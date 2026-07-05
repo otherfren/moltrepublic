@@ -3,5 +3,6 @@
 **/*.rs.bk
 Cargo.lock.bak
 config.toml
-deleteme.mdconfig.toml.lock
+deleteme.md
+config.toml.lock
 config.toml.tmp-*
