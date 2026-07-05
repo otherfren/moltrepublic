@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-ui"
+description = "Slint GUI: the live-mirror operator. Drives the same Command set as MCP."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+molt-core.workspace = true
+molt-config.workspace = true
+molt-engine.workspace = true
+tokio.workspace = true
+slint.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# clipboard for the seed copy button (X11: contents live as long as the app)
+arboard.workspace = true
+chrono.workspace = true
+paste.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

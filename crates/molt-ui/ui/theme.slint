@@ -1,0 +1,429 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Design tokens, the screen-router enum, and the localized string table.
+// `Strings` is populated from Rust (`apply_strings`) per language, so switching
+// languages at runtime is just re-setting these properties.
+
+// The multi-stage flow, modelled after konkinwallet's AppScreen state machine.
+export enum AppScreen {
+    choice,    // first-run: create / open / join / restore
+    create,    // create-workspace wizard
+    open,      // open a local workspace (mock list)
+    join,      // join via invite (mock)
+    restore,   // restore from backup / seed (mock)
+    settings,  // config.toml editor (mock — no disk write)
+    main,      // placeholder main view (surfaces land in Phase B)
+}
+
+// One emoji reaction tally on a chat message; `mine` marks the emoji the
+// local member picked (accent-highlighted pill, click to un-react).
+export struct ReactionItem {
+    emoji: string,
+    count: int,
+    mine: bool,
+}
+
+// One line in a surface's log: for chat, `lead` is the sender and `text` the
+// body; for gated surfaces `lead` is empty and `text` is the proposal summary.
+export struct LogLine {
+    lead: string,
+    text: string,
+    when: string, // "2026-06-02 13:37 (~20 minutes ago)", grey in the header
+    quote: int, // quoted message position in the log (-1 = no quote)
+    quote-label: string, // "author: body" teaser of the quoted message
+    deleted-by: string, // who deleted the message ("" = live)
+    first: bool, // starts a new author block (shows the name + time header)
+    own: bool, // the local member wrote it
+    alt: bool, // author-block zebra stripe (flips when the author changes)
+    mine-emoji: string, // the local member's reaction ("" = none yet)
+    reactions: [ReactionItem],
+}
+
+// A pending proposal on a gated surface, with its approval progress.
+export struct ProposalRow {
+    id: int,
+    text: string,
+    approvals: int,
+    threshold: int,
+}
+
+// One member of a republic with its last-sync info (mock data).
+export struct MemberSync {
+    name: string,
+    last: string, // human "last synced" label, e.g. "2 min ago"
+    state: int, // 0 = synced, 1 = syncing, 2 = offline
+}
+
+// A local workspace/republic shown in the Open screen list (mock data).
+export struct WorkspaceItem {
+    name: string,
+    detail: string,
+    status: string,
+    synced: bool,
+    state: int, // 0 = synced, 1 = syncing, 2 = offline
+    last-sync-min: int, // minutes since the last completed sync (sort key)
+    s3: bool, // automatic S3 backup configured
+    seed: string, // recovery seed all secret keys derive from (mock)
+    net: string, // transport: "tor" | "nym" | "clearnet"
+    members: [MemberSync], // who is in the DAO + when they last synced
+}
+
+// One row of the settings backup table: a local workspace, its backup in
+// the S3 bucket, or both. Built Rust-side from the session's workspaces +
+// the bucket-only orphans; prose cells (size/last) are rendered there too.
+export struct BackupRow {
+    local: string, // local workspace name ("" = bucket-only)
+    remote: string, // backup name in the bucket ("" = not backed up)
+    has-local: bool, // false = orphan row, auto-backup not toggleable
+    auto: bool, // automatic backup on
+    size: string, // human size, e.g. "1.8 MiB"
+    last: string, // human last-backup, e.g. "30 min ago" / "never"
+    size-kib: int, // machine sort key for the size column
+    last-min: int, // machine sort key for the last-backup column (max = never)
+}
+
+// The parsed preview of an invite link on the Join screen. Filled by Rust via
+// the pure `parse-invite` callback (the same molt-core parser the engine's
+// join run uses, so the preview and the run can never disagree).
+export struct InvitePreview {
+    valid: bool,
+    republic: string,
+    rule: string, // "m-of-n"
+    inviter: string,
+}
+
+// One sub-view of a surface (nav entry), from molt-core's shared view list.
+// `icon` is a Twemoji glyph (colorful emoji font), picked in Rust per key.
+export struct ViewItem {
+    key: string,
+    name: string,
+    icon: string,
+}
+
+// One of the five surfaces, with live counts and its log + pending proposals.
+export struct SurfaceTab {
+    key: string,
+    name: string,
+    gated: bool,
+    applied-count: int,
+    pending-count: int,
+    log: [LogLine],
+    pending: [ProposalRow],
+    views: [ViewItem], // its nav sub-views, default first
+}
+
+// A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
+export struct Palette {
+    bg-base: color,
+    bg-surface: color,
+    bg-elevated: color,
+    raised: color,
+    text-primary: color,
+    text-secondary: color,
+    text-faint: color,
+    border-subtle: color,
+    accent-primary: color,
+    accent-foreground: color,
+    accent-good: color,
+    accent-warn: color,
+    accent-bad: color,
+}
+
+export global Palettes {
+    // Classic — clean Office-style layout in the moltrepublic.ai brand orange
+    // (#e65515): off-white surfaces, charcoal text, a teal-green "good" that
+    // nods to the brand teal so the logo sits naturally on it.
+    out property <Palette> light: {
+        bg-base: #f4f1ee,
+        bg-surface: #ffffff,
+        bg-elevated: #faf7f4,
+        raised: #efe9e3,
+        text-primary: #2b2b2b,
+        text-secondary: #5c5651,
+        text-faint: #9a948c,
+        border-subtle: #e4ded6,
+        accent-primary: #e65515,
+        accent-foreground: #ffffff,
+        accent-good: #1f9e73,
+        accent-warn: #d99400,
+        accent-bad: #cf4433,
+    };
+    // Dark — near-black with a teal undertone; the accent is tuned to the
+    // brand teal (matching the light-teal "republic" the logo uses on dark),
+    // so the moltrepublic.ai lockup and the UI share one teal.
+    out property <Palette> dark: {
+        bg-base: #05100f,
+        bg-surface: #0a1c1b,
+        bg-elevated: #0f2a28,
+        raised: #143432,
+        text-primary: #d8e8e2,
+        text-secondary: #82b2b5,
+        text-faint: #466f6b,
+        border-subtle: #17403c,
+        accent-primary: #45c8d0,
+        accent-foreground: #04211f,
+        accent-good: #2fd0a6,
+        accent-warn: #f2c94c,
+        accent-bad: #ff5d70,
+    };
+    // Brutalism — an earnest, slightly-clumsy homemade theme ("gewollt aber nicht
+    // gekonnt"): a light warm-concrete desktop, off-white beveled chrome, and a
+    // sincere muted teal-green accent. The desktop is kept light on purpose so
+    // the dark text stays readable everywhere (≈8:1) — the brutalism comes from
+    // the bevels and the slightly-off warm harmony, not from low contrast.
+    out property <Palette> win95: {
+        bg-base: #c2bba9,
+        bg-surface: #ebe8e0,
+        bg-elevated: #f4f1ea,
+        raised: #dcd8cd,
+        text-primary: #1c1a17,
+        text-secondary: #514c43,
+        text-faint: #5f5a4e,
+        border-subtle: #a39c8c,
+        accent-primary: #0a4f5b,
+        accent-foreground: #ffffff,
+        accent-good: #2f7a5f,
+        accent-warn: #b7830f,
+        accent-bad: #b0402f,
+    };
+}
+
+export global Theme {
+    // 0 = Light (Office), 1 = Dark (cypherpunk), 2 = Win95 (brutalist).
+    in-out property <int> theme-index: 0;
+    // Fired when the in-app ThemeSwitch picks a theme; Rust binds this to a
+    // SetTheme command so the change round-trips through the engine (co-equal).
+    callback picked(int);
+    out property <Palette> active: theme-index == 0
+        ? Palettes.light
+        : (theme-index == 2 ? Palettes.win95 : Palettes.dark);
+    out property <bool> win95: theme-index == 2;
+
+    // Convenience tokens (used across the app), derived from the active palette.
+    out property <color> bg: active.bg-base;
+    out property <color> panel: active.bg-surface;
+    out property <color> panel-2: active.bg-elevated;
+    out property <color> raised: active.raised;
+    out property <color> line: active.border-subtle;
+    out property <color> text: active.text-primary;
+    out property <color> dim: active.text-secondary;
+    out property <color> faint: active.text-faint;
+    out property <color> accent: active.accent-primary;
+    out property <color> accent-soft: active.accent-primary.transparentize(0.84);
+    // chat zebra stripe — deliberately NOT panel-2, so author blocks read
+    // against the chat panel they sit on
+    out property <color> zebra: active.text-primary.transparentize(0.94);
+    out property <color> accent-ink: active.accent-foreground;
+    out property <color> good: active.accent-good;
+    out property <color> warn: active.accent-warn;
+    out property <color> bad: active.accent-bad;
+
+    // Win95 chrome bevel (3D raised look); neutral on the other themes.
+    out property <color> bevel-light: win95 ? #ffffff : active.border-subtle;
+    out property <color> bevel-dark: win95 ? #000000 : active.border-subtle;
+
+    out property <length> radius: theme-index == 0 ? 4px : (win95 ? 0px : 8px);
+    out property <length> border-w: win95 ? 2px : 1px;
+    out property <length> pad: 18px;
+    out property <length> fs-h1: 26px;
+    out property <length> fs-h2: 18px;
+    out property <length> fs-body: 14px;
+    out property <length> fs-cap: 12px;
+}
+
+export global Strings {
+    // brand + choice
+    in property <string> choice-title;
+    in property <string> choice-subtitle;
+    in property <string> choice-mock-note;
+    in property <string> choice-group-republic;
+    in property <string> choice-create-title;
+    in property <string> choice-create-sub;
+    in property <string> choice-open-title;
+    in property <string> choice-open-sub;
+    in property <string> choice-join-title;
+    in property <string> choice-join-sub;
+    in property <string> choice-restore-title;
+    in property <string> choice-restore-sub;
+
+    // wizard navigation
+    in property <string> nav-back;
+
+    // shared field labels (reused by wizard + settings)
+    in property <string> field-network;
+    in property <string> field-tor-mode;
+    in property <string> field-tor-port;
+    in property <string> field-threshold;
+    in property <string> field-members;
+    in property <string> field-language;
+    in property <string> field-theme;
+    in property <string> field-workspace-dir;
+    in property <string> field-mcp-port;
+    in property <string> field-mcp-allow;
+    in property <string> field-mcp-token;
+    in property <string> set-rotate;
+    in property <string> set-token-note;
+    in property <string> set-token-show;
+    in property <string> set-token-hide;
+    in property <string> field-headless;
+
+    // create (found a republic)
+    in property <string> mock-banner;
+    in property <string> cw-title;
+    in property <string> cw-grp-republic;
+    // localized field placeholders (technical ones — URLs, IPs,
+    // paths — stay literal in app.slint)
+    in property <string> ph-ws-name;
+    in property <string> ph-member;
+    in property <string> ph-seed;
+    in property <string> cw-republic-hint;
+    in property <string> cw-taken;
+    in property <string> cw-grp-rule;
+    in property <string> cw-rule-hint;
+    in property <string> cw-rule-warn;
+    in property <string> cw-rule-a;
+    in property <string> cw-rule-b;
+    in property <string> cw-rule-c;
+    in property <string> cw-grp-transport;
+    in property <string> cw-transport-hint;
+    in property <string> cw-net-ok-tor;
+    in property <string> cw-net-ok-nym;
+    in property <string> cw-net-warn;
+    in property <string> cw-found;
+    in property <string> cw-ph1;
+    in property <string> cw-ph2;
+    in property <string> cw-ph3;
+    in property <string> cw-invites;
+    in property <string> cw-invites-hint;
+    in property <string> enter-republic;
+
+    // open / join / restore
+    in property <string> ow-title;
+    in property <string> ow-empty;
+    in property <string> ow-change-folder;
+    in property <string> ow-col-name;
+    in property <string> ow-col-sync;
+    in property <string> ow-open;
+    in property <string> ow-delete;
+    in property <string> ow-select-hint;
+    in property <string> ow-s3-on;
+    in property <string> ow-s3-off;
+    in property <string> ow-grp-sync;
+    in property <string> ow-grp-backup;
+    in property <string> ow-grp-net;
+    in property <string> ow-members;
+    in property <string> ow-backup-cfg;
+    in property <string> ow-export;
+    in property <string> ow-export-note;
+    in property <string> ow-seed-show;
+    in property <string> ow-seed-hide;
+    in property <string> ow-seed-note;
+    in property <string> ow-copy;
+    in property <string> ow-hold-tip;
+    in property <string> toast-copied;
+    in property <string> del-ws-title;
+    in property <string> del-ws-body;
+    in property <string> del-ws-confirm;
+    in property <string> bk-title;
+    in property <string> bk-body;
+    in property <string> bk-path;
+    in property <string> bk-confirm;
+    in property <string> field-s3-backup;
+    in property <string> field-s3-endpoint;
+    in property <string> jw-title;
+    in property <string> jw-grp-invite;
+    in property <string> jw-invite-hint;
+    in property <string> jw-ok;
+    in property <string> jw-grp-preview;
+    in property <string> jw-preview-hint;
+    in property <string> jw-invited-by;
+    in property <string> jw-join;
+    in property <string> jw-ph1;
+    in property <string> jw-ph2;
+    in property <string> jw-ph3;
+    in property <string> jw-failed;
+    in property <string> rw-title;
+    in property <string> rw-seed;
+    in property <string> rw-paste;
+    in property <string> rw-seed-hint;
+    in property <string> rw-continue;
+    in property <string> rw-via-peer;
+    in property <string> rw-peer-hint;
+    in property <string> rw-via-s3;
+    in property <string> rw-s3-hint;
+    in property <string> rw-s3-none;
+    in property <string> rw-s3-ok;
+    in property <string> rw-via-file;
+    in property <string> rw-file-hint;
+    in property <string> rw-choose;
+    in property <string> rw-no-file;
+    in property <string> rw-file-title;
+    in property <string> rw-file-body;
+    in property <string> rw-file-pick;
+    in property <string> rw-log-title;
+    in property <string> rw-finish;
+    in property <string> rw-failed;
+    in property <string> rw-ph1;
+    in property <string> rw-ph2;
+    in property <string> rw-ph3;
+
+    // settings
+    in property <string> set-title;
+    in property <string> set-tab-general;
+    in property <string> set-tab-workspace;
+    in property <string> set-tab-backup;
+    in property <string> set-ws-choose;
+    in property <string> set-ws-dir-title;
+    in property <string> set-ws-dir-body;
+    in property <string> set-ws-found-one;
+    in property <string> set-ws-found-many;
+    in property <string> field-s3-access;
+    in property <string> field-s3-secret;
+    in property <string> field-s3-bucket;
+    in property <string> set-s3-test;
+    in property <string> set-s3-active;
+    in property <string> set-s3-every;
+    in property <string> set-s3-unit-min;
+    in property <string> toast-s3-ok;
+    in property <string> bk-col-local;
+    in property <string> bk-col-remote;
+    in property <string> bk-col-auto;
+    in property <string> bk-col-size;
+    in property <string> bk-col-last;
+    in property <string> set-tab-network;
+    in property <string> set-tab-mcp;
+    in property <string> set-tab-node;
+    in property <string> set-save;
+    in property <string> set-save-note;
+    in property <string> set-close;
+    in property <string> set-path-label;
+
+    // main view (surfaces)
+    in property <string> mv-send;
+    in property <string> mv-propose;
+    in property <string> mv-approve;
+    in property <string> mv-decline;
+    in property <string> mv-pending;
+    in property <string> mv-applied;
+    in property <string> mv-chat-ph;
+    in property <string> mv-propose-ph;
+    in property <string> mv-empty-chat;
+    in property <string> mv-later;
+    in property <string> mv-empty-pending;
+    in property <string> mv-empty-applied;
+    in property <string> mv-deleted-by;
+    in property <string> dm-title;
+    in property <string> dm-body;
+    in property <string> dm-confirm;
+    in property <string> mv-close-ws;
+    in property <string> close-ws-title;
+    in property <string> close-ws-body;
+    in property <string> close-ws-confirm;
+    in property <string> close-ws-cancel;
+    in property <string> tip-theme;
+    in property <string> tip-language;
+    in property <string> tip-settings;
+    in property <string> quit-title;
+    in property <string> quit-body;
+    in property <string> quit-confirm;
+}

@@ -1,0 +1,3733 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The MoltRepublic node GUI. Multi-stage flow modelled after konkinwallet:
+// a persistent left sidebar (wordmark, the surfaces, and the theme / language /
+// settings controls + a close-workspace button at the bottom-left) plus a main
+// area that routes between the first-run choice, the create/open/join/restore
+// wizards, a shared done screen, the settings panel, and the surfaces view.
+//
+// This GUI is a LIVE-MIRROR of the engine's shared session: navigation,
+// language, theme and settings are pushed back from the engine after a
+// SessionChanged event, and every UI action calls a callback the Rust side
+// turns into a molt_core::Command on the shared WalletHandle. An MCP agent
+// issuing the same commands drives this same state — the two operators are
+// co-equal. Everything is a mock: nothing is written to disk.
+//
+// Three runtime themes (Monero light / dark.fi dark / Win95 Brutalism) via
+// Theme; all controls are hand-rolled (components.slint) so they restyle live.
+
+// The colorful emoji font (Twemoji, borrowed from konkinwallet) — used for
+// the nav sub-view icons, the reaction pills and the emoji palette.
+import "assets/fonts/Twemoji.Mozilla.ttf";
+
+import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, WorkspaceItem, MemberSync, InvitePreview, BackupRow } from "theme.slint";
+import {
+    AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
+    ConfirmModal, DotLabel
+} from "components.slint";
+import {
+    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView
+} from "parts.slint";
+
+export { Strings, Theme }
+
+// A settings form group: caption sitting tight above its control(s), so a
+// label+field pair reads as one unit inside the wider panel rhythm.
+component FieldLabel inherits VerticalLayout {
+    in property <string> label;
+    spacing: 6px;
+    Text {
+        text: root.label;
+        color: Theme.text;
+    }
+    @children
+}
+
+// A clickable, sortable column header for the backup table (the Open
+// screen's header idiom: faint until hovered/active, accent ▲/▼).
+component SortHeader inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> desc;
+    in property <LayoutAlignment> align: start;
+    callback clicked();
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+    HorizontalLayout {
+        alignment: root.align;
+        spacing: 5px;
+        Text {
+            text: root.label;
+            color: root.active || ta.has-hover ? Theme.text : Theme.faint;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        if root.active: Text {
+            text: root.desc ? "▼" : "▲";
+            color: Theme.accent;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "MoltRepublic — node";
+    preferred-width: 940px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 600px;
+    background: Theme.bg;
+
+    // ---- shared session state, pushed from the engine (live-mirror) ----
+    in property <AppScreen> screen: AppScreen.choice;
+    in property <int> lang-index: 0;
+    in property <string> notice;
+    in property <string> config-path;
+
+    // ---- active workspace (main header), live-mirrored from the engine ----
+    in property <string> active-workspace;
+    in property <string> active-status;
+    in property <int> active-state: 0;
+
+    // ---- surfaces (main view), live-mirrored from the engine ----
+    in property <string> node-member;
+    in property <string> threshold-badge;
+    in property <[SurfaceTab]> surfaces;
+    // the active workspace's roster (chat members strip: who is online)
+    in property <[MemberSync]> active-members;
+
+    // ---- actions: each becomes a Command on the shared WalletHandle ----
+    callback navigate(AppScreen);
+    callback set-language(int);
+    callback save-settings();
+    callback rotate-token();
+    callback quit();
+    // body + quoted log index (-1 = plain message)
+    callback send-chat(string, int);
+    callback propose(string, string);
+    callback approve(int);
+    callback decline(int);
+    // select the main-view surface (routed to a SelectSurface command; the
+    // sub-view resets to the surface's default)
+    callback select-surface(string);
+    // select a surface AND one of its sub-views (a SelectView command)
+    callback select-view(string, string);
+    // toggle the local member's emoji reaction on chat message #i (ReactChat)
+    callback toggle-reaction(int, string);
+    // wipe chat message #i and leave the deletion notice (DeleteChat)
+    callback delete-chat(int);
+    // workspace verbs (engine-backed, co-equal with MCP)
+    callback open-workspace(string);
+    callback close-workspace();
+    // restore verbs (engine-backed; the engine ticks progress + log)
+    callback restore-start(string, string);
+    callback restore-cancel();
+    callback restore-finish();
+    // founding verbs (engine-backed; the engine ticks progress + log and
+    // derives the seed + invites): name, handle, threshold, members, net
+    callback create-start(string, string, int, int, string);
+    callback create-cancel();
+    callback create-finish();
+    // join verbs (engine-backed; the engine parses the invite and ticks)
+    callback join-start(string, string);
+    callback join-cancel();
+    callback join-finish();
+    // copy a text (seed / invite link) into the system clipboard, in Rust
+    callback copy-text(string);
+    // read the system clipboard (for the paste buttons), handled in Rust
+    pure callback paste-clipboard() -> string;
+    // parse an invite link for the join preview — the same molt-core parser
+    // the engine uses, so preview and run can never disagree
+    pure callback parse-invite(string) -> InvitePreview;
+    // whether a workspace of this name already exists (checks the mirrored
+    // session list in Rust; the engine re-validates on create-start)
+    pure callback workspace-name-taken(string) -> bool;
+    // live run logs, mirrored from the engine session; copy-log("restore" |
+    // "create" | "join") joins one and puts it on the clipboard
+    in property <[string]> rw-log;
+    in property <[string]> cw-log;
+    in property <[string]> jw-log;
+    callback copy-log(string);
+    // (theme changes are routed via the Theme.picked global callback, bound in Rust)
+
+    // ---- local UI working state (not shared) ----
+    property <AppScreen> settings-return: AppScreen.choice;
+    // mirrored from the engine session (co-equal): which surface the main
+    // view shows and which of its sub-views is active; changing them is a
+    // SelectSurface / SelectView command
+    in property <string> selected-surface: "chat";
+    in property <string> selected-view: "today";
+    // sidebar mode: expanded (labels) or collapsed to an icon rail. Toggled
+    // by clicking the vertical divider on the sidebar's right edge.
+    property <bool> nav-collapsed: false;
+    // modal: confirm closing the workspace (raised by either close button)
+    property <bool> confirm-close-open: false;
+    // modal: confirm quitting the program while a workspace is open
+    // (raised from Rust's window close-requested handler)
+    in-out property <bool> confirm-quit-open: false;
+    property <string> mv-draft;
+    // compose quote state: which message the next send replies to (-1 = none)
+    property <int> mv-quote-index: -1;
+    property <string> mv-quote-label;
+    // one-shot scroll request: the ChatRow with this index brings itself
+    // into view and resets it to -1
+    property <int> chat-scroll-to: -1;
+    // modal: confirm deleting a chat message (holds the target index)
+    property <bool> confirm-delmsg-open: false;
+    property <int> delmsg-index: -1;
+
+    // create: the local configuration draft (like the settings draft, local
+    // until create-start hands it to the engine) …
+    property <int> cw-net-index: 0;
+    property <int> cw-tor-mode-index: 0;
+    property <int> cw-tor-port: 9050;
+    property <string> cw-name;
+    property <string> cw-member;
+    property <int> cw-threshold: 2;
+    property <int> cw-members: 3;
+    // the recommended threshold: the simple majority of n
+    property <int> cw-rule-default: Math.floor(root.cw-members / 2) + 1;
+    property <bool> cw-taken: root.workspace-name-taken(root.cw-name);
+    // … and the founding lifecycle, mirrored from the engine session (the
+    // engine ticks progress + log and derives the seed + invites):
+    // step 0 = configure, 1 = run view; outcome 0 = running, 1 = founded
+    in property <int> cw-step: 0;
+    in property <float> cw-progress: 0.0;
+    in property <int> cw-outcome: 0;
+    in property <string> cw-seed;
+    in property <[string]> cw-invites;
+    // run-header labels ("who is being founded"), composed in Rust so an
+    // MCP-started founding shows real values even with an empty local form
+    in property <string> cw-run-name;
+    in property <string> cw-run-detail;
+    out property <bool> cw-running: root.cw-step == 1 && root.cw-outcome == 0;
+
+    // join: the local invite draft + its live preview (parsed by the same
+    // molt-core parser the engine runs) …
+    property <string> jw-invite;
+    property <string> jw-member;
+    property <InvitePreview> jw-preview: root.parse-invite(root.jw-invite);
+    // … and the join lifecycle, mirrored from the engine session:
+    // step 0 = invite form, 1 = run view
+    in property <int> jw-step: 0;
+    in property <float> jw-progress: 0.0;
+    in property <int> jw-outcome: 0;
+    in property <string> jw-republic;
+    in property <string> jw-rule;
+    in property <string> jw-inviter;
+    out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
+
+    property <string> rw-seed;
+    property <string> rw-endpoint;
+    // restore: chosen backup file + picker modal (continues gate themselves
+    // on the inputs, so there are no attempted-validation flags)
+    property <string> rw-file;
+    // restore lifecycle, mirrored from the engine session (the engine ticks
+    // the progress and the live log; the GUI only renders and sends verbs):
+    // step 0 = pick a way in, 1 = run view; outcome 0 = running, 1 = ok, 2 = failed
+    in property <int> rw-step: 0;
+    in property <string> rw-way;
+    in property <string> rw-target;
+    in property <float> rw-progress: 0.0;
+    in property <int> rw-outcome: 0;
+    // true while the mock restore is in flight — locks every escape hatch
+    // (header ×, back, chrome controls; Rust blocks the window close too)
+    out property <bool> restore-running: root.rw-step == 1 && root.rw-outcome == 0;
+    // any engine run in flight (restore / founding / join): one lock for the
+    // chrome controls and the WM close (read from Rust)
+    out property <bool> run-active: root.restore-running || root.cw-running || root.jw-running;
+    property <bool> restore-file-modal-open: false;
+    // mock folder picker for the settings workspace tab
+    property <bool> ws-dir-modal-open: false;
+    property <string> ws-dir-draft;
+    property <string> rw-file-draft;
+
+    // settings: a local editable draft, seeded from the engine session by Rust.
+    in-out property <bool> cfg-headless: false;
+    in-out property <string> cfg-workspace-dir;
+    in-out property <int> cfg-mcp-port: 4040;
+    in-out property <string> cfg-mcp-allow: "127.0.0.1";
+    in-out property <string> cfg-mcp-token;
+    in-out property <int> cfg-network-index: 0;
+    in-out property <int> cfg-tor-mode-index: 0;
+    in-out property <int> cfg-tor-port: 9050;
+    in-out property <bool> cfg-s3-backup: false;
+    in-out property <string> cfg-s3-endpoint;
+    in-out property <string> cfg-s3-access;
+    in-out property <string> cfg-s3-secret;
+    in-out property <string> cfg-s3-bucket;
+    in-out property <int> cfg-s3-interval: 60;
+    property <int> set-tab: 0;
+    // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
+    in property <[BackupRow]> bk-rows;
+    callback set-ws-backup(string, bool);
+    // backup-table sorting (view-local, like the Open list): column key
+    // ("" = session order) + direction; the sort runs in Rust over the
+    // mirrored model and is re-applied on every session push.
+    in-out property <string> bk-sort-key: "";
+    in-out property <bool> bk-sort-desc: false;
+    callback sort-backups(string, bool);
+
+    // open screen (mock local workspace list + current selection). The list
+    // itself is a Rust-side VecModel so entries can actually be deleted.
+    in property <[WorkspaceItem]> ws-list;
+    callback delete-workspace(string);
+    // list sorting (view-local): column key ("" = session order) + direction.
+    // The sort itself runs in Rust over the mirrored model, and is re-applied
+    // there whenever the session pushes a fresh list.
+    in-out property <string> ws-sort-key: "";
+    in-out property <bool> ws-sort-desc: false;
+    callback sort-workspaces(string, bool);
+    property <int> open-selected: -1;
+    property <string> open-name;
+    property <string> open-detail;
+    property <string> open-status;
+    property <bool> open-synced: false;
+    property <int> open-state: 0; // 0 = synced, 1 = syncing, 2 = offline
+    property <bool> open-s3: false;
+    property <string> open-seed;
+    property <string> open-net;
+    property <[MemberSync]> open-members;
+    property <bool> seed-shown: false;
+    property <string> export-note;
+
+    // ---- toast: short feedback bubble (e.g. after copy-to-clipboard).
+    // Two timers bound its visibility: the soft timer hides it 2.6 s after
+    // the LAST trigger, the cap timer 2.9 s after it APPEARED — so back-to-
+    // back copies keep the feedback fresh, but the bubble is never on
+    // screen longer than 3 seconds in one stretch. ----
+    property <string> toast-text;
+    property <bool> toast-open: false;
+    public function show-toast(msg: string) {
+        root.toast-text = msg;
+        if (!root.toast-open) {
+            root.toast-open = true;
+            toast-cap.restart();
+        }
+        toast-timer.restart();
+    }
+    function hide-toast() {
+        root.toast-open = false;
+        toast-timer.stop();
+        toast-cap.stop();
+    }
+    toast-timer := Timer {
+        interval: 2600ms;
+        running: false;
+        triggered => {
+            root.hide-toast();
+        }
+    }
+    toast-cap := Timer {
+        interval: 2900ms; // the hard < 3 s cap, however often the toast re-arms
+        running: false;
+        triggered => {
+            root.hide-toast();
+        }
+    }
+    // modal: manual backup — choose where the encrypted blob would be written
+    property <bool> backup-modal-open: false;
+    property <string> backup-path;
+    // modal: confirm deleting a workspace (type its name to arm the button)
+    property <bool> confirm-delete-open: false;
+    property <string> delete-name;
+    property <string> delete-typed;
+
+    // Select a row on the Open screen: fill the details panel and drop any
+    // revealed seed / export note from the previous selection.
+    function select-workspace(i: int, w: WorkspaceItem) {
+        root.open-selected = i;
+        root.open-name = w.name;
+        root.open-detail = w.detail;
+        root.open-status = w.status;
+        root.open-synced = w.synced;
+        root.open-state = w.state;
+        root.open-s3 = w.s3;
+        root.open-seed = w.seed;
+        root.open-net = w.net;
+        root.open-members = w.members;
+        root.seed-shown = false;
+        root.export-note = "";
+    }
+
+    // Deselect the current row: the details panel folds back to its hint.
+    function deselect-workspace() {
+        root.open-selected = -1;
+        root.seed-shown = false;
+        root.export-note = "";
+    }
+
+    // Forget the opened workspace entirely (close-workspace): without this a
+    // later main-screen entry would show the previous republic's name.
+    function reset-open-workspace() {
+        root.deselect-workspace();
+        root.open-name = "";
+        root.open-detail = "";
+        root.open-status = "";
+        root.open-synced = false;
+        root.open-state = 0;
+        root.open-s3 = false;
+        root.open-seed = "";
+        root.open-net = "";
+    }
+
+    // Sort the backup table by a header column: clicking the active column
+    // again flips the direction.
+    function bk-sort-by(key: string) {
+        if (root.bk-sort-key == key) {
+            root.bk-sort-desc = !root.bk-sort-desc;
+        } else {
+            root.bk-sort-key = key;
+            root.bk-sort-desc = false;
+        }
+        root.sort-backups(root.bk-sort-key, root.bk-sort-desc);
+    }
+
+    // Sort the workspace list by a header column: clicking the active column
+    // again flips the direction; a sort drops the row selection (the indices
+    // change underneath it).
+    function sort-by(key: string) {
+        if (root.ws-sort-key == key) {
+            root.ws-sort-desc = !root.ws-sort-desc;
+        } else {
+            root.ws-sort-key = key;
+            root.ws-sort-desc = false;
+        }
+        root.deselect-workspace();
+        root.sort-workspaces(root.ws-sort-key, root.ws-sort-desc);
+    }
+
+    // Escape presses the active screen's × — but only when that × is
+    // clickable (never during a running engine mock-run). An open modal is
+    // closed first, like a click on its scrim.
+    function handle-escape() {
+        if (root.confirm-quit-open) {
+            root.confirm-quit-open = false;
+        } else if (root.confirm-close-open) {
+            root.confirm-close-open = false;
+        } else if (root.confirm-delete-open) {
+            root.confirm-delete-open = false;
+        } else if (root.confirm-delmsg-open) {
+            root.confirm-delmsg-open = false;
+        } else if (root.backup-modal-open) {
+            root.backup-modal-open = false;
+        } else if (root.restore-file-modal-open) {
+            root.restore-file-modal-open = false;
+        } else if (root.ws-dir-modal-open) {
+            root.ws-dir-modal-open = false;
+        } else if (root.screen == AppScreen.open) {
+            root.navigate(AppScreen.choice);
+        } else if (root.screen == AppScreen.restore && !root.restore-running) {
+            if (root.rw-step == 1) {
+                root.restore-cancel();
+            } else {
+                root.navigate(AppScreen.choice);
+            }
+        } else if (root.screen == AppScreen.create && !root.cw-running) {
+            if (root.cw-step == 1) {
+                root.create-cancel();
+            } else {
+                root.navigate(AppScreen.choice);
+            }
+        } else if (root.screen == AppScreen.join && !root.jw-running) {
+            if (root.jw-step == 1) {
+                root.join-cancel();
+            } else {
+                root.navigate(AppScreen.choice);
+            }
+        }
+    }
+
+    // Fresh founding form defaults.
+    function reset-create() {
+        root.cw-name = "";
+        root.cw-member = "";
+        root.cw-threshold = 2;
+        root.cw-members = 3;
+        root.cw-net-index = 0;
+        root.cw-tor-mode-index = 0;
+        root.cw-tor-port = 9050;
+    }
+
+    init => {
+        esc.focus();
+    }
+
+    // One FocusScope wraps the whole window: unhandled keys bubble up from
+    // whatever has focus (including text fields), so Escape always reaches
+    // this handler and presses the active screen's × via handle-escape().
+    // (Children keep their indentation, like the list+details group idiom.)
+    esc := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.handle-escape();
+                return accept;
+            }
+            reject
+        }
+
+    HorizontalLayout {
+        spacing: 0;
+
+        // =================================================================
+        // Persistent sidebar: wordmark, surfaces (main), and the bottom-left
+        // controls (theme / language / settings) + close workspace.
+        // =================================================================
+        Rectangle {
+            width: root.nav-collapsed ? 64px : 252px;
+            animate width {
+                duration: 140ms;
+                easing: ease-in-out;
+            }
+            background: Theme.panel;
+            Rectangle {
+                x: parent.width - Theme.border-w;
+                width: Theme.border-w;
+                height: parent.height;
+                background: Theme.line;
+            }
+            VerticalLayout {
+                // wordmark (brand): the moltrepublic.ai lockup as crisp text —
+                // molt (orange) · republic (teal) · .ai (orange). The teal follows
+                // the theme so it stays legible on the dark palette.
+                Rectangle {
+                    // same height as the main view's header bar, so the two
+                    // top panels line up
+                    height: 64px;
+                    if !root.nav-collapsed: HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        alignment: center;
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                spacing: 0;
+                                Text {
+                                    text: "molt";
+                                    color: #e65515;
+                                    font-size: 24px;
+                                    font-weight: 800;
+                                    letter-spacing: -0.4px;
+                                }
+                                Text {
+                                    text: "republic";
+                                    color: Theme.theme-index == 1 ? #6fc7d0 : #064955;
+                                    font-size: 24px;
+                                    font-weight: 800;
+                                    letter-spacing: -0.4px;
+                                }
+                                Text {
+                                    text: ".ai";
+                                    color: #e65515;
+                                    font-size: 24px;
+                                    font-weight: 800;
+                                    letter-spacing: -0.4px;
+                                }
+                            }
+                        }
+                    }
+                    // collapsed: the brand shrinks to its initial
+                    if root.nav-collapsed: Text {
+                        text: "m";
+                        color: #e65515;
+                        font-size: 26px;
+                        font-weight: 800;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+
+                // workspace navigation (only when a workspace is open): the
+                // five surfaces at the top level, each expandable into its
+                // sub-views. The selected surface's group is the open one
+                // (accordion — mirrored: an MCP select opens it too).
+                if root.screen == AppScreen.main: VerticalLayout {
+                    padding: 8px;
+                    spacing: 3px;
+                    alignment: start;
+                    for s in root.surfaces: VerticalLayout {
+                        spacing: 2px;
+                        SurfaceRow {
+                            s: s;
+                            selected: s.key == root.selected-surface;
+                            compact: root.nav-collapsed;
+                            chosen => {
+                                root.mv-draft = "";
+                                root.select-surface(s.key);
+                            }
+                        }
+                        if s.key == root.selected-surface && !root.nav-collapsed: VerticalLayout {
+                            spacing: 1px;
+                            for v in s.views: ViewRow {
+                                label: v.name;
+                                icon: v.icon;
+                                selected: v.key == root.selected-view;
+                                pending: v.key == "proposals" ? s.pending-count : 0;
+                                chosen => {
+                                    root.mv-draft = "";
+                                    root.select-view(s.key, v.key);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+
+                // close workspace (only when a workspace is open and the
+                // sidebar is expanded; the main-view header keeps its own ×)
+                if root.screen == AppScreen.main && !root.nav-collapsed: VerticalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 10px;
+                    AppButton {
+                        label: Strings.mv-close-ws;
+                        clicked => {
+                            root.confirm-close-open = true;
+                        }
+                    }
+                }
+
+                // theme / language / settings controls (bottom, centered);
+                // the icon rail keeps just the settings gear
+                Rectangle {
+                    height: 56px;
+                    if !root.nav-collapsed: HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        ChromeControls {
+                            popup-up: true;
+                            controls-enabled: !root.run-active;
+                            lang-index: root.lang-index;
+                            open-settings => {
+                                // guard: opening settings FROM settings must not
+                                // make the close button loop back to settings
+                                if (root.screen != AppScreen.settings) {
+                                    root.settings-return = root.screen;
+                                }
+                                root.navigate(AppScreen.settings);
+                            }
+                            set-language(i) => {
+                                root.set-language(i);
+                            }
+                        }
+                    }
+                    if root.nav-collapsed: Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        background: gear-ta.has-hover ? Theme.raised : Theme.panel-2;
+                        Image {
+                            source: @image-url("assets/gear.svg");
+                            colorize: Theme.dim;
+                            width: 18px;
+                            height: 18px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        gear-ta := TouchArea {
+                            enabled: !root.run-active;
+                            clicked => {
+                                if (root.screen != AppScreen.settings) {
+                                    root.settings-return = root.screen;
+                                }
+                                root.navigate(AppScreen.settings);
+                            }
+                        }
+                        HoverTip {
+                            label: Strings.tip-settings;
+                            shown: gear-ta.has-hover;
+                            x: parent.width + 8px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                }
+            }
+
+            // clickable divider on the sidebar's right edge (below the header,
+            // so the wordmark row stays untouched): hover highlights like the
+            // horizontal splitter, a click flips expanded <-> icon rail.
+            nav-toggle := TouchArea {
+                x: parent.width - 8px;
+                y: 65px;
+                width: 8px;
+                height: parent.height - 65px;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.nav-collapsed = !root.nav-collapsed;
+                }
+            }
+            nav-grip := Rectangle {
+                x: parent.width - 6px;
+                y: 65px + (parent.height - 65px - self.height) / 2;
+                width: 5px;
+                height: 140px;
+                border-radius: Theme.win95 ? 0px : 2.5px;
+                background: nav-toggle.pressed || nav-toggle.has-hover ? Theme.accent : Theme.line;
+            }
+            // hinted gray arrows above/below the grip, pointing where a click
+            // takes the sidebar: left = collapse, right = expand
+            Text {
+                text: root.nav-collapsed ? "▸" : "◂";
+                color: Theme.faint;
+                font-size: 10px;
+                x: nav-grip.x + (nav-grip.width - self.width) / 2;
+                y: nav-grip.y - self.height - 8px;
+            }
+            Text {
+                text: root.nav-collapsed ? "▸" : "◂";
+                color: Theme.faint;
+                font-size: 10px;
+                x: nav-grip.x + (nav-grip.width - self.width) / 2;
+                y: nav-grip.y + nav-grip.height + 8px;
+            }
+        }
+
+        // =================================================================
+        // Main area: routes the current screen. A subtle radial glow evokes
+        // the dark.fi hero (atmospheric in the dark theme, faint elsewhere).
+        // =================================================================
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.bg;
+
+            // ---- choice ----
+            if root.screen == AppScreen.choice: VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    VerticalLayout {
+                        width: 520px;
+                        spacing: 12px;
+                        Text {
+                            text: Strings.choice-title;
+                            color: Theme.text;
+                            font-size: Theme.fs-h1;
+                            font-weight: 800;
+                        }
+                        Text {
+                            text: Strings.choice-subtitle;
+                            color: Theme.dim;
+                            font-size: Theme.fs-body;
+                        }
+                        Rectangle { height: 4px; }
+                        ChoiceCard {
+                            title: Strings.choice-open-title;
+                            sub: Strings.choice-open-sub;
+                            icon: @image-url("assets/open.svg");
+                            chosen => {
+                                root.navigate(AppScreen.open);
+                            }
+                        }
+                        ChoiceCard {
+                            title: Strings.choice-restore-title;
+                            sub: Strings.choice-restore-sub;
+                            icon: @image-url("assets/restore.svg");
+                            chosen => {
+                                root.rw-seed = "";
+                                root.rw-endpoint = "";
+                                root.rw-file = "";
+                                root.navigate(AppScreen.restore);
+                            }
+                        }
+                        // "New republic" — create / join grouped and indented,
+                        // bracketed by a thin left rule.
+                        Text {
+                            text: Strings.choice-group-republic;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            font-weight: 700;
+                            letter-spacing: 0.5px;
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Rectangle {
+                                width: 2px;
+                                background: Theme.line;
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                ChoiceCard {
+                                    title: Strings.choice-create-title;
+                                    sub: Strings.choice-create-sub;
+                                    icon: @image-url("assets/create.svg");
+                                    chosen => {
+                                        root.reset-create();
+                                        root.navigate(AppScreen.create);
+                                    }
+                                }
+                                ChoiceCard {
+                                    title: Strings.choice-join-title;
+                                    sub: Strings.choice-join-sub;
+                                    icon: @image-url("assets/join.svg");
+                                    chosen => {
+                                        root.jw-invite = "";
+                                        root.jw-member = "";
+                                        root.navigate(AppScreen.join);
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { height: 4px; }
+                        Text {
+                            text: Strings.choice-mock-note;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ---- create: found a new republic. Step 1 is one configuration
+            // screen of three themed panels (republic / approval rule /
+            // transport); "Found republic" starts the engine-run founding
+            // (progress + live log, like the restore), and on success the
+            // founding result appears: the recovery phrase and one one-time
+            // invite link per future member. ----
+            if root.screen == AppScreen.create: VerticalLayout {
+                padding: 24px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: Strings.cw-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h1;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        label: "×";
+                        // no bailing out while the founding is running; after
+                        // success it discards the (not yet entered) republic
+                        enabled: !root.cw-running;
+                        clicked => {
+                            if (root.cw-step == 1) {
+                                root.create-cancel();
+                            } else {
+                                root.navigate(AppScreen.choice);
+                            }
+                        }
+                    }
+                }
+
+                // step dots: 1 = configure, 2 = founding run, 3 = keys & invites
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 7px;
+                    for i in 3: Rectangle {
+                        width: 9px;
+                        height: 9px;
+                        border-radius: 4.5px;
+                        background: i == (root.cw-step == 0 ? 0 : (root.cw-outcome == 1 ? 2 : 1)) ? Theme.accent : Theme.line;
+                    }
+                }
+
+                if root.cw-step == 0: VerticalLayout {
+                    spacing: 12px;
+                    // pack to the top: leftover height stays blank instead of
+                    // inflating the last panel
+                    alignment: start;
+
+                    // who this republic is
+                    RestoreWay {
+                        title: Strings.cw-grp-republic;
+                        hint: Strings.cw-republic-hint;
+                        icon: @image-url("assets/republic.svg");
+                        HorizontalLayout {
+                            spacing: 12px;
+                            AppField {
+                                horizontal-stretch: 3;
+                                text <=> root.cw-name;
+                                placeholder: Strings.ph-ws-name;
+                                invalid: root.cw-taken;
+                            }
+                            AppField {
+                                horizontal-stretch: 2;
+                                text <=> root.cw-member;
+                                placeholder: Strings.ph-member;
+                            }
+                        }
+                        if root.cw-taken: DotLabel {
+                            tone: Theme.warn;
+                            label: Strings.cw-taken;
+                            label-color: Theme.warn;
+                            label-size: Theme.fs-cap;
+                        }
+                    }
+
+                    // the m-of-n approval rule, with a live sentence + seats
+                    RestoreWay {
+                        title: Strings.cw-grp-rule;
+                        hint: Strings.cw-rule-hint;
+                        icon: @image-url("assets/users.svg");
+                        HorizontalLayout {
+                            spacing: 18px;
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text {
+                                    text: Strings.field-threshold;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                }
+                                AppStepper {
+                                    width: 120px;
+                                    value <=> root.cw-threshold;
+                                    minimum: 1;
+                                    maximum: root.cw-members;
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text {
+                                    text: Strings.field-members;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                }
+                                AppStepper {
+                                    width: 120px;
+                                    value <=> root.cw-members;
+                                    minimum: 2;
+                                    maximum: 13;
+                                    // changing n snaps m to its default — the
+                                    // simple majority (⌊n/2⌋+1); m stays freely
+                                    // adjustable within 1..=n afterwards
+                                    changed(v) => {
+                                        root.cw-threshold = root.cw-rule-default;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 7px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "\{Strings.cw-rule-a} \{root.cw-threshold} \{Strings.cw-rule-b} \{root.cw-members} \{Strings.cw-rule-c}";
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-body;
+                                    wrap: word-wrap;
+                                }
+                                // one seat per member; the filled ones must
+                                // approve. Straying more than 1 from the
+                                // majority default earns a warning.
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: 5px;
+                                    for i in root.cw-members: Rectangle {
+                                        width: 13px;
+                                        height: 13px;
+                                        border-radius: Theme.win95 ? 0px : 6.5px;
+                                        background: i < root.cw-threshold ? Theme.accent : transparent;
+                                        border-width: Theme.border-w;
+                                        border-color: i < root.cw-threshold ? Theme.accent : Theme.line;
+                                    }
+                                    if Math.abs(root.cw-threshold - root.cw-rule-default) > 1: Text {
+                                        text: "⚠ \{Strings.cw-rule-warn}";
+                                        color: Theme.warn;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // how the republic's traffic travels
+                    RestoreWay {
+                        title: Strings.cw-grp-transport;
+                        hint: Strings.cw-transport-hint;
+                        icon: @image-url("assets/globe.svg");
+                        HorizontalLayout {
+                            spacing: 8px;
+                            AppDropdown {
+                                width: 110px;
+                                model: ["tor", "nym", "none"];
+                                current-index <=> root.cw-net-index;
+                            }
+                            if root.cw-net-index == 0: AppDropdown {
+                                width: 130px;
+                                model: ["local", "embedded", "whonix"];
+                                current-index <=> root.cw-tor-mode-index;
+                            }
+                            // only a LOCAL tor daemon has an explicit SOCKS
+                            // port; embedded and whonix configure themselves
+                            if root.cw-net-index == 0 && root.cw-tor-mode-index == 0: AppStepper {
+                                width: 120px;
+                                value <=> root.cw-tor-port;
+                                minimum: 1;
+                                maximum: 65535;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                horizontal-stretch: 1;
+                                alignment: end;
+                                Rectangle {
+                                    width: 9px;
+                                    height: 9px;
+                                    border-radius: 4.5px;
+                                    y: (parent.height - self.height) / 2;
+                                    background: root.cw-net-index == 2 ? Theme.warn : Theme.good;
+                                }
+                                Text {
+                                    text: root.cw-net-index == 0 ? Strings.cw-net-ok-tor
+                                        : (root.cw-net-index == 1 ? Strings.cw-net-ok-nym : Strings.cw-net-warn);
+                                    color: root.cw-net-index == 2 ? Theme.warn : Theme.good;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: Theme.accent-soft;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.accent;
+                        HorizontalLayout {
+                            padding: 12px;
+                            Text {
+                                text: Strings.mock-banner;
+                                color: Theme.accent;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            icon: @image-url("assets/create.svg");
+                            icon-set: true;
+                            label: Strings.cw-found;
+                            enabled: root.cw-name != "" && root.cw-member != "" && !root.cw-taken;
+                            clicked => {
+                                root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members,
+                                    root.cw-net-index == 0 ? "tor" : (root.cw-net-index == 1 ? "nym" : "none"));
+                            }
+                        }
+                    }
+                }
+                if root.cw-step == 0: Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                // step 2/3: the running founding; on success the log gives
+                // way to the founding result (phrase + invites) and only
+                // "Enter republic" remains
+                if root.cw-step == 1: RunView {
+                    vertical-stretch: 1;
+                    title: root.cw-run-name;
+                    hint: root.cw-run-detail;
+                    icon: @image-url("assets/create.svg");
+                    progress: root.cw-progress;
+                    outcome: root.cw-outcome;
+                    ph1: Strings.cw-ph1;
+                    ph2: Strings.cw-ph2;
+                    ph3: Strings.cw-ph3;
+                    failed-label: Strings.rw-failed;
+                    log: root.cw-log;
+                    show-log: root.cw-outcome != 1;
+                    back-shown: false;
+                    finish-enabled: root.cw-outcome == 1;
+                    finish-label: Strings.enter-republic;
+                    finish => {
+                        root.create-finish();
+                    }
+                    copy-log-clicked => {
+                        root.copy-log("create");
+                        root.show-toast(Strings.toast-copied);
+                    }
+
+                    // the founding result: save the phrase, hand out the invites
+                    if root.cw-outcome == 1: VerticalLayout {
+                        spacing: 12px;
+                        vertical-stretch: 1;
+                        SeedPanel {
+                            seed: root.cw-seed;
+                            copy-requested => {
+                                root.copy-text(root.cw-seed);
+                                root.show-toast(Strings.toast-copied);
+                            }
+                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            background: Theme.panel-2;
+                            border-radius: Theme.win95 ? 0px : 8px;
+                            border-width: Theme.border-w;
+                            border-color: Theme.line;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                Text {
+                                    text: Strings.cw-invites;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: Strings.cw-invites-hint;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    clip: true;
+                                    invfl := Flickable {
+                                        width: 100%;
+                                        height: 100%;
+                                        viewport-width: self.width;
+                                        viewport-height: invlist.preferred-height;
+                                        invlist := VerticalLayout {
+                                            spacing: 5px;
+                                            alignment: start;
+                                            for inv in root.cw-invites: Rectangle {
+                                                height: 36px;
+                                                border-radius: Theme.win95 ? 0px : 8px;
+                                                background: Theme.panel;
+                                                border-width: Theme.border-w;
+                                                border-color: Theme.line;
+                                                HorizontalLayout {
+                                                    padding-left: 10px;
+                                                    padding-right: 5px;
+                                                    spacing: 9px;
+                                                    Image {
+                                                        source: @image-url("assets/link.svg");
+                                                        colorize: Theme.accent;
+                                                        width: 15px;
+                                                        height: 15px;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: inv;
+                                                        color: Theme.text;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                        overflow: elide;
+                                                    }
+                                                    AppButton {
+                                                        height: 28px;
+                                                        pad: 10px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        label: Strings.ow-copy;
+                                                        clicked => {
+                                                            root.copy-text(inv);
+                                                            root.show-toast(Strings.toast-copied);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ScrollHint {
+                                        x: parent.width - 7px;
+                                        view-h: invfl.height;
+                                        content-h: invfl.viewport-height;
+                                        scroll-y: invfl.viewport-y;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- open (mock empty list) ----
+            if root.screen == AppScreen.open: VerticalLayout {
+                padding: 24px;
+                // side padding matches the 16px list/details splitter gap
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 14px;
+
+                HorizontalLayout {
+                    Text {
+                        text: Strings.ow-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h1;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        label: "×";
+                        clicked => {
+                            root.navigate(AppScreen.choice);
+                        }
+                    }
+                }
+
+                // workspace folder + change-folder button
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 40px;
+                        background: Theme.panel;
+                        border-radius: Theme.radius;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 9px;
+                            Image {
+                                source: @image-url("assets/open.svg");
+                                colorize: Theme.dim;
+                                width: 17px;
+                                height: 17px;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: root.cfg-workspace-dir;
+                                color: Theme.dim;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    AppButton {
+                        height: 40px; // match the folder bar on the left
+                        label: Strings.ow-change-folder;
+                        clicked => {
+                            // open settings on the storage tab, which edits the
+                            // workspace folder; return here on close.
+                            root.settings-return = AppScreen.open;
+                            root.set-tab = 1;
+                            root.navigate(AppScreen.settings);
+                        }
+                    }
+                }
+
+                // list + details as one group; the 16px gap matches the old
+                // splitter-zone spacing
+                VerticalLayout {
+                spacing: 16px;
+                vertical-stretch: 1;
+
+                // scrollable list of local workspaces / republics, under a
+                // sortable table header
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.panel;
+                    border-radius: Theme.radius;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    clip: true;
+                    VerticalLayout {
+
+                    // table header: click a column to sort the list by it,
+                    // click the active column again to flip the direction.
+                    // Cell widths mirror the row columns (dot / name / status
+                    // / the two fixed-width buttons), so header and rows align.
+                    HorizontalLayout {
+                        height: 32px;
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        spacing: 12px;
+                        Rectangle {
+                            width: 9px; // status-dot column
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            nh-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.sort-by("name");
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 5px;
+                                Text {
+                                    text: Strings.ow-col-name;
+                                    color: root.ws-sort-key == "name" || nh-ta.has-hover ? Theme.text : Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                if root.ws-sort-key == "name": Text {
+                                    text: root.ws-sort-desc ? "▼" : "▲";
+                                    color: Theme.accent;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 160px;
+                            sh-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.sort-by("sync");
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 5px;
+                                Text {
+                                    text: Strings.ow-col-sync;
+                                    color: root.ws-sort-key == "sync" || sh-ta.has-hover ? Theme.text : Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                if root.ws-sort-key == "sync": Text {
+                                    text: root.ws-sort-desc ? "▼" : "▲";
+                                    color: Theme.accent;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 184px; // Open/Delete buttons zone (86+12+86)
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.line;
+                    }
+
+                    Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    lfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: lst.preferred-height;
+                        lst := VerticalLayout {
+                            padding: 6px;
+                            spacing: 4px;
+                            for w[i] in root.ws-list: Rectangle {
+                                height: 54px;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                background: i == root.open-selected ? Theme.raised : (rw-ta.has-hover ? Theme.panel-2 : transparent);
+                                // Row-wide touch area first, so the per-row Open
+                                // button (later in the tree) sits above it.
+                                rw-ta := TouchArea {
+                                    clicked => {
+                                        // clicking the selected row again deselects
+                                        if (root.open-selected == i) {
+                                            root.deselect-workspace();
+                                        } else {
+                                            root.select-workspace(i, w);
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 12px;
+                                    Rectangle {
+                                        width: 9px;
+                                        height: 9px;
+                                        border-radius: 4.5px;
+                                        y: (parent.height - self.height) / 2;
+                                        background: w.state == 0 ? Theme.good : (w.state == 2 ? Theme.faint : Theme.warn);
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: w.name;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-body;
+                                            font-weight: 600;
+                                        }
+                                        Text {
+                                            text: w.detail;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                    }
+                                    Text {
+                                        // fixed column, aligned under the
+                                        // "Last sync" header
+                                        width: 160px;
+                                        text: w.status;
+                                        color: w.state == 0 ? Theme.good : (w.state == 2 ? Theme.dim : Theme.warn);
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    AppButton {
+                                        width: 86px;
+                                        height: 32px;
+                                        y: (parent.height - self.height) / 2;
+                                        label: Strings.ow-open;
+                                        primary: true;
+                                        clicked => {
+                                            root.select-workspace(i, w);
+                                            root.open-workspace(w.name);
+                                        }
+                                    }
+                                    AppButton {
+                                        width: 86px;
+                                        height: 32px;
+                                        y: (parent.height - self.height) / 2;
+                                        label: Strings.ow-delete;
+                                        clicked => {
+                                            root.delete-name = w.name;
+                                            root.delete-typed = "";
+                                            root.confirm-delete-open = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if root.ws-list.length == 0: Rectangle {
+                                height: 64px;
+                                Text {
+                                    text: Strings.ow-empty;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-body;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                        }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: lfl.height;
+                        content-h: lfl.viewport-height;
+                        scroll-y: lfl.viewport-y;
+                    }
+                    } // end scroll area
+
+                    } // end header + scroll-area column
+                }
+
+                // details panel — updates when a republic is selected; sizes
+                // itself so its content is always fully visible (stretch 0:
+                // the list above takes all remaining space). The inner
+                // VerticalLayout is what gives the panel its preferred height
+                // (conditional children only count inside a layout).
+                Rectangle {
+                    vertical-stretch: 0;
+                    background: Theme.panel;
+                    border-radius: Theme.radius;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    VerticalLayout {
+                    if root.open-selected < 0: VerticalLayout {
+                        padding: 16px;
+                        Rectangle {
+                            height: 52px;
+                            Text {
+                                text: Strings.ow-select-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-body;
+                                x: 0;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                    if root.open-selected >= 0: VerticalLayout {
+                        padding: 14px;
+                        spacing: 10px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Text {
+                                text: root.open-name;
+                                color: Theme.text;
+                                font-size: Theme.fs-h2;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "· \{root.open-detail}";
+                                color: Theme.dim;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                        // one row of themed groups, so status and action pair
+                        // up visibly: sync + seed | backup + its actions | net
+                        HorizontalLayout {
+                            spacing: 10px;
+                            DetailGroup {
+                                title: Strings.ow-grp-sync;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Rectangle {
+                                        width: 9px;
+                                        height: 9px;
+                                        border-radius: 4.5px;
+                                        y: (parent.height - self.height) / 2;
+                                        background: root.open-state == 0 ? Theme.good : (root.open-state == 2 ? Theme.faint : Theme.warn);
+                                    }
+                                    Text {
+                                        text: root.open-status;
+                                        color: root.open-state == 0 ? Theme.good : (root.open-state == 2 ? Theme.dim : Theme.warn);
+                                        font-size: Theme.fs-body;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    AppButton {
+                                        height: 30px;
+                                        pad: 10px;
+                                        icon: @image-url("assets/eye.svg");
+                                        icon-set: true;
+                                        label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
+                                        clicked => {
+                                            root.seed-shown = !root.seed-shown;
+                                        }
+                                    }
+                                }
+                            }
+                            DetailGroup {
+                                title: Strings.ow-grp-backup;
+                                // fit-to-content: only the sync group stretches
+                                horizontal-stretch: 0;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Rectangle {
+                                        width: 9px;
+                                        height: 9px;
+                                        border-radius: 4.5px;
+                                        y: (parent.height - self.height) / 2;
+                                        background: root.open-s3 ? Theme.good : Theme.warn;
+                                    }
+                                    Text {
+                                        text: root.open-s3 ? Strings.ow-s3-on : Strings.ow-s3-off;
+                                        color: root.open-s3 ? Theme.good : Theme.warn;
+                                        font-size: Theme.fs-body;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: 8px;
+                                    AppButton {
+                                        height: 30px;
+                                        pad: 10px;
+                                        icon: @image-url("assets/gear.svg");
+                                        icon-set: true;
+                                        label: Strings.ow-backup-cfg;
+                                        clicked => {
+                                            // S3 editing lives on the backup
+                                            // tab; return here when it closes.
+                                            root.settings-return = AppScreen.open;
+                                            root.set-tab = 2;
+                                            root.navigate(AppScreen.settings);
+                                        }
+                                    }
+                                    AppButton {
+                                        height: 30px;
+                                        pad: 10px;
+                                        icon: @image-url("assets/floppy.svg");
+                                        icon-set: true;
+                                        label: Strings.ow-export;
+                                        clicked => {
+                                            root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
+                                            root.backup-modal-open = true;
+                                        }
+                                    }
+                                }
+                            }
+                            DetailGroup {
+                                title: Strings.ow-grp-net;
+                                horizontal-stretch: 0;
+                                // centre the single line in the space below the
+                                // caption instead of letting it hang at the bottom
+                                VerticalLayout {
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Rectangle {
+                                            width: 9px;
+                                            height: 9px;
+                                            border-radius: 4.5px;
+                                            y: (parent.height - self.height) / 2;
+                                            background: root.open-net == "clearnet" ? Theme.warn : Theme.good;
+                                        }
+                                        Text {
+                                            text: root.open-net == "tor" ? "Tor" : (root.open-net == "nym" ? "Nym" : "Clearnet");
+                                            color: root.open-net == "clearnet" ? Theme.warn : Theme.good;
+                                            font-size: Theme.fs-body;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if root.export-note != "": Text {
+                            text: root.export-note;
+                            color: Theme.good;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        // seed panel: masked by default; hold the eye button to
+                        // peek at the real phrase, copy puts it on the clipboard
+                        if root.seed-shown: SeedPanel {
+                            seed: root.open-seed;
+                            copy-requested => {
+                                root.copy-text(root.open-seed);
+                                root.show-toast(Strings.toast-copied);
+                            }
+                        }
+                        // the DAO's members and when each of them last synced;
+                        // fixed-width chips laid out as a grid that wraps to
+                        // new lines (Slint has no flow layout, so x/y are
+                        // computed from the index)
+                        DetailGroup {
+                            title: Strings.ow-members;
+                            mgrid := Rectangle {
+                                property <length> chip-w: 160px;
+                                property <length> chip-h: 24px;
+                                property <length> gap: 6px;
+                                property <int> cols: max(1, Math.floor(self.width / (self.chip-w + self.gap)));
+                                property <int> rows: Math.ceil(root.open-members.length / self.cols);
+                                height: self.rows * self.chip-h + max(0, self.rows - 1) * self.gap;
+                                for m[i] in root.open-members: Rectangle {
+                                    x: Math.mod(i, mgrid.cols) * (mgrid.chip-w + mgrid.gap);
+                                    y: Math.floor(i / mgrid.cols) * (mgrid.chip-h + mgrid.gap);
+                                    width: mgrid.chip-w;
+                                    height: mgrid.chip-h;
+                                    border-radius: Theme.win95 ? 0px : 12px;
+                                    background: Theme.panel;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    HorizontalLayout {
+                                        padding-left: 9px;
+                                        padding-right: 9px;
+                                        spacing: 6px;
+                                        Rectangle {
+                                            width: 7px;
+                                            height: 7px;
+                                            border-radius: 3.5px;
+                                            y: (parent.height - self.height) / 2;
+                                            background: m.state == 0 ? Theme.good : (m.state == 2 ? Theme.faint : Theme.warn);
+                                        }
+                                        Text {
+                                            text: "\{m.name} · \{m.last}";
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    }
+                }
+
+                } // end list+details group
+
+            }
+
+            // ---- join via invite: the invite link on top (paste / example,
+            // with a live parse check), then — branched off it like the
+            // restore ways — what the invite says you are joining, plus your
+            // handle and the Join button. Joining is an engine-run (progress
+            // + live log); malformed invites fail partway. ----
+            if root.screen == AppScreen.join: VerticalLayout {
+                padding: 24px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: Strings.jw-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h1;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        label: "×";
+                        // no bailing out while the join is running; after a
+                        // failure it works again
+                        enabled: !root.jw-running;
+                        clicked => {
+                            if (root.jw-step == 1) {
+                                root.join-cancel();
+                            } else {
+                                root.navigate(AppScreen.choice);
+                            }
+                        }
+                    }
+                }
+
+                // step dots: 1 = the invite, 2 = join progress
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 7px;
+                    for i in 2: Rectangle {
+                        width: 9px;
+                        height: 9px;
+                        border-radius: 4.5px;
+                        background: i == root.jw-step ? Theme.accent : Theme.line;
+                    }
+                }
+
+                if root.jw-step == 0: VerticalLayout {
+                    spacing: 12px;
+                    // pack to the top: leftover height stays blank instead of
+                    // inflating the last panel
+                    alignment: start;
+
+                    // the invite link feeds everything below
+                    RestoreWay {
+                        title: Strings.jw-grp-invite;
+                        hint: Strings.jw-invite-hint;
+                        icon: @image-url("assets/join.svg");
+                        HorizontalLayout {
+                            spacing: 8px;
+                            AppField {
+                                text <=> root.jw-invite;
+                                placeholder: "molt://invite/…";
+                                horizontal-stretch: 1;
+                            }
+                            AppButton {
+                                height: 38px;
+                                pad: 10px;
+                                icon: @image-url("assets/paste.svg");
+                                icon-set: true;
+                                label: Strings.rw-paste;
+                                clicked => {
+                                    root.jw-invite = root.paste-clipboard();
+                                }
+                            }
+                        }
+                        // any non-empty invite is accepted for now (the real
+                        // check comes with the network implementation)
+                        if root.jw-invite != "": DotLabel {
+                            tone: Theme.good;
+                            label: Strings.jw-ok;
+                            label-color: Theme.good;
+                            label-size: Theme.fs-cap;
+                        }
+                    }
+
+                    // what you are joining — the parsed republic details when
+                    // the invite carries them; dimmed until something is pasted
+                    WayBranch {
+                        armed: root.jw-invite != "";
+                        last: true;
+                        RestoreWay {
+                            horizontal-stretch: 1;
+                            title: root.jw-preview.valid ? root.jw-preview.republic : Strings.jw-grp-preview;
+                            hint: root.jw-preview.valid
+                                ? "\{root.jw-preview.rule} · \{Strings.jw-invited-by} \{root.jw-preview.inviter}"
+                                : Strings.jw-preview-hint;
+                            icon: @image-url("assets/republic.svg");
+                            HorizontalLayout {
+                                spacing: 12px;
+                                AppField {
+                                    horizontal-stretch: 1;
+                                    text <=> root.jw-member;
+                                    placeholder: Strings.ph-member;
+                                }
+                                AppButton {
+                                    height: 38px;
+                                    primary: true;
+                                    enabled: root.jw-invite != "" && root.jw-member != "";
+                                    label: Strings.jw-join;
+                                    clicked => {
+                                        root.join-start(root.jw-invite, root.jw-member);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: Theme.accent-soft;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.accent;
+                        HorizontalLayout {
+                            padding: 12px;
+                            Text {
+                                text: Strings.mock-banner;
+                                color: Theme.accent;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+                if root.jw-step == 0: Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                // step 2: the running join with progress bar + live log
+                // (a mock join always succeeds, so there is no back button)
+                if root.jw-step == 1: RunView {
+                    vertical-stretch: 1;
+                    title: root.jw-republic;
+                    hint: root.jw-inviter == "" ? root.jw-rule
+                        : "\{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
+                    icon: @image-url("assets/join.svg");
+                    progress: root.jw-progress;
+                    outcome: root.jw-outcome;
+                    ph1: Strings.jw-ph1;
+                    ph2: Strings.jw-ph2;
+                    ph3: Strings.jw-ph3;
+                    failed-label: Strings.jw-failed;
+                    log: root.jw-log;
+                    back-shown: false;
+                    finish-enabled: root.jw-outcome == 1;
+                    finish-label: Strings.enter-republic;
+                    finish => {
+                        root.join-finish();
+                    }
+                    copy-log-clicked => {
+                        root.copy-log("join");
+                        root.show-toast(Strings.toast-copied);
+                    }
+                }
+            }
+
+            // ---- restore from backup / seed (mock) ----
+            // ---- restore: the recovery phrase on top, then three ways in,
+            // each with its own continue button ----
+            if root.screen == AppScreen.restore: VerticalLayout {
+                padding: 24px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: Strings.rw-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h1;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        label: "×";
+                        // no bailing out while the restore is running; after a
+                        // failure it works again
+                        enabled: !root.restore-running;
+                        clicked => {
+                            if (root.rw-step == 1) {
+                                root.restore-cancel();
+                            } else {
+                                root.navigate(AppScreen.choice);
+                            }
+                        }
+                    }
+                }
+
+                // step dots: 1 = pick a way in, 2 = restore progress
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 7px;
+                    for i in 2: Rectangle {
+                        width: 9px;
+                        height: 9px;
+                        border-radius: 4.5px;
+                        background: i == root.rw-step ? Theme.accent : Theme.line;
+                    }
+                }
+
+                if root.rw-step == 0: VerticalLayout {
+                spacing: 12px;
+
+                // the recovery phrase feeds every restore path
+                RestoreWay {
+                    title: Strings.rw-seed;
+                    hint: Strings.rw-seed-hint;
+                    icon: @image-url("assets/key.svg");
+                    HorizontalLayout {
+                        spacing: 8px;
+                        AppField {
+                            text <=> root.rw-seed;
+                            placeholder: Strings.ph-seed;
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            height: 38px;
+                            pad: 10px;
+                            icon: @image-url("assets/paste.svg");
+                            icon-set: true;
+                            label: Strings.rw-paste;
+                            clicked => {
+                                root.rw-seed = root.paste-clipboard();
+                            }
+                        }
+                    }
+                }
+
+                // way 1: re-sync from another member over SimpleX
+                WayBranch {
+                    armed: root.rw-seed != "";
+                    RestoreWay {
+                    horizontal-stretch: 1;
+                    title: Strings.rw-via-peer;
+                    hint: Strings.rw-peer-hint;
+                    icon: @image-url("assets/users.svg");
+                    HorizontalLayout {
+                        spacing: 8px;
+                        AppField {
+                            text <=> root.rw-endpoint;
+                            placeholder: "smp://…";
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            enabled: root.rw-seed != "" && root.rw-endpoint != "";
+                            label: Strings.rw-continue;
+                            clicked => {
+                                root.restore-start("peer", root.rw-endpoint);
+                            }
+                        }
+                    }
+                }
+
+                }
+
+                // way 2: pull the encrypted backup from the configured S3 bucket
+                WayBranch {
+                    armed: root.rw-seed != "";
+                    RestoreWay {
+                    horizontal-stretch: 1;
+                    title: Strings.rw-via-s3;
+                    hint: Strings.rw-s3-hint;
+                    icon: @image-url("assets/cloud.svg");
+                    HorizontalLayout {
+                        spacing: 8px;
+                        // the currently configured S3 endpoint + (mock) reachability
+                        Rectangle {
+                            width: 9px;
+                            height: 9px;
+                            border-radius: 4.5px;
+                            y: (parent.height - self.height) / 2;
+                            background: root.cfg-s3-endpoint == "" ? Theme.warn : Theme.good;
+                        }
+                        Text {
+                            text: root.cfg-s3-endpoint == "" ? Strings.rw-s3-none : "\{root.cfg-s3-endpoint} · \{Strings.rw-s3-ok}";
+                            color: root.cfg-s3-endpoint == "" ? Theme.warn : Theme.good;
+                            font-size: Theme.fs-body;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        AppButton {
+                            height: 38px;
+                            pad: 10px;
+                            icon: @image-url("assets/gear.svg");
+                            icon-set: true;
+                            label: Strings.ow-backup-cfg;
+                            clicked => {
+                                root.settings-return = AppScreen.restore;
+                                root.set-tab = 2;
+                                root.navigate(AppScreen.settings);
+                            }
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            enabled: root.rw-seed != "" && root.cfg-s3-endpoint != "";
+                            label: Strings.rw-continue;
+                            clicked => {
+                                root.restore-start("s3", root.cfg-s3-endpoint);
+                            }
+                        }
+                    }
+                }
+
+                }
+
+                // way 3: manual restore from an encrypted .molt.enc file
+                WayBranch {
+                    armed: root.rw-seed != "";
+                    last: true;
+                    RestoreWay {
+                    horizontal-stretch: 1;
+                    title: Strings.rw-via-file;
+                    hint: Strings.rw-file-hint;
+                    icon: @image-url("assets/floppy.svg");
+                    HorizontalLayout {
+                        spacing: 8px;
+                        // folder chip showing the chosen blob
+                        Rectangle {
+                            height: 38px;
+                            horizontal-stretch: 1;
+                            background: chip-ta.has-hover ? Theme.raised : Theme.panel;
+                            border-radius: Theme.radius;
+                            border-width: Theme.border-w;
+                            border-color: Theme.line;
+                            chip-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.rw-file-draft = root.rw-file == "" ? "~/Backups/" : root.rw-file;
+                                    root.restore-file-modal-open = true;
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 9px;
+                                Image {
+                                    source: @image-url("assets/open.svg");
+                                    colorize: Theme.dim;
+                                    width: 17px;
+                                    height: 17px;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                Text {
+                                    text: root.rw-file == "" ? Strings.rw-no-file : root.rw-file;
+                                    color: root.rw-file == "" ? Theme.faint : Theme.text;
+                                    font-size: Theme.fs-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        AppButton {
+                            height: 38px;
+                            pad: 10px;
+                            icon: @image-url("assets/open.svg");
+                            icon-set: true;
+                            label: Strings.rw-choose;
+                            clicked => {
+                                root.rw-file-draft = root.rw-file == "" ? "~/Backups/" : root.rw-file;
+                                root.restore-file-modal-open = true;
+                            }
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            enabled: root.rw-seed != "" && root.rw-file != "";
+                            label: Strings.rw-continue;
+                            clicked => {
+                                root.restore-start("file", root.rw-file);
+                            }
+                        }
+                    }
+                }
+
+                }
+
+                Rectangle {
+                    background: Theme.accent-soft;
+                    border-radius: Theme.win95 ? 0px : 8px;
+                    border-width: Theme.border-w;
+                    border-color: Theme.accent;
+                    HorizontalLayout {
+                        padding: 12px;
+                        Text {
+                            text: Strings.mock-banner;
+                            color: Theme.accent;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                }
+
+                // step 2: the running restore (shared RunView: progress bar,
+                // live log, outcome-gated Back/Finish)
+                if root.rw-step == 1: RunView {
+                    vertical-stretch: 1;
+                    title: root.rw-way == "peer" ? Strings.rw-via-peer : (root.rw-way == "s3" ? Strings.rw-via-s3 : Strings.rw-via-file);
+                    hint: root.rw-target;
+                    icon: root.rw-way == "peer" ? @image-url("assets/users.svg") : (root.rw-way == "s3" ? @image-url("assets/cloud.svg") : @image-url("assets/floppy.svg"));
+                    progress: root.rw-progress;
+                    outcome: root.rw-outcome;
+                    ph1: Strings.rw-ph1;
+                    ph2: Strings.rw-ph2;
+                    ph3: Strings.rw-ph3;
+                    failed-label: Strings.rw-failed;
+                    log: root.rw-log;
+                    back-enabled: root.rw-outcome == 2;
+                    finish-enabled: root.rw-outcome == 1;
+                    finish-label: Strings.rw-finish;
+                    back => {
+                        root.restore-cancel();
+                    }
+                    finish => {
+                        root.restore-finish();
+                    }
+                    copy-log-clicked => {
+                        root.copy-log("restore");
+                        root.show-toast(Strings.toast-copied);
+                    }
+                }
+
+                if root.rw-step == 0: Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+
+            // ---- main view: the selected surface (surfaces live in the sidebar) ----
+            if root.screen == AppScreen.main: VerticalLayout {
+                // top header bar (same height as the sidebar wordmark, so the
+                // two line up): workspace name, then three status pills left
+                // of the × — monero daemon, chat transport, and sync (the
+                // mock derives the first two from the workspace's state).
+                Rectangle {
+                    height: 64px;
+                    background: Theme.panel;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: root.active-workspace == "" ? "Republic" : root.active-workspace;
+                            color: Theme.text;
+                            font-size: Theme.fs-h2;
+                            font-weight: 700;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusPill {
+                                label: "monerod";
+                                tone: root.active-state == 2 ? Theme.bad : Theme.good;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusPill {
+                                label: "chat";
+                                tone: root.active-state == 2 ? Theme.faint : Theme.good;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusPill {
+                                label: root.active-status == "" ? "Synced" : root.active-status;
+                                tone: root.active-state == 0 ? Theme.good : (root.active-state == 2 ? Theme.faint : Theme.warn);
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            AppButton {
+                                label: "×";
+                                tooltip: Strings.mv-close-ws;
+                                tooltip-left: true;
+                                clicked => {
+                                    root.confirm-close-open = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    for s in root.surfaces: Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    visible: s.key == root.selected-surface;
+                    VerticalLayout {
+                        // tight to the edges — chat real estate over chrome
+                        padding: 8px;
+                        spacing: 8px;
+
+                        // chat / Today — konkinwallet-style: the members
+                        // strip (who is online right now), zebra-striped
+                        // messages with emoji reactions, and a compose box
+                        // that grows on Alt+Enter line breaks.
+                        if s.key == "chat" && root.selected-view == "today": VerticalLayout {
+                            spacing: 8px;
+
+                            // presence strip: fixed-width pills wrapping into
+                            // as many rows as needed (index-computed grid —
+                            // Slint has no flow layout); a click on a member
+                            // jumps to Organization → Members
+                            if root.active-members.length > 0: Rectangle {
+                                height: pgrid.height + 16px;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                pgrid := Rectangle {
+                                    x: 8px;
+                                    y: 8px;
+                                    width: parent.width - 16px;
+                                    property <length> chip-h: 28px;
+                                    property <length> gap: 6px;
+                                    // as many 150px-minimum columns as fit, then the
+                                    // pills stretch to fill the row exactly
+                                    property <int> cols: max(1, Math.floor(self.width / (150px + self.gap)));
+                                    property <length> chip-w: (self.width - (self.cols - 1) * self.gap) / self.cols;
+                                    property <int> rows: Math.ceil(root.active-members.length / self.cols);
+                                    height: self.rows * self.chip-h + max(0, self.rows - 1) * self.gap;
+                                    for m[i] in root.active-members: MemberPill {
+                                        x: Math.mod(i, pgrid.cols) * (pgrid.chip-w + pgrid.gap);
+                                        y: Math.floor(i / pgrid.cols) * (pgrid.chip-h + pgrid.gap);
+                                        width: pgrid.chip-w;
+                                        m: m;
+                                        clicked => {
+                                            root.select-view("organization", "members");
+                                        }
+                                    }
+                                }
+                            }
+
+                            // the message list sits on a real panel — writing
+                            // straight onto the desktop background read badly,
+                            // especially in the brutalism theme
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                clip: true;
+                                chfl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: chlist.preferred-height + 8px;
+                                    // pinned to the newest message. The binding
+                                    // alone dies on the first manual drag, so
+                                    // every content growth re-pins imperatively:
+                                    // a new message (own or incoming) always
+                                    // scrolls the box to the bottom.
+                                    viewport-y: min(0px, self.height - self.viewport-height);
+                                    changed viewport-height => {
+                                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                                    }
+                                    chlist := VerticalLayout {
+                                        // indented message cards with a small
+                                        // gap between them
+                                        padding: 8px;
+                                        padding-left: 16px;
+                                        spacing: 4px;
+                                        alignment: start;
+                                        if s.applied-count == 0: Text {
+                                            text: Strings.mv-empty-chat;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for l[i] in s.log: ChatRow {
+                                                line: l;
+                                                index: i;
+                                                // replies indent behind their quote
+                                                indent: l.quote >= 0;
+                                                scroll-request: root.chat-scroll-to;
+                                                toggle-reaction(emoji) => {
+                                                    root.toggle-reaction(i, emoji);
+                                                }
+                                                copy-requested => {
+                                                    root.copy-text(l.text);
+                                                    root.show-toast(Strings.toast-copied);
+                                                }
+                                                delete-requested => {
+                                                    root.delmsg-index = i;
+                                                    root.confirm-delmsg-open = true;
+                                                }
+                                                quote-requested => {
+                                                    root.mv-quote-index = i;
+                                                    root.mv-quote-label = l.lead + ": " + l.text;
+                                                    chat-in.focus();
+                                                }
+                                                quote-jump => {
+                                                    root.chat-scroll-to = l.quote;
+                                                }
+                                                bring-into-view => {
+                                                    chfl.viewport-y = clamp(
+                                                        chfl.viewport-y - (self.absolute-position.y - chfl.absolute-position.y) + 8px,
+                                                        min(0px, chfl.height - chfl.viewport-height), 0px);
+                                                    root.chat-scroll-to = -1;
+                                                }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: chfl.height;
+                                    content-h: chfl.viewport-height;
+                                    scroll-y: chfl.viewport-y;
+                                }
+                            }
+
+                            // replying? a quiet banner names the quoted
+                            // message; × drops the quote again
+                            if root.mv-quote-index >= 0: Rectangle {
+                                height: 26px;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 6px;
+                                border-width: 1px;
+                                border-color: Theme.line;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 4px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "↳";
+                                        color: Theme.accent;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.mv-quote-label;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Rectangle {
+                                        width: 20px;
+                                        height: 20px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: Theme.win95 ? 0px : 5px;
+                                        background: qx-ta.has-hover ? Theme.raised : transparent;
+                                        Text {
+                                            text: "×";
+                                            color: Theme.dim;
+                                            font-size: 13px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        qx-ta := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => {
+                                                root.mv-quote-index = -1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // compose: Enter sends; Alt+Enter breaks the line
+                            // and the box grows to show the extra text
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: min(122px, max(38px, chat-in.preferred-height + 16px));
+                                    background: Theme.panel;
+                                    border-radius: Theme.radius;
+                                    border-width: Theme.border-w;
+                                    border-color: chat-in.has-focus ? Theme.accent : Theme.line;
+                                    clip: true;
+                                    if root.mv-draft == "": Text {
+                                        x: 12px;
+                                        y: 10px;
+                                        text: Strings.mv-chat-ph;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-body;
+                                    }
+                                    chat-in := TextInput {
+                                        x: 12px;
+                                        y: 9px;
+                                        width: parent.width - 24px;
+                                        height: parent.height - 18px;
+                                        text <=> root.mv-draft;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-body;
+                                        font-family: "Twemoji Mozilla";
+                                        single-line: false;
+                                        wrap: word-wrap;
+                                        // this whole branch only exists while
+                                        // chat/Today is the open view — so the
+                                        // keyboard focus lands here the moment
+                                        // it opens and you can just type
+                                        init => {
+                                            self.focus();
+                                        }
+                                        key-pressed(event) => {
+                                            // plain Enter sends; Alt+Enter (and
+                                            // Shift+Enter) fall through to the
+                                            // TextInput, which inserts the break
+                                            if (event.text == Key.Return && !event.modifiers.alt && !event.modifiers.shift) {
+                                                root.send-chat(root.mv-draft, root.mv-quote-index);
+                                                root.mv-draft = "";
+                                                root.mv-quote-index = -1;
+                                                // keep typing: the focus stays here
+                                                self.focus();
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+                                    }
+                                }
+                                // emoji palette appends to the draft
+                                VerticalLayout {
+                                    alignment: end;
+                                    Rectangle {
+                                        width: 38px;
+                                        height: 38px;
+                                        background: em-ta.has-hover ? Theme.raised : Theme.panel;
+                                        border-radius: Theme.radius;
+                                        border-width: Theme.border-w;
+                                        border-color: Theme.line;
+                                        Text {
+                                            text: "🙂";
+                                            font-family: "Twemoji Mozilla";
+                                            font-size: 19px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        em-ta := TouchArea {
+                                            clicked => {
+                                                compose-emoji.show();
+                                            }
+                                        }
+                                        compose-emoji := PopupWindow {
+                                            // anchor the grid's RIGHT edge to the
+                                            // button (38px wide): otherwise the
+                                            // palette runs off the window edge and
+                                            // only its first cells stay visible
+                                            x: 38px - (8 * 34px + 7 * 4px + 16px);
+                                            y: -54px;
+                                            EmojiGrid {
+                                                emoji-picked(emoji) => {
+                                                    root.mv-draft += emoji;
+                                                    compose-emoji.close();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: end;
+                                    AppButton {
+                                        height: 38px;
+                                        label: Strings.mv-send;
+                                        primary: true;
+                                        clicked => {
+                                            root.send-chat(root.mv-draft, root.mv-quote-index);
+                                            root.mv-draft = "";
+                                            root.mv-quote-index = -1;
+                                            // keep typing: focus returns to the box
+                                            chat-in.focus();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // chat / Archive and the Organization views: content
+                        // arrives with the systematic per-view pass
+                        if (s.key == "chat" && root.selected-view != "today") || s.key == "organization": VerticalLayout {
+                            alignment: start;
+                            padding: 8px;
+                            Text {
+                                text: Strings.mv-later;
+                                color: Theme.faint;
+                                font-size: Theme.fs-body;
+                            }
+                        }
+
+                        // gated (board / memory / treasury / vault)
+                        if s.gated: VerticalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: Strings.mv-pending;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                VerticalLayout {
+                                    padding: 2px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    if s.pending-count == 0: Text {
+                                        text: Strings.mv-empty-pending;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                    }
+                                    for p in s.pending: Rectangle {
+                                        background: Theme.panel-2;
+                                        border-radius: Theme.win95 ? 0px : 8px;
+                                        border-width: Theme.border-w;
+                                        border-color: Theme.line;
+                                        VerticalLayout {
+                                            padding: 10px;
+                                            spacing: 8px;
+                                            Text {
+                                                text: "#\{p.id}  \{p.text}";
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                wrap: word-wrap;
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                Rectangle {
+                                                    height: 6px;
+                                                    border-radius: Theme.win95 ? 0px : 3px;
+                                                    background: Theme.line;
+                                                    horizontal-stretch: 1;
+                                                    Rectangle {
+                                                        x: 0;
+                                                        height: parent.height;
+                                                        border-radius: parent.border-radius;
+                                                        width: parent.width * min(1.0, p.approvals * 1.0 / max(p.threshold, 1));
+                                                        background: Theme.accent;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: "\{p.approvals}/\{p.threshold}";
+                                                    color: Theme.dim;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                AppButton {
+                                                    label: Strings.mv-approve;
+                                                    primary: true;
+                                                    clicked => {
+                                                        root.approve(p.id);
+                                                    }
+                                                }
+                                                AppButton {
+                                                    label: Strings.mv-decline;
+                                                    clicked => {
+                                                        root.decline(p.id);
+                                                    }
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: Strings.mv-applied;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                VerticalLayout {
+                                    padding: 2px;
+                                    spacing: 4px;
+                                    alignment: start;
+                                    if s.applied-count == 0: Text {
+                                        text: Strings.mv-empty-applied;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                    }
+                                    for l in s.log: Text {
+                                        text: l.text;
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-body;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                AppField {
+                                    horizontal-stretch: 1;
+                                    placeholder: Strings.mv-propose-ph;
+                                    text <=> root.mv-draft;
+                                    accepted => {
+                                        root.propose(s.key, root.mv-draft);
+                                        root.mv-draft = "";
+                                    }
+                                }
+                                AppButton {
+                                    label: Strings.mv-propose;
+                                    primary: true;
+                                    clicked => {
+                                        root.propose(s.key, root.mv-draft);
+                                        root.mv-draft = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+
+            // ---- settings (in-memory config editor — MOCK, no disk write) ----
+            if root.screen == AppScreen.settings: VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: Strings.set-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h1;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        label: "×";
+                        clicked => {
+                            root.navigate(root.settings-return);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    AppButton {
+                        label: Strings.set-tab-general;
+                        primary: root.set-tab == 0;
+                        clicked => {
+                            root.set-tab = 0;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.set-tab-workspace;
+                        primary: root.set-tab == 1;
+                        clicked => {
+                            root.set-tab = 1;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.set-tab-backup;
+                        primary: root.set-tab == 2;
+                        clicked => {
+                            root.set-tab = 2;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.set-tab-network;
+                        primary: root.set-tab == 3;
+                        clicked => {
+                            root.set-tab = 3;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.set-tab-mcp;
+                        primary: root.set-tab == 4;
+                        clicked => {
+                            root.set-tab = 4;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.set-tab-node;
+                        primary: root.set-tab == 5;
+                        clicked => {
+                            root.set-tab = 5;
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.panel;
+                    border-radius: Theme.radius;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 14px;
+                        if root.set-tab == 0: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            FieldLabel {
+                                label: Strings.field-language;
+                                AppDropdown {
+                                    width: 200px;
+                                    model: ["English", "Deutsch"];
+                                    current-index: root.lang-index;
+                                    changed(i) => {
+                                        root.set-language(i);
+                                    }
+                                }
+                            }
+                            FieldLabel {
+                                label: Strings.field-theme;
+                                AppDropdown {
+                                    width: 200px;
+                                    model: ["Classic", "Dark", "Brutalism"];
+                                    current-index <=> Theme.theme-index;
+                                    changed(i) => {
+                                        Theme.picked(i);
+                                    }
+                                }
+                            }
+                        }
+                        if root.set-tab == 1: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            FieldLabel {
+                                label: Strings.field-workspace-dir;
+                                // read-only: the folder is only changed via
+                                // the (mock) picker modal, never by free-typing
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        background: Theme.panel;
+                                        border-radius: Theme.radius;
+                                        border-width: Theme.border-w;
+                                        border-color: Theme.line;
+                                        height: max(38px, ws-dir-text.preferred-height + 20px);
+                                        ws-dir-text := Text {
+                                            x: 12px;
+                                            y: 10px;
+                                            width: parent.width - 24px;
+                                            text: root.cfg-workspace-dir == "" ? "—" : root.cfg-workspace-dir;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-cap;
+                                            wrap: char-wrap;
+                                        }
+                                    }
+                                    AppButton {
+                                        height: 38px;
+                                        icon: @image-url("assets/folder.svg");
+                                        icon-set: true;
+                                        label: Strings.set-ws-choose;
+                                        clicked => {
+                                            root.ws-dir-draft = root.cfg-workspace-dir;
+                                            root.ws-dir-modal-open = true;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: root.ws-list.length == 1
+                                        ? "1 \{Strings.set-ws-found-one}"
+                                        : "\{root.ws-list.length} \{Strings.set-ws-found-many}";
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                }
+                            }
+                        }
+                        if root.set-tab == 2: bk-tab := VerticalLayout {
+                            spacing: 12px;
+                            vertical-stretch: 1;
+                            // both name columns get the SAME fixed share of
+                            // the width — a stretch would distribute by each
+                            // row's preferred size and the column edges would
+                            // wander per row. 24 = side paddings, 40 = 4 gaps.
+                            property <length> name-w: (self.width - 24px - 44px - 72px - 108px - 40px) / 2;
+                            // section head: plain title, the on/off switch and
+                            // the interval sit to its right
+                            HorizontalLayout {
+                                spacing: 18px;
+                                alignment: start;
+                                Text {
+                                    text: Strings.field-s3-backup;
+                                    color: Theme.text;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                AppCheck {
+                                    label: Strings.set-s3-active;
+                                    checked <=> root.cfg-s3-backup;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                if root.cfg-s3-backup: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: Strings.set-s3-every;
+                                        color: Theme.dim;
+                                        vertical-alignment: center;
+                                    }
+                                    AppStepper {
+                                        width: 130px;
+                                        height: 30px;
+                                        y: (parent.height - self.height) / 2;
+                                        value <=> root.cfg-s3-interval;
+                                        minimum: 1;
+                                        maximum: 1440;
+                                    }
+                                    Text {
+                                        text: Strings.set-s3-unit-min;
+                                        color: Theme.dim;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.line;
+                            }
+                            FieldLabel {
+                                label: Strings.field-s3-endpoint;
+                                AppField {
+                                    text <=> root.cfg-s3-endpoint;
+                                    placeholder: "https://s3.example.org";
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                FieldLabel {
+                                    label: Strings.field-s3-access;
+                                    horizontal-stretch: 1;
+                                    AppField {
+                                        text <=> root.cfg-s3-access;
+                                        placeholder: "AKIA…";
+                                    }
+                                }
+                                FieldLabel {
+                                    label: Strings.field-s3-secret;
+                                    horizontal-stretch: 1;
+                                    AppField {
+                                        secret: true;
+                                        text <=> root.cfg-s3-secret;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                FieldLabel {
+                                    label: Strings.field-s3-bucket;
+                                    horizontal-stretch: 1;
+                                    AppField {
+                                        text <=> root.cfg-s3-bucket;
+                                        placeholder: "media-archive";
+                                    }
+                                }
+                                // bottom-aligned so the button lines up with
+                                // the bucket field, not its label
+                                VerticalLayout {
+                                    alignment: end;
+                                    AppButton {
+                                        height: 38px;
+                                        icon: @image-url("assets/cloud.svg");
+                                        icon-set: true;
+                                        label: Strings.set-s3-test;
+                                        enabled: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
+                                        clicked => {
+                                            root.show-toast(Strings.toast-s3-ok);
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.line;
+                            }
+                            // local ↔ bucket mapping: every row has at least
+                            // one side; auto-backup toggles per workspace
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                SortHeader {
+                                    width: bk-tab.name-w;
+                                    label: Strings.bk-col-local;
+                                    active: root.bk-sort-key == "local";
+                                    desc: root.bk-sort-desc;
+                                    clicked => {
+                                        root.bk-sort-by("local");
+                                    }
+                                }
+                                SortHeader {
+                                    width: bk-tab.name-w;
+                                    label: Strings.bk-col-remote;
+                                    active: root.bk-sort-key == "remote";
+                                    desc: root.bk-sort-desc;
+                                    clicked => {
+                                        root.bk-sort-by("remote");
+                                    }
+                                }
+                                SortHeader {
+                                    width: 44px;
+                                    label: Strings.bk-col-auto;
+                                    active: root.bk-sort-key == "auto";
+                                    desc: root.bk-sort-desc;
+                                    align: center;
+                                    clicked => {
+                                        root.bk-sort-by("auto");
+                                    }
+                                }
+                                SortHeader {
+                                    width: 72px;
+                                    label: Strings.bk-col-size;
+                                    active: root.bk-sort-key == "size";
+                                    desc: root.bk-sort-desc;
+                                    align: end;
+                                    clicked => {
+                                        root.bk-sort-by("size");
+                                    }
+                                }
+                                SortHeader {
+                                    width: 108px;
+                                    label: Strings.bk-col-last;
+                                    active: root.bk-sort-key == "last";
+                                    desc: root.bk-sort-desc;
+                                    align: end;
+                                    clicked => {
+                                        root.bk-sort-by("last");
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: Theme.panel-2;
+                                border-radius: Theme.radius;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                clip: true;
+                                bkfl := Flickable {
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 2px;
+                                        alignment: start;
+                                        for r in root.bk-rows: Rectangle {
+                                            height: 34px;
+                                            border-radius: Theme.win95 ? 0px : 4px;
+                                            background: bkr-ta.has-hover ? Theme.raised : transparent;
+                                            bkr-ta := TouchArea { }
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                spacing: 10px;
+                                                Text {
+                                                    width: bk-tab.name-w;
+                                                    text: r.local == "" ? "—" : r.local;
+                                                    color: r.local == "" ? Theme.faint : Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: left;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    width: bk-tab.name-w;
+                                                    text: r.remote == "" ? "—" : r.remote;
+                                                    color: r.remote == "" ? Theme.faint : Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: left;
+                                                    overflow: elide;
+                                                }
+                                                // auto-backup toggle: renders the
+                                                // mirrored state only — the click
+                                                // goes through the engine
+                                                Rectangle {
+                                                    width: 44px;
+                                                    if r.has-local: Rectangle {
+                                                        width: 20px;
+                                                        height: 20px;
+                                                        x: (parent.width - self.width) / 2;
+                                                        y: (parent.height - 20px) / 2;
+                                                        border-radius: Theme.win95 ? 0px : 4px;
+                                                        border-width: Theme.border-w;
+                                                        border-color: r.auto ? Theme.accent : Theme.line;
+                                                        background: r.auto ? Theme.accent : Theme.panel;
+                                                        if r.auto: Text {
+                                                            text: "✓";
+                                                            color: Theme.accent-ink;
+                                                            font-size: 14px;
+                                                            font-weight: 700;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        TouchArea {
+                                                            clicked => {
+                                                                root.set-ws-backup(r.local, !r.auto);
+                                                            }
+                                                        }
+                                                    }
+                                                    if !r.has-local: Text {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text: "—";
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-body;
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                    }
+                                                }
+                                                Text {
+                                                    width: 72px;
+                                                    text: r.size;
+                                                    color: Theme.dim;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: right;
+                                                }
+                                                Text {
+                                                    width: 108px;
+                                                    text: r.last;
+                                                    color: r.last == "never" ? Theme.faint : Theme.dim;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: right;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: bkfl.height;
+                                    content-h: bkfl.viewport-height;
+                                    scroll-y: bkfl.viewport-y;
+                                }
+                            }
+                        }
+                        if root.set-tab == 3: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            FieldLabel {
+                                label: Strings.field-network;
+                                AppDropdown {
+                                    width: 200px;
+                                    model: ["tor", "none"];
+                                    current-index <=> root.cfg-network-index;
+                                }
+                            }
+                            // tor mode only applies to tor; the SOCKS port
+                            // only to tor+local (embedded/whonix configure
+                            // themselves)
+                            if root.cfg-network-index == 0: FieldLabel {
+                                label: Strings.field-tor-mode;
+                                AppDropdown {
+                                    width: 200px;
+                                    model: ["local", "embedded", "whonix"];
+                                    current-index <=> root.cfg-tor-mode-index;
+                                }
+                            }
+                            if root.cfg-network-index == 0 && root.cfg-tor-mode-index == 0: FieldLabel {
+                                label: Strings.field-tor-port;
+                                AppStepper {
+                                    width: 200px;
+                                    value <=> root.cfg-tor-port;
+                                    minimum: 1;
+                                    maximum: 65535;
+                                }
+                            }
+                        }
+                        if root.set-tab == 4: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            FieldLabel {
+                                label: Strings.field-mcp-port;
+                                AppStepper {
+                                    width: 200px;
+                                    value <=> root.cfg-mcp-port;
+                                    minimum: 1;
+                                    maximum: 65535;
+                                }
+                            }
+                            FieldLabel {
+                                label: Strings.field-mcp-allow;
+                                AppField {
+                                    text <=> root.cfg-mcp-allow;
+                                    placeholder: "127.0.0.1";
+                                }
+                            }
+                            FieldLabel {
+                                label: Strings.field-mcp-token;
+                                tok-row := HorizontalLayout {
+                                    spacing: 10px;
+                                    // masked by default; the eye toggles the peek.
+                                    // leaving the tab drops this branch, so the
+                                    // token re-masks on its own
+                                    property <bool> token-shown: false;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        background: Theme.panel;
+                                        border-radius: Theme.radius;
+                                        border-width: Theme.border-w;
+                                        border-color: Theme.line;
+                                        height: max(38px, token-text.preferred-height + 20px);
+                                        token-text := Text {
+                                            x: 12px;
+                                            y: 10px;
+                                            width: parent.width - 24px;
+                                            text: root.cfg-mcp-token == "" ? "—"
+                                                : (tok-row.token-shown ? root.cfg-mcp-token : "****************");
+                                            color: Theme.text;
+                                            font-size: Theme.fs-cap;
+                                            wrap: char-wrap;
+                                        }
+                                    }
+                                    AppButton {
+                                        pad: 10px;
+                                        icon: @image-url("assets/eye.svg");
+                                        icon-set: true;
+                                        primary: tok-row.token-shown;
+                                        enabled: root.cfg-mcp-token != "";
+                                        tooltip: tok-row.token-shown ? Strings.set-token-hide : Strings.set-token-show;
+                                        clicked => {
+                                            tok-row.token-shown = !tok-row.token-shown;
+                                        }
+                                    }
+                                    AppButton {
+                                        pad: 10px;
+                                        icon: @image-url("assets/copy.svg");
+                                        icon-set: true;
+                                        label: Strings.ow-copy;
+                                        enabled: root.cfg-mcp-token != "";
+                                        clicked => {
+                                            root.copy-text(root.cfg-mcp-token);
+                                            root.show-toast(Strings.toast-copied);
+                                        }
+                                    }
+                                    AppButton {
+                                        label: Strings.set-rotate;
+                                        clicked => {
+                                            root.rotate-token();
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: Strings.set-token-note;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        if root.set-tab == 5: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            AppCheck {
+                                label: Strings.field-headless;
+                                checked <=> root.cfg-headless;
+                            }
+                        }
+                        // the backup tab's table wants the leftover height
+                        // itself; every other tab pushes its fields up
+                        if root.set-tab != 2: Rectangle {
+                            vertical-stretch: 1;
+                        }
+                        Text {
+                            text: "\{Strings.set-path-label}:  \{root.config-path}";
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        if root.notice == "saved": Text {
+                            text: Strings.set-save-note;
+                            color: Theme.accent;
+                            font-size: Theme.fs-cap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    AppButton {
+                        label: Strings.set-close;
+                        clicked => {
+                            root.navigate(root.settings-return);
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    AppButton {
+                        label: Strings.set-save;
+                        primary: true;
+                        clicked => {
+                            root.save-settings();
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+
+    // Modal: confirm closing the workspace (raised by either close control).
+    if root.confirm-close-open: ConfirmModal {
+        title: Strings.close-ws-title;
+        body: Strings.close-ws-body;
+        confirm-label: Strings.close-ws-confirm;
+        dismissed => {
+            root.confirm-close-open = false;
+        }
+        confirmed => {
+            root.confirm-close-open = false;
+            root.reset-open-workspace();
+            root.close-workspace();
+        }
+    }
+
+    // =================================================================
+    if root.confirm-close-open: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #0000008c;
+            // scrim: absorbs clicks to the app behind; outside click cancels
+            TouchArea {
+                clicked => {
+                    root.confirm-close-open = false;
+                }
+            }
+            Rectangle {
+                width: min(400px, root.width - 48px);
+                height: dialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 12px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                // absorb clicks inside the dialog so the scrim doesn't cancel
+                TouchArea { }
+                dialog := VerticalLayout {
+                    padding: 22px;
+                    spacing: 12px;
+                    Text {
+                        text: Strings.close-ws-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.close-ws-body;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 4px;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            label: Strings.close-ws-cancel;
+                            clicked => {
+                                root.confirm-close-open = false;
+                            }
+                        }
+                        AppButton {
+                            label: Strings.close-ws-confirm;
+                            primary: true;
+                            clicked => {
+                                root.confirm-close-open = false;
+                                root.reset-open-workspace();
+                                root.close-workspace();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Modal: confirm quitting the program while a workspace is open
+    // (raised from Rust's window close-requested handler).
+    if root.confirm-quit-open: ConfirmModal {
+        title: Strings.quit-title;
+        body: Strings.quit-body;
+        confirm-label: Strings.quit-confirm;
+        dismissed => {
+            root.confirm-quit-open = false;
+        }
+        confirmed => {
+            root.confirm-quit-open = false;
+            root.quit();
+        }
+    }
+
+    // =================================================================
+    if root.confirm-quit-open: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #0000008c;
+            TouchArea {
+                clicked => {
+                    root.confirm-quit-open = false;
+                }
+            }
+            Rectangle {
+                width: min(400px, root.width - 48px);
+                height: qdialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 12px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                TouchArea { }
+                qdialog := VerticalLayout {
+                    padding: 22px;
+                    spacing: 12px;
+                    Text {
+                        text: Strings.quit-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.quit-body;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 4px;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            label: Strings.close-ws-cancel;
+                            clicked => {
+                                root.confirm-quit-open = false;
+                            }
+                        }
+                        AppButton {
+                            label: Strings.quit-confirm;
+                            primary: true;
+                            clicked => {
+                                root.confirm-quit-open = false;
+                                root.quit();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Modal: confirm deleting a workspace from the Open list — the delete
+    // button stays disabled until the user types the exact name.
+    if root.confirm-delete-open: ConfirmModal {
+        dialog-width: 420px;
+        title: Strings.del-ws-title;
+        body: Strings.del-ws-body;
+        confirm-label: Strings.del-ws-confirm;
+        confirm-enabled: root.delete-typed == root.delete-name;
+        dismissed => {
+            root.confirm-delete-open = false;
+        }
+        confirmed => {
+            root.confirm-delete-open = false;
+            root.deselect-workspace();
+            root.delete-workspace(root.delete-name);
+        }
+        Text {
+            text: root.delete-name;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+        }
+        AppField {
+            text <=> root.delete-typed;
+            placeholder: root.delete-name;
+            invalid: root.delete-typed != "" && root.delete-typed != root.delete-name;
+        }
+    }
+
+    // =================================================================
+    if root.confirm-delete-open: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #0000008c;
+            TouchArea {
+                clicked => {
+                    root.confirm-delete-open = false;
+                }
+            }
+            Rectangle {
+                width: min(420px, root.width - 48px);
+                height: ddialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 12px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                TouchArea { }
+                ddialog := VerticalLayout {
+                    padding: 22px;
+                    spacing: 12px;
+                    Text {
+                        text: Strings.del-ws-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.del-ws-body;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.delete-name;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        font-weight: 700;
+                    }
+                    AppField {
+                        text <=> root.delete-typed;
+                        placeholder: root.delete-name;
+                        invalid: root.delete-typed != "" && root.delete-typed != root.delete-name;
+                    }
+                    Rectangle {
+                        height: 4px;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            label: Strings.close-ws-cancel;
+                            clicked => {
+                                root.confirm-delete-open = false;
+                            }
+                        }
+                        AppButton {
+                            label: Strings.del-ws-confirm;
+                            primary: true;
+                            enabled: root.delete-typed == root.delete-name;
+                            clicked => {
+                                root.confirm-delete-open = false;
+                                root.deselect-workspace();
+                                root.delete-workspace(root.delete-name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Modal: confirm deleting a chat message — the text is wiped for
+    // everyone, only the deletion notice remains.
+    if root.confirm-delmsg-open: ConfirmModal {
+        title: Strings.dm-title;
+        body: Strings.dm-body;
+        confirm-label: Strings.dm-confirm;
+        dismissed => {
+            root.confirm-delmsg-open = false;
+        }
+        confirmed => {
+            root.confirm-delmsg-open = false;
+            root.delete-chat(root.delmsg-index);
+            root.delmsg-index = -1;
+        }
+    }
+
+    // =================================================================
+    if root.confirm-delmsg-open: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #0000008c;
+            TouchArea {
+                clicked => {
+                    root.confirm-delmsg-open = false;
+                }
+            }
+            Rectangle {
+                width: min(400px, root.width - 48px);
+                height: dmdialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 12px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                TouchArea { }
+                dmdialog := VerticalLayout {
+                    padding: 22px;
+                    spacing: 12px;
+                    Text {
+                        text: Strings.dm-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.dm-body;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 4px;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            label: Strings.close-ws-cancel;
+                            clicked => {
+                                root.confirm-delmsg-open = false;
+                            }
+                        }
+                        AppButton {
+                            label: Strings.dm-confirm;
+                            primary: true;
+                            clicked => {
+                                root.confirm-delmsg-open = false;
+                                root.delete-chat(root.delmsg-index);
+                                root.delmsg-index = -1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Modal: manual backup — pick where the workspace is written as one
+    // encrypted blob (mock: confirming records the note, writes nothing).
+    if root.backup-modal-open: ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.bk-title;
+        body: Strings.bk-body;
+        confirm-label: Strings.bk-confirm;
+        confirm-enabled: root.backup-path != "";
+        dismissed => {
+            root.backup-modal-open = false;
+        }
+        confirmed => {
+            root.backup-modal-open = false;
+            root.export-note = Strings.ow-export-note + " " + root.backup-path;
+        }
+        Text {
+            text: Strings.bk-path;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+        }
+        AppField {
+            text <=> root.backup-path;
+            placeholder: "~/Backups/republic.molt.enc";
+        }
+    }
+
+    // =================================================================
+    if root.backup-modal-open: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #0000008c;
+            TouchArea {
+                clicked => {
+                    root.backup-modal-open = false;
+                }
+            }
+            Rectangle {
+                width: min(440px, root.width - 48px);
+                height: bdialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 12px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                TouchArea { }
+                bdialog := VerticalLayout {
+                    padding: 22px;
+                    spacing: 12px;
+                    Text {
+                        text: Strings.bk-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.bk-body;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.bk-path;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                    }
+                    AppField {
+                        text <=> root.backup-path;
+                        placeholder: "~/Backups/republic.molt.enc";
+                    }
+                    Rectangle {
+                        height: 4px;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            label: Strings.close-ws-cancel;
+                            clicked => {
+                                root.backup-modal-open = false;
+                            }
+                        }
+                        AppButton {
+                            label: Strings.bk-confirm;
+                            primary: true;
+                            enabled: root.backup-path != "";
+                            clicked => {
+                                root.backup-modal-open = false;
+                                root.export-note = Strings.ow-export-note + " " + root.backup-path;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Modal: pick the encrypted workspace blob for the manual restore
+    // (mock file chooser: a path field, nothing is read from disk).
+    if root.restore-file-modal-open: ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.rw-file-title;
+        body: Strings.rw-file-body;
+        confirm-label: Strings.rw-file-pick;
+        confirm-enabled: root.rw-file-draft != "";
+        dismissed => {
+            root.restore-file-modal-open = false;
+        }
+        confirmed => {
+            root.restore-file-modal-open = false;
+            root.rw-file = root.rw-file-draft;
+        }
+        AppField {
+            text <=> root.rw-file-draft;
+            placeholder: "~/Backups/republic.molt.enc";
+        }
+    }
+
+    // =================================================================
+    // Mock folder picker for the settings workspace tab: edits a draft,
+    // Select commits it into the workspace-dir config field.
+    // =================================================================
+    if root.ws-dir-modal-open: ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.set-ws-dir-title;
+        body: Strings.set-ws-dir-body;
+        confirm-label: Strings.rw-file-pick;
+        confirm-enabled: root.ws-dir-draft != "";
+        dismissed => {
+            root.ws-dir-modal-open = false;
+        }
+        confirmed => {
+            root.ws-dir-modal-open = false;
+            root.cfg-workspace-dir = root.ws-dir-draft;
+        }
+        AppField {
+            text <=> root.ws-dir-draft;
+            placeholder: "~/.moltrepublic/workspaces";
+        }
+    }
+
+    // =================================================================
+    // Toast: brief bottom-center feedback bubble (e.g. "copied"), auto-
+    // dismissed by toast-timer; drawn above everything.
+    // =================================================================
+    if root.toast-open: Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: parent.height - self.height - 30px;
+            width: toast-label.preferred-width + 28px + 36px;
+            height: 38px;
+            border-radius: Theme.win95 ? 0px : 19px;
+            background: Theme.raised;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            // clicking anywhere on the bubble dismisses it right away
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.hide-toast();
+                }
+            }
+            // success dot, then the message — all in palette colours so the
+            // toast follows the active theme
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                x: 14px;
+                y: (parent.height - self.height) / 2;
+                background: Theme.good;
+            }
+            toast-label := Text {
+                x: 28px;
+                height: 100%;
+                text: root.toast-text;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+            }
+            // explicit close: a small × so dismissing is discoverable
+            toast-x := TouchArea {
+                x: parent.width - 31px;
+                y: (parent.height - 24px) / 2;
+                width: 24px;
+                height: 24px;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.hide-toast();
+                }
+            }
+            Rectangle {
+                x: toast-x.x;
+                y: toast-x.y;
+                width: 24px;
+                height: 24px;
+                border-radius: Theme.win95 ? 0px : 12px;
+                background: toast-x.has-hover ? Theme.panel-2 : transparent;
+                Text {
+                    text: "×";
+                    color: Theme.dim;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+            }
+        }
+
+    } // end esc FocusScope
+}

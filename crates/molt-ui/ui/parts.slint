@@ -1,0 +1,988 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Reusable screen parts: everything here depends only on the Theme /
+// Strings globals and its own properties — no AppWindow state. The window
+// (app.slint) composes these into the actual screens.
+
+import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, MemberSync } from "theme.slint";
+import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
+
+// A large clickable option card used on the first-run choice screen.
+export component ChoiceCard inherits Rectangle {
+    in property <string> title;
+    in property <string> sub;
+    in property <image> icon;
+    callback chosen();
+    height: 88px;
+    border-radius: Theme.radius;
+    background: ta.has-hover ? Theme.raised : Theme.panel-2;
+    border-width: Theme.border-w;
+    border-color: ta.has-hover ? Theme.accent : Theme.line;
+    animate background, border-color { duration: 110ms; }
+
+    Rectangle {
+        x: 16px;
+        y: (parent.height - 56px) / 2;
+        width: 56px;
+        height: 56px;
+        border-radius: Theme.win95 ? 0px : 10px;
+        background: Theme.accent-soft;
+        border-width: Theme.border-w;
+        border-color: Theme.accent;
+        Image {
+            source: root.icon;
+            colorize: Theme.accent;
+            width: 28px;
+            height: 28px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    VerticalLayout {
+        x: 88px;
+        width: parent.width - 104px;
+        height: 100%;
+        alignment: center;
+        spacing: 4px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.fs-h2;
+            font-weight: 700;
+        }
+        Text {
+            text: root.sub;
+            color: Theme.dim;
+            font-size: Theme.fs-body;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.chosen();
+        }
+    }
+}
+
+// A small warn-coloured count pill: open proposals awaiting a decision.
+export component PendingBadge inherits Rectangle {
+    in property <int> count;
+    width: max(18px, cnt.preferred-width + 11px);
+    height: 17px;
+    border-radius: Theme.win95 ? 0px : 8.5px;
+    background: Theme.warn;
+    cnt := Text {
+        text: root.count;
+        color: Theme.panel;
+        font-size: 11px;
+        font-weight: 700;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One top-level surface entry in the sidebar: icon + name, a pending-
+// proposals badge when decisions await, and a chevron (the selected
+// surface's group is the expanded one). In compact mode (collapsed icon
+// rail) only the icon shows — pending proposals then become a warn-
+// coloured corner dot, so the hint survives the collapse.
+export component SurfaceRow inherits Rectangle {
+    in property <SurfaceTab> s;
+    in property <bool> selected;
+    in property <bool> compact: false;
+    callback chosen();
+    height: 46px;
+    border-radius: Theme.win95 ? 0px : 8px;
+    background: root.selected ? Theme.raised : (ta.has-hover ? Theme.panel-2 : transparent);
+    Rectangle {
+        x: 0;
+        width: 3px;
+        height: parent.height;
+        background: root.selected ? Theme.accent : transparent;
+    }
+    // roomy icon box with an ultra-thin, quiet outline — chrome must not
+    // distract from the icon itself
+    Rectangle {
+        width: 38px;
+        height: 38px;
+        x: root.compact ? (parent.width - self.width) / 2 : 6px;
+        y: (parent.height - self.height) / 2;
+        border-radius: Theme.win95 ? 0px : 9px;
+        // no chrome around the icon in light/dark; brutalism keeps its frame
+        border-width: Theme.win95 ? 1px : 0px;
+        border-color: Theme.line;
+        Image {
+            source: root.s.key == "organization" ? @image-url("assets/republic.svg")
+                : root.s.key == "chat" ? @image-url("assets/chat.svg")
+                : root.s.key == "memory" ? @image-url("assets/memory.svg")
+                : root.s.key == "quests" ? @image-url("assets/board.svg")
+                : root.s.key == "vault" ? @image-url("assets/vault.svg")
+                : @image-url("assets/treasury.svg");
+            colorize: Theme.accent;
+            width: 20px;
+            height: 20px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        if root.compact && root.s.pending-count > 0: Rectangle {
+            x: parent.width - 6px;
+            y: -3px;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: Theme.warn;
+            border-width: 1px;
+            border-color: Theme.panel;
+        }
+    }
+    if !root.compact: HorizontalLayout {
+        x: 52px;
+        width: parent.width - 60px;
+        height: 100%;
+        spacing: 7px;
+        Text {
+            text: root.s.name;
+            color: Theme.text;
+            font-weight: 600;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.s.pending-count > 0: PendingBadge {
+            count: root.s.pending-count;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.selected ? "▾" : "▸";
+            color: Theme.dim;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.chosen();
+        }
+    }
+    if root.compact: HoverTip {
+        label: root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name;
+        shown: ta.has-hover;
+        x: parent.width + 8px;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+// One sub-view entry under an expanded surface: a colorful Twemoji icon +
+// label; the Proposals view carries the pending-count badge.
+export component ViewRow inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> selected;
+    in property <int> pending: 0;
+    callback chosen();
+    height: 30px;
+    border-radius: Theme.win95 ? 0px : 6px;
+    background: root.selected ? Theme.raised : (ta.has-hover ? Theme.panel-2 : transparent);
+    HorizontalLayout {
+        padding-left: 26px;
+        padding-right: 10px;
+        spacing: 8px;
+        // fixed clip box: an oversized emoji glyph must never bleed into
+        // the neighbouring rows
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            clip: true;
+            y: (parent.height - self.height) / 2;
+            opacity: root.selected ? 1.0 : 0.75;
+            Text {
+                text: root.icon;
+                font-family: "Twemoji Mozilla";
+                font-size: 13px;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.text : Theme.dim;
+            font-size: 13px;
+            font-weight: root.selected ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.pending > 0: PendingBadge {
+            count: root.pending;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.chosen();
+        }
+    }
+}
+
+// The emoji palette (borrowed from konkinwallet): a fixed 8-glyph row in a
+// PopupWindow, rendered in the colorful Twemoji font.
+export component EmojiGrid inherits Rectangle {
+    callback emoji-picked(string);
+    background: Theme.panel;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    border-radius: Theme.win95 ? 0px : 6px;
+    width: 8 * 34px + 7 * 4px + 16px;
+    height: 46px;
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        for emoji in ["👍", "👎", "🎉", "✅", "❤️", "🙏", "🤔", "🔥"]: Rectangle {
+            width: 34px;
+            background: e-ta.has-hover ? Theme.raised : transparent;
+            border-radius: Theme.win95 ? 0px : 4px;
+            clip: true;
+            Text {
+                text: emoji;
+                font-family: "Twemoji Mozilla";
+                font-size: 22px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+            e-ta := TouchArea {
+                clicked => {
+                    root.emoji-picked(emoji);
+                }
+            }
+        }
+    }
+}
+
+// One emoji-reaction pill on a chat message (the count hides at 1); the
+// local member's own pick gets the accent highlight, clicking toggles.
+export component ReactionPill inherits Rectangle {
+    in property <ReactionItem> r;
+    callback clicked();
+    width: prow.preferred-width + (root.r.count > 1 ? 12px : 6px);
+    height: 22px;
+    // no chrome at all: the emoji just stands there — a whisper of hover
+    // feedback, and the count carries the "mine" accent
+    background: pta.has-hover ? Theme.raised : transparent;
+    border-radius: Theme.win95 ? 0px : 11px;
+    prow := HorizontalLayout {
+        x: 5px;
+        height: 100%;
+        spacing: 3px;
+        alignment: start;
+        // fixed clip box: an oversized emoji glyph must stay inside the
+        // pill instead of painting into (and under) the next chat row;
+        // nudged 1px up so the glyph sits optically centred
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            clip: true;
+            y: (parent.height - self.height) / 2 - 1px;
+            Text {
+                text: root.r.emoji;
+                font-family: "Twemoji Mozilla";
+                font-size: 15px;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.r.count > 1: Text {
+            text: root.r.count;
+            color: root.r.mine ? Theme.accent : Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+    pta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// One chat message row, konkinwallet-style: author + grey timestamp once
+// per author block, a selectable body, the reaction pills underneath, and
+// a quiet copy affordance at the right edge on hover. The "+" opens the
+// emoji palette and only shows while the member hasn't reacted yet.
+export component ChatRow inherits Rectangle {
+    in property <LogLine> line;
+    in property <int> index;
+    // mirror of the window's one-shot scroll request; when it names this
+    // row, the row asks its host (which can reach the Flickable) to scroll
+    in property <int> scroll-request: -1;
+    callback toggle-reaction(string);
+    callback copy-requested();
+    callback quote-requested();
+    callback delete-requested();
+    callback quote-jump();
+    callback bring-into-view();
+    property <bool> is-target: root.scroll-request == root.index;
+    changed is-target => {
+        if (self.is-target) {
+            root.bring-into-view();
+        }
+    }
+    // an indent WRAPPER layout must not carry the card: a HorizontalLayout
+    // between the repeater and the card loses the card's preferred height,
+    // the card comes up short and the next one paints over the pills. So
+    // the row is a transparent container and indents its card itself.
+    in property <bool> indent: false;
+    // the card's height comes from a real padded layout (not from a
+    // manually anchored crow + offset): preferred-height of an anchored,
+    // width-bound layout mis-measures wrapped content by a few pixels —
+    // exactly the pixels the pills kept drowning under the card edge by
+    height: card.preferred-height;
+    background: transparent;
+    // every message is its own card; the tone still alternates per author
+    // block (same member in a row = same tone), in a grey of its own —
+    // NOT the panel tone the chat sits on
+    card := Rectangle {
+    x: root.indent ? 22px : 0px;
+    width: parent.width - (root.indent ? 22px : 0px);
+    height: parent.height;
+    background: root.line.alt ? Theme.zebra : Theme.panel-2;
+    border-width: 1px;
+    border-color: Theme.line;
+    border-radius: Theme.win95 ? 0px : 8px;
+    crow := VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 7px;
+        padding-bottom: 6px;
+        spacing: 0px;
+        // quoted message teaser: grey, clickable — jumps to the original
+        if root.line.quote >= 0: HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                height: 18px;
+                border-radius: Theme.win95 ? 0px : 4px;
+                background: qt-ta.has-hover ? Theme.raised : transparent;
+                HorizontalLayout {
+                    padding-left: 2px;
+                    padding-right: 6px;
+                    spacing: 5px;
+                    Text {
+                        text: "↳";
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.line.quote-label;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                qt-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.quote-jump();
+                    }
+                }
+            }
+        }
+        if root.line.quote >= 0: Rectangle {
+            height: 2px;
+        }
+        // the author is named once per block (with the grey timestamp) —
+        // consecutive messages of the same member just append below it
+        if root.line.first: HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: root.line.lead;
+                color: root.line.own ? Theme.accent : Theme.text;
+                font-size: Theme.fs-cap;
+                font-weight: 700;
+            }
+            Text {
+                text: root.line.when;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
+        if root.line.first: Rectangle {
+            height: 3px;
+        }
+        // a read-only TextInput instead of Text: the body is selectable,
+        // Ctrl+C copies the selection. Twemoji leads the font chain so
+        // emojis render in full colour; everything the emoji font lacks
+        // falls back to the regular text font per glyph.
+        if root.line.deleted-by == "": TextInput {
+            text: root.line.text;
+            read-only: true;
+            single-line: false;
+            wrap: word-wrap;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-family: "Twemoji Mozilla";
+        }
+        // deleted: the text is gone, only the tombstone remains
+        if root.line.deleted-by != "": Text {
+            text: "⌫ \{Strings.mv-deleted-by} \{root.line.deleted-by}";
+            color: Theme.faint;
+            font-size: Theme.fs-body;
+            font-italic: true;
+        }
+        // the reaction row hangs directly off the text. Its height is
+        // EXPLICIT: repeated fixed-height pills don't reliably feed the
+        // layout's preferred height, and a short row let the next card
+        // paint over the pills.
+        if root.line.deleted-by == "" && (root.line.reactions.length > 0 || root.line.mine-emoji == ""): HorizontalLayout {
+            height: 26px;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            spacing: 4px;
+            alignment: start;
+            for r in root.line.reactions: ReactionPill {
+                r: r;
+                clicked => {
+                    root.toggle-reaction(r.emoji);
+                }
+            }
+            if root.line.mine-emoji == "": Rectangle {
+                width: 26px;
+                height: 22px;
+                background: plus-ta.has-hover ? Theme.raised : transparent;
+                border-radius: Theme.win95 ? 0px : 11px;
+                border-width: Theme.win95 ? Theme.border-w : 0px;
+                border-color: Theme.line;
+                Text {
+                    text: "+";
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+                plus-ta := TouchArea {
+                    clicked => {
+                        react-pop.show();
+                    }
+                }
+                react-pop := PopupWindow {
+                    x: 0;
+                    y: -52px;
+                    EmojiGrid {
+                        emoji-picked(emoji) => {
+                            root.toggle-reaction(emoji);
+                            react-pop.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // quiet affordances, always visible top-right: delete (reddish, kept
+    // away from the outer edge), copy, and quote at the very edge — only
+    // their shading reacts to hovering; tombstones offer none of them
+    if root.line.deleted-by == "": Rectangle {
+        x: parent.width - 82px;
+        y: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: Theme.win95 ? 0px : 5px;
+        background: dt-ta.has-hover ? Theme.raised : transparent;
+        Image {
+            source: @image-url("assets/trash.svg");
+            colorize: dt-ta.has-hover ? Theme.bad : Theme.bad.transparentize(0.45);
+            width: 13px;
+            height: 13px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        dt-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.delete-requested();
+            }
+        }
+    }
+    if root.line.deleted-by == "": Rectangle {
+        x: parent.width - 56px;
+        y: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: Theme.win95 ? 0px : 5px;
+        background: cp-ta.has-hover ? Theme.raised : transparent;
+        Image {
+            source: @image-url("assets/copy.svg");
+            colorize: cp-ta.has-hover ? Theme.text : Theme.faint;
+            width: 13px;
+            height: 13px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        cp-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.copy-requested();
+            }
+        }
+    }
+    if root.line.deleted-by == "": Rectangle {
+        x: parent.width - 30px;
+        y: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: Theme.win95 ? 0px : 5px;
+        background: qb-ta.has-hover ? Theme.raised : transparent;
+        Image {
+            source: @image-url("assets/quote-arrow.svg");
+            colorize: qb-ta.has-hover ? Theme.text : Theme.faint;
+            width: 13px;
+            height: 13px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        qb-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.quote-requested();
+            }
+        }
+    }
+    } // end card
+}
+
+// A small header status pill: coloured dot + label (daemon / chat / sync).
+export component StatusPill inherits Rectangle {
+    in property <string> label;
+    in property <color> tone;
+    height: 24px;
+    width: sp-row.preferred-width + 18px;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 12px;
+    border-width: Theme.win95 ? 1px : 0px;
+    border-color: Theme.line;
+    sp-row := HorizontalLayout {
+        x: 9px;
+        height: 100%;
+        spacing: 6px;
+        alignment: start;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            y: (parent.height - self.height) / 2;
+            background: root.tone;
+        }
+        Text {
+            text: root.label;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One member in the chat's presence strip (konkinwallet's members strip):
+// presence dot + name + last-seen label. Fixed width so the strip can wrap
+// the pills into a grid; clicking jumps to Organization → Members.
+export component MemberPill inherits Rectangle {
+    in property <MemberSync> m;
+    callback clicked();
+    height: 28px;
+    background: mp-ta.has-hover ? Theme.raised : Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 6px;
+        alignment: start;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            y: (parent.height - self.height) / 2;
+            background: root.m.state == 0 ? Theme.good : (root.m.state == 1 ? Theme.warn : Theme.faint);
+        }
+        Text {
+            text: root.m.name;
+            color: Theme.text;
+            font-size: Theme.fs-cap;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.m.last;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+    mp-ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A small captioned group box for the Open screen's details panel: caption on
+// top, content below, so status lines and their actions read as one theme.
+export component DetailGroup inherits Rectangle {
+    in property <string> title;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    background: Theme.panel-2;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 7px;
+        Text {
+            text: root.title;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+        }
+        @children
+    }
+}
+
+// One way in on the Restore screen: an icon badge, a bold title, a one-line
+// hint and a content row below — visually set apart on a raised surface.
+export component RestoreWay inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    in property <image> icon;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    background: Theme.panel-2;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.win95 ? 0px : 10px;
+            background: Theme.accent-soft;
+            border-width: Theme.border-w;
+            border-color: Theme.accent;
+            Image {
+                source: root.icon;
+                colorize: Theme.accent;
+                width: 20px;
+                height: 20px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+            }
+            Text {
+                text: root.hint;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                overflow: elide;
+            }
+            @children
+        }
+    }
+}
+
+// A subordinate row on the Restore screen: indents its content behind a
+// tree rail (vertical guide line + a stub into the panel), making visually
+// clear that the ways in depend on the recovery phrase above. While no
+// phrase is set (`armed: false`) the branch is dimmed.
+export component WayBranch inherits Rectangle {
+    in property <bool> armed: true;
+    in property <bool> last: false;
+    opacity: root.armed ? 1.0 : 0.55;
+    animate opacity {
+        duration: 150ms;
+    }
+    HorizontalLayout {
+        spacing: 0px;
+        Rectangle {
+            width: 30px;
+            // vertical guide: bridges the row gap above; the last branch
+            // stops at its own stub (L shape)
+            Rectangle {
+                x: 13px;
+                y: -12px;
+                width: 2px;
+                height: root.last ? parent.height / 2 + 13px : parent.height + 24px;
+                background: Theme.line;
+            }
+            // stub into the panel
+            Rectangle {
+                x: 13px;
+                y: parent.height / 2 - 1px;
+                width: 17px;
+                height: 2px;
+                background: Theme.line;
+            }
+        }
+        @children
+    }
+}
+
+// The recovery-phrase panel: masked by default, hold the eye button to peek
+// at the real phrase, Copy puts it on the clipboard (via `copy-requested`).
+// Used by the Open screen's details and the founding result.
+export component SeedPanel inherits Rectangle {
+    in property <string> seed;
+    callback copy-requested();
+    // all mock seeds are 12 words, so the masked form is a constant
+    property <string> mask: "***  ***  ***  ***  ***  ***  ***  ***  ***  ***  ***  ***";
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        // warning stripe
+        Rectangle {
+            width: 3px;
+            border-radius: 1.5px;
+            background: Theme.bad;
+        }
+        VerticalLayout {
+            spacing: 8px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: hold-ta.pressed ? root.seed : root.mask;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                // hold-to-peek: shows the seed only while the mouse button
+                // is held down
+                Rectangle {
+                    width: 38px;
+                    height: 30px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius;
+                    border-width: Theme.border-w;
+                    border-color: hold-ta.pressed ? Theme.accent : Theme.line;
+                    background: hold-ta.pressed ? Theme.accent-soft : (hold-ta.has-hover ? Theme.raised : Theme.panel);
+                    Image {
+                        source: @image-url("assets/eye.svg");
+                        colorize: Theme.text;
+                        width: 16px;
+                        height: 16px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    hold-ta := TouchArea { }
+                    HoverTip {
+                        label: Strings.ow-hold-tip;
+                        shown: hold-ta.has-hover && !hold-ta.pressed;
+                        x: (parent.width - self.width) / 2;
+                        y: -(self.height + 7px);
+                    }
+                }
+                AppButton {
+                    height: 30px;
+                    pad: 10px;
+                    y: (parent.height - self.height) / 2;
+                    label: Strings.ow-copy;
+                    clicked => {
+                        root.copy-requested();
+                    }
+                }
+            }
+            Text {
+                text: Strings.ow-seed-note;
+                color: Theme.bad;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// The shared run view for the engine-ticked mock runs (restore / found /
+// join): the way panel with a progress bar and phase line, an optional
+// success slot (`@children`, used for the founding result), the live detail
+// log, and an outcome-gated Back/Finish footer. The engine owns progress,
+// log and outcome — this component only renders and reports clicks.
+export component RunView inherits VerticalLayout {
+    in property <string> title;
+    in property <string> hint;
+    in property <image> icon;
+    in property <float> progress;
+    // 0 = running, 1 = succeeded, 2 = failed
+    in property <int> outcome;
+    in property <string> ph1;
+    in property <string> ph2;
+    in property <string> ph3;
+    in property <string> failed-label;
+    in property <[string]> log;
+    // the founding hides the log on success to make room for its result
+    in property <bool> show-log: true;
+    // the founding cannot fail, so it hides the (never armed) back button
+    in property <bool> back-shown: true;
+    in property <bool> back-enabled: false;
+    in property <bool> finish-enabled: false;
+    in property <string> finish-label;
+    callback back();
+    callback finish();
+    callback copy-log-clicked();
+    spacing: 12px;
+
+    RestoreWay {
+        title: root.title;
+        hint: root.hint;
+        icon: root.icon;
+        VerticalLayout {
+            spacing: 8px;
+            Rectangle {
+                height: 10px;
+                border-radius: Theme.win95 ? 0px : 5px;
+                background: Theme.panel;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width * root.progress;
+                    height: parent.height;
+                    background: root.outcome == 2 ? Theme.bad : Theme.accent;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.outcome == 2 ? root.failed-label
+                        : (root.progress < 0.3 ? root.ph1 : (root.progress < 0.75 ? root.ph2 : root.ph3));
+                    color: root.outcome == 2 ? Theme.bad : Theme.dim;
+                    font-size: Theme.fs-cap;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: "\{Math.round(root.progress * 100)} %";
+                    color: Theme.text;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                }
+            }
+        }
+    }
+
+    @children
+
+    // live details: what is fetched, derived and copied where —
+    // auto-scrolls to each new line; fills the remaining height
+    if root.show-log: Rectangle {
+        vertical-stretch: 1;
+        background: Theme.panel-2;
+        border-radius: Theme.win95 ? 0px : 8px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: Strings.rw-log-title;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                AppButton {
+                    height: 26px;
+                    pad: 9px;
+                    label: Strings.ow-copy;
+                    clicked => {
+                        root.copy-log-clicked();
+                    }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                logfl := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: loglines.preferred-height;
+                    // pinned to the bottom: auto-scrolls on every new
+                    // line (a manual drag detaches the pin)
+                    viewport-y: min(0px, self.height - self.viewport-height);
+                    loglines := VerticalLayout {
+                        spacing: 3px;
+                        alignment: start;
+                        for line in root.log: Text {
+                            text: line;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            overflow: elide;
+                        }
+                    }
+                }
+                ScrollHint {
+                    x: parent.width - 7px;
+                    view-h: logfl.height;
+                    content-h: logfl.viewport-height;
+                    scroll-y: logfl.viewport-y;
+                }
+            }
+        }
+    }
+
+    // back arms only after a failure; finish arms only after success and
+    // jumps straight into the workspace
+    HorizontalLayout {
+        spacing: 10px;
+        if root.back-shown: AppButton {
+            label: Strings.nav-back;
+            enabled: root.back-enabled;
+            clicked => {
+                root.back();
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        AppButton {
+            primary: true;
+            label: root.finish-label;
+            enabled: root.finish-enabled;
+            clicked => {
+                root.finish();
+            }
+        }
+    }
+}

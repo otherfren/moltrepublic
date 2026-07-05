@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-app"
+description = "The MoltRepublic node binary: UI mode (GUI + MCP) or headless (MCP-only)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "moltd"
+path = "src/main.rs"
+
+[dependencies]
+molt-core.workspace = true
+molt-config.workspace = true
+molt-engine.workspace = true
+molt-mcp.workspace = true
+molt-ui.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

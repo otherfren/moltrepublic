@@ -1,0 +1,504 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#![allow(missing_docs)]
+
+//! `moltd` — the MoltRepublic node binary.
+//!
+//! The node **requires a `config.toml`** to start. It is found like this:
+//!
+//! * `--config <PATH>` — use exactly this file (abort if it does not exist).
+//! * otherwise auto-discover, first match wins:
+//!     1. `./config.toml`
+//!     2. `~/config.toml`
+//!     3. `~/.moltrepublic/config.toml`
+//! * if none is found — abort with a hint to `--generate-config`.
+//!
+//! Config maintenance (each writes and exits):
+//! * `--generate-config [PATH]` — write a fresh default config. Without a path
+//!   it targets `~/.moltrepublic/config.toml`. Aborts if the file already
+//!   exists or the path is not writable.
+//! * `--repair-config <PATH>` — fix an existing config: salvage the valid
+//!   fields, fill the rest with defaults, back the original up to `<PATH>.bak`.
+//!
+//! The config carries: whether to start headless (`[node].headless`), where
+//! workspaces are stored (`[storage].workspace_dir`), and how/whether an
+//! anonymity network is used (`[transport.anonymity]`). It is parsed strictly:
+//! `deny_unknown_fields` makes typos and unknown fields hard errors. The schema,
+//! rendering and lenient salvage all live in the `molt-config` crate, shared
+//! with the GUI so a runtime settings change round-trips through the same
+//! renderer used here.
+//!
+//! Once started there are two modes, both driving the *same* `WalletHandle`. A
+//! co-equal MCP server is **always** available over TCP on `[mcp].port`. UI mode
+//! (the default) additionally runs the GUI; headless mode (`[node].headless`,
+//! or automatic when the GUI cannot start) additionally serves MCP over stdio
+//! (or `--mcp-tcp`).
+
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use clap::Parser;
+use molt_config::{backup_path, is_well_formed, parse, render, salvage, Config, Settings};
+use molt_engine::WalletHandle;
+use tokio::runtime::Runtime;
+use tracing_subscriber::EnvFilter;
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(
+    name = "moltd",
+    version,
+    about = "MoltRepublic node — one command set, two co-equal operators (GUI + MCP)."
+)]
+struct Cli {
+    /// Use exactly this config.toml (skips auto-discovery; aborts if missing).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Write a default config.toml and exit. Without a path: ~/.moltrepublic/config.toml.
+    #[arg(long, value_name = "PATH", num_args = 0..=1)]
+    generate_config: Option<Option<PathBuf>>,
+
+    /// Repair an existing config.toml (salvage valid fields, back up the original) and exit.
+    #[arg(long, value_name = "PATH")]
+    repair_config: Option<PathBuf>,
+
+    /// Headless: expose MCP over this TCP address instead of stdio.
+    #[arg(long, value_name = "ADDR")]
+    mcp_tcp: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    init_tracing();
+
+    // Maintenance subcommands short-circuit everything else.
+    if let Some(maybe_path) = cli.generate_config {
+        let path = match maybe_path {
+            Some(p) => p,
+            None => default_generate_path()?,
+        };
+        return generate_config(&path);
+    }
+    if let Some(path) = cli.repair_config {
+        return repair_config(&path);
+    }
+
+    let config_path = resolve_config_path(cli.config.as_deref())?;
+    let config = load_config(&config_path)?;
+    tracing::info!(path = %config_path.display(), "loaded config");
+
+    let workspace_dir = provision_workspace_dir(&config.storage.workspace_dir)?;
+    tracing::info!(dir = %workspace_dir.display(), "workspace directory ready");
+    let anonymity = &config.transport.anonymity;
+    tracing::info!(
+        network = ?anonymity.network,
+        tor_mode = ?anonymity.tor.mode,
+        tor_port = anonymity.tor.port,
+        "transport anonymity configured (transport not yet wired in this scaffold)"
+    );
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    // The initial shared session mirrors config.toml. It lives in the engine, so
+    // the GUI and an MCP agent see and change the same screen / language / settings.
+    let session = molt_core::SessionView {
+        language: config.ui.lang.clone(),
+        theme: config.ui.theme.clone(),
+        settings: molt_core::SessionSettings {
+            headless: config.node.headless,
+            workspace_dir: config.storage.workspace_dir.clone(),
+            // S3 backup is a session-only mock; config.toml has no key for it yet.
+            s3_backup: false,
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: molt_core::SessionSettings::default().s3_bucket,
+            s3_interval_min: molt_core::SessionSettings::default().s3_interval_min,
+            mcp_port: config.mcp.port,
+            mcp_allow: config.mcp.allow.clone(),
+            mcp_token: config.mcp.token.clone(),
+            anonymity: config.transport.anonymity.network.as_str().to_string(),
+            tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
+            tor_port: config.transport.anonymity.tor.port,
+        },
+        // workspace list (demo mock), active workspace, restore lifecycle
+        ..molt_core::SessionView::default()
+    };
+    // Group is workspace-specific; scaffold uses the demo 2-of-3 group.
+    let wallet =
+        rt.block_on(async move { molt_engine::spawn(molt_core::GroupConfig::demo(), session) });
+
+    // Always-on MCP over TCP, UI + headless. The bind address, peer-IP allowlist
+    // and required token all come from [mcp] in the config.
+    let (bind_ip, allow_all, allowlist) = parse_mcp_allow(&config.mcp.allow);
+    let mcp_addr = format!("{bind_ip}:{}", config.mcp.port);
+    if config.mcp.token.is_empty() {
+        tracing::warn!(
+            "MCP token is empty — the TCP endpoint is unauthenticated; \
+             run `moltd --generate-config` or set [mcp].token"
+        );
+    }
+    let mcp_token = config.mcp.token.clone();
+    {
+        let mcp_wallet = wallet.clone();
+        let listen_addr = mcp_addr.clone();
+        let allowlist = allowlist.clone();
+        let token = mcp_token.clone();
+        rt.spawn(async move {
+            if let Err(e) =
+                molt_mcp::serve_tcp(mcp_wallet, &listen_addr, allow_all, allowlist, token).await
+            {
+                tracing::warn!(error = %e, "MCP TCP server stopped");
+            }
+        });
+    }
+    tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
+
+    if config.node.headless {
+        tracing::info!("mode: headless (config: node.headless = true)");
+        return run_headless(
+            &rt,
+            wallet,
+            cli.mcp_tcp.as_deref(),
+            allow_all,
+            allowlist,
+            mcp_token,
+        );
+    }
+
+    // UI mode (default): GUI on main thread; fall back to headless stdio MCP if it can't start.
+    tracing::info!("mode: UI (GUI on main thread)");
+    match molt_ui::run_app(wallet.clone(), rt.handle().clone(), config_path.clone()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, "GUI unavailable; falling back to headless MCP");
+            run_headless(
+                &rt,
+                wallet,
+                cli.mcp_tcp.as_deref(),
+                allow_all,
+                allowlist,
+                mcp_token,
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config discovery, loading, validation
+// ---------------------------------------------------------------------------
+
+/// Resolve which config file to load. An explicit `--config` that points at a
+/// missing file is a hard error; otherwise auto-discover in three locations.
+fn resolve_config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = explicit {
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+        anyhow::bail!(
+            "--config points to a file that does not exist:\n  {}\n\n\
+             Generate one with:  moltd --generate-config {}",
+            p.display(),
+            p.display(),
+        );
+    }
+
+    let candidates = discovery_candidates();
+    for c in &candidates {
+        if c.is_file() {
+            return Ok(c.clone());
+        }
+    }
+
+    let looked = candidates
+        .iter()
+        .map(|c| format!("  - {}", c.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "no config.toml found. Looked in:\n{looked}\n\n\
+         Generate one with:  moltd --generate-config [PATH]\n\
+         \x20 (PATH is optional; without it, ~/.moltrepublic/config.toml is used)\n\
+         Then start with:    moltd --config <path-to-config.toml>"
+    );
+}
+
+/// The auto-discovery search path, in priority order.
+fn discovery_candidates() -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from("config.toml")];
+    if let Some(home) = home_dir() {
+        v.push(home.join("config.toml"));
+        v.push(home.join(".moltrepublic").join("config.toml"));
+    }
+    v
+}
+
+/// Read and strictly parse a config file, wrapping errors with its path.
+fn load_config(path: &Path) -> anyhow::Result<Config> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    let config = parse(&text).with_context(|| {
+        format!(
+            "parsing config {} (try: moltd --repair-config {})",
+            path.display(),
+            path.display()
+        )
+    })?;
+    Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// Config generation / repair
+// ---------------------------------------------------------------------------
+
+/// Default target for `--generate-config` with no path: `~/.moltrepublic/config.toml`.
+fn default_generate_path() -> anyhow::Result<PathBuf> {
+    let home = home_dir().context(
+        "cannot determine the home directory ($HOME); \
+         pass an explicit path: moltd --generate-config <path>",
+    )?;
+    Ok(home.join(".moltrepublic").join("config.toml"))
+}
+
+/// Write a fresh default config. Fails if the file exists or the path is not
+/// writable (e.g. an unreachable directory). Creates parent directories.
+fn generate_config(path: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        anyhow::bail!(
+            "refusing to overwrite an existing file: {}\n\
+             To fix a broken config instead, use:  moltd --repair-config {}",
+            path.display(),
+            path.display()
+        );
+    }
+    ensure_parent_dir(path)?;
+    // Mint a fresh MCP API token and write it into the config.
+    let settings = Settings {
+        mcp_token: molt_config::random_token(),
+        ..Settings::default()
+    };
+    std::fs::write(path, render(&settings))
+        .with_context(|| format!("writing {} (path not reachable?)", path.display()))?;
+    let shown = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    println!("Wrote default config to {}", shown.display());
+    println!();
+    println!("MCP API token (shown once — clients send it as `initialize` params.token):");
+    println!("    {}", settings.mcp_token);
+    println!("It is stored in the config; rotate it anytime from the GUI settings (MCP tab).");
+    println!();
+    println!("Start with:  moltd --config {}", shown.display());
+    Ok(())
+}
+
+/// Repair an existing config: salvage valid fields, default the rest, and back
+/// up the original to `<path>.bak`. Requires the file to exist.
+fn repair_config(path: &Path) -> anyhow::Result<()> {
+    if !path.is_file() {
+        anyhow::bail!(
+            "nothing to repair — no file at {}\n\
+             Create one with:  moltd --generate-config {}",
+            path.display(),
+            path.display()
+        );
+    }
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let parseable = is_well_formed(&text);
+    let was_valid = parse(&text).is_ok();
+    let settings = salvage(&text);
+
+    let backup = backup_path(path);
+    std::fs::copy(path, &backup)
+        .with_context(|| format!("writing backup {} (path not reachable?)", backup.display()))?;
+    std::fs::write(path, render(&settings))
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    if was_valid {
+        println!(
+            "Config at {} was already valid; rewrote it in normalized form.",
+            path.display()
+        );
+    } else if parseable {
+        println!(
+            "Repaired {} — salvaged the valid fields, filled the rest with defaults.",
+            path.display()
+        );
+    } else {
+        println!(
+            "Could not parse {} as TOML; wrote a fresh default config. \
+             Copy any values you need back from the backup.",
+            path.display()
+        );
+    }
+    println!("Backup of the original: {}", backup.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Paths, workspace, runtime
+// ---------------------------------------------------------------------------
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Parse the `[mcp].allow` string into `(bind_ip, allow_all, allowlist)`.
+///
+/// `"0.0.0.0"` anywhere means "any client" (`allow_all`). Otherwise every valid
+/// IP is an allowlist entry. We bind loopback only when loopback is the sole
+/// entry; any other case binds all interfaces and filters connections per peer
+/// IP inside the MCP server.
+fn parse_mcp_allow(allow: &str) -> (String, bool, Vec<IpAddr>) {
+    let entries: Vec<&str> = allow
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let allow_all = entries.contains(&"0.0.0.0");
+    let ips: Vec<IpAddr> = entries
+        .iter()
+        .filter_map(|e| e.parse::<IpAddr>().ok())
+        .collect();
+    let only_loopback = !allow_all && ips.len() == 1 && ips[0].is_loopback();
+    let bind_ip = if only_loopback {
+        "127.0.0.1".to_string()
+    } else {
+        "0.0.0.0".to_string()
+    };
+    (bind_ip, allow_all, ips)
+}
+
+/// Expand a leading `~` / `~/` against `$HOME`; leave any other path untouched.
+fn expand_tilde(input: &str) -> PathBuf {
+    if input == "~" {
+        if let Some(home) = home_dir() {
+            return home;
+        }
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(input)
+}
+
+/// Expand and create the workspace directory, returning its resolved path.
+fn provision_workspace_dir(configured: &str) -> anyhow::Result<PathBuf> {
+    let dir = expand_tilde(configured);
+    std::fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "creating workspace dir {} (path not reachable?)",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
+}
+
+fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {} (path not reachable?)", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Run the MCP server in the foreground (headless / fallback path). A `--mcp-tcp`
+/// override reuses the same peer-IP allowlist and token as the always-on endpoint.
+fn run_headless(
+    rt: &Runtime,
+    wallet: WalletHandle,
+    mcp_tcp: Option<&str>,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+    token: String,
+) -> anyhow::Result<()> {
+    match mcp_tcp {
+        Some(addr) => {
+            tracing::info!(%addr, "MCP transport: tcp");
+            rt.block_on(molt_mcp::serve_tcp(
+                wallet, addr, allow_all, allowlist, token,
+            ))?;
+        }
+        None => {
+            tracing::info!("MCP transport: stdio");
+            rt.block_on(molt_mcp::serve_stdio(wallet))?;
+        }
+    }
+    Ok(())
+}
+
+/// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .init();
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_expands_against_home() {
+        if let Some(home) = home_dir() {
+            assert_eq!(expand_tilde("~/x/y"), home.join("x/y"));
+        }
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("valid ip literal")
+    }
+
+    #[test]
+    fn allow_default_binds_loopback_only() {
+        let (bind, all, list) = parse_mcp_allow("127.0.0.1");
+        assert_eq!(bind, "127.0.0.1");
+        assert!(!all);
+        assert_eq!(list, vec![ip("127.0.0.1")]);
+    }
+
+    #[test]
+    fn allow_zero_means_any() {
+        let (bind, all, list) = parse_mcp_allow("0.0.0.0");
+        assert_eq!(bind, "0.0.0.0");
+        assert!(all);
+        // 0.0.0.0 is a valid IP, so it lands in the list too — harmless when allow_all.
+        assert_eq!(list, vec![ip("0.0.0.0")]);
+    }
+
+    #[test]
+    fn allow_comma_list_binds_all_and_collects_ips() {
+        let (bind, all, list) = parse_mcp_allow("127.0.0.1, 192.168.1.10 , 10.0.0.5");
+        assert_eq!(bind, "0.0.0.0"); // more than loopback -> bind all, filter per peer
+        assert!(!all);
+        assert_eq!(
+            list,
+            vec![ip("127.0.0.1"), ip("192.168.1.10"), ip("10.0.0.5")]
+        );
+    }
+
+    #[test]
+    fn allow_ignores_blank_and_garbage_entries() {
+        let (_, all, list) = parse_mcp_allow(" , not-an-ip, 192.168.0.2 ,");
+        assert!(!all);
+        assert_eq!(list, vec![ip("192.168.0.2")]);
+    }
+}

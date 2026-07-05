@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# MoltRepublic — workspace.
+#
+# Layering discipline carried over from konkinwallet (pw-*): one crate per
+# concern, a lower crate never depends on a higher one, and the core holds the
+# command/event contract with no I/O. The spine here is deliberately small and
+# centred on one invariant: there is ONE command set (`molt-core::Command`),
+# executed in ONE place (`molt-engine`), and every frontend — the MCP interface
+# and the GUI — drives that same set as a co-equal operator.
+#
+#   molt-core    domain types, Command/Event/Surface contract, errors — no I/O
+#   molt-config  config.toml schema, render, salvage, round-trip write (no I/O deps)
+#   molt-engine  the wallet-core actor: single owning task, WalletHandle
+#   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
+#   molt-ui      Slint GUI frontend (the live-mirror operator)
+#   molt-app     the binary: ui-mode (GUI + MCP) | headless (MCP-only)
+#
+# Future surface crates (molt-board / molt-memory / molt-treasury / molt-vault /
+# molt-policy, per moltrepublic_backend_plan R2–R6) plug into molt-engine behind
+# the same Surface/Approvable contract; they are not scaffolded yet.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/molt-core",
+    "crates/molt-config",
+    "crates/molt-engine",
+    "crates/molt-mcp",
+    "crates/molt-ui",
+    "crates/molt-app",
+]
+# The GUI is standard: `cargo build` builds the whole workspace, Slint included.
+# Headless is a runtime choice (`[node].headless` in config.toml, or automatic
+# when no display is available), not a separate build.
+
+[workspace.dependencies]
+# internal
+molt-core   = { path = "crates/molt-core" }
+molt-config = { path = "crates/molt-config" }
+molt-engine = { path = "crates/molt-engine" }
+molt-mcp    = { path = "crates/molt-mcp" }
+molt-ui     = { path = "crates/molt-ui" }
+
+# external
+tokio              = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util", "net", "time"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+toml               = "0.8"
+clap               = { version = "4", features = ["derive"] }
+anyhow             = "1"
+thiserror          = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize            = { version = "1", features = ["derive"] }
+arboard            = { version = "3", default-features = false }
+chrono             = { version = "0.4", default-features = false, features = ["clock"] }
+strum              = { version = "0.27", features = ["derive"] }
+paste              = "1"
+
+# GUI (molt-ui). FemtoVG (pure-Rust GPU renderer) is the default — it can
+# rasterize color-emoji fonts (Twemoji nav icons / reactions) and fixes the
+# software renderer's resize flicker; the software renderer stays in as the
+# no-GL fallback. Both keep the build pure-Rust (no Skia/C++ toolchain);
+# backend-winit gives a real window.
+slint       = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "compat-1-2"] }
+slint-build = "1"
+
+[workspace.package]
+version    = "0.0.1"
+edition    = "2021"
+license    = "GPL-3.0-or-later"
+authors    = ["Peter Geschel <geschel@gmail.com>"]
+repository = "https://github.com/TBD/moltrepublic"   # grep-replace once the public repo URL is locked
+rust-version = "1.80"
+
+[workspace.lints.clippy]
+unwrap_used      = "warn"
+todo             = "warn"
+dbg_macro        = "warn"
+as_conversions   = "warn"
+float_arithmetic = "warn"
+
+[workspace.lints.rust]
+missing_docs    = "warn"
+unsafe_code     = "deny"     # deny (not forbid): Slint-generated code wraps internal unsafe in #[allow]
+unused_must_use = "deny"
+
+[profile.dev]
+overflow-checks = true
+# NOTE: unlike konkinwallet we keep dev unwinding (no panic="abort") so the unit
+# test harness builds on stable. The release posture below mirrors konkin.
+
+[profile.release]
+overflow-checks = true       # mirror monero-oxide security posture
+panic           = "abort"    # no stack unwinding that could surface secrets
+lto             = "thin"
+codegen-units   = 1          # determinism input for reproducible release builds
+strip           = "none"     # strip in a build-release post-step, keep debug-info locally

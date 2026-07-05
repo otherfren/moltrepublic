@@ -1,0 +1,714 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Hand-rolled, theme-driven controls. Like konkinwallet, we do NOT use
+// std-widgets: their style is fixed at compile time and cannot follow our
+// three runtime palettes (Monero light / dark.fi dark / Win95 Brutalism). Every
+// control reads Theme.active, so switching themes restyles them live.
+
+import { Theme, Strings } from "theme.slint";
+
+// A small hover bubble. The caller positions it (x/y) and toggles `shown`;
+// it sizes itself to its text. Used for icon-button hover hints.
+export component HoverTip inherits Rectangle {
+    in property <string> label;
+    in property <bool> shown: false;
+
+    visible: root.shown && root.label != "";
+    height: 23px;
+    width: tiptext.preferred-width + 16px;
+    background: Theme.text;
+    border-radius: 5px;
+
+    tiptext := Text {
+        x: 8px;
+        height: 100%;
+        text: root.label;
+        color: Theme.bg;
+        font-size: Theme.fs-cap;
+        vertical-alignment: center;
+    }
+}
+
+// Primary / secondary button. In Win95 it gets a raised bevel (white top-left)
+// that inverts to black when pressed. Set `tooltip` for a hover hint.
+export component AppButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <string> tooltip;
+    in property <bool> tooltip-below: false;
+    in property <bool> tooltip-left: false;
+    // horizontal label padding; lower it for compact in-group buttons
+    in property <length> pad: 14px;
+    // optional leading icon (colorized to the label colour)
+    in property <image> icon;
+    in property <bool> icon-set: false;
+    callback clicked();
+
+    height: 34px;
+    border-radius: Theme.radius;
+    border-width: Theme.border-w;
+    border-color: root.primary ? Theme.accent : (Theme.win95 ? #000000 : Theme.line);
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.primary
+        ? (ta.pressed ? Theme.accent.darker(0.25) : (ta.has-hover ? Theme.accent.brighter(0.12) : Theme.accent))
+        : (ta.pressed ? Theme.panel-2 : (ta.has-hover ? Theme.raised : Theme.panel));
+
+    if Theme.win95: Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 2px;
+        background: ta.pressed ? #000000 : #ffffff;
+    }
+    if Theme.win95: Rectangle {
+        x: 0;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: ta.pressed ? #000000 : #ffffff;
+    }
+
+    HorizontalLayout {
+        padding-left: root.pad;
+        padding-right: root.pad;
+        // icon-only buttons: no gap next to the empty label, else the
+        // icon sits off-center
+        spacing: root.label == "" ? 0px : 7px;
+        alignment: center;
+        if root.icon-set: Image {
+            source: root.icon;
+            colorize: root.primary ? Theme.accent-ink : Theme.text;
+            width: 15px;
+            height: 15px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.label;
+            color: root.primary ? Theme.accent-ink : Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if root.tooltip != "": HoverTip {
+        label: root.tooltip;
+        shown: ta.has-hover;
+        x: root.tooltip-left ? -(self.width + 6px) : (parent.width - self.width) / 2;
+        y: root.tooltip-left ? (parent.height - self.height) / 2
+            : (root.tooltip-below ? parent.height + 6px : -(self.height + 6px));
+    }
+}
+
+// Single-line text field (raw TextInput in a themed surface).
+export component AppField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    // When true the field is outlined in the "bad" colour (failed validation).
+    in property <bool> invalid: false;
+    // When true the input renders as password dots (secrets).
+    in property <bool> secret: false;
+    callback accepted();
+    callback edited();
+
+    height: 38px;
+    background: Theme.panel;
+    border-radius: Theme.radius;
+    border-width: Theme.border-w;
+    border-color: root.invalid ? Theme.bad : (input.has-focus ? Theme.accent : Theme.line);
+    clip: true;
+
+    Rectangle {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        clip: true;
+        if root.text == "": Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            color: Theme.faint;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+        input := TextInput {
+            width: 100%;
+            height: 100%;
+            text <=> root.text;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            single-line: true;
+            input-type: root.secret ? InputType.password : InputType.text;
+            accepted => {
+                root.accepted();
+            }
+            edited => {
+                root.edited();
+            }
+        }
+    }
+}
+
+// Select-from-list via a popup.
+export component AppDropdown inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    callback changed(int);
+
+    height: 38px;
+    background: Theme.panel;
+    border-radius: Theme.radius;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.model[root.current-index];
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: "▾";
+            color: Theme.dim;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            pop.show();
+        }
+    }
+    pop := PopupWindow {
+        x: 0;
+        y: parent.height + 2px;
+        width: root.width;
+        Rectangle {
+            background: Theme.panel;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            border-radius: Theme.radius;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+                for opt[i] in root.model: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.win95 ? 0px : 4px;
+                    background: i == root.current-index ? Theme.accent-soft : (row-ta.has-hover ? Theme.raised : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        Text {
+                            text: opt;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            vertical-alignment: center;
+                        }
+                    }
+                    row-ta := TouchArea {
+                        clicked => {
+                            root.current-index = i;
+                            root.changed(i);
+                            pop.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Numeric stepper (− value +).
+export component AppStepper inherits Rectangle {
+    in-out property <int> value: 0;
+    in property <int> minimum: 0;
+    in property <int> maximum: 999;
+    callback changed(int);
+
+    height: 38px;
+    background: Theme.panel;
+    border-radius: Theme.radius;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+
+    HorizontalLayout {
+        Rectangle {
+            width: 38px;
+            background: minus-ta.has-hover ? Theme.raised : transparent;
+            Text {
+                text: "−";
+                color: Theme.text;
+                font-size: 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            minus-ta := TouchArea {
+                clicked => {
+                    if (root.value > root.minimum) {
+                        root.value -= 1;
+                        root.changed(root.value);
+                    }
+                }
+            }
+        }
+        Rectangle {
+            width: 1px;
+            background: Theme.line;
+        }
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            horizontal-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 1px;
+            background: Theme.line;
+        }
+        Rectangle {
+            width: 38px;
+            background: plus-ta.has-hover ? Theme.raised : transparent;
+            Text {
+                text: "+";
+                color: Theme.text;
+                font-size: 17px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            plus-ta := TouchArea {
+                clicked => {
+                    if (root.value < root.maximum) {
+                        root.value += 1;
+                        root.changed(root.value);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Checkbox + label row.
+export component AppCheck inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - 20px) / 2;
+            border-radius: Theme.win95 ? 0px : 4px;
+            border-width: Theme.border-w;
+            border-color: root.checked ? Theme.accent : Theme.line;
+            background: root.checked ? Theme.accent : Theme.panel;
+            if root.checked: Text {
+                text: "✓";
+                color: Theme.accent-ink;
+                font-size: 14px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// A small national flag (SVG asset): 0 = English (GB), 1 = German.
+export component FlagIcon inherits Image {
+    in property <int> lang;
+    source: root.lang == 1 ? @image-url("assets/flag-de.svg") : @image-url("assets/flag-gb.svg");
+    width: 24px;
+    height: 16px;
+    image-fit: contain;
+}
+
+// A flag centered in a fixed-width chip — so the flag never stretches or sticks
+// to the top edge inside a row layout.
+component FlagChip inherits Rectangle {
+    in property <int> lang;
+    width: 26px;
+    FlagIcon {
+        lang: root.lang;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+// A theme preview image (a small mock-up per theme), centered in a fixed chip.
+// The three PNGs live in assets/theme-{classic,dark,brutalism}.png and can be
+// replaced with any 3:2 artwork.
+component ThemeChip inherits Rectangle {
+    in property <int> t;
+    width: 30px;
+    Image {
+        source: root.t == 0 ? @image-url("assets/theme-classic.png")
+            : (root.t == 2 ? @image-url("assets/theme-brutalism.png")
+            : @image-url("assets/theme-dark.png"));
+        width: 27px;
+        height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: fill;
+    }
+}
+
+// Reusable chrome cluster: a theme picker, a flag language picker, and a
+// settings gear — each a button that opens a select popup. `popup-up` makes the
+// popups open upward (for use at the bottom-left of the sidebar, konkin-style).
+export component ChromeControls inherits HorizontalLayout {
+    in property <int> lang-index;
+    in property <bool> popup-up: false;
+    // false while e.g. a restore is running: the controls grey out and stop
+    // reacting, so nothing can navigate away mid-run
+    in property <bool> controls-enabled: true;
+    opacity: root.controls-enabled ? 1.0 : 0.45;
+    callback open-settings();
+    callback set-language(int);
+    spacing: 10px;
+
+    // ---- theme select button + popup ----
+    Rectangle {
+        width: 52px;
+        height: 32px;
+        y: (parent.height - 32px) / 2;
+        border-radius: Theme.radius;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        background: tb-ta.has-hover ? Theme.raised : Theme.panel-2;
+        HorizontalLayout {
+            alignment: center;
+            ThemeChip {
+                t: Theme.theme-index;
+            }
+        }
+        tb-ta := TouchArea {
+            enabled: root.controls-enabled;
+            clicked => {
+                theme-pop.show();
+            }
+        }
+        HoverTip {
+            label: Strings.tip-theme;
+            shown: tb-ta.has-hover;
+            x: (parent.width - self.width) / 2;
+            y: root.popup-up ? -(self.height + 7px) : parent.height + 7px;
+        }
+        theme-pop := PopupWindow {
+            x: 0;
+            y: root.popup-up ? -118px : parent.height + 3px;
+            width: 158px;
+            Rectangle {
+                background: Theme.panel;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                border-radius: Theme.radius;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 2px;
+                    for i in 3: Rectangle {
+                        height: 34px;
+                        border-radius: Theme.win95 ? 0px : 4px;
+                        background: i == Theme.theme-index ? Theme.accent-soft : (tr-ta.has-hover ? Theme.raised : transparent);
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            spacing: 9px;
+                            alignment: start;
+                            ThemeChip {
+                                t: i;
+                            }
+                            Text {
+                                text: i == 0 ? "Classic" : (i == 1 ? "Dark" : "Brutalism");
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                        tr-ta := TouchArea {
+                            clicked => {
+                                Theme.theme-index = i;
+                                Theme.picked(i);
+                                theme-pop.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- language flag button + popup ----
+    Rectangle {
+        width: 52px;
+        height: 32px;
+        y: (parent.height - 32px) / 2;
+        border-radius: Theme.radius;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        background: lb-ta.has-hover ? Theme.raised : Theme.panel-2;
+        HorizontalLayout {
+            alignment: center;
+            FlagChip {
+                lang: root.lang-index;
+            }
+        }
+        lb-ta := TouchArea {
+            enabled: root.controls-enabled;
+            clicked => {
+                lang-pop.show();
+            }
+        }
+        HoverTip {
+            label: Strings.tip-language;
+            shown: lb-ta.has-hover;
+            x: (parent.width - self.width) / 2;
+            y: root.popup-up ? -(self.height + 7px) : parent.height + 7px;
+        }
+        lang-pop := PopupWindow {
+            x: 0;
+            y: root.popup-up ? -78px : parent.height + 3px;
+            width: 138px;
+            Rectangle {
+                background: Theme.panel;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                border-radius: Theme.radius;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 2px;
+                    Rectangle {
+                        height: 32px;
+                        border-radius: Theme.win95 ? 0px : 4px;
+                        background: root.lang-index == 0 ? Theme.accent-soft : (en-ta.has-hover ? Theme.raised : transparent);
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            spacing: 8px;
+                            alignment: start;
+                            FlagChip {
+                                lang: 0;
+                            }
+                            Text {
+                                text: "English";
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                        en-ta := TouchArea {
+                            clicked => {
+                                root.set-language(0);
+                                lang-pop.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 32px;
+                        border-radius: Theme.win95 ? 0px : 4px;
+                        background: root.lang-index == 1 ? Theme.accent-soft : (de-ta.has-hover ? Theme.raised : transparent);
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            spacing: 8px;
+                            alignment: start;
+                            FlagChip {
+                                lang: 1;
+                            }
+                            Text {
+                                text: "Deutsch";
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                        de-ta := TouchArea {
+                            clicked => {
+                                root.set-language(1);
+                                lang-pop.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- gear -> settings ----
+    Rectangle {
+        width: 36px;
+        height: 36px;
+        y: (parent.height - 36px) / 2;
+        border-radius: Theme.radius;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        background: g-ta.has-hover ? Theme.raised : Theme.panel-2;
+        Image {
+            source: @image-url("assets/gear.svg");
+            colorize: Theme.text;
+            width: 18px;
+            height: 18px;
+            x: (parent.width - 18px) / 2;
+            y: (parent.height - 18px) / 2;
+        }
+        g-ta := TouchArea {
+            enabled: root.controls-enabled;
+            clicked => {
+                root.open-settings();
+            }
+        }
+        HoverTip {
+            label: Strings.tip-settings;
+            shown: g-ta.has-hover;
+            x: (parent.width - self.width) / 2;
+            y: root.popup-up ? -(self.height + 7px) : parent.height + 7px;
+        }
+    }
+}
+
+// A shadow-style vertical scroll hint for a Flickable: a soft bar hugging
+// the right edge that shows there is more content and where you are. Feed
+// it the flickable's metrics; it hides itself when nothing overflows. The
+// caller positions its x.
+export component ScrollHint inherits Rectangle {
+    in property <length> view-h; // the flickable's visible height
+    in property <length> content-h; // the flickable's viewport-height
+    in property <length> scroll-y; // the flickable's viewport-y (<= 0)
+
+    visible: root.content-h > root.view-h + 1px;
+    width: 4px;
+    border-radius: 2px;
+    background: Theme.faint;
+    opacity: 0.4;
+    height: root.visible ? max(24px, root.view-h * (root.view-h / root.content-h)) : 0px;
+    y: 4px + (root.visible
+        ? (root.view-h - self.height - 8px) * ((-root.scroll-y) / (root.content-h - root.view-h))
+        : 0px);
+}
+
+// The one confirm-dialog skeleton every modal shares: dimmed scrim (click
+// dismisses), a centred dialog with title + body, an optional extra-content
+// slot (`@children`) and the Cancel/Confirm row. Escape handling stays with
+// the window's handle-escape(), which closes modals first.
+export component ConfirmModal inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> confirm-label;
+    in property <string> cancel-label: Strings.close-ws-cancel;
+    in property <bool> confirm-enabled: true;
+    in property <length> dialog-width: 400px;
+    callback confirmed();
+    callback dismissed();
+    width: 100%;
+    height: 100%;
+    background: #0000008c;
+    // scrim: absorbs clicks to the app behind; outside click cancels
+    TouchArea {
+        clicked => {
+            root.dismissed();
+        }
+    }
+    Rectangle {
+        width: min(root.dialog-width, root.width - 48px);
+        height: dlg.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.panel;
+        border-radius: Theme.win95 ? 0px : 12px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        // absorb clicks inside the dialog so the scrim doesn't cancel
+        TouchArea { }
+        dlg := VerticalLayout {
+            padding: 22px;
+            spacing: 12px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.fs-h2;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.body;
+                color: Theme.dim;
+                font-size: Theme.fs-body;
+                wrap: word-wrap;
+            }
+            @children
+            Rectangle {
+                height: 4px;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                AppButton {
+                    label: root.cancel-label;
+                    clicked => {
+                        root.dismissed();
+                    }
+                }
+                AppButton {
+                    label: root.confirm-label;
+                    primary: true;
+                    enabled: root.confirm-enabled;
+                    clicked => {
+                        root.confirmed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The ubiquitous "coloured dot + label" status line.
+export component DotLabel inherits HorizontalLayout {
+    in property <color> tone;
+    in property <string> label;
+    in property <color> label-color: Theme.dim;
+    in property <length> label-size: Theme.fs-body;
+    spacing: 8px;
+    Rectangle {
+        width: 9px;
+        height: 9px;
+        border-radius: 4.5px;
+        y: (parent.height - self.height) / 2;
+        background: root.tone;
+    }
+    Text {
+        text: root.label;
+        color: root.label-color;
+        font-size: root.label-size;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}

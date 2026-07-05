@@ -1,0 +1,5 @@
+# Pinned exactly so the toolchain is part of the source tree, not a release-note
+# footnote — a prerequisite for byte-reproducible builds.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
