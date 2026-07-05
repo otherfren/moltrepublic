@@ -37,17 +37,15 @@ async fn konkin_server_pins_and_connects() {
 
 #[tokio::test]
 #[ignore = "makes a real TLS connection to smp8.simplex.im"]
-async fn public_ed448_server_is_a_known_pure_rust_gap() {
-    // Honest documentation of the pure-Rust posture's cost: the official
-    // simplex.im servers use ED448 certs; rustls-rustcrypto rejects the
-    // handshake because it cannot verify ED448 (it does ED25519). If this
-    // ever starts *passing*, the provider gained ED448 and this test
-    // should flip to `connects`.
+async fn public_ed448_server_pins_and_connects() {
+    // The official simplex.im servers use Ed448 certs. Our pure-Rust
+    // Ed448 verifier (RFC 8032, wired into the rustls provider) now
+    // handshakes with them — no C toolchain, every SimpleX server covered.
     let s = SmpServer::parse(PUBLIC_ED448).expect("parse");
-    match tls::test_connection(&s).await {
-        Ok(()) => println!("NOTE: smp8 now connects — rustcrypto gained ED448; update this test"),
-        Err(e) => println!("EXPECTED (pure-Rust ED448 gap): {e}"),
-    }
+    tls::test_connection(&s)
+        .await
+        .expect("TLS+ALPN+pin against the official Ed448 server smp8.simplex.im");
+    println!("OK: Ed448 official server {} pins and connects", s.host);
 }
 
 #[tokio::test]

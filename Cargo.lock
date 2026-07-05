@@ -1261,7 +1261,7 @@ dependencies = [
  "cpufeatures",
  "curve25519-dalek-derive",
  "digest",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -1503,6 +1503,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed448-goldilocks"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88322282bccdc6fa7ab65b0c30cb877fba541547653436d08bb775fa4a4307b4"
+dependencies = [
+ "fiat-crypto 0.1.20",
+ "hex",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1693,6 +1705,12 @@ dependencies = [
  "rand_core 0.6.4",
  "subtle",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e825f6987101665dea6ec934c09ec6d721de7bc1bf92248e1d5810c8cd636b77"
 
 [[package]]
 name = "fiat-crypto"
@@ -2997,6 +3015,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keccak"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
+dependencies = [
+ "cpufeatures",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3346,6 +3373,7 @@ dependencies = [
  "chacha20poly1305",
  "crypto_box",
  "ed25519-dalek",
+ "ed448-goldilocks",
  "getrandom 0.2.17",
  "hex",
  "hmac",
@@ -3356,6 +3384,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sha3",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
@@ -5156,6 +5185,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sha3"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
+dependencies = [
+ "digest",
+ "keccak",
 ]
 
 [[package]]

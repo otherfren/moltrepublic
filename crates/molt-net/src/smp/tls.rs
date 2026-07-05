@@ -11,20 +11,78 @@
 //! Pure-Rust posture: rustls with the RustCrypto provider (no ring/aws-lc,
 //! so no C toolchain — matches the reproducible-build envelope).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::crypto::WebPkiSupportedAlgorithms;
+use rustls::pki_types::{alg_id, AlgorithmIdentifier, CertificateDer, InvalidSignature, ServerName, SignatureVerificationAlgorithm, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
 use tokio_rustls::{client::TlsStream, TlsConnector};
 
+use crate::smp::ed448;
 use crate::smp::server::SmpServer;
 use crate::NetError;
 
 /// ALPN protocol identifier for SMP v1.
 const ALPN_SMP: &[u8] = b"smp/1";
+/// Ed448 signature/key OID (1.3.101.113), dotted form for cert dispatch.
+const OID_ED448: &str = "1.3.101.113";
+
+/// The Ed448 signature-verification algorithm the pure-Rust rustcrypto
+/// provider is missing. Backed by our RFC-8032-validated verifier so the
+/// client advertises AND verifies Ed448 — supporting the official
+/// simplex.im servers (Ed448 certs) without a C toolchain.
+#[derive(Debug)]
+struct Ed448Sva;
+
+impl SignatureVerificationAlgorithm for Ed448Sva {
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), InvalidSignature> {
+        if ed448::verify(public_key, message, signature) {
+            Ok(())
+        } else {
+            Err(InvalidSignature)
+        }
+    }
+
+    fn public_key_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ED448
+    }
+
+    fn signature_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ED448
+    }
+}
+
+static ED448_SVA: Ed448Sva = Ed448Sva;
+
+/// The rustcrypto signature-verification set, augmented with Ed448 (built
+/// once; the `'static` slices are leaked intentionally — a single small
+/// allocation for the process).
+fn sig_algs_with_ed448() -> WebPkiSupportedAlgorithms {
+    static AUGMENTED: OnceLock<WebPkiSupportedAlgorithms> = OnceLock::new();
+    *AUGMENTED.get_or_init(|| {
+        let base = rustls_rustcrypto::provider().signature_verification_algorithms;
+        let ed448: &'static dyn SignatureVerificationAlgorithm = &ED448_SVA;
+        let mut all: Vec<&'static dyn SignatureVerificationAlgorithm> = base.all.to_vec();
+        all.push(ed448);
+        let all: &'static [&'static dyn SignatureVerificationAlgorithm] =
+            Box::leak(all.into_boxed_slice());
+        let ed448_only: &'static [&'static dyn SignatureVerificationAlgorithm] =
+            Box::leak(vec![ed448].into_boxed_slice());
+        let mut mapping = base.mapping.to_vec();
+        mapping.push((SignatureScheme::ED448, ed448_only));
+        let mapping: &'static [(SignatureScheme, &'static [&'static dyn SignatureVerificationAlgorithm])] =
+            Box::leak(mapping.into_boxed_slice());
+        WebPkiSupportedAlgorithms { all, mapping }
+    })
+}
 
 /// A verifier that trusts exactly one CA — the one whose SHA-256 matches
 /// the pinned fingerprint — and checks the presented chain against it.
@@ -102,8 +160,10 @@ impl ServerCertVerifier for PinnedCaVerifier {
     }
 }
 
-/// Verify `leaf` is signed by `ca` (Ed25519 SMP certs), using x509-parser's
-/// signature check.
+/// Verify `leaf` is signed by `ca`. SMP certs are Ed25519 (konkin and
+/// most self-hosted) or **Ed448** (official simplex.im) — x509-parser's
+/// built-in check does not do Ed448, so that case is verified with our
+/// RFC-8032 verifier over the raw TBS bytes.
 fn verify_signed_by(
     leaf: &CertificateDer<'_>,
     ca: &CertificateDer<'_>,
@@ -113,13 +173,28 @@ fn verify_signed_by(
         .map_err(|_| rustls::Error::General("SMP leaf certificate is malformed".into()))?;
     let (_, ca_c) = x509_parser::certificate::X509Certificate::from_der(ca.as_ref())
         .map_err(|_| rustls::Error::General("SMP CA certificate is malformed".into()))?;
-    leaf_c
-        .verify_signature(Some(ca_c.public_key()))
-        .map_err(|e| {
-            rustls::Error::General(format!(
-                "SMP online certificate is not signed by the pinned CA: {e}"
+
+    if leaf_c.signature_algorithm.oid().to_id_string() == OID_ED448 {
+        // Ed448: verify the CA's key over the DER-encoded TBSCertificate
+        let tbs = leaf_c.tbs_certificate.as_ref();
+        let sig = leaf_c.signature_value.as_ref();
+        let ca_key = ca_c.public_key().subject_public_key.as_ref();
+        if ed448::verify(ca_key, tbs, sig) {
+            Ok(())
+        } else {
+            Err(rustls::Error::General(
+                "SMP online certificate (Ed448) is not signed by the pinned CA".into(),
             ))
-        })
+        }
+    } else {
+        leaf_c
+            .verify_signature(Some(ca_c.public_key()))
+            .map_err(|e| {
+                rustls::Error::General(format!(
+                    "SMP online certificate is not signed by the pinned CA: {e}"
+                ))
+            })
+    }
 }
 
 /// Build a rustls client config that pins `server`'s CA fingerprint and
@@ -132,6 +207,9 @@ fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
     let mut base = rustls_rustcrypto::provider();
     base.kx_groups
         .retain(|g| g.name() == rustls::NamedGroup::X25519);
+    // add Ed448 so the client advertises it in signature_algorithms AND
+    // can verify the server's Ed448 CertificateVerify (official servers)
+    base.signature_verification_algorithms = sig_algs_with_ed448();
     let provider = Arc::new(base);
     let verifier = Arc::new(PinnedCaVerifier {
         pin: server.fingerprint_raw(),

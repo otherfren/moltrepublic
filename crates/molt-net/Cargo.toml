@@ -35,3 +35,5 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 crypto_box.workspace = true
+ed448-goldilocks = "0.9"
+sha3 = "0.10"

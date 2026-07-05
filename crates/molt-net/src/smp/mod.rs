@@ -14,6 +14,7 @@
 //! `LoopbackTransport` today.
 
 pub mod conn;
+pub mod ed448;
 pub mod server;
 pub mod tls;
 
