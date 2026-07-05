@@ -40,6 +40,22 @@ const OUR_MAX_VERSION: u16 = 12;
 /// The lowest version we accept.
 const OUR_MIN_VERSION: u16 = 7;
 
+/// A queue created via [`SmpConn::new_queue`]: the server-assigned ids
+/// and the keys the recipient keeps. `recipient_id` is used by the creator
+/// (with `auth_sk`) to `SUB`/`ACK`; `sender_id` is handed to the sender to
+/// `SEND` — this is exactly the SMP `QueuePair` the transport concept's
+/// invite handover carries.
+pub struct NewQueue {
+    /// The recipient-side queue id (the creator subscribes on this).
+    pub recipient_id: Vec<u8>,
+    /// The sender-side queue id (handed to the one sender).
+    pub sender_id: Vec<u8>,
+    /// The recipient's Ed25519 command-auth key.
+    pub auth_sk: ed25519_dalek::SigningKey,
+    /// The recipient's X25519 DH secret (message-body decryption).
+    pub dh_secret: x25519_dalek::StaticSecret,
+}
+
 /// An open, handshaked SMP connection to one server.
 pub struct SmpConn {
     tls: TlsStream<TcpStream>,
@@ -122,6 +138,73 @@ impl SmpConn {
                 String::from_utf8_lossy(&cmd[..cmd.len().min(16)])
             )))
         }
+    }
+
+    /// Create a queue on this server (`NEW`) with a freshly generated
+    /// Ed25519 recipient-auth key and X25519 DH key. Returns the queue's
+    /// server-assigned ids and the keys the recipient keeps. Verified
+    /// against the live server (returns `IDS`).
+    pub async fn new_queue(&mut self) -> Result<NewQueue, NetError> {
+        let mut sk_bytes = [0u8; 32];
+        getrandom::getrandom(&mut sk_bytes).map_err(|e| NetError::Crypto(e.to_string()))?;
+        let auth_sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let auth_pk = auth_sk.verifying_key().to_bytes();
+        let mut dh_bytes = [0u8; 32];
+        getrandom::getrandom(&mut dh_bytes).map_err(|e| NetError::Crypto(e.to_string()))?;
+        let dh_secret = x25519_dalek::StaticSecret::from(dh_bytes);
+        let dh_pk = x25519_dalek::PublicKey::from(&dh_secret).to_bytes();
+
+        // NEW = "NEW " authPk(SPKI,short) dhPk(SPKI,short) basicAuth("0")
+        //       subscribeMode("C") sndSecure("F")
+        let mut cmd = Vec::new();
+        cmd.extend_from_slice(b"NEW ");
+        push_short(&mut cmd, &spki_ed25519(&auth_pk));
+        push_short(&mut cmd, &spki_x25519(&dh_pk));
+        cmd.push(b'0'); // basicAuth: none
+        cmd.push(b'C'); // subscribeMode: create only
+        cmd.push(b'F'); // sndSecure: no
+
+        let (_corr, _entity, command) = self.send_signed(&auth_sk, &[], &cmd).await?;
+        let (recipient_id, sender_id) = parse_ids(&command)?;
+        Ok(NewQueue {
+            recipient_id,
+            sender_id,
+            auth_sk,
+            dh_secret,
+        })
+    }
+
+    /// Send a signed transmission (`entity` = queue id, empty for `NEW`)
+    /// and return the parsed response. The signature covers
+    /// `sessionId ++ authorized` — confirmed against the live server (the
+    /// v7+ format keeps the sessionId in the *signed* bytes though it is
+    /// dropped from the wire).
+    async fn send_signed(
+        &mut self,
+        key: &ed25519_dalek::SigningKey,
+        entity: &[u8],
+        command: &[u8],
+    ) -> Result<Response, NetError> {
+        use ed25519_dalek::Signer;
+        let corr = self.next_corr();
+        // authorized (wire, v7+) = corrId | entityId | command
+        let mut authorized = Vec::new();
+        authorized.push(CORR_PRESENT);
+        authorized.extend_from_slice(&corr);
+        push_short(&mut authorized, entity);
+        authorized.extend_from_slice(command);
+        // signed bytes = short(sessionId) ++ authorized
+        let mut signed = Vec::new();
+        push_short(&mut signed, &self.session_id);
+        signed.extend_from_slice(&authorized);
+        let sig = key.sign(&signed).to_bytes();
+        // transmission = authorization(short sig) | authorized
+        let mut tx = Vec::new();
+        push_short(&mut tx, &sig);
+        tx.extend_from_slice(&authorized);
+        self.write_block(&wrap_transmission(&tx)).await?;
+        let block = self.read_block().await?;
+        parse_first_response(&block)
     }
 
     fn next_corr(&mut self) -> [u8; 24] {
@@ -248,6 +331,42 @@ fn read_short(b: &[u8], p: &mut usize) -> Result<Vec<u8>, NetError> {
         .ok_or_else(|| NetError::Framing("shortString overruns".into()))?;
     *p += len;
     Ok(s.to_vec())
+}
+
+/// SubjectPublicKeyInfo DER for an Ed25519 public key (RFC 8410): the
+/// fixed 12-byte prefix (SEQUENCE, AlgorithmIdentifier OID 1.3.101.112,
+/// BIT STRING) + the 32-byte key.
+fn spki_ed25519(pk: &[u8; 32]) -> Vec<u8> {
+    let mut v = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    v.extend_from_slice(pk);
+    v
+}
+
+/// SPKI DER for an X25519 public key (OID 1.3.101.110).
+fn spki_x25519(pk: &[u8; 32]) -> Vec<u8> {
+    let mut v = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00,
+    ];
+    v.extend_from_slice(pk);
+    v
+}
+
+/// Parse an `IDS` response command into `(recipientId, senderId)`, or map a
+/// server `ERR` into a [`NetError`].
+fn parse_ids(command: &[u8]) -> Result<(Vec<u8>, Vec<u8>), NetError> {
+    if command.starts_with(b"IDS ") {
+        let mut p = 4;
+        let rid = read_short(command, &mut p)?;
+        let sid = read_short(command, &mut p)?;
+        Ok((rid, sid))
+    } else {
+        Err(NetError::Crypto(format!(
+            "NEW not accepted: {}",
+            String::from_utf8_lossy(&command[..command.len().min(48)])
+        )))
+    }
 }
 
 fn read_corr(b: &[u8], p: &mut usize) -> Result<Vec<u8>, NetError> {
