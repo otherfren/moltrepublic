@@ -482,31 +482,6 @@ export component ChatRow inherits Rectangle {
                         overflow: elide;
                     }
                 }
-                // own live share: delete the local file (the share goes
-                // permanently unavailable for everyone)
-                if root.line.own && root.line.file-available: VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 26px;
-                        height: 26px;
-                        border-radius: Theme.win95 ? 0px : 5px;
-                        background: frm-ta.has-hover ? Theme.raised : transparent;
-                        Image {
-                            source: @image-url("assets/trash.svg");
-                            colorize: frm-ta.has-hover ? Theme.bad : Theme.bad.transparentize(0.45);
-                            width: 13px;
-                            height: 13px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        frm-ta := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            clicked => {
-                                root.file-remove-requested();
-                            }
-                        }
-                    }
-                }
             }
         }
         if root.line.deleted-by == "" && root.line.has-file: Rectangle {
@@ -571,10 +546,32 @@ export component ChatRow inherits Rectangle {
     // quiet affordances, always visible top-right: delete (reddish, kept
     // away from the outer edge), copy, and quote at the very edge — only
     // their shading reacts to hovering; tombstones offer none of them.
-    // An own LIVE file share hides this message-delete: its card carries
-    // the one delete that matters there (the local file) — two trash
-    // icons on one entry read as duplicates. Once the file is removed
+    // An own LIVE file share swaps this message-delete for the local-file
+    // delete IN THE SAME SLOT (below) — one trash per entry, always in the
+    // same place, so chat lines look uniform. Once the file is removed
     // (card grey), deleting the message becomes available again.
+    if root.line.deleted-by == "" && root.line.has-file && root.line.own && root.line.file-available: Rectangle {
+        x: parent.width - 82px;
+        y: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: Theme.win95 ? 0px : 5px;
+        background: frm-ta.has-hover ? Theme.raised : transparent;
+        Image {
+            source: @image-url("assets/trash.svg");
+            colorize: frm-ta.has-hover ? Theme.bad : Theme.bad.transparentize(0.45);
+            width: 13px;
+            height: 13px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        frm-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.file-remove-requested();
+            }
+        }
+    }
     if root.line.deleted-by == "" && !(root.line.has-file && root.line.own && root.line.file-available): Rectangle {
         x: parent.width - 82px;
         y: 4px;
