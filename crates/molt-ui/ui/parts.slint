@@ -328,6 +328,10 @@ export component ChatRow inherits Rectangle {
     callback delete-requested();
     callback quote-jump();
     callback bring-into-view();
+    // shared-file card: click = download (host decides / toasts),
+    // trash on own live shares = delete the local file
+    callback file-clicked();
+    callback file-remove-requested();
     property <bool> is-target: root.scroll-request == root.index;
     changed is-target => {
         if (self.is-target) {
@@ -422,8 +426,9 @@ export component ChatRow inherits Rectangle {
         // a read-only TextInput instead of Text: the body is selectable,
         // Ctrl+C copies the selection. Twemoji leads the font chain so
         // emojis render in full colour; everything the emoji font lacks
-        // falls back to the regular text font per glyph.
-        if root.line.deleted-by == "": TextInput {
+        // falls back to the regular text font per glyph. A pure file share
+        // has no body — the card below is the whole message.
+        if root.line.deleted-by == "" && !(root.line.has-file && root.line.text == ""): TextInput {
             text: root.line.text;
             read-only: true;
             single-line: false;
@@ -431,6 +436,81 @@ export component ChatRow inherits Rectangle {
             color: Theme.text;
             font-size: Theme.fs-body;
             font-family: "Twemoji Mozilla";
+        }
+        // the shared-file card: metadata only (name, size · type · date).
+        // Clicking downloads from the sharer's disk while the file exists;
+        // a removed file stays visible but grey — the history is honest.
+        if root.line.deleted-by == "" && root.line.has-file: Rectangle {
+            height: 46px;
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: 1px;
+            border-color: Theme.line;
+            background: file-ta.has-hover && root.line.file-available ? Theme.raised : Theme.zebra;
+            // card-wide touch area first, so the remove button (later in
+            // the tree) sits above it
+            file-ta := TouchArea {
+                mouse-cursor: root.line.file-available ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    root.file-clicked();
+                }
+            }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 6px;
+                spacing: 8px;
+                Text {
+                    text: root.line.file-available ? "📄" : "🚫";
+                    font-family: "Twemoji Mozilla";
+                    font-size: 19px;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 1px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.line.file-name;
+                        color: root.line.file-available ? Theme.text : Theme.faint;
+                        font-size: Theme.fs-body;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.line.file-available ? root.line.file-meta : Strings.mv-file-gone;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        overflow: elide;
+                    }
+                }
+                // own live share: delete the local file (the share goes
+                // permanently unavailable for everyone)
+                if root.line.own && root.line.file-available: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: Theme.win95 ? 0px : 5px;
+                        background: frm-ta.has-hover ? Theme.raised : transparent;
+                        Image {
+                            source: @image-url("assets/trash.svg");
+                            colorize: frm-ta.has-hover ? Theme.bad : Theme.bad.transparentize(0.45);
+                            width: 13px;
+                            height: 13px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        frm-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.file-remove-requested();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.line.deleted-by == "" && root.line.has-file: Rectangle {
+            height: 3px;
         }
         // deleted: the text is gone, only the tombstone remains
         if root.line.deleted-by != "": Text {

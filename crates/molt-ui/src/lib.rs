@@ -554,6 +554,58 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        ui.on_share_file(move |name| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            // a path from the mock picker is reduced to its file name —
+            // where the file lives is this node's business
+            let name = name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(name.as_str())
+                .to_string();
+            let (size, kind, modified) = mock_file_meta(&name);
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::ShareFile {
+                    name,
+                    size,
+                    kind,
+                    modified,
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_download_file(move |index| {
+            let Ok(index) = u64::try_from(index) else {
+                return;
+            };
+            issue(&rt, &w, &weak, Command::DownloadFile { index });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_remove_file(move |index| {
+            let Ok(index) = u64::try_from(index) else {
+                return;
+            };
+            issue(&rt, &w, &weak, Command::RemoveFile { index });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_toggle_reaction(move |index, emoji| {
             let Ok(index) = u64::try_from(index) else {
                 return;
@@ -1087,6 +1139,10 @@ struct LogLineData {
     alt: bool,
     mine_emoji: String,
     reactions: Vec<ReactionData>,
+    has_file: bool,
+    file_name: String,
+    file_meta: String,
+    file_available: bool,
 }
 struct ReactionData {
     emoji: String,
@@ -1161,6 +1217,10 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         alt: l.alt,
                         mine_emoji: l.mine_emoji.clone().into(),
                         reactions: ModelRc::new(VecModel::from(reactions)),
+                        has_file: l.has_file,
+                        file_name: l.file_name.clone().into(),
+                        file_meta: l.file_meta.clone().into(),
+                        file_available: l.file_available,
                     }
                 })
                 .collect();
@@ -1286,6 +1346,10 @@ fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
                 alt: false,
                 mine_emoji: String::new(),
                 reactions: Vec::new(),
+                has_file: false,
+                file_name: String::new(),
+                file_meta: String::new(),
+                file_available: false,
             })
             .collect()
     };
@@ -1329,6 +1393,21 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
             }
         })
         .collect();
+    // a shared file renders as a card: name plus "size · type · date"
+    let (has_file, file_name, file_meta, file_available) = match &m.file {
+        Some(f) => (
+            true,
+            f.name.clone(),
+            format!(
+                "{} · {} · {}",
+                file_size_label(f.size),
+                f.kind,
+                file_date_label(f.modified)
+            ),
+            f.available,
+        ),
+        None => (false, String::new(), String::new(), false),
+    };
     LogLineData {
         lead: m.from.clone(),
         text: m.body.clone(),
@@ -1345,7 +1424,59 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         alt: false, // author-block zebra, filled in by annotate_chat_log
         mine_emoji,
         reactions,
+        has_file,
+        file_name,
+        file_meta,
+        file_available,
     }
+}
+
+/// Human size for a byte count, e.g. `"680 B"` / `"48 KiB"` / `"1.2 MiB"`.
+fn file_size_label(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        size_label(u32::try_from(bytes / 1024).unwrap_or(u32::MAX))
+    }
+}
+
+/// The file's own date as a local calendar day, e.g. `"2026-07-01"`.
+fn file_date_label(ts: u64) -> String {
+    let Ok(secs) = i64::try_from(ts) else {
+        return String::new();
+    };
+    let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
+        return String::new();
+    };
+    utc.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// Mock file metadata for the (mock) picker: without a real file dialog the
+/// size and date derive deterministically from the name (FNV-1a), the type
+/// from the extension — stable per name, plausible to look at.
+fn mock_file_meta(name: &str) -> (u64, String, u64) {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let size = 2_048 + h % 4_000_000; // 2 KiB .. ~4 MiB
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
+    let kind = match ext.as_deref() {
+        Some("pdf") => "PDF",
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif") => "Image",
+        Some("md" | "txt") => "Text",
+        Some("ods" | "xlsx" | "csv") => "Spreadsheet",
+        Some("odt" | "docx") => "Document",
+        Some("zip" | "tar" | "gz" | "7z") => "Archive",
+        _ => "File",
+    }
+    .to_string();
+    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+    let modified = now.saturating_sub(h % (30 * 24 * 3600)); // within ~30 days
+    (size, kind, modified)
 }
 
 /// The whole-log pass over a chat: author-block zebra (the stripe flips
@@ -1706,6 +1837,14 @@ lexicon! {
     mv_empty_pending: "Nothing awaiting approval.", "Nichts wartet auf Zustimmung.";
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
+    mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
+    at_title: "Share a file", "Datei teilen";
+    at_body: "Only the file's metadata (name, size, type, date) is posted to the chat. Members download from your device while the file exists. (Mock — no file dialog yet, nothing is uploaded.)", "Nur die Metadaten der Datei (Name, Größe, Typ, Datum) werden in den Chat gestellt. Mitglieder laden von deinem Gerät herunter, solange die Datei existiert. (Mock — noch kein Dateidialog, nichts wird hochgeladen.)";
+    at_ph: "~/Documents/report.pdf", "~/Dokumente/bericht.pdf";
+    at_pick: "Or pick a suggestion:", "Oder einen Vorschlag wählen:";
+    at_share: "Share", "Teilen";
+    toast_download: "Downloading (mock):", "Lade herunter (Mock):";
+    toast_file_removed: "Local file deleted — the share is no longer available.", "Lokale Datei gelöscht — die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";
     dm_body: "The text disappears for everyone and only a deletion notice remains. (Mock — nothing on disk.)", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt. (Mock — nichts auf der Platte.)";
     dm_confirm: "Delete", "Löschen";
@@ -1739,6 +1878,10 @@ mod tests {
             alt: false,
             mine_emoji: String::new(),
             reactions: Vec::new(),
+            has_file: false,
+            file_name: String::new(),
+            file_meta: String::new(),
+            file_available: false,
         }
     }
 

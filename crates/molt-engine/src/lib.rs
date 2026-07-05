@@ -303,6 +303,14 @@ impl State {
             Command::ChatFrom { from, body, quote } => self.cmd_chat_from(from, body, quote),
             Command::ReactChat { index, emoji } => self.cmd_react_chat(index, emoji),
             Command::DeleteChat { index } => self.cmd_delete_chat(index),
+            Command::ShareFile {
+                name,
+                size,
+                kind,
+                modified,
+            } => self.cmd_share_file(name, size, kind, modified),
+            Command::DownloadFile { index } => self.cmd_download_file(index),
+            Command::RemoveFile { index } => self.cmd_remove_file(index),
 
             // proposals.rs
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
@@ -488,6 +496,27 @@ mod tests {
             w.execute(Command::DeleteChat { index: 1 })
                 .await
                 .expect("delete");
+            // two file shares: one stays available, one is removed — both
+            // states must survive the reopen
+            w.execute(Command::ShareFile {
+                name: "charter.pdf".into(),
+                size: 48_000,
+                kind: "PDF".into(),
+                modified: 1_751_000_000,
+            })
+            .await
+            .expect("share");
+            w.execute(Command::ShareFile {
+                name: "draft.md".into(),
+                size: 900,
+                kind: "Text".into(),
+                modified: 1_751_000_000,
+            })
+            .await
+            .expect("share 2");
+            w.execute(Command::RemoveFile { index: 3 })
+                .await
+                .expect("remove");
 
             let chat_before = read_surface(&w, Surface::Chat).await;
             let memory_before = read_surface(&w, Surface::Memory).await;
@@ -507,6 +536,15 @@ mod tests {
             assert_eq!(chat_after.applied, chat_before.applied);
             assert_eq!(memory_after.applied, memory_before.applied);
             assert_eq!(memory_after.pending.len(), memory_before.pending.len());
+
+            // the file shares replay with their availability intact
+            w.execute(Command::DownloadFile { index: 2 })
+                .await
+                .expect("kept file downloads after reopen");
+            assert!(matches!(
+                w.execute(Command::DownloadFile { index: 3 }).await,
+                Err(MoltError::FileUnavailable(3))
+            ));
 
             // the roster and rule replayed from the genesis event
             match w.execute(Command::Status).await.expect("status") {
@@ -666,6 +704,90 @@ mod tests {
                 })
                 .await,
                 Err(MoltError::UnknownMessage(7))
+            ));
+        });
+    }
+
+    #[test]
+    fn file_share_lifecycle_download_until_removed() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::ShareFile {
+                name: "charter.pdf".into(),
+                size: 48_000,
+                kind: "PDF".into(),
+                modified: 1_751_000_000,
+            })
+            .await
+            .expect("share");
+
+            // the chat log carries exactly the metadata
+            match w
+                .execute(Command::ReadState {
+                    surface: Surface::Chat,
+                })
+                .await
+                .expect("read")
+            {
+                Reply::State(s) => {
+                    let f = &s.applied[0]["file"];
+                    assert_eq!(f["name"], json!("charter.pdf"));
+                    assert_eq!(f["size"], json!(48_000));
+                    assert_eq!(f["kind"], json!("PDF"));
+                    assert_eq!(f["modified"], json!(1_751_000_000));
+                    assert_eq!(f["available"], json!(true));
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+
+            // downloadable while the sharer keeps the file …
+            w.execute(Command::DownloadFile { index: 0 })
+                .await
+                .expect("download works while available");
+
+            // … the sharer removes it locally → permanently unavailable
+            w.execute(Command::RemoveFile { index: 0 })
+                .await
+                .expect("remove own share");
+            assert!(matches!(
+                w.execute(Command::DownloadFile { index: 0 }).await,
+                Err(MoltError::FileUnavailable(0))
+            ));
+            assert!(matches!(
+                w.execute(Command::RemoveFile { index: 0 }).await,
+                Err(MoltError::FileUnavailable(0))
+            ));
+
+            // plain messages have nothing to download
+            w.execute(Command::Chat {
+                body: "hi".into(),
+                quote: None,
+            })
+            .await
+            .expect("chat");
+            assert!(matches!(
+                w.execute(Command::DownloadFile { index: 1 }).await,
+                Err(MoltError::NoFile(1))
+            ));
+            // deleting a share message drops the share entirely
+            w.execute(Command::ShareFile {
+                name: "notes.md".into(),
+                size: 10,
+                kind: "".into(),
+                modified: 0,
+            })
+            .await
+            .expect("share 2");
+            w.execute(Command::DeleteChat { index: 2 })
+                .await
+                .expect("delete");
+            assert!(matches!(
+                w.execute(Command::DownloadFile { index: 2 }).await,
+                Err(MoltError::NoFile(2))
+            ));
+            assert!(matches!(
+                w.execute(Command::DownloadFile { index: 9 }).await,
+                Err(MoltError::UnknownMessage(9))
             ));
         });
     }

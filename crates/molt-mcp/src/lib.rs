@@ -359,6 +359,53 @@ fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "share_file",
+            command: "share_file",
+            description: "Share a file into the ungated chat: only the METADATA (name, size, type, date) is posted — the bytes stay on this node's disk, participants download from there while the file exists (mocked until the transport lands).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "file name, no path" },
+                    "size": { "type": "integer", "description": "size in bytes" },
+                    "kind": { "type": "string", "description": "display type, e.g. PDF" },
+                    "modified": { "type": "integer", "description": "file date, unix seconds (omit = now)" }
+                },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::ShareFile {
+                name: str_arg(args, "name")?,
+                size: args.get("size").and_then(Value::as_u64).unwrap_or(0),
+                kind: args.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                modified: args.get("modified").and_then(Value::as_u64).unwrap_or(0),
+            }),
+        },
+        ToolDef {
+            name: "download_file",
+            command: "download_file",
+            description: "Download a shared file from its sharer's disk (0-based chat log index). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "index": { "type": "integer" } },
+                "required": ["index"]
+            }),
+            build: |args| Ok(Command::DownloadFile {
+                index: u64_arg(args, "index")?,
+            }),
+        },
+        ToolDef {
+            name: "remove_file",
+            command: "remove_file",
+            description: "Sharer-only: mark a shared file as deleted from this disk (0-based chat log index) — the share becomes permanently unavailable for every participant.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "index": { "type": "integer" } },
+                "required": ["index"]
+            }),
+            build: |args| Ok(Command::RemoveFile {
+                index: u64_arg(args, "index")?,
+            }),
+        },
+        ToolDef {
             name: "delete_chat",
             command: "delete_chat",
             description: "Delete a chat message (0-based log index): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",

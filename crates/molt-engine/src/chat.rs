@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use molt_core::{
-    mockrand, ChatMessage, Command, Event, MemberId, MoltError, Reply, WorkspaceEvent,
+    mockrand, ChatMessage, Command, Event, FileMeta, MemberId, MoltError, Reply, WorkspaceEvent,
 };
 
 use crate::{now_secs, Envelope, State};
@@ -52,10 +52,101 @@ impl State {
             quote,
             reactions: BTreeMap::new(),
             deleted_by: None,
+            file: None,
         };
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
         self.emit(Event::Chat { from, body });
+    }
+
+    /// Share a file into the chat: a message carrying only the metadata.
+    /// The bytes stay on this node's disk — participants download from
+    /// there while the file exists (mocked until the transport story).
+    pub(crate) fn cmd_share_file(
+        &mut self,
+        name: String,
+        size: u64,
+        kind: String,
+        modified: u64,
+    ) -> Result<Reply, MoltError> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(MoltError::BadPayload(
+                "the file name must not be empty".into(),
+            ));
+        }
+        let kind = kind.trim().to_string();
+        let from = self.member();
+        let msg = ChatMessage {
+            from: from.clone(),
+            body: String::new(),
+            ts: now_secs(),
+            quote: None,
+            reactions: BTreeMap::new(),
+            deleted_by: None,
+            file: Some(FileMeta {
+                name: name.clone(),
+                size,
+                kind: if kind.is_empty() {
+                    "File".to_string()
+                } else {
+                    kind
+                },
+                modified: if modified == 0 { now_secs() } else { modified },
+                available: true,
+            }),
+        };
+        let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
+        self.record(env);
+        self.emit(Event::Chat {
+            from,
+            body: format!("📎 {name}"),
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// (Mock-)download a shared file from the sharer's disk: validates that
+    /// the share exists and is still available; no bytes move until the
+    /// transport exists.
+    pub(crate) fn cmd_download_file(&self, index: u64) -> Result<Reply, MoltError> {
+        let msg = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.chat.get(i))
+            .ok_or(MoltError::UnknownMessage(index))?;
+        let file = msg.file.as_ref().ok_or(MoltError::NoFile(index))?;
+        if !file.available {
+            return Err(MoltError::FileUnavailable(index));
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// The sharer deleted the local file: the share flips to unavailable
+    /// for everyone, permanently (an event — replay reproduces it).
+    pub(crate) fn cmd_remove_file(&mut self, index: u64) -> Result<Reply, MoltError> {
+        let me = self.member();
+        {
+            let msg = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.chat.get(i))
+                .ok_or(MoltError::UnknownMessage(index))?;
+            let file = msg.file.as_ref().ok_or(MoltError::NoFile(index))?;
+            if msg.from != me {
+                return Err(MoltError::NotYourFile(index));
+            }
+            if !file.available {
+                return Err(MoltError::FileUnavailable(index));
+            }
+        }
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::FileRemoved {
+                index,
+                by: me.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(Event::FileRemoved { index, by: me });
+        Ok(Reply::Ack)
     }
 
     /// Toggle the local member's emoji reaction: the emoji you already

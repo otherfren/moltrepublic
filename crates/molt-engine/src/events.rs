@@ -113,7 +113,18 @@ impl State {
                 };
                 msg.body.clear();
                 msg.reactions.clear();
+                // deleting the message drops a file share with it
+                msg.file = None;
                 msg.deleted_by = Some(by.clone());
+            }
+            WorkspaceEvent::FileRemoved { index, .. } => {
+                if let Some(file) = usize::try_from(*index)
+                    .ok()
+                    .and_then(|i| self.chat.get_mut(i))
+                    .and_then(|m| m.file.as_mut())
+                {
+                    file.available = false;
+                }
             }
             WorkspaceEvent::Proposed {
                 id,
@@ -260,6 +271,7 @@ mod tests {
                 quote: None,
                 reactions: Default::default(),
                 deleted_by: None,
+                file: None,
             }
         };
         vec![
@@ -318,6 +330,25 @@ mod tests {
                     by: "petra".to_string(),
                 },
             ),
+            e(9, "petra", {
+                let mut share = msg("petra", "", 109);
+                share.file = Some(molt_core::FileMeta {
+                    name: "charter.pdf".to_string(),
+                    size: 48_000,
+                    kind: "PDF".to_string(),
+                    modified: 100,
+                    available: true,
+                });
+                WorkspaceEvent::Chat(share)
+            }),
+            e(
+                10,
+                "petra",
+                WorkspaceEvent::FileRemoved {
+                    index: 1,
+                    by: "petra".to_string(),
+                },
+            ),
         ]
     }
 
@@ -337,9 +368,12 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.name, "Chess Club");
         assert_eq!(a.roster, vec!["petra", "walter"]);
-        assert_eq!(a.chat.len(), 1);
+        assert_eq!(a.chat.len(), 2);
         assert_eq!(a.chat[0].deleted_by.as_deref(), Some("petra"));
         assert!(a.chat[0].reactions.is_empty());
+        let file = a.chat[1].file.as_ref().expect("share survives replay");
+        assert_eq!(file.name, "charter.pdf");
+        assert!(!file.available, "the removal replays too");
         assert_eq!(a.applied["memory"].len(), 1);
         assert_eq!(a.proposals[&1].approvals, 2);
         assert_eq!(a.next_proposal_id, 2);

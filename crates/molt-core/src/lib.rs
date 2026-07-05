@@ -572,6 +572,31 @@ impl BackupOrphan {
     }
 }
 
+/// Metadata of a file shared into the chat. Only metadata travels — the
+/// bytes stay on the sharer's disk; participants download from there as
+/// long as the file exists (the fetch itself is the transport's job, next
+/// story; today it is mocked). When the sharer deletes the local file the
+/// share flips to unavailable for everyone, permanently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileMeta {
+    /// File name (no path — where it lives is the sharer's business).
+    pub name: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Display type, e.g. `"PDF"` (proper MIME types come with transport).
+    pub kind: String,
+    /// The file's own date, unix seconds.
+    pub modified: u64,
+    /// Still present on the sharer's disk (`false` = removed; downloads
+    /// answer "no longer available").
+    #[serde(default = "file_available_default")]
+    pub available: bool,
+}
+
+fn file_available_default() -> bool {
+    true
+}
+
 /// One chat message — THE schema of the chat log. The engine mutates and
 /// the GUI reads this one type; on the wire (`read_state.applied`) it
 /// serializes to the same JSON object as before.
@@ -594,6 +619,10 @@ pub struct ChatMessage {
     /// Who deleted the message (`None` = live).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_by: Option<MemberId>,
+    /// A shared file's metadata (`None` = a plain text message). Deleting
+    /// the message drops the share with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileMeta>,
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +802,14 @@ pub enum WorkspaceEvent {
         /// Message position in the chat log (0-based).
         index: u64,
         /// Who deleted it.
+        by: MemberId,
+    },
+    /// The sharer deleted a shared file from their disk — the share at
+    /// this chat position is unavailable from now on.
+    FileRemoved {
+        /// The share message's position in the chat log (0-based).
+        index: u64,
+        /// The sharer.
         by: MemberId,
     },
     /// An object was put forward for threshold approval.
@@ -1197,6 +1234,33 @@ pub enum Command {
         /// The reaction emoji.
         emoji: String,
     },
+    /// Share a file into the ungated chat. Only the METADATA is posted —
+    /// the bytes never leave this node's disk; participants download from
+    /// there while the file exists (the fetch is the transport's job, next
+    /// story; mocked today).
+    ShareFile {
+        /// File name (no path).
+        name: String,
+        /// Size in bytes.
+        size: u64,
+        /// Display type, e.g. `"PDF"`.
+        kind: String,
+        /// The file's own date, unix seconds (0 = stamp now).
+        modified: u64,
+    },
+    /// Download a shared file from the sharer's disk (mock: validates
+    /// availability, moves no bytes). Fails once the sharer deleted the
+    /// local file.
+    DownloadFile {
+        /// The share message's position in the chat log (0-based).
+        index: u64,
+    },
+    /// Sharer-only: the local file is gone (deleted from this disk) — the
+    /// share becomes permanently unavailable for every participant.
+    RemoveFile {
+        /// The share message's position in the chat log (0-based).
+        index: u64,
+    },
     /// Read the projected state of one surface.
     ReadState {
         /// Which surface to read.
@@ -1510,6 +1574,13 @@ pub enum Event {
         /// Who toggled it.
         by: MemberId,
     },
+    /// A shared file became unavailable (its sharer deleted it locally).
+    FileRemoved {
+        /// The share message's position in the chat log.
+        index: u64,
+        /// The sharer.
+        by: MemberId,
+    },
     /// A proposal was created.
     Proposed {
         /// The proposal id.
@@ -1595,6 +1666,15 @@ pub enum MoltError {
     /// The chat log has no message at this position.
     #[error("unknown chat message {0}")]
     UnknownMessage(u64),
+    /// The chat message at this position carries no shared file.
+    #[error("message {0} has no shared file")]
+    NoFile(u64),
+    /// The shared file's owner deleted it locally; nothing to download.
+    #[error("the shared file at message {0} is no longer available")]
+    FileUnavailable(u64),
+    /// Only the member who shared a file can remove it.
+    #[error("only the member who shared the file at message {0} can remove it")]
+    NotYourFile(u64),
     /// A restore action arrived in the wrong lifecycle state.
     #[error("restore: {0}")]
     Restore(String),

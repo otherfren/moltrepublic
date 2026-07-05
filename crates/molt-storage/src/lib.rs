@@ -1327,6 +1327,7 @@ mod tests {
                 quote: None,
                 reactions: BTreeMap::new(),
                 deleted_by: None,
+                file: None,
             }),
         }
     }

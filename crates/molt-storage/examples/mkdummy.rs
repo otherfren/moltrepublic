@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use molt_core::{ChatMessage, EventEnvelope, WorkspaceEvent};
+use molt_core::{ChatMessage, EventEnvelope, FileMeta, WorkspaceEvent};
 
 fn chat_env(seq: u64, ts: u64, from: &str, body: &str, quote: Option<u64>) -> EventEnvelope {
     EventEnvelope {
@@ -28,6 +28,7 @@ fn chat_env(seq: u64, ts: u64, from: &str, body: &str, quote: Option<u64>) -> Ev
             quote,
             reactions: BTreeMap::new(),
             deleted_by: None,
+            file: None,
         }),
     }
 }
@@ -74,6 +75,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     })?;
     ws.append(&chat_env(6, t + 240, "me", "try sending a message, then restart moltd", None))?;
+    // two file shares: one still on "peer-1's disk", one already removed —
+    // the chat shows both card states out of the box
+    let share = |seq: u64, ts: u64, from: &str, name: &str, size: u64, kind: &str| EventEnvelope {
+        seq,
+        ts,
+        by: from.to_string(),
+        body: WorkspaceEvent::Chat(ChatMessage {
+            from: from.to_string(),
+            body: String::new(),
+            ts,
+            quote: None,
+            reactions: BTreeMap::new(),
+            deleted_by: None,
+            file: Some(FileMeta {
+                name: name.to_string(),
+                size,
+                kind: kind.to_string(),
+                modified: ts - 86_400,
+                available: true,
+            }),
+        }),
+    };
+    ws.append(&share(7, t + 300, "peer-1", "dummy-charter.pdf", 148_480, "PDF"))?;
+    ws.append(&share(8, t + 360, "peer-2", "old-scan.jpg", 2_411_724, "Image"))?;
+    ws.append(&EventEnvelope {
+        seq: 9,
+        ts: t + 420,
+        by: "peer-2".to_string(),
+        body: WorkspaceEvent::FileRemoved {
+            // chat position of the seq-8 share: the sixth chat message
+            // (indices count messages, not envelopes — the reaction at
+            // seq 5 occupies no chat slot)
+            index: 5,
+            by: "peer-2".to_string(),
+        },
+    })?;
     ws.sync()?;
 
     println!("workspace dir : {}", ws.dir().display());
