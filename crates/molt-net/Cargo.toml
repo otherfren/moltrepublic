@@ -25,3 +25,13 @@ sha2.workspace = true
 hmac.workspace = true
 zeroize.workspace = true
 hex.workspace = true
+# SMP transport (T3): pure-Rust TLS + cert pinning + queue crypto
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-rustcrypto.workspace = true
+rustls-pki-types.workspace = true
+x509-parser.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+crypto_box.workspace = true
