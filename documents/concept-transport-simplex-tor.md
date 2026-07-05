@@ -1,8 +1,35 @@
 # Concept: communication — SimpleX (SMP) over Tor
 
-Status: **design**. Today there is no network: the reply simulator fakes
-other members, the run lifecycles fake handshakes, and `transport.*` config
-is parsed but unwired. This document specifies the real transport:
+Status: **T1 implemented** (2026-07-05), T2–T6 open. What exists:
+`molt-net` (Transport trait, uniform-block framing with named-constant
+budget math, mandatory per-queue wrapping, chunker/reassembler with
+`(msg id, chunk idx)` dedup, `LoopbackTransport` + seeded chaos harness,
+per-node supervisor with log-backed outbox / delivery cursors / fan-out
+jitter / backoff and per-sender in-order inbound); the engine is wired
+(record → publish + coalescing wakeup, internal `NetDelivered` /
+`NetPeerSeen` / `NetSendFailed` on the INTERNAL list, passive presence on
+the member pills); `transport.state` is real (encrypted sub-key file,
+atomic rewrite, cursors survive restarts); the reply simulator is retired —
+demo members are loopback peer nodes with their own engine instance and
+transport endpoint. Honest T1 deltas, to be closed where noted:
+
+* **Convergence is per-sender.** Delivered event *sets* and per-sender
+  order converge across nodes; identical cross-sender ordering (and with
+  it index-safe cross-node quotes/reactions) needs stable message ids and
+  the reconciliation rule — lands with T2/R-plan. Until then only `Chat`
+  events cross the wire; index-referencing events stay node-local and a
+  transferred message's `quote` is stripped on receipt.
+* **Ack-after-apply, not ack-after-fsync.** The loopback receiver acks
+  once the engine accepted the event (applied + queued to the writer);
+  tightening to the §3.4 fsync rule is T3 work (the writer already exposes
+  the hook point).
+* **Wire frames are plaintext JSON inside the per-queue wrap** until MLS
+  (T2) supplies the real ciphertext payload.
+
+The rest of this document is the design as specified; sections below are
+unchanged targets. Today the run lifecycles still fake handshakes and
+`transport.*` config remains unwired (T4/T5). This document specifies the
+real transport:
 **MLS-protected group messages carried as opaque payloads over SimpleX
 Messaging Protocol (SMP) queues, reached exclusively through Tor**
 (per the docs' architecture: MLS ▸ SMP ▸ Tor/Nym; Nym is a later backend
@@ -445,7 +472,8 @@ without sockets, everything below tests without the engine.
    whole app now runs on real transport paths. Deliberately the **largest**
    milestone, not the smallest: the simulated members become full
    in-process peer nodes — own engine instance and transport endpoint —
-   not scripted repliers.)*
+   not scripted repliers.)* — **done 2026-07-05**, deltas in the status
+   note at the top.
 2. **T2** MLS integration (OpenMLS) behind `MlsTask`, incl. the
    `transport.state` write-ahead discipline; invite/join state machine real
    over loopback: ticket MAC, single-use enforcement, and the inviter

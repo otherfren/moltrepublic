@@ -180,7 +180,13 @@ impl State {
         if self.persist && !already_open {
             self.open_stored_workspace(&id)?;
         }
+        // the transport context changes with the workspace: tear the old
+        // mesh down and stand the new one up right away (presence pills
+        // are live before the first chat; persisted opens no-op — their
+        // seats are real and empty until T2)
+        self.teardown_net();
         self.session.active_workspace = id;
+        self.ensure_demo_net();
         self.session.screen = Screen::Main;
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);
@@ -286,8 +292,11 @@ impl State {
     }
 
     pub(crate) fn cmd_close_workspace(&mut self) -> Result<Reply, MoltError> {
+        self.teardown_net();
         self.close_active_storage();
         self.session.active_workspace = String::new();
+        // back on the boot group: its mesh stands up for the next chat
+        self.ensure_demo_net();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -361,6 +370,10 @@ impl State {
             dir = self.active.as_ref().map(|a| a.dir.clone());
             self.close_active_storage();
             self.session.active_workspace = String::new();
+        }
+        if self.session.active_workspace == id {
+            // a session-only workspace being deleted takes its mesh along
+            self.teardown_net();
         }
         if self.persist {
             let root = self.workspace_root();

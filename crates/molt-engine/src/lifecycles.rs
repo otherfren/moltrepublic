@@ -76,7 +76,9 @@ impl State {
         let dir = opened.dir().to_path_buf();
 
         // a previously open workspace closes cleanly before the new one
-        // takes over the actor state
+        // takes over the actor state; a demo mesh belongs to the old
+        // context and tears down with it
+        self.teardown_net();
         self.close_active_storage();
         self.reset_workspace_state();
         self.apply(&genesis);
@@ -625,7 +627,10 @@ impl State {
     /// `tick` is re-sent every 90 ms; the task stops as soon as a tick is
     /// answered with an error (the run is over or was cancelled).
     pub(crate) fn spawn_ticker(&self, tick: Command) {
-        let tx = self.cmd_tx.clone();
+        // upgrade the actor's weak self-handle; a stopping actor spawns no ticker
+        let Some(tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(90)).await;

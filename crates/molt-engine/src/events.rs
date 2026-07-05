@@ -35,11 +35,17 @@ impl State {
         env
     }
 
-    /// Apply one envelope, then hand it to the open workspace's writer (if
-    /// any). The reply never waits for the disk; a lagging or failing
-    /// writer surfaces honestly in the session notice.
+    /// Apply one envelope, hand it to the open workspace's writer (if
+    /// any), and wake the transport. The reply waits for neither the disk
+    /// nor the network: the writer group-commits on its own clock, and the
+    /// net wakeup carries no data (the log/feed is the outbox — transport
+    /// concept §2). A lagging or failing writer surfaces honestly in the
+    /// session notice.
     pub(crate) fn record(&mut self, env: EventEnvelope) {
         self.apply(&env);
+        if let Some(net) = &self.net {
+            net.publish(&env);
+        }
         let Some(active) = &self.active else {
             return;
         };

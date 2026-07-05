@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-net"
+description = "The transport layer: MLS-protected payloads over SMP-style queues. T1 scope: Transport trait, uniform-block framing (chunker, per-queue wrapping), LoopbackTransport with chaos harness, and the log-backed outbox supervisor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+molt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+hex.workspace = true

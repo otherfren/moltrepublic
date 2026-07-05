@@ -11,21 +11,24 @@
 //! authoritative event order that both frontends mirror.
 //!
 //! The approval logic here is a faithful but *simulated* stand-in for the real
-//! threshold machine: there is no FROST, no MLS, no network. Each `Approve`
-//! counts as one member's co-signature; when the count reaches the group
-//! threshold the proposal is applied. Swapping in the real signing backend is a
-//! future surface-crate concern and does not change this contract.
+//! threshold machine: there is no FROST, no MLS. Each `Approve` counts as one
+//! member's co-signature; when the count reaches the group threshold the
+//! proposal is applied. Swapping in the real signing backend is a future
+//! surface-crate concern and does not change this contract.
 //!
 //! The implementation is split by concern: [`chat`] (the ungated surface,
-//! typed messages, reactions, deletion, the demo reply simulator),
-//! [`proposals`] (the gated propose/approve/apply machine and snapshots),
-//! [`session`] (navigation, settings, workspaces) and [`lifecycles`] (the
-//! three engine-run mocks: restore / create / join over one `RunCore`).
+//! typed messages, reactions, deletion), [`net`] (the `molt-net` glue: the
+//! log-backed outbox feed, the inbound `Net*` handlers, and the loopback
+//! demo mesh whose peers replaced the old reply simulator), [`proposals`]
+//! (the gated propose/approve/apply machine and snapshots), [`session`]
+//! (navigation, settings, workspaces) and [`lifecycles`] (the three
+//! engine-run mocks: restore / create / join over one `RunCore`).
 
 mod chat;
 mod configstore;
 mod events;
 mod lifecycles;
+mod net;
 mod proposals;
 mod session;
 
@@ -33,6 +36,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
+pub use net::{CmdSink, FileStateStore, StorageLog};
 
 use molt_core::{
     ChatMessage, Command, Event, GroupConfig, MemberId, MoltError, ProposalRecord, Reply,
@@ -116,7 +120,7 @@ pub fn spawn_with_config(
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true, None);
     Ok((handle, store))
 }
 
@@ -127,7 +131,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None)
 }
 
 fn spawn_actor(
@@ -137,10 +141,11 @@ fn spawn_actor(
     mut cmd_rx: mpsc::Receiver<Envelope>,
     store: Option<ConfigStoreHandle>,
     persist: bool,
+    net: Option<net::NetRuntime>,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
-    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist);
+    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -199,8 +204,11 @@ pub(crate) struct ActiveStorage {
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
-    /// Handle back into the actor's own queue (run tickers, reply simulator).
-    pub(crate) cmd_tx: mpsc::Sender<Envelope>,
+    /// Handle back into the actor's own queue (run tickers, net sink).
+    /// Weak on purpose: the actor must stop once every *operator* handle
+    /// is gone — its own self-reference must not keep it alive (demo peer
+    /// engines rely on exactly this to terminate on mesh teardown).
+    pub(crate) cmd_tx: mpsc::WeakSender<Envelope>,
     /// The chat log — typed, THE schema lives in [`molt_core::ChatMessage`].
     pub(crate) chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface.
@@ -217,6 +225,14 @@ pub(crate) struct State {
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
+    /// The transport runtime (the demo loopback mesh today; a persisted
+    /// workspace's supervisor once the T2 join flow wires real peers).
+    pub(crate) net: Option<net::NetRuntime>,
+    /// Monotonic mesh-incarnation counter: `Net*` commands carry the
+    /// generation of the mesh that sent them, and commands from a
+    /// torn-down mesh are dropped (a delivery queued behind a workspace
+    /// switch must not land in the new context's log).
+    pub(crate) net_generation: u64,
     /// Whether workspaces persist to disk at all ([`spawn`] = false).
     pub(crate) persist: bool,
     /// The shared app/session state (screen, language, settings, …).
@@ -229,6 +245,7 @@ pub(crate) struct State {
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: GroupConfig,
         session: SessionView,
@@ -236,6 +253,7 @@ impl State {
         cmd_tx: mpsc::Sender<Envelope>,
         store: Option<ConfigStoreHandle>,
         persist: bool,
+        net: Option<net::NetRuntime>,
     ) -> Self {
         let mut applied = HashMap::new();
         for s in Surface::ALL {
@@ -245,7 +263,7 @@ impl State {
         State {
             config,
             ev_tx,
-            cmd_tx,
+            cmd_tx: cmd_tx.downgrade(),
             chat: Vec::new(),
             applied,
             proposals: HashMap::new(),
@@ -253,6 +271,8 @@ impl State {
             next_seq: 1,
             replica: None,
             active: None,
+            net,
+            net_generation: 0,
             persist,
             session,
             store,
@@ -300,7 +320,6 @@ impl State {
         match cmd {
             // chat.rs
             Command::Chat { body, quote } => self.cmd_chat(body, quote),
-            Command::ChatFrom { from, body, quote } => self.cmd_chat_from(from, body, quote),
             Command::ReactChat { index, emoji } => self.cmd_react_chat(index, emoji),
             Command::DeleteChat { index } => self.cmd_delete_chat(index),
             Command::ShareFile {
@@ -327,6 +346,21 @@ impl State {
                 Ok(Reply::Proposals { proposals: views })
             }
             Command::Status => Ok(Reply::Status(self.status())),
+
+            // net.rs (engine-internal, sent by the node's own supervisor)
+            Command::NetDelivered {
+                from,
+                envelope,
+                generation,
+            } => self.cmd_net_delivered(from, envelope, generation),
+            Command::NetPeerSeen { member, generation } => {
+                self.cmd_net_peer_seen(member, generation)
+            }
+            Command::NetSendFailed {
+                member,
+                reason,
+                generation,
+            } => self.cmd_net_send_failed(member, reason, generation),
 
             // session.rs
             Command::ReadSession => Ok(Reply::Session(Box::new(self.session.clone()))),
@@ -397,6 +431,7 @@ mod tests {
             cmd_tx,
             None,
             false,
+            None,
         )
     }
 

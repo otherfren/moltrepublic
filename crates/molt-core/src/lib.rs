@@ -336,17 +336,24 @@ pub struct WorkspaceInfo {
     pub members: Vec<MemberInfo>,
 }
 
+/// FNV-1a over a string: the one stable, non-cryptographic name hash the
+/// demo machinery shares (workspace ids, brain seeds) — never key material.
+pub fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// A stable fake [`WorkspaceId`] for demo entries: an FNV-1a hash of the
 /// name, expanded to 32 bytes with splitmix-style mixing — distinct names
 /// yield distinct ids (no cyclic-name collisions, unlike naive byte
 /// repetition). Real ids come from the seed derivation in `molt-storage`;
 /// this exists so session-only demo lists are addressable by id too.
 pub fn demo_workspace_id(name: &str) -> WorkspaceId {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
-    for b in name.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
+    let mut h = fnv1a64(name);
     // hash the length in as well so "a" and "a\0"-style paddings differ
     h ^= u64::try_from(name.len()).unwrap_or(u64::MAX);
     let mut id = String::with_capacity(64);
@@ -597,6 +604,22 @@ fn file_available_default() -> bool {
     true
 }
 
+impl ChatMessage {
+    /// A plain text message — the one constructor chat posts and test
+    /// builders share, so the default-field shape cannot drift.
+    pub fn text(from: impl Into<MemberId>, body: impl Into<String>, ts: u64) -> ChatMessage {
+        ChatMessage {
+            from: from.into(),
+            body: body.into(),
+            ts,
+            quote: None,
+            reactions: BTreeMap::new(),
+            deleted_by: None,
+            file: None,
+        }
+    }
+}
+
 /// One chat message — THE schema of the chat log. The engine mutates and
 /// the GUI reads this one type; on the wire (`read_state.applied`) it
 /// serializes to the same JSON object as before.
@@ -744,6 +767,42 @@ impl Default for WorkspacePrefs {
             last_backup: None,
         }
     }
+}
+
+/// Format marker of `transport.state` (the node-local encrypted transport
+/// bookkeeping file — concept-transport-simplex-tor.md §6).
+pub const TRANSPORT_STATE_VERSION: u32 = 1;
+
+/// The outbound half of one delivery cursor: how far this node's log has
+/// been fanned out to one peer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundCursor {
+    /// The last local log seq whose fan-out to this peer was accepted by
+    /// the transport (the outbox resumes at `log_seq + 1`).
+    pub log_seq: u64,
+    /// Wire messages sent on this link so far (each message carries the
+    /// next value — the receiver's dedup/order key).
+    pub wire_seq: u64,
+}
+
+/// `transport.state` — node-local transport bookkeeping (concept §6):
+/// delivery cursors today; per-queue wrapping keys, MLS ratchets and the
+/// dedup windows join in later milestones. It must **not** live in the
+/// shared log: two nodes' cursors legitimately differ, and the log stays
+/// replayable shared history. Losing this file loses transport progress
+/// (peers absorb the resulting resends via their dedup), never history.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportState {
+    /// Schema version ([`TRANSPORT_STATE_VERSION`]).
+    #[serde(default)]
+    pub version: u32,
+    /// Per peer: how far our log is fanned out to them.
+    #[serde(default)]
+    pub outbound: BTreeMap<MemberId, OutboundCursor>,
+    /// Per peer: the last inbound wire seq applied (their messages with a
+    /// lower or equal seq are duplicates).
+    #[serde(default)]
+    pub inbound: BTreeMap<MemberId, u64>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
@@ -1190,17 +1249,43 @@ pub enum Command {
         #[serde(default)]
         quote: Option<u64>,
     },
-    /// Post a chat message as another member. Sent by the engine's own
-    /// demo reply-simulator (like the run tickers, this is engine-internal
-    /// and not exposed as an MCP tool).
-    ChatFrom {
-        /// The (simulated) sender.
+    /// An authenticated peer event arrived over the transport. Sent by the
+    /// node's own `molt-net` supervisor (engine-internal, like the run
+    /// tickers — never an MCP tool: a network peer must not be
+    /// impersonatable through the MCP surface).
+    NetDelivered {
+        /// The peer whose queue delivered it (the transport's link
+        /// identity; must match the envelope's `by`).
         from: MemberId,
-        /// The message body.
-        body: String,
-        /// Quoted message (0-based position in the chat log), if replying.
+        /// The peer's original envelope (their seq/ts stamps); the engine
+        /// re-stamps it into the local log in arrival order.
+        envelope: EventEnvelope,
+        /// Which mesh incarnation sent this (`None` = the engine-lifetime
+        /// transport). The engine drops commands from a torn-down mesh —
+        /// a delivery already queued behind a workspace switch must not
+        /// land in the new context's (possibly persisted!) log.
         #[serde(default)]
-        quote: Option<u64>,
+        generation: Option<u64>,
+    },
+    /// Passive presence: authenticated inbound traffic from a member was
+    /// observed (engine-internal; no beacons, ever — concept §3.4).
+    NetPeerSeen {
+        /// The member that was heard from.
+        member: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Sending to a member's queue keeps failing; the outbox is backing
+    /// off and retrying (engine-internal transport health).
+    NetSendFailed {
+        /// The unreachable member.
+        member: MemberId,
+        /// The transport's reason, for the log/pills.
+        reason: String,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// Put an object forward for threshold approval on a gated surface.
     Propose {

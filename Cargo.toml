@@ -12,6 +12,7 @@
 #   molt-core    domain types, Command/Event/Surface contract, errors — no I/O
 #   molt-config  config.toml schema, render, salvage, round-trip write (no I/O deps)
 #   molt-storage encrypted append-only workspace storage: event log, snapshots, keys
+#   molt-net     the transport: SMP-style queues behind a Transport trait (loopback today)
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
 #   molt-ui      Slint GUI frontend (the live-mirror operator)
@@ -27,6 +28,7 @@ members = [
     "crates/molt-core",
     "crates/molt-config",
     "crates/molt-storage",
+    "crates/molt-net",
     "crates/molt-engine",
     "crates/molt-mcp",
     "crates/molt-ui",
@@ -41,6 +43,7 @@ members = [
 molt-core    = { path = "crates/molt-core" }
 molt-config  = { path = "crates/molt-config" }
 molt-storage = { path = "crates/molt-storage" }
+molt-net     = { path = "crates/molt-net" }
 molt-engine  = { path = "crates/molt-engine" }
 molt-mcp     = { path = "crates/molt-mcp" }
 molt-ui      = { path = "crates/molt-ui" }

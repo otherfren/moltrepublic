@@ -113,7 +113,7 @@ fn main() -> anyhow::Result<()> {
         network = ?anonymity.network,
         tor_mode = ?anonymity.tor.mode,
         tor_port = anonymity.tor.port,
-        "transport anonymity configured (transport not yet wired in this scaffold)"
+        "transport anonymity configured (loopback transport active; Tor/SMP wiring is milestone T3–T5)"
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()

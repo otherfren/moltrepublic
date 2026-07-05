@@ -16,9 +16,11 @@ workspace = true
 molt-core.workspace = true
 molt-config.workspace = true
 molt-storage.workspace = true
+molt-net.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

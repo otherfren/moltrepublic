@@ -187,10 +187,14 @@ live-mirrors, an agent reads via `read_session`, `read_state`,
   is nothing to expose. If it ever gains a real effect it becomes a command
   first.
 * **Engine-internal commands** (`RestoreTick` / `CreateTick` / `JoinTick`,
-  `ChatFrom`, `ReloadSettings`, `ConfigNotice`). These exist in the command
-  enum but are deliberately not MCP tools: ticks are the engine's own clock,
-  and `ChatFrom` (the demo reply simulator) posts under *other members'
-  names* — exposing it would let any client impersonate members.
+  `NetDelivered` / `NetPeerSeen` / `NetSendFailed`, `ReloadSettings`,
+  `ConfigNotice`). These exist in the command enum but are deliberately not
+  MCP tools: ticks are the engine's own clock, and the `Net*` commands are
+  the node's own transport supervisor speaking (concept-transport §2) —
+  `NetDelivered` records events under *other members'* names, so exposing
+  it would let any client impersonate a network peer, and the two health
+  signals would let a client forge presence. (They replaced `ChatFrom`,
+  the retired reply simulator, which was internal for the same reason.)
   `ReloadSettings` and `ConfigNotice` are the config watcher's mirror path
   (file → session): `ReloadSettings` as a tool would let a client bypass
   `save_settings` (and with it the persist path and its validation

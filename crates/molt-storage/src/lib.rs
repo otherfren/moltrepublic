@@ -48,8 +48,9 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use molt_core::{
-    EventEnvelope, ManifestWorkspace, RawEnvelope, WorkspaceEvent, WorkspaceId, WorkspaceManifest,
-    WorkspacePrefs, WorkspaceSnapshot, MANIFEST_FORMAT, STORAGE_VERSION,
+    EventEnvelope, ManifestWorkspace, RawEnvelope, TransportState, WorkspaceEvent, WorkspaceId,
+    WorkspaceManifest, WorkspacePrefs, WorkspaceSnapshot, MANIFEST_FORMAT, STORAGE_VERSION,
+    TRANSPORT_STATE_VERSION,
 };
 use sha2::Sha256;
 
@@ -66,6 +67,8 @@ const NONCE_LEN: usize = 24;
 const FRAME_HEADER_LEN: usize = 8;
 /// AAD segment number that marks a snapshot frame (never a real segment).
 const SNAPSHOT_SEGMENT: u64 = u64::MAX;
+/// AAD segment number that marks the `transport.state` frame.
+const TRANSPORT_SEGMENT: u64 = u64::MAX - 1;
 /// Group-commit window: fsync at most this often under sustained load.
 const GROUP_COMMIT: Duration = Duration::from_millis(50);
 /// Bound of the writer queue; a full queue means the disk is falling behind.
@@ -665,6 +668,112 @@ impl OpenedWorkspace {
         self.prefs = p;
         Ok(())
     }
+
+    /// The `transport.state` sub-key: derived from the workspace key, so
+    /// the file shares the workspace's protection without reusing its key.
+    fn transport_key(&self) -> [u8; 32] {
+        hkdf32(&self.key, "molt-transport-state", &self.id)
+    }
+
+    /// Read `transport.state` (transport concept §6): node-local encrypted
+    /// transport bookkeeping. Absent, damaged or newer-versioned files fall
+    /// back to defaults — losing this file costs resends (the peers' dedup
+    /// absorbs them), never history.
+    pub fn read_transport_state(&self) -> TransportState {
+        let path = self.dir.join("transport.state");
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading transport.state failed — starting fresh");
+                return TransportState::default();
+            }
+        };
+        let (frames, torn) = split_frames(&data);
+        if frames.len() != 1 || torn.is_some() {
+            tracing::warn!("transport.state framing is damaged — starting fresh");
+            return TransportState::default();
+        }
+        let plaintext = match decrypt_frame(
+            &self.transport_key(),
+            &self.id,
+            TRANSPORT_SEGMENT,
+            0,
+            frames[0].nonce,
+            frames[0].ciphertext,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "transport.state does not authenticate — starting fresh");
+                return TransportState::default();
+            }
+        };
+        match serde_json::from_slice::<TransportState>(&plaintext) {
+            Ok(st) if st.version <= TRANSPORT_STATE_VERSION => st,
+            Ok(st) => {
+                tracing::warn!(
+                    version = st.version,
+                    "transport.state was written by a newer node — starting fresh (safe: resends dedup)"
+                );
+                TransportState::default()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "transport.state decode failed — starting fresh");
+                TransportState::default()
+            }
+        }
+    }
+
+    /// Rewrite `transport.state` atomically (via `tmp/`, mode 0600), old
+    /// content discarded — this file must never accrete history (from T2
+    /// it holds ratchet state whose deletion IS forward secrecy).
+    pub fn write_transport_state(&self, state: &TransportState) -> Result<(), StorageError> {
+        let mut state = state.clone();
+        state.version = TRANSPORT_STATE_VERSION;
+        let plaintext = serde_json::to_vec(&state)
+            .map_err(|e| StorageError::Corrupt(format!("encoding transport.state: {e}")))?;
+        let frame =
+            encode_frame(&self.transport_key(), &self.id, TRANSPORT_SEGMENT, 0, &plaintext)?;
+        write_atomic(&self.dir, "transport.state", &frame, true)
+    }
+
+    /// Read every envelope with `seq >= from_seq` from the log — the
+    /// log-backed outbox source (transport concept §2). Seq is positional
+    /// (frame k of the whole log is seq k), so frames before `from_seq`
+    /// are counted but not decrypted. Reads on the writer thread are
+    /// consistently ordered with its own appends (same handle, page cache
+    /// — no fsync needed to see them).
+    pub fn read_log_from(&self, from_seq: u64) -> Result<Vec<EventEnvelope>, StorageError> {
+        // the common wakeup finds the cursor at the tip — answer without
+        // touching a single segment (the full scan below is O(log bytes);
+        // a per-segment seq index for long logs is T3 work)
+        if from_seq >= self.next_seq {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut seq: u64 = 0; // seq of the previous frame; current = seq + 1
+        for (seg_no, path) in list_sorted(&self.dir.join("log"), ".mlog") {
+            let data = fs::read(&path)?;
+            let (frames, _torn) = split_frames(&data);
+            for frame in frames {
+                seq += 1;
+                if seq < from_seq {
+                    continue;
+                }
+                let plaintext =
+                    decrypt_frame(&self.key, &self.id, seg_no, seq, frame.nonce, frame.ciphertext)?;
+                match serde_json::from_slice::<EventEnvelope>(&plaintext) {
+                    Ok(env) => out.push(env),
+                    Err(_) => {
+                        // an event from a newer node: it stays on disk and
+                        // is not ours to fan out
+                        tracing::warn!(seq, "skipping an unknown event in the outbox read");
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// `000042.mlog`-style segment file name.
@@ -1145,6 +1254,14 @@ enum WriterMsg {
     Append(EventEnvelope),
     Prefs(WorkspacePrefs),
     Snapshot(WorkspaceSnapshot),
+    /// Outbox read: every envelope with `seq >= from`. Served by the
+    /// writer thread so reads are consistently ordered with queued appends
+    /// (same channel, FIFO — a read enqueued after an append sees it).
+    ReadFrom(u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
+    /// Persist `transport.state` (atomic rewrite).
+    SaveTransport(TransportState),
+    /// Load `transport.state` (defaults when absent/damaged).
+    LoadTransport(tokio::sync::oneshot::Sender<TransportState>),
     Close(mpsc::SyncSender<()>),
 }
 
@@ -1185,6 +1302,51 @@ impl StorageHandle {
     /// Enqueue a snapshot write.
     pub fn snapshot(&self, snap: WorkspaceSnapshot) {
         let _ = self.tx.send(WriterMsg::Snapshot(snap));
+    }
+
+    /// Enqueue one message from an async context. The writer queue is a
+    /// bounded std channel whose `send` blocks when the disk falls behind
+    /// — that must stall a blocking-pool thread, never a tokio worker
+    /// (a couple of blocked workers would freeze the engine and UI).
+    async fn send_from_async(&self, msg: WriterMsg) -> bool {
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || tx.send(msg).is_ok())
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Read every envelope with `seq >= from_seq` — the log-backed outbox
+    /// source. Empty when the writer is gone.
+    pub async fn read_log_from(&self, from_seq: u64) -> Vec<EventEnvelope> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if !self.send_from_async(WriterMsg::ReadFrom(from_seq, tx)).await {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Queue a `transport.state` rewrite (fire-and-forget, like prefs).
+    /// A full writer queue drops the save with a warning: stale cursors
+    /// only cost resends, which the peers' dedup absorbs — better than
+    /// blocking the transport on a struggling disk.
+    pub fn save_transport_state(&self, state: TransportState) {
+        match self.tx.try_send(WriterMsg::SaveTransport(state)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!("writer queue full — dropping a transport.state save");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Load `transport.state` (defaults when absent, damaged, or the
+    /// writer is gone).
+    pub async fn load_transport_state(&self) -> TransportState {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if !self.send_from_async(WriterMsg::LoadTransport(tx)).await {
+            return TransportState::default();
+        }
+        rx.await.unwrap_or_default()
     }
 
     /// Whether the writer hit a fatal error (dying disk); appends after this
@@ -1251,6 +1413,28 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         if let Err(e) = ws.set_prefs(p) {
                             fail(&failed_flag, "prefs write", &e);
                         }
+                    }
+                    Ok(WriterMsg::ReadFrom(from_seq, reply)) => {
+                        match ws.read_log_from(from_seq) {
+                            Ok(events) => {
+                                let _ = reply.send(events);
+                            }
+                            Err(e) => {
+                                // the outbox treats an empty read as "nothing
+                                // pending"; a failing disk surfaces via the
+                                // writer's own failure flag on the next append
+                                tracing::warn!(error = %e, "outbox log read failed");
+                                let _ = reply.send(Vec::new());
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveTransport(state)) => {
+                        if let Err(e) = ws.write_transport_state(&state) {
+                            fail(&failed_flag, "transport.state write", &e);
+                        }
+                    }
+                    Ok(WriterMsg::LoadTransport(reply)) => {
+                        let _ = reply.send(ws.read_transport_state());
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
                         if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {
