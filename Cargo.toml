@@ -82,7 +82,11 @@ slint       = { version = "1", default-features = false, features = ["std", "bac
 slint-build = "1"
 # native file picker (chat file sharing). XDG portal backend: pure Rust
 # (zbus), no GTK build dependency; talks to the desktop's portal service.
-rfd         = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# MUST stay on the async-std/async-io flavor, NOT "tokio": Slint's winit
+# backend uses zbus too (color-scheme portal, on the GUI main thread), and
+# cargo feature-unification would flip Slint's zbus into tokio mode — which
+# panics ("no reactor running") on any thread without a tokio context.
+rfd         = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 [workspace.package]
 version    = "0.0.1"
