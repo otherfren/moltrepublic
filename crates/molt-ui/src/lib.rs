@@ -1174,6 +1174,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     let sealed = seats.iter().filter(|s| s.state == 2).count();
     ui.set_cw_sealed(i32::try_from(sealed).unwrap_or(0));
     ui.set_cw_total(i32::try_from(seats.len()).unwrap_or(0));
+    ui.set_cw_simulated(sv.create.simulated);
     sync_rows(&ui.get_cw_seats(), seats, |m| ui.set_cw_seats(m));
 
     // join
@@ -1780,7 +1781,9 @@ lexicon! {
     cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";
     cw_members_title: "Members", "Mitglieder";
     cw_sealed_word: "sealed", "versiegelt";
+    cw_sim_badge: "SIMULATION", "SIMULATION";
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
+    cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members over SMP arrive with T3.", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder über SMP kommen mit T3.";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     enter_republic: "Enter republic", "Republik betreten";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";

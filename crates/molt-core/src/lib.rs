@@ -1225,6 +1225,12 @@ pub struct CreateState {
     pub seed: String,
     /// The ritual's member list: one row per future member.
     pub seats: Vec<RitualSeatView>,
+    /// The members are in-process simulations (no real network yet, T3):
+    /// the founder's own node auto-activates and signs. The UI shows a
+    /// SIMULATION badge so this is never mistaken for real off-band
+    /// sharing. `false` once members join over a real transport.
+    #[serde(default)]
+    pub simulated: bool,
 }
 
 /// The (mock) join-via-invite lifecycle. Shared session state like the restore.

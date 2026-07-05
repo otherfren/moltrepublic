@@ -327,6 +327,10 @@ impl State {
             .start_ritual(&name, &member, threshold, members, &seed)
             .map_err(MoltError::Create)?;
 
+        // normal path = the founder's node simulates the other members
+        // (no real network yet, T3); the manual/test path does not. Honesty
+        // rule: never pretend a real off-band exchange is happening.
+        let simulated = self.ritual_material_sink.is_none();
         let seats = links
             .into_iter()
             .map(|link| molt_core::RitualSeatView {
@@ -344,13 +348,25 @@ impl State {
             net,
             seed,
             seats,
+            simulated,
         };
         self.session.create.run.log.push(format!(
-            "→ ritual opened · {member} (founder) · {threshold}-of-{members} · invites minted"
+            "→ ritual opened · {member} (founder) · {threshold}-of-{members} · {} invite(s) minted",
+            usize::from(members).saturating_sub(1)
         ));
-        self.session.create.run.log.push(
-            "→ links shared off-band · waiting for members to activate".to_string(),
-        );
+        if simulated {
+            self.session.create.run.log.push(
+                "→ SIMULATION — no real network yet (T3): this node auto-activates and \
+                 signs for every member. Nothing was shared off-band."
+                    .to_string(),
+            );
+        } else {
+            self.session.create.run.log.push(
+                "→ share each link off-band, over a private channel — the ritual waits \
+                 for members to activate"
+                    .to_string(),
+            );
+        }
         self.session.screen = Screen::Create;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

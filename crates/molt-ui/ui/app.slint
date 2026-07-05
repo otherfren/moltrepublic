@@ -232,6 +232,10 @@ export component AppWindow inherits Window {
     in property <[RitualSeat]> cw-seats;
     in property <int> cw-sealed;   // how many rows are green
     in property <int> cw-total;    // total rows (n)
+    // the members are in-process simulations (no real network yet): the
+    // lobby shows a SIMULATION badge so it is never mistaken for a real
+    // off-band exchange
+    in property <bool> cw-simulated;
     // run-header labels ("who is being founded"), composed in Rust so an
     // MCP-started founding shows real values even with an empty local form
     in property <string> cw-run-name;
@@ -1098,22 +1102,42 @@ export component AppWindow inherits Window {
                             padding: 12px;
                             spacing: 8px;
                             HorizontalLayout {
+                                spacing: 8px;
                                 Text {
                                     text: Strings.cw-members-title;
                                     color: Theme.faint;
                                     font-size: Theme.fs-cap;
                                     font-weight: 700;
-                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
                                 }
+                                // honest marker: these members are simulated
+                                if root.cw-simulated: Rectangle {
+                                    background: Theme.warn;
+                                    border-radius: Theme.win95 ? 0px : 4px;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        padding-top: 2px;
+                                        padding-bottom: 2px;
+                                        Text {
+                                            text: Strings.cw-sim-badge;
+                                            color: #1a1200;
+                                            font-size: Theme.fs-cap;
+                                            font-weight: 700;
+                                        }
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                                 Text {
                                     text: "\{root.cw-sealed} / \{root.cw-total} \{Strings.cw-sealed-word}";
                                     color: root.cw-outcome == 1 ? Theme.good : Theme.faint;
                                     font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
                                 }
                             }
                             Text {
-                                text: Strings.cw-ritual-hint;
-                                color: Theme.faint;
+                                text: root.cw-simulated ? Strings.cw-ritual-hint-sim : Strings.cw-ritual-hint;
+                                color: root.cw-simulated ? Theme.warn : Theme.faint;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
                             }
