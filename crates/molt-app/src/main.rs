@@ -457,8 +457,17 @@ fn run_headless(
 }
 
 /// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel.
+///
+/// zbus is capped at ERROR by default: the XDG-portal request pattern
+/// (client creates the Request proxy before the portal creates the object)
+/// makes zbus emit a scary-but-harmless "Failed to populate properties
+/// cache via GetAll" WARN on every portal interaction — Slint's
+/// color-scheme query at startup, the file picker. A user cannot act on
+/// it and nothing is broken, so it does not belong in their terminal.
+/// `RUST_LOG` overrides the whole filter for debugging.
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,zbus=error"));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
