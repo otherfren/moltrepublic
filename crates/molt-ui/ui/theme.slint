@@ -54,8 +54,9 @@ export struct MemberSync {
     state: int, // 0 = synced, 1 = syncing, 2 = offline
 }
 
-// A local workspace/republic shown in the Open screen list (mock data).
+// A local workspace/republic shown in the Open screen list.
 export struct WorkspaceItem {
+    id: string, // the workspace id — the sole address of workspace verbs
     name: string,
     detail: string,
     status: string,
@@ -72,6 +73,7 @@ export struct WorkspaceItem {
 // the S3 bucket, or both. Built Rust-side from the session's workspaces +
 // the bucket-only orphans; prose cells (size/last) are rendered there too.
 export struct BackupRow {
+    id: string, // local workspace id ("" = bucket-only orphan)
     local: string, // local workspace name ("" = bucket-only)
     remote: string, // backup name in the bucket ("" = not backed up)
     has-local: bool, // false = orphan row, auto-backup not toggleable
@@ -277,7 +279,6 @@ export global Strings {
     in property <string> ph-member;
     in property <string> ph-seed;
     in property <string> cw-republic-hint;
-    in property <string> cw-taken;
     in property <string> cw-grp-rule;
     in property <string> cw-rule-hint;
     in property <string> cw-rule-warn;

@@ -159,7 +159,6 @@ export component AppWindow inherits Window {
     pure callback parse-invite(string) -> InvitePreview;
     // whether a workspace of this name already exists (checks the mirrored
     // session list in Rust; the engine re-validates on create-start)
-    pure callback workspace-name-taken(string) -> bool;
     // live run logs, mirrored from the engine session; copy-log("restore" |
     // "create" | "join") joins one and puts it on the clipboard
     in property <[string]> rw-log;
@@ -208,7 +207,6 @@ export component AppWindow inherits Window {
     property <int> cw-members: 3;
     // the recommended threshold: the simple majority of n
     property <int> cw-rule-default: Math.floor(root.cw-members / 2) + 1;
-    property <bool> cw-taken: root.workspace-name-taken(root.cw-name);
     // … and the founding lifecycle, mirrored from the engine session (the
     // engine ticks progress + log and derives the seed + invites):
     // step 0 = configure, 1 = run view; outcome 0 = running, 1 = founded
@@ -349,8 +347,10 @@ export component AppWindow inherits Window {
     // modal: manual backup — choose where the encrypted blob would be written
     property <bool> backup-modal-open: false;
     property <string> backup-path;
-    // modal: confirm deleting a workspace (type its name to arm the button)
+    // modal: confirm deleting a workspace (type its name to arm the button;
+    // the id is what the delete verb actually addresses)
     property <bool> confirm-delete-open: false;
+    property <string> delete-id;
     property <string> delete-name;
     property <string> delete-typed;
 
@@ -885,19 +885,12 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 3;
                                 text <=> root.cw-name;
                                 placeholder: Strings.ph-ws-name;
-                                invalid: root.cw-taken;
                             }
                             AppField {
                                 horizontal-stretch: 2;
                                 text <=> root.cw-member;
                                 placeholder: Strings.ph-member;
                             }
-                        }
-                        if root.cw-taken: DotLabel {
-                            tone: Theme.warn;
-                            label: Strings.cw-taken;
-                            label-color: Theme.warn;
-                            label-size: Theme.fs-cap;
                         }
                     }
 
@@ -1050,7 +1043,7 @@ export component AppWindow inherits Window {
                             icon: @image-url("assets/create.svg");
                             icon-set: true;
                             label: Strings.cw-found;
-                            enabled: root.cw-name != "" && root.cw-member != "" && !root.cw-taken;
+                            enabled: root.cw-name != "" && root.cw-member != "";
                             clicked => {
                                 root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members,
                                     root.cw-net-index == 0 ? "tor" : (root.cw-net-index == 1 ? "nym" : "none"));
@@ -1415,7 +1408,7 @@ export component AppWindow inherits Window {
                                         primary: true;
                                         clicked => {
                                             root.select-workspace(i, w);
-                                            root.open-workspace(w.name);
+                                            root.open-workspace(w.id);
                                         }
                                     }
                                     AppButton {
@@ -1424,6 +1417,7 @@ export component AppWindow inherits Window {
                                         y: (parent.height - self.height) / 2;
                                         label: Strings.ow-delete;
                                         clicked => {
+                                            root.delete-id = w.id;
                                             root.delete-name = w.name;
                                             root.delete-typed = "";
                                             root.confirm-delete-open = true;
@@ -2988,7 +2982,7 @@ export component AppWindow inherits Window {
                                                         }
                                                         TouchArea {
                                                             clicked => {
-                                                                root.set-ws-backup(r.local, !r.auto);
+                                                                root.set-ws-backup(r.id, !r.auto);
                                                             }
                                                         }
                                                     }
@@ -3418,7 +3412,7 @@ export component AppWindow inherits Window {
         confirmed => {
             root.confirm-delete-open = false;
             root.deselect-workspace();
-            root.delete-workspace(root.delete-name);
+            root.delete-workspace(root.delete-id);
         }
         Text {
             text: root.delete-name;
@@ -3501,7 +3495,7 @@ export component AppWindow inherits Window {
                             clicked => {
                                 root.confirm-delete-open = false;
                                 root.deselect-workspace();
-                                root.delete-workspace(root.delete-name);
+                                root.delete-workspace(root.delete-id);
                             }
                         }
                     }

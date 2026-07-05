@@ -4,12 +4,12 @@
 //! but *simulated* stand-in for the real FROST threshold machine.
 
 use molt_core::{
-    Event, MoltError, ProposalId, ProposalState, ProposalView, Reply, StatusView, Surface,
-    SurfaceSnapshot, SurfaceStat,
+    Event, MoltError, ProposalId, ProposalRecord, ProposalState, ProposalView, Reply, StatusView,
+    Surface, SurfaceSnapshot, SurfaceStat, WorkspaceEvent,
 };
 use serde_json::Value;
 
-use crate::{Proposal, State};
+use crate::State;
 
 impl State {
     pub(crate) fn cmd_propose(
@@ -25,86 +25,117 @@ impl State {
                 "payload must be a JSON object".into(),
             ));
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        let approvals = if self.config.self_cosign { 1 } else { 0 };
-        self.proposals.insert(
-            id,
-            Proposal {
+        let me = self.member();
+        let id = ProposalId(self.next_id);
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::Proposed {
+                id,
                 surface,
                 payload,
-                approvals,
-                state: ProposalState::Proposed,
             },
         );
-        self.emit(Event::Proposed {
-            id: ProposalId(id),
-            surface,
-        });
+        self.record(env);
+        self.emit(Event::Proposed { id, surface });
+        if self.config.self_cosign {
+            // the proposer's own approval is an event too — replay must not
+            // depend on the config flag
+            let env = self.make_env(me.clone(), WorkspaceEvent::Approved { id, by: me });
+            self.record(env);
+        }
         // A self-cosign may already satisfy a threshold of 1.
         self.try_apply(id);
-        Ok(Reply::Proposed { id: ProposalId(id) })
+        Ok(Reply::Proposed { id })
     }
 
     pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
-        let pid = proposal.0;
         {
             let p = self
                 .proposals
-                .get_mut(&pid)
+                .get(&proposal.0)
                 .ok_or(MoltError::UnknownProposal(proposal))?;
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
-            p.approvals += 1;
         }
-        let have = self.proposals[&pid].approvals;
+        let me = self.member();
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::Approved {
+                id: proposal,
+                by: me,
+            },
+        );
+        self.record(env);
+        let have = self.proposals.get(&proposal.0).map(|p| p.approvals).unwrap_or(0);
         self.emit(Event::Approved {
             id: proposal,
             have,
             need: self.threshold(),
         });
-        self.try_apply(pid);
+        self.try_apply(proposal);
         Ok(Reply::Ack)
     }
 
     pub(crate) fn cmd_decline(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
-        let p = self
-            .proposals
-            .get_mut(&proposal.0)
-            .ok_or(MoltError::UnknownProposal(proposal))?;
-        if p.state != ProposalState::Proposed {
-            return Err(MoltError::AlreadyTerminal(proposal, p.state));
+        {
+            let p = self
+                .proposals
+                .get(&proposal.0)
+                .ok_or(MoltError::UnknownProposal(proposal))?;
+            if p.state != ProposalState::Proposed {
+                return Err(MoltError::AlreadyTerminal(proposal, p.state));
+            }
         }
-        p.state = ProposalState::Rejected;
+        let me = self.member();
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::Declined {
+                id: proposal,
+                by: me,
+            },
+        );
+        self.record(env);
         self.emit(Event::Rejected { id: proposal });
         Ok(Reply::Ack)
     }
 
-    /// Apply a proposal if it has reached the threshold.
-    fn try_apply(&mut self, pid: u64) {
-        let (surface, payload, ready) = match self.proposals.get(&pid) {
-            Some(p) if p.state == ProposalState::Proposed => (
-                p.surface,
-                p.payload.clone(),
-                p.approvals >= self.threshold(),
-            ),
-            _ => return,
-        };
+    /// Record the `Applied` event once a proposal has reached the threshold.
+    /// The threshold *decision* happens here, at event-creation time; the
+    /// outcome is an event of its own, so replay never re-decides it.
+    fn try_apply(&mut self, id: ProposalId) {
+        let ready = matches!(
+            self.proposals.get(&id.0),
+            Some(p) if p.state == ProposalState::Proposed
+                && p.approvals >= self.threshold()
+        );
         if !ready {
             return;
         }
-        self.applied.entry(surface).or_default().push(payload);
-        if let Some(p) = self.proposals.get_mut(&pid) {
-            p.state = ProposalState::Applied;
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::Applied { id });
+        self.record(env);
+        if let Some(surface) = self.proposals.get(&id.0).map(|p| p.surface) {
+            self.emit(Event::Applied { id, surface });
         }
-        self.emit(Event::Applied {
-            id: ProposalId(pid),
-            surface,
-        });
     }
 
-    pub(crate) fn view(&self, id: u64, p: &Proposal) -> ProposalView {
+    /// Re-decide thresholds after a replay: a crash between an `Approved`
+    /// frame and its `Applied` frame must not leave a proposal stuck at
+    /// `have >= need` forever. Called once per open, after the tail applied.
+    pub(crate) fn recover_pending_applies(&mut self) {
+        let ready: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.state == ProposalState::Proposed && p.approvals >= self.threshold())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ready {
+            self.try_apply(ProposalId(id));
+        }
+    }
+
+    pub(crate) fn view(&self, id: u64, p: &ProposalRecord) -> ProposalView {
         ProposalView {
             id: ProposalId(id),
             surface: p.surface,
@@ -166,8 +197,8 @@ impl State {
             })
             .collect();
         StatusView {
-            member: self.config.member.clone(),
-            members: self.config.members.clone(),
+            member: self.member(),
+            members: self.roster(),
             threshold: self.threshold(),
             surfaces,
         }

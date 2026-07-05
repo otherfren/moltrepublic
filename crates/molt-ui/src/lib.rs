@@ -137,18 +137,9 @@ pub fn run_app(
         None => InvitePreview::default(),
     });
 
-    // Live duplicate-name check for the founding form (against the mirrored
-    // session list; the engine re-validates on CreateStart).
-    {
-        let weak = ui.as_weak();
-        ui.on_workspace_name_taken(move |name| {
-            let Some(ui) = weak.upgrade() else {
-                return false;
-            };
-            let name = name.trim().to_string();
-            ui.get_ws_list().iter().any(|w| w.name == name)
-        });
-    }
+    // NOTE: the old duplicate-name check is gone by design — display names
+    // may repeat, the workspace id disambiguates (the same DAO opened twice
+    // locally is a supported setup).
 
     // The previously applied session settings: the mirror uses it to refresh
     // the settings draft only on real changes, the leave-guard to detect a
@@ -335,14 +326,12 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_open_workspace(move |name| {
+        ui.on_open_workspace(move |id| {
             issue(
                 &rt,
                 &w,
                 &weak,
-                Command::OpenWorkspace {
-                    name: name.to_string(),
-                },
+                Command::OpenWorkspace { id: id.to_string() },
             );
         });
     }
@@ -358,14 +347,12 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_delete_workspace(move |name| {
+        ui.on_delete_workspace(move |id| {
             issue(
                 &rt,
                 &w,
                 &weak,
-                Command::DeleteWorkspace {
-                    name: name.to_string(),
-                },
+                Command::DeleteWorkspace { id: id.to_string() },
             );
         });
     }
@@ -373,13 +360,13 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_set_ws_backup(move |name, enabled| {
+        ui.on_set_ws_backup(move |id, enabled| {
             issue(
                 &rt,
                 &w,
                 &weak,
                 Command::SetWorkspaceBackup {
-                    name: name.to_string(),
+                    id: id.to_string(),
                     enabled,
                 },
             );
@@ -712,6 +699,7 @@ fn workspace_item(w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
         })
         .collect();
     WorkspaceItem {
+        id: w.id.as_str().into(),
         name: w.name.as_str().into(),
         detail: w.detail.as_str().into(),
         status: sync_status_label(w.state, w.last_sync_min, w.sync_queue).into(),
@@ -778,6 +766,7 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         .workspaces
         .iter()
         .map(|w| BackupRow {
+            id: w.id.as_str().into(),
             local: w.name.as_str().into(),
             remote: if w.s3 { w.name.as_str() } else { "" }.into(),
             has_local: true,
@@ -789,6 +778,7 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         })
         .collect();
     rows.extend(sv.backup_orphans.iter().map(|o| BackupRow {
+        id: "".into(),
         local: "".into(),
         remote: o.name.as_str().into(),
         has_local: false,
@@ -947,9 +937,10 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     sync_rows(&ui.get_bk_rows(), bk, |m| ui.set_bk_rows(m));
 
     // the main header shows the active workspace (+ its sync status); the
-    // chat's members strip mirrors the active workspace's roster/presence
-    ui.set_active_workspace(sv.active_workspace.clone().into());
-    let active = sv.workspaces.iter().find(|w| w.name == sv.active_workspace);
+    // chat's members strip mirrors the active workspace's roster/presence.
+    // `active_workspace` is an id; the header wants the display name.
+    let active = sv.workspaces.iter().find(|w| w.id == sv.active_workspace);
+    ui.set_active_workspace(active.map(|w| w.name.as_str()).unwrap_or_default().into());
     let (a_state, a_status) = active
         .map(|w| {
             (
@@ -1537,7 +1528,7 @@ macro_rules! lexicon {
 lexicon! {
     choice_title: "Welcome", "Willkommen";
     choice_subtitle: "Choose how to begin.", "Wähle, wie du beginnen möchtest.";
-    choice_mock_note: "Simulation — workspaces are not stored on disk yet.", "Simulation — Workspaces werden noch nicht auf der Platte gespeichert.";
+    choice_mock_note: "Workspaces are stored encrypted in the workspace folder (see Settings).", "Workspaces werden verschlüsselt im Workspace-Ordner gespeichert (siehe Einstellungen).";
     choice_group_republic: "New republic", "Neue Republik";
     choice_create_title: "Create", "Gründen";
     choice_create_sub: "A new workspace", "Workspace erstellen";
@@ -1571,7 +1562,6 @@ lexicon! {
     ph_member: "my name", "mein Name";
     ph_seed: "word1 word2 word3 …", "wort1 wort2 wort3 …";
     cw_republic_hint: "Its name, and the handle the other members will see you by.", "Ihr Name und das Handle, unter dem dich die anderen Mitglieder sehen.";
-    cw_taken: "A republic with this name already exists on this device.", "Eine Republik mit diesem Namen existiert bereits auf diesem Gerät.";
     cw_grp_rule: "Approval Rules", "Zustimmungsregeln";
     cw_rule_hint: "Gated changes apply only once enough members approve.", "Geschützte Änderungen gelten erst, wenn genug Mitglieder zustimmen.";
     cw_rule_warn: "not recommended", "nicht empfohlen";
@@ -1800,6 +1790,7 @@ mod tests {
 
     fn ws(name: &str, minutes: i32) -> WorkspaceItem {
         WorkspaceItem {
+            id: molt_core::demo_workspace_id(name).into(),
             name: name.into(),
             detail: "".into(),
             status: "".into(),

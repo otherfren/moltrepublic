@@ -24,6 +24,7 @@
 
 mod chat;
 mod configstore;
+mod events;
 mod lifecycles;
 mod proposals;
 mod session;
@@ -34,8 +35,8 @@ use std::path::PathBuf;
 pub use configstore::ConfigStoreHandle;
 
 use molt_core::{
-    ChatMessage, Command, Event, GroupConfig, MoltError, ProposalState, Reply, SessionScope,
-    SessionView, Surface,
+    ChatMessage, Command, Event, GroupConfig, MemberId, MoltError, ProposalRecord, Reply,
+    SessionScope, SessionView, Surface, WorkspaceId,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -85,11 +86,20 @@ impl WalletHandle {
 /// — usually built from the loaded `config.toml`. Must be called from within a
 /// runtime context (the actor is `tokio::spawn`ed).
 ///
-/// This variant runs without config persistence (unit tests, ephemeral
-/// nodes); `moltd` uses [`spawn_with_config`] so settings round-trip with
-/// the node's `config.toml`.
+/// This variant runs without config persistence **and without workspace
+/// storage** (unit tests, ephemeral nodes): workspaces live in the session
+/// only, exactly like the original mock. `moltd` uses [`spawn_with_config`]
+/// so settings round-trip with the node's `config.toml` and workspaces
+/// persist under `workspace_dir`.
 pub fn spawn(config: GroupConfig, session: SessionView) -> WalletHandle {
-    spawn_inner(config, session, None)
+    spawn_inner(config, session, None, false)
+}
+
+/// Like [`spawn`], but with workspace storage under the session's
+/// `workspace_dir`. What `moltd` gets via [`spawn_with_config`]; exposed for
+/// integration tests that want real persistence without a config file.
+pub fn spawn_with_storage(config: GroupConfig, session: SessionView) -> WalletHandle {
+    spawn_inner(config, session, None, true)
 }
 
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
@@ -106,7 +116,7 @@ pub fn spawn_with_config(
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()));
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true);
     Ok((handle, store))
 }
 
@@ -114,9 +124,10 @@ fn spawn_inner(
     config: GroupConfig,
     session: SessionView,
     store: Option<ConfigStoreHandle>,
+    persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist)
 }
 
 fn spawn_actor(
@@ -125,10 +136,11 @@ fn spawn_actor(
     cmd_tx: mpsc::Sender<Envelope>,
     mut cmd_rx: mpsc::Receiver<Envelope>,
     store: Option<ConfigStoreHandle>,
+    persist: bool,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
-    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store);
+    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -142,7 +154,9 @@ fn spawn_actor(
 }
 
 /// Demo entropy for the mock generators: the given material hashed together
-/// with the current time (not cryptography — this feeds a simulation).
+/// with the current time. NOT cryptography and never key material — it only
+/// salts simulation output (mock invite tickets, reply timing); real key
+/// hierarchies come from `molt_storage::generate_seed_phrase`.
 pub(crate) fn entropy_for(material: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -155,20 +169,30 @@ pub(crate) fn entropy_for(material: &str) -> u64 {
     h.finish()
 }
 
-/// Seconds since the Unix epoch — the timestamp chat messages carry.
-pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
+// The one shared clock (event timestamps must not drift from the storage
+// layer's backup/trash age math).
+pub(crate) use molt_storage::now_secs;
+
+/// The replicated identity of the open workspace, established exclusively by
+/// the `Founded` genesis event (and grown by `MemberJoined`) — rule, roster
+/// and the acting member never exist outside the event stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ReplicaState {
+    pub(crate) name: String,
+    pub(crate) member: MemberId,
+    pub(crate) roster: Vec<MemberId>,
+    pub(crate) rule_m: u8,
 }
 
-/// One pending or resolved proposal.
-pub(crate) struct Proposal {
-    pub(crate) surface: Surface,
-    pub(crate) payload: Value,
-    pub(crate) approvals: usize,
-    pub(crate) state: ProposalState,
+/// The storage side of the open workspace: its id, directory, the engine's
+/// authoritative copy of the local prefs (the writer applies updates in
+/// order, so re-reading the file would race queued writes), and the
+/// writer-thread handle every recorded envelope is enqueued on.
+pub(crate) struct ActiveStorage {
+    pub(crate) id: WorkspaceId,
+    pub(crate) dir: PathBuf,
+    pub(crate) prefs: molt_core::WorkspacePrefs,
+    pub(crate) handle: molt_storage::StorageHandle,
 }
 
 /// All authoritative state, owned exclusively by the actor task.
@@ -181,8 +205,20 @@ pub(crate) struct State {
     pub(crate) chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface.
     pub(crate) applied: HashMap<Surface, Vec<Value>>,
-    pub(crate) proposals: HashMap<u64, Proposal>,
+    /// Every known proposal — stored as the schema type
+    /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
+    pub(crate) proposals: HashMap<u64, ProposalRecord>,
     pub(crate) next_id: u64,
+    /// The next event seq (strictly monotonic per workspace; reset on close).
+    pub(crate) next_seq: u64,
+    /// Identity of the open workspace, from its genesis event (None = no
+    /// workspace open; the demo `GroupConfig` fills in).
+    pub(crate) replica: Option<ReplicaState>,
+    /// The open workspace's storage writer (None = nothing open, or a
+    /// session-only workspace on a storage-less engine).
+    pub(crate) active: Option<ActiveStorage>,
+    /// Whether workspaces persist to disk at all ([`spawn`] = false).
+    pub(crate) persist: bool,
     /// The shared app/session state (screen, language, settings, …).
     pub(crate) session: SessionView,
     /// The config file owner (None = no persistence: tests, ephemeral nodes).
@@ -199,6 +235,7 @@ impl State {
         ev_tx: broadcast::Sender<Event>,
         cmd_tx: mpsc::Sender<Envelope>,
         store: Option<ConfigStoreHandle>,
+        persist: bool,
     ) -> Self {
         let mut applied = HashMap::new();
         for s in Surface::ALL {
@@ -213,10 +250,30 @@ impl State {
             applied,
             proposals: HashMap::new(),
             next_id: 1,
+            next_seq: 1,
+            replica: None,
+            active: None,
+            persist,
             session,
             store,
             boot_settings,
         }
+    }
+
+    /// The acting member: the open workspace's identity, else the boot group.
+    pub(crate) fn member(&self) -> MemberId {
+        self.replica
+            .as_ref()
+            .map(|r| r.member.clone())
+            .unwrap_or_else(|| self.config.member.clone())
+    }
+
+    /// The member roster: the open workspace's, else the boot group's.
+    pub(crate) fn roster(&self) -> Vec<MemberId> {
+        self.replica
+            .as_ref()
+            .map(|r| r.roster.clone())
+            .unwrap_or_else(|| self.config.members.clone())
     }
 
     pub(crate) fn emit(&self, ev: Event) {
@@ -231,7 +288,11 @@ impl State {
     }
 
     pub(crate) fn threshold(&self) -> usize {
-        self.config.threshold.max(1)
+        self.replica
+            .as_ref()
+            .map(|r| usize::from(r.rule_m))
+            .unwrap_or(self.config.threshold)
+            .max(1)
     }
 
     /// Dispatch one command to its module.
@@ -273,11 +334,11 @@ impl State {
                 theme,
             } => self.cmd_reload_settings(settings, language, theme),
             Command::ConfigNotice { notice } => self.cmd_config_notice(notice),
-            Command::OpenWorkspace { name } => self.cmd_open_workspace(name),
+            Command::OpenWorkspace { id } => self.cmd_open_workspace(id),
             Command::CloseWorkspace => self.cmd_close_workspace(),
-            Command::DeleteWorkspace { name } => self.cmd_delete_workspace(name),
-            Command::SetWorkspaceBackup { name, enabled } => {
-                self.cmd_set_workspace_backup(name, enabled)
+            Command::DeleteWorkspace { id } => self.cmd_delete_workspace(id),
+            Command::SetWorkspaceBackup { id, enabled } => {
+                self.cmd_set_workspace_backup(id, enabled)
             }
 
             // lifecycles.rs
@@ -306,7 +367,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use molt_core::{Screen, SessionSettings};
+    use molt_core::{demo_workspace_id, Screen, SessionSettings};
     use serde_json::json;
 
     fn rt() -> tokio::runtime::Runtime {
@@ -314,6 +375,176 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime")
+    }
+
+    /// A bare actor state for unit tests of the event applier (no runtime,
+    /// no storage, no config store).
+    pub(crate) fn plain_state() -> State {
+        let (ev_tx, _keep) = broadcast::channel::<Event>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
+        State::new(
+            GroupConfig::demo(),
+            SessionView::default(),
+            ev_tx,
+            cmd_tx,
+            None,
+            false,
+        )
+    }
+
+    async fn read_session(w: &WalletHandle) -> Box<SessionView> {
+        match w.execute(Command::ReadSession).await.expect("read session") {
+            Reply::Session(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    async fn read_surface(w: &WalletHandle, surface: Surface) -> molt_core::SurfaceSnapshot {
+        match w
+            .execute(Command::ReadState { surface })
+            .await
+            .expect("read state")
+        {
+            Reply::State(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The "it survives a restart" keystone: found a republic on a storage
+    /// engine, write chat + a threshold-applied proposal, close, reopen —
+    /// the replayed state equals the live state exactly.
+    #[test]
+    fn workspace_state_survives_close_and_reopen() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let session = SessionView {
+                workspaces: Vec::new(),
+                settings: SessionSettings {
+                    workspace_dir: tmp.path().join("workspaces").display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = spawn_with_storage(GroupConfig::demo(), session);
+
+            // found a 2-of-3 republic
+            w.execute(Command::CreateStart {
+                name: "Keystone".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+                net: "tor".to_string(),
+            })
+            .await
+            .expect("create start");
+            for _ in 0..60 {
+                if w.execute(Command::CreateTick).await.is_err() {
+                    break;
+                }
+            }
+            w.execute(Command::CreateFinish).await.expect("finish");
+            let s = read_session(&w).await;
+            let id = s.active_workspace.clone();
+            assert_eq!(id.len(), 64, "a real derived workspace id");
+            let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
+            assert_eq!(ws.name, "Keystone");
+            // the recovery phrase is shown once in the wizard and never
+            // kept in the shared session of a persisted workspace
+            assert!(ws.seed.is_empty());
+
+            // write history: chat, reaction, delete, proposal to threshold
+            w.execute(Command::Chat {
+                body: "first".to_string(),
+                quote: None,
+            })
+            .await
+            .expect("chat 1");
+            w.execute(Command::Chat {
+                body: "second".to_string(),
+                quote: Some(0),
+            })
+            .await
+            .expect("chat 2");
+            w.execute(Command::ReactChat {
+                index: 0,
+                emoji: "👍".to_string(),
+            })
+            .await
+            .expect("react");
+            let pid = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"persisted"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            w.execute(Command::Approve { proposal: pid })
+                .await
+                .expect("approve");
+            w.execute(Command::DeleteChat { index: 1 })
+                .await
+                .expect("delete");
+
+            let chat_before = read_surface(&w, Surface::Chat).await;
+            let memory_before = read_surface(&w, Surface::Memory).await;
+
+            // close (flush + closing snapshot + LOCK release), then reopen
+            w.execute(Command::CloseWorkspace).await.expect("close");
+            assert_eq!(read_session(&w).await.active_workspace, "");
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("reopen");
+
+            let s = read_session(&w).await;
+            assert_eq!(s.active_workspace, id);
+            assert_eq!(s.screen, Screen::Main);
+            let chat_after = read_surface(&w, Surface::Chat).await;
+            let memory_after = read_surface(&w, Surface::Memory).await;
+            assert_eq!(chat_after.applied, chat_before.applied);
+            assert_eq!(memory_after.applied, memory_before.applied);
+            assert_eq!(memory_after.pending.len(), memory_before.pending.len());
+
+            // the roster and rule replayed from the genesis event
+            match w.execute(Command::Status).await.expect("status") {
+                Reply::Status(st) => {
+                    assert_eq!(st.member, "petra");
+                    assert_eq!(st.threshold, 2);
+                    assert_eq!(st.members.len(), 3);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+
+            // a second engine cannot open it while we hold the LOCK
+            w.execute(Command::CloseWorkspace).await.expect("close 2");
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("open 3");
+            let session2 = SessionView {
+                workspaces: read_session(&w).await.workspaces.clone(),
+                settings: SessionSettings {
+                    workspace_dir: tmp.path().join("workspaces").display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w2 = spawn_with_storage(GroupConfig::demo(), session2);
+            assert!(matches!(
+                w2.execute(Command::OpenWorkspace { id: id.clone() }).await,
+                Err(MoltError::WorkspaceBusy(_))
+            ));
+
+            // deleting moves the directory to .trash and closes it
+            w.execute(Command::DeleteWorkspace { id: id.clone() })
+                .await
+                .expect("delete ws");
+            let root = tmp.path().join("workspaces");
+            assert!(molt_storage::find_workspace_dir(&root, &id).is_none());
+            assert!(root.join(".trash").read_dir().expect("trash").count() > 0);
+        });
     }
 
     #[test]
@@ -344,7 +575,7 @@ mod tests {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             // "Savings-DAO" ships without auto-backup
             w.execute(Command::SetWorkspaceBackup {
-                name: "Savings-DAO".into(),
+                id: demo_workspace_id("Savings-DAO"),
                 enabled: true,
             })
             .await
@@ -363,7 +594,7 @@ mod tests {
             }
             let err = w
                 .execute(Command::SetWorkspaceBackup {
-                    name: "No Such".into(),
+                    id: demo_workspace_id("No Such"),
                     enabled: true,
                 })
                 .await;
@@ -520,16 +751,16 @@ mod tests {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
 
-            // open by name moves to main and records the active workspace
+            // open by id moves to main and records the active workspace
             w.execute(Command::OpenWorkspace {
-                name: "Family Office".to_string(),
+                id: demo_workspace_id("Family Office"),
             })
             .await
             .expect("open");
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, "Family Office");
+                    assert_eq!(s.active_workspace, demo_workspace_id("Family Office"));
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -537,7 +768,7 @@ mod tests {
             // deleting an unknown workspace is an error
             assert!(matches!(
                 w.execute(Command::DeleteWorkspace {
-                    name: "Nope".to_string(),
+                    id: demo_workspace_id("Nope"),
                 })
                 .await,
                 Err(MoltError::UnknownWorkspace(_))
@@ -568,7 +799,11 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read3") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, "Restored Republic");
+                    assert_eq!(s.active_workspace, demo_workspace_id("Restored Republic"));
+                    assert!(s
+                        .workspaces
+                        .iter()
+                        .any(|ws| ws.name == "Restored Republic"));
                     assert_eq!(s.restore.run.step, 0);
                 }
                 other => panic!("unexpected: {other:?}"),
@@ -613,17 +848,6 @@ mod tests {
                 .await,
                 Err(MoltError::Create(_))
             ));
-            assert!(matches!(
-                w.execute(Command::CreateStart {
-                    name: "Family Office".to_string(), // duplicate
-                    member: "me".to_string(),
-                    threshold: 2,
-                    members: 3,
-                    net: "tor".to_string(),
-                })
-                .await,
-                Err(MoltError::Create(_))
-            ));
             for bad_n in [1_u8, 14] {
                 assert!(matches!(
                     w.execute(Command::CreateStart {
@@ -656,7 +880,7 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
                     assert_eq!(s.create.run.outcome, 1);
-                    assert_eq!(s.create.seed.split(' ').count(), 12);
+                    assert_eq!(s.create.seed.split(' ').count(), 24);
                     assert_eq!(s.create.invites.len(), 2);
                     for inv in &s.create.invites {
                         let info = molt_core::InviteInfo::parse(inv).expect("invite parses");
@@ -670,7 +894,7 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, "Chess Club");
+                    assert_eq!(s.active_workspace, demo_workspace_id("Chess Club"));
                     let ws = s
                         .workspaces
                         .iter()
@@ -714,7 +938,7 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, "Chess Club");
+                    assert_eq!(s.active_workspace, demo_workspace_id("Chess Club"));
                     let ws = s
                         .workspaces
                         .iter()

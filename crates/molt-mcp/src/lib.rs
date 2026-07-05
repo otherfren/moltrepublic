@@ -549,14 +549,14 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "open_workspace",
             command: "open_workspace",
-            description: "Open a locally known workspace: it becomes active and the node moves to the main screen.",
+            description: "Open a locally known workspace by its id (see read_session → workspaces[].id): its state loads from disk, it becomes active, and the node moves to the main screen.",
             schema: || json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
+                "properties": { "id": { "type": "string", "description": "the workspace id from read_session" } },
+                "required": ["id"]
             }),
             build: |args| Ok(Command::OpenWorkspace {
-                name: str_arg(args, "name")?,
+                id: str_arg(args, "id")?,
             }),
         },
         ToolDef {
@@ -569,30 +569,30 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "delete_workspace",
             command: "delete_workspace",
-            description: "Forget a locally known workspace (mock: removes the list entry).",
+            description: "Forget a locally known workspace by its id: its directory moves to the recoverable .trash and the list entry disappears.",
             schema: || json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
+                "properties": { "id": { "type": "string", "description": "the workspace id from read_session" } },
+                "required": ["id"]
             }),
             build: |args| Ok(Command::DeleteWorkspace {
-                name: str_arg(args, "name")?,
+                id: str_arg(args, "id")?,
             }),
         },
         ToolDef {
             name: "set_workspace_backup",
             command: "set_workspace_backup",
-            description: "Switch automatic S3 backup on or off for one workspace (mock: enabling stamps a first backup).",
+            description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml; enabling stamps a first backup).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string" },
+                    "id": { "type": "string", "description": "the workspace id from read_session" },
                     "enabled": { "type": "boolean" }
                 },
-                "required": ["name", "enabled"]
+                "required": ["id", "enabled"]
             }),
             build: |args| Ok(Command::SetWorkspaceBackup {
-                name: str_arg(args, "name")?,
+                id: str_arg(args, "id")?,
                 enabled: bool_arg(args, "enabled")?,
             }),
         },

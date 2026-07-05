@@ -24,6 +24,12 @@ use serde_json::Value;
 /// future `molt-identity` concern.
 pub type MemberId = String;
 
+/// The sole address of a workspace across the command set: 32 bytes, lowercase
+/// hex (64 chars), derived from the recovery seed and the member identity
+/// (`HKDF(seed, "molt-ws-id", member)` — see `molt-storage`). Display names
+/// are presentation only and may repeat; the id never does.
+pub type WorkspaceId = String;
+
 /// The shared surfaces. [`Surface::Organization`] is a read-only info area
 /// and [`Surface::Chat`] is ungated; the other four change the shared state
 /// only through a threshold-approved proposal.
@@ -264,10 +270,41 @@ pub struct MemberInfo {
     pub state: u8,
 }
 
-/// A locally known workspace/republic. Mock data, but it lives in the shared
-/// session so the GUI's Open screen and an MCP agent see the *same* list.
+/// Project a member roster into the session's [`MemberInfo`] shape: members
+/// for whom `synced` holds are "just now"/online, everyone else gets
+/// `absent_label` and shows offline. The one projection every flow uses —
+/// presence is the transport's runtime state, so until that exists these
+/// labels are the honest defaults.
+pub fn roster_members(
+    roster: &[MemberId],
+    synced: impl Fn(&str) -> bool,
+    absent_label: &str,
+) -> Vec<MemberInfo> {
+    roster
+        .iter()
+        .map(|m| {
+            let is_synced = synced(m);
+            MemberInfo {
+                name: m.clone(),
+                last: if is_synced {
+                    "just now".to_string()
+                } else {
+                    absent_label.to_string()
+                },
+                state: if is_synced { 0 } else { 2 },
+            }
+        })
+        .collect()
+}
+
+/// A locally known workspace/republic. It lives in the shared session so the
+/// GUI's Open screen and an MCP agent see the *same* list; on a real node it
+/// is built by scanning `workspace_dir/*/manifest.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
+    /// The workspace id — the sole address across the command set.
+    #[serde(default)]
+    pub id: WorkspaceId,
     /// Display name.
     pub name: String,
     /// Threshold summary, e.g. `"3-of-5"`.
@@ -299,12 +336,44 @@ pub struct WorkspaceInfo {
     pub members: Vec<MemberInfo>,
 }
 
+/// A stable fake [`WorkspaceId`] for demo entries: an FNV-1a hash of the
+/// name, expanded to 32 bytes with splitmix-style mixing — distinct names
+/// yield distinct ids (no cyclic-name collisions, unlike naive byte
+/// repetition). Real ids come from the seed derivation in `molt-storage`;
+/// this exists so session-only demo lists are addressable by id too.
+pub fn demo_workspace_id(name: &str) -> WorkspaceId {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // hash the length in as well so "a" and "a\0"-style paddings differ
+    h ^= u64::try_from(name.len()).unwrap_or(u64::MAX);
+    let mut id = String::with_capacity(64);
+    for i in 0..4u64 {
+        // splitmix64 finalizer over (h + block index)
+        let mut z = h.wrapping_add(i.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        id.push_str(&format!("{z:016x}"));
+    }
+    id
+}
+
 impl WorkspaceInfo {
     /// Sentinel for [`WorkspaceInfo::last_backup_min`]: never backed up.
     pub const NEVER: u32 = u32::MAX;
 
     fn never() -> u32 {
         Self::NEVER
+    }
+
+    /// The one rendering of the threshold rule (`"m-of-n"`) every list
+    /// entry uses — Open screen, lifecycle finishes and the disk scan must
+    /// not each own a format string.
+    pub fn rule_detail(rule_m: u8, rule_n: usize) -> String {
+        format!("{rule_m}-of-{rule_n}")
     }
 
     /// The demo set of local republics the scaffold ships with.
@@ -332,6 +401,7 @@ impl WorkspaceInfo {
             members: Vec<MemberInfo>,
         ) -> WorkspaceInfo {
             WorkspaceInfo {
+                id: demo_workspace_id(name),
                 name: name.to_string(),
                 detail: detail.to_string(),
                 synced,
@@ -526,6 +596,289 @@ pub struct ChatMessage {
     pub deleted_by: Option<MemberId>,
 }
 
+// ---------------------------------------------------------------------------
+// Workspace storage schema (concept-workspace-storage.md). Typed structs in
+// molt-core ARE the schema; the I/O lives in `molt-storage` (core holds no
+// I/O). Every file starts with a format marker and version.
+// ---------------------------------------------------------------------------
+
+/// Format marker of `manifest.toml`.
+pub const MANIFEST_FORMAT: &str = "molt-workspace";
+/// Format marker of `prefs.toml`.
+pub const PREFS_FORMAT: &str = "molt-workspace-prefs";
+/// Highest manifest/log schema version this build understands. Opening
+/// refuses politely above it; listing stays possible (forward compatibility
+/// is a feature of the list screen, not of opening).
+pub const STORAGE_VERSION: u32 = 1;
+
+/// `manifest.toml` — the plaintext identity card of a workspace directory.
+/// Deliberately *minimal*: what the Open screen needs before the user
+/// authorizes decryption, and nothing that leaks content (no roster, no
+/// acting member handle). Written once at creation, rewritten only on rename.
+///
+/// Parsed leniently (`deny_unknown_fields` off, defaults where sensible):
+/// manifests written by a newer node must stay listable by an older one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceManifest {
+    /// Format marker, [`MANIFEST_FORMAT`].
+    #[serde(default)]
+    pub format: String,
+    /// Schema version; opening checks `version <= STORAGE_VERSION`.
+    #[serde(default)]
+    pub version: u32,
+    /// The identity card.
+    pub workspace: ManifestWorkspace,
+    /// Crypto parameters for the key-sealing path.
+    #[serde(default)]
+    pub crypto: CryptoParams,
+}
+
+/// The `[workspace]` table of the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestWorkspace {
+    /// 32-byte hex id, derived from the seed + member identity.
+    pub id: WorkspaceId,
+    /// Display name (presentation only; may repeat across workspaces).
+    pub name: String,
+    /// Creation time, unix seconds.
+    #[serde(default)]
+    pub created: u64,
+    /// Approval threshold (m). A plaintext copy for the list screen; the
+    /// authoritative value is the `Founded` genesis event.
+    #[serde(default)]
+    pub rule_m: u8,
+    /// Member count (n). Plaintext copy, like `rule_m`.
+    #[serde(default)]
+    pub rule_n: u8,
+}
+
+/// The `[crypto]` table of the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CryptoParams {
+    /// Key-derivation for the (future, opt-in) passphrase sealing path.
+    #[serde(default = "default_kdf")]
+    pub kdf: String,
+    /// The AEAD used for frames, snapshots and exports.
+    #[serde(default = "default_cipher")]
+    pub cipher: String,
+    /// Path of the sealed workspace key, relative to the workspace dir.
+    #[serde(default = "default_key_file")]
+    pub key_file: String,
+}
+
+impl Default for CryptoParams {
+    fn default() -> Self {
+        CryptoParams {
+            kdf: default_kdf(),
+            cipher: default_cipher(),
+            key_file: default_key_file(),
+        }
+    }
+}
+
+fn default_kdf() -> String {
+    "argon2id".to_string()
+}
+fn default_cipher() -> String {
+    "xchacha20poly1305".to_string()
+}
+fn default_key_file() -> String {
+    "keys/workspace.key".to_string()
+}
+
+/// `prefs.toml` — per-workspace settings that are *this node's business*,
+/// not shared history: they belong neither in the manifest (identity only)
+/// nor in the event log (toggling a local backup must not fork history).
+/// Rewritten atomically via `tmp/` on every change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePrefs {
+    /// Format marker, [`PREFS_FORMAT`].
+    #[serde(default)]
+    pub format: String,
+    /// Schema version.
+    #[serde(default)]
+    pub version: u32,
+    /// Automatic S3 backup on/off.
+    #[serde(default)]
+    pub s3_backup: bool,
+    /// Unix seconds of the last completed backup; `None` = never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup: Option<u64>,
+}
+
+impl Default for WorkspacePrefs {
+    fn default() -> Self {
+        WorkspacePrefs {
+            format: PREFS_FORMAT.to_string(),
+            version: STORAGE_VERSION,
+            s3_backup: false,
+            last_backup: None,
+        }
+    }
+}
+
+/// One event in a workspace's append-only history: the envelope every log
+/// frame carries. `apply(event)` in the engine is the only thing that
+/// mutates workspace state — replaying the log from zero reconstructs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    /// Strictly monotonic per workspace; the log's primary key.
+    pub seq: u64,
+    /// Unix seconds (engine clock at event creation).
+    pub ts: u64,
+    /// Who caused it (member handle for now; MLS leaf identity later).
+    pub by: MemberId,
+    /// What happened.
+    pub body: WorkspaceEvent,
+}
+
+/// What can happen in a workspace. **Additive-only evolution**: new kinds
+/// append variants; an older reader that meets an unknown variant must not
+/// write to that workspace (applying a partial history would fork state).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkspaceEvent {
+    /// seq 1, exactly once: who this republic is. Rule, roster and the
+    /// acting member never exist outside the event stream.
+    Founded {
+        /// Display name at founding.
+        name: String,
+        /// Approval threshold (m).
+        rule_m: u8,
+        /// Member count (n).
+        rule_n: u8,
+        /// The acting member on this node.
+        member: MemberId,
+        /// The full member roster (filled seats + open invites).
+        roster: Vec<MemberId>,
+    },
+    /// A seat filled via invite.
+    MemberJoined {
+        /// The joining member.
+        member: MemberId,
+    },
+    /// A chat message was posted (the existing typed schema).
+    Chat(ChatMessage),
+    /// A member's emoji reaction on a chat message was toggled.
+    ChatReacted {
+        /// Message position in the chat log (0-based).
+        index: u64,
+        /// The reaction emoji.
+        emoji: String,
+        /// Who toggled it.
+        by: MemberId,
+    },
+    /// A chat message was wiped; only the deletion notice remains.
+    ChatDeleted {
+        /// Message position in the chat log (0-based).
+        index: u64,
+        /// Who deleted it.
+        by: MemberId,
+    },
+    /// An object was put forward for threshold approval.
+    Proposed {
+        /// The proposal id (assigned in delivery order).
+        id: ProposalId,
+        /// The gated target surface.
+        surface: Surface,
+        /// The surface-specific transition.
+        payload: Value,
+    },
+    /// One member's approval landed on a pending proposal.
+    Approved {
+        /// The proposal.
+        id: ProposalId,
+        /// The approving member.
+        by: MemberId,
+    },
+    /// A pending proposal was declined.
+    Declined {
+        /// The proposal.
+        id: ProposalId,
+        /// The declining member.
+        by: MemberId,
+    },
+    /// A proposal reached the threshold; its payload joined the surface log.
+    Applied {
+        /// The proposal.
+        id: ProposalId,
+    },
+    /// Roster presence checkpoint.
+    MemberSeen {
+        /// The member that was seen.
+        member: MemberId,
+        /// When (unix seconds).
+        ts: u64,
+    },
+}
+
+/// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on
+/// an unknown enum variant, so decoding is two-stage — try the typed
+/// envelope, on failure fall back to this raw form. Today the raw decode is
+/// a validity probe: the frame stays untouched on disk and only a count of
+/// unknown events surfaces (which blocks writing). Re-emitting preserved
+/// raw frames on compaction is a later concern — compaction does not exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawEnvelope {
+    /// Strictly monotonic per workspace.
+    pub seq: u64,
+    /// Unix seconds.
+    pub ts: u64,
+    /// Who caused it.
+    pub by: MemberId,
+    /// The unparsed event body.
+    pub body: Value,
+}
+
+/// A serializable proposal record (the engine's in-memory `Proposal`, as
+/// the snapshot stores it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    /// The gated target surface.
+    pub surface: Surface,
+    /// The proposed transition.
+    pub payload: Value,
+    /// Approvals collected so far.
+    pub approvals: usize,
+    /// Lifecycle state.
+    pub state: ProposalState,
+}
+
+/// Exactly what the engine actor holds for one workspace — the snapshot
+/// payload. Replaying the full log from zero produces the same dump as any
+/// snapshot plus its tail (the keystone determinism test pins this).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineStateDump {
+    /// Display name (from the genesis event).
+    pub name: String,
+    /// The acting member on this node.
+    pub member: MemberId,
+    /// Approval threshold (m).
+    pub rule_m: u8,
+    /// The member roster.
+    pub roster: Vec<MemberId>,
+    /// The chat log.
+    pub chat: Vec<ChatMessage>,
+    /// Applied transition log per gated surface (keyed by surface name).
+    pub applied: BTreeMap<String, Vec<Value>>,
+    /// Every known proposal by id.
+    pub proposals: BTreeMap<u64, ProposalRecord>,
+    /// The next proposal id to assign.
+    pub next_proposal_id: u64,
+}
+
+/// A state snapshot at a log position. Snapshots are an *optimization* —
+/// deleting them must always be safe (the log holds the truth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    /// Snapshot schema version.
+    pub version: u32,
+    /// The log seq this snapshot captures (replay frames `> at_seq`).
+    pub at_seq: u64,
+    /// The engine state at `at_seq`.
+    pub state: EngineStateDump,
+}
+
 /// A parsed (mock) invite link. The one wire format both the GUI preview and
 /// the engine's join run use: `molt://invite/<republic>/<m>of<n>/<inviter>/<ticket>`
 /// (spaces in the republic name travel as dashes).
@@ -607,28 +960,13 @@ pub mod mockrand {
     }
 }
 
-/// The mock wordlist the demo derives recovery phrases from.
-const SEED_WORDS: [&str; 48] = [
-    "amber", "basalt", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "indigo", "juniper",
-    "kelp", "lantern", "marble", "nectar", "onyx", "pebble", "quartz", "raven", "saffron",
-    "thistle", "umber", "vellum", "willow", "yarrow", "zenith", "anchor", "birch", "cobalt",
-    "dune", "elm", "flint", "grove", "heron", "iris", "jade", "krill", "lichen", "moss", "north",
-    "otter", "pine", "quill", "reef", "slate", "tide", "vale", "wren", "yew",
-];
-
 use mockrand::lcg;
 
-/// Derive a mock 12-word recovery phrase from `entropy`.
-pub fn mock_seed(entropy: u64) -> String {
-    let mut x = lcg(entropy);
-    let mut words = Vec::with_capacity(12);
-    for _ in 0..12 {
-        x = lcg(x);
-        let idx = usize::try_from((x >> 33) % 48).unwrap_or_default();
-        words.push(SEED_WORDS[idx]);
-    }
-    words.join(" ")
-}
+// NOTE: the old `mock_seed` (12 words off a 48-word LCG list) is gone on
+// purpose: founded workspaces derive their key hierarchy from a real
+// OS-CSPRNG seed rendered as a BIP-39 phrase (`molt-storage::keys`). A key
+// hierarchy hanging off ~30 bits of hashed wall-clock is decorative
+// encryption. `mock_ticket` below still feeds the simulated invite flow.
 
 /// Derive a mock one-time invite ticket (10 base32 characters) from `entropy`.
 pub fn mock_ticket(entropy: u64) -> String {
@@ -763,8 +1101,9 @@ pub struct SessionView {
     /// Backups in the S3 bucket without a local workspace (mock, static).
     #[serde(default)]
     pub backup_orphans: Vec<BackupOrphan>,
-    /// Name of the currently opened workspace (empty = none).
-    pub active_workspace: String,
+    /// Id of the currently opened workspace (empty = none). The display
+    /// name lives in the matching [`WorkspaceInfo`] entry.
+    pub active_workspace: WorkspaceId,
     /// The (mock) restore lifecycle.
     pub restore: RestoreState,
     /// The (mock) founding lifecycle.
@@ -928,24 +1267,29 @@ pub enum Command {
         notice: String,
     },
     // --- workspaces & restore (shared, co-equal) ---
-    /// Open a locally known workspace: it becomes active and the node moves
+    /// Open a locally known workspace: its state is loaded from disk
+    /// (snapshot + event-log tail), it becomes active and the node moves
     /// to the main screen.
     OpenWorkspace {
-        /// The workspace's display name.
-        name: String,
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
     },
-    /// Close the active workspace and return to the choice screen.
+    /// Close the active workspace (flush + closing snapshot, release the
+    /// lock) and return to the choice screen.
     CloseWorkspace,
-    /// Forget a locally known workspace (mock: removes the list entry).
+    /// Forget a locally known workspace: its directory moves to the
+    /// recoverable `.trash` (entries older than 30 days are purged at
+    /// startup) and the list entry disappears.
     DeleteWorkspace {
-        /// The workspace's display name.
-        name: String,
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
     },
-    /// Switch automatic S3 backup on or off for one workspace. Enabling
-    /// runs a first backup right away (mock: stamps "just now").
+    /// Switch automatic S3 backup on or off for one workspace; persisted in
+    /// the workspace's local `prefs.toml`. Enabling runs a first backup
+    /// right away (the uploader itself is not wired yet).
     SetWorkspaceBackup {
-        /// The workspace's display name.
-        name: String,
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
         /// New auto-backup state.
         enabled: bool,
     },
@@ -1239,6 +1583,12 @@ pub enum MoltError {
     /// The named workspace is not in the local list.
     #[error("unknown workspace `{0}`")]
     UnknownWorkspace(String),
+    /// The workspace is already open (locally or by another process).
+    #[error("workspace is busy: {0}")]
+    WorkspaceBusy(String),
+    /// A storage operation failed (I/O, corruption, wrong key, …).
+    #[error("storage: {0}")]
+    Storage(String),
     /// The named sub-view does not exist on the given surface.
     #[error("surface {0:?} has no view `{1}`")]
     UnknownView(Surface, String),
@@ -1290,12 +1640,42 @@ mod tests {
 
     #[test]
     fn mock_generators_are_deterministic() {
-        let seed = mock_seed(42);
-        assert_eq!(seed, mock_seed(42));
-        assert_ne!(seed, mock_seed(43));
-        assert_eq!(seed.split(' ').count(), 12);
         let ticket = mock_ticket(42);
         assert_eq!(ticket.len(), 10);
         assert_eq!(ticket, mock_ticket(42));
+        assert_ne!(ticket, mock_ticket(43));
+    }
+
+    #[test]
+    fn event_envelope_roundtrips_and_unknown_variants_fall_back_raw() {
+        let env = EventEnvelope {
+            seq: 7,
+            ts: 1_751_700_000,
+            by: "mithra".to_string(),
+            body: WorkspaceEvent::ChatReacted {
+                index: 3,
+                emoji: "🔥".to_string(),
+                by: "mithra".to_string(),
+            },
+        };
+        let wire = serde_json::to_string(&env).expect("encode");
+        let back: EventEnvelope = serde_json::from_str(&wire).expect("decode");
+        assert_eq!(back, env);
+
+        // a frame written by a newer node: the typed decode fails, the raw
+        // fallback preserves the envelope for re-emission
+        let newer = r#"{"seq":8,"ts":1,"by":"x","body":{"type":"hologram","q":1}}"#;
+        assert!(serde_json::from_str::<EventEnvelope>(newer).is_err());
+        let raw: RawEnvelope = serde_json::from_str(newer).expect("raw fallback");
+        assert_eq!(raw.seq, 8);
+        assert_eq!(raw.body["type"], serde_json::json!("hologram"));
+    }
+
+    #[test]
+    fn demo_workspace_ids_are_stable_and_distinct() {
+        let a = demo_workspace_id("Family Office");
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, demo_workspace_id("Family Office"));
+        assert_ne!(a, demo_workspace_id("Savings-DAO"));
     }
 }

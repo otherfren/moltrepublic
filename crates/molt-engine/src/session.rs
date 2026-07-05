@@ -3,10 +3,22 @@
 //! Shared app/session state: navigation, language, theme, settings and the
 //! locally known workspaces. All of it is co-equal — the GUI and MCP drive
 //! the same commands and mirror the same session.
+//!
+//! The workspace verbs are storage-backed on a persistent engine
+//! ([`crate::spawn_with_config`] / [`crate::spawn_with_storage`]): open
+//! loads snapshot + log tail through the event applier, close writes a
+//! closing snapshot and releases the LOCK, delete moves the directory to
+//! the recoverable `.trash`. On a storage-less engine ([`crate::spawn`])
+//! they keep the original session-only behavior.
 
-use molt_core::{MoltError, Reply, Screen, SessionScope, SessionSettings, Surface};
+use std::path::PathBuf;
 
-use crate::State;
+use molt_core::{
+    roster_members, MoltError, Reply, Screen, SessionScope, SessionSettings, Surface,
+    WorkspaceEvent, WorkspaceId, WorkspaceInfo,
+};
+
+use crate::{ActiveStorage, State};
 
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
@@ -153,18 +165,128 @@ impl State {
         self.session.restart_required = keys;
     }
 
-    pub(crate) fn cmd_open_workspace(&mut self, name: String) -> Result<Reply, MoltError> {
-        if !self.session.workspaces.iter().any(|w| w.name == name) {
-            return Err(MoltError::UnknownWorkspace(name));
+    /// The resolved workspace root (`storage.workspace_dir`, `~` expanded).
+    pub(crate) fn workspace_root(&self) -> PathBuf {
+        molt_storage::expand_tilde(&self.session.settings.workspace_dir)
+    }
+
+    pub(crate) fn cmd_open_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
+            return Err(MoltError::UnknownWorkspace(id));
         }
-        self.session.active_workspace = name;
+        // reopening the already-open workspace is a navigation no-op — a
+        // second open would collide with our own flock and report Busy
+        let already_open = self.active.as_ref().is_some_and(|a| a.id == id);
+        if self.persist && !already_open {
+            self.open_stored_workspace(&id)?;
+        }
+        self.session.active_workspace = id;
         self.session.screen = Screen::Main;
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
+    /// Load a workspace from disk into the actor: LOCK, snapshot + tail
+    /// through the event applier, then hand the append side to a writer
+    /// task. Every validation runs *before* the previously open workspace
+    /// is torn down — any failure leaves it untouched (the freshly taken
+    /// LOCK releases when `opened` drops on the error paths).
+    fn open_stored_workspace(&mut self, id: &str) -> Result<(), MoltError> {
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        let (opened, loaded) =
+            molt_storage::open_workspace(&dir).map_err(molt_storage::StorageError::into_molt)?;
+        if loaded.unknown_events > 0 {
+            return Err(MoltError::Storage(format!(
+                "{} event(s) were written by a newer version — update this \
+                 node to open the workspace (writing with a partial history \
+                 would fork it)",
+                loaded.unknown_events
+            )));
+        }
+        // the loaded history must carry its genesis: a snapshot only exists
+        // after Founded was applied (it records the acting member), a bare
+        // log must start with the Founded frame
+        let has_genesis = match &loaded.snapshot {
+            Some(snap) => !snap.state.member.is_empty(),
+            None => matches!(
+                loaded.tail.first(),
+                Some(env) if env.seq == 1 && matches!(env.body, WorkspaceEvent::Founded { .. })
+            ),
+        };
+        if !has_genesis {
+            return Err(MoltError::Storage(
+                "workspace history has no Founded genesis".to_string(),
+            ));
+        }
+
+        // point of no return: swap the actor state to the new workspace
+        self.close_active_storage();
+        self.reset_workspace_state();
+        if let Some(snap) = loaded.snapshot {
+            self.restore_dump(snap.state);
+        }
+        for env in &loaded.tail {
+            self.apply(env);
+        }
+        self.next_seq = opened.next_seq;
+        let prefs = opened.prefs.clone();
+        self.active = Some(ActiveStorage {
+            id: id.to_string(),
+            dir,
+            prefs,
+            handle: molt_storage::start_writer(opened),
+        });
+        // a crash may have separated an Approved frame from its Applied
+        // frame; re-decide thresholds that were already met
+        self.recover_pending_applies();
+        self.refresh_active_entry();
+        Ok(())
+    }
+
+    /// Mirror the replayed genesis identity into the session's list entry:
+    /// the manifest copies feed the undecrypted Open screen, the event
+    /// stream is the authority once the workspace is open.
+    fn refresh_active_entry(&mut self) {
+        let Some(replica) = self.replica.clone() else {
+            return;
+        };
+        let Some(active) = &self.active else {
+            return;
+        };
+        let Some(ws) = self
+            .session
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == active.id)
+        else {
+            return;
+        };
+        ws.name = replica.name;
+        ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
+        // members are a projection of the replayed roster — always rebuilt,
+        // so a roster grown by MemberJoined never leaves a stale list
+        ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");
+    }
+
+    /// Flush + closing snapshot + LOCK release for the open workspace (if
+    /// any), then drop its in-memory state. No-op on a session-only open.
+    pub(crate) fn close_active_storage(&mut self) {
+        if let Some(active) = self.active.take() {
+            let snap = self.snapshot_now();
+            active.handle.close(Some(snap));
+            self.reset_workspace_state();
+        }
+    }
+
     pub(crate) fn cmd_close_workspace(&mut self) -> Result<Reply, MoltError> {
+        self.close_active_storage();
         self.session.active_workspace = String::new();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
@@ -173,28 +295,87 @@ impl State {
 
     pub(crate) fn cmd_set_workspace_backup(
         &mut self,
-        name: String,
+        id: WorkspaceId,
         enabled: bool,
     ) -> Result<Reply, MoltError> {
-        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.name == name) else {
-            return Err(MoltError::UnknownWorkspace(name));
+        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) else {
+            return Err(MoltError::UnknownWorkspace(id));
         };
         ws.s3 = enabled;
         if enabled {
-            // mock: enabling runs a first backup right away
+            // enabling runs a first backup right away (the uploader itself
+            // is milestone S5; the stamp keeps list and prefs consistent)
             ws.last_backup_min = 0;
+        }
+        if self.persist {
+            self.persist_backup_pref(&id, enabled);
         }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    pub(crate) fn cmd_delete_workspace(&mut self, name: String) -> Result<Reply, MoltError> {
-        let before = self.session.workspaces.len();
-        self.session.workspaces.retain(|w| w.name != name);
-        if self.session.workspaces.len() == before {
-            return Err(MoltError::UnknownWorkspace(name));
+    /// Write the auto-backup switch into the workspace's `prefs.toml`. For
+    /// the open workspace the engine-held copy is authoritative and the
+    /// write goes through the writer task (one writer per directory —
+    /// re-reading the file here would race the writer's queued updates);
+    /// a closed workspace's file is read, patched and rewritten directly.
+    pub(crate) fn persist_backup_pref(&mut self, id: &str, enabled: bool) {
+        if let Some(a) = &mut self.active {
+            if a.id == id {
+                a.prefs.s3_backup = enabled;
+                if enabled {
+                    a.prefs.last_backup = Some(crate::now_secs());
+                }
+                a.handle.set_prefs(a.prefs.clone());
+                return;
+            }
         }
-        if self.session.active_workspace == name {
+        let Some(dir) = molt_storage::find_workspace_dir(&self.workspace_root(), id) else {
+            // the promise is persistence — a missing directory must not
+            // look like success
+            tracing::warn!(id, "backup pref not persisted: workspace directory missing");
+            self.session.notice = "storage-failed".to_string();
+            return;
+        };
+        let mut prefs = molt_storage::read_prefs(&dir);
+        prefs.s3_backup = enabled;
+        if enabled {
+            prefs.last_backup = Some(crate::now_secs());
+        }
+        if let Err(e) = molt_storage::write_prefs(&dir, &prefs) {
+            tracing::warn!(error = %e, "persisting backup pref failed");
+            self.session.notice = "storage-failed".to_string();
+        }
+    }
+
+    pub(crate) fn cmd_delete_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
+            return Err(MoltError::UnknownWorkspace(id));
+        }
+        // deleting the open workspace closes it first (flush, LOCK release)
+        // and immediately stops calling it open — even if the trash move
+        // below fails, the session must not claim an open workspace whose
+        // actor state is gone
+        let mut dir = None;
+        if self.active.as_ref().is_some_and(|a| a.id == id) {
+            dir = self.active.as_ref().map(|a| a.dir.clone());
+            self.close_active_storage();
+            self.session.active_workspace = String::new();
+        }
+        if self.persist {
+            let root = self.workspace_root();
+            let dir = dir.or_else(|| molt_storage::find_workspace_dir(&root, &id));
+            if let Some(dir) = dir {
+                if let Err(e) = molt_storage::trash_workspace(&root, &dir) {
+                    // the entry stays listed (the dir still exists); the
+                    // close above is already visible
+                    self.emit_session(SessionScope::Full);
+                    return Err(e.into_molt());
+                }
+            }
+        }
+        self.session.workspaces.retain(|w| w.id != id);
+        if self.session.active_workspace == id {
             self.session.active_workspace = String::new();
         }
         self.emit_session(SessionScope::Full);

@@ -96,7 +96,18 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(path = %config_path.display(), "loaded config");
 
     let workspace_dir = provision_workspace_dir(&config.storage.workspace_dir)?;
-    tracing::info!(dir = %workspace_dir.display(), "workspace directory ready");
+    // recoverable deletes expire after 30 days
+    molt_storage::purge_trash(&workspace_dir, molt_storage::TRASH_MAX_AGE_SECS);
+    // the Open screen's list: every manifest under the root (no decryption)
+    let workspaces: Vec<molt_core::WorkspaceInfo> = molt_storage::scan_workspaces(&workspace_dir)
+        .iter()
+        .map(molt_storage::ScanEntry::info)
+        .collect();
+    tracing::info!(
+        dir = %workspace_dir.display(),
+        found = workspaces.len(),
+        "workspace directory ready"
+    );
     let anonymity = &config.transport.anonymity;
     tracing::info!(
         network = ?anonymity.network,
@@ -129,7 +140,9 @@ fn main() -> anyhow::Result<()> {
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
         },
-        // workspace list (demo mock), active workspace, restore lifecycle
+        // the scanned on-disk workspaces replace the demo list
+        workspaces,
+        // active workspace, restore lifecycle, demo backup orphans
         ..molt_core::SessionView::default()
     };
     // Group is workspace-specific; the node currently runs the simulated
@@ -170,6 +183,7 @@ fn main() -> anyhow::Result<()> {
     }
     tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
 
+    let shutdown_wallet = wallet.clone();
     let result = if config.node.headless {
         tracing::info!("mode: headless (config: node.headless = true)");
         run_headless(
@@ -200,6 +214,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Close any open workspace durably (flush, closing snapshot, LOCK
+    // release) — quitting must be as safe as the in-app close button.
+    let _ = rt.block_on(shutdown_wallet.execute(molt_core::Command::CloseWorkspace));
     // Flush any pending (debounced) config write and release the config lock.
     rt.block_on(config_store.shutdown());
     result
@@ -389,23 +406,12 @@ fn parse_mcp_allow(allow: &str) -> (String, bool, Vec<IpAddr>) {
     (bind_ip, allow_all, ips)
 }
 
-/// Expand a leading `~` / `~/` against `$HOME`; leave any other path untouched.
-fn expand_tilde(input: &str) -> PathBuf {
-    if input == "~" {
-        if let Some(home) = home_dir() {
-            return home;
-        }
-    } else if let Some(rest) = input.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(input)
-}
-
 /// Expand and create the workspace directory, returning its resolved path.
+/// Tilde expansion is `molt_storage::expand_tilde` — the same resolution the
+/// engine uses at open time, so the scanned root and the opened root can
+/// never diverge.
 fn provision_workspace_dir(configured: &str) -> anyhow::Result<PathBuf> {
-    let dir = expand_tilde(configured);
+    let dir = molt_storage::expand_tilde(configured);
     std::fs::create_dir_all(&dir).with_context(|| {
         format!(
             "creating workspace dir {} (path not reachable?)",
@@ -466,14 +472,6 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tilde_expands_against_home() {
-        if let Some(home) = home_dir() {
-            assert_eq!(expand_tilde("~/x/y"), home.join("x/y"));
-        }
-        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
-    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().expect("valid ip literal")

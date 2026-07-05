@@ -11,6 +11,7 @@
 #
 #   molt-core    domain types, Command/Event/Surface contract, errors — no I/O
 #   molt-config  config.toml schema, render, salvage, round-trip write (no I/O deps)
+#   molt-storage encrypted append-only workspace storage: event log, snapshots, keys
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
 #   molt-ui      Slint GUI frontend (the live-mirror operator)
@@ -25,6 +26,7 @@ resolver = "2"
 members = [
     "crates/molt-core",
     "crates/molt-config",
+    "crates/molt-storage",
     "crates/molt-engine",
     "crates/molt-mcp",
     "crates/molt-ui",
@@ -36,11 +38,12 @@ members = [
 
 [workspace.dependencies]
 # internal
-molt-core   = { path = "crates/molt-core" }
-molt-config = { path = "crates/molt-config" }
-molt-engine = { path = "crates/molt-engine" }
-molt-mcp    = { path = "crates/molt-mcp" }
-molt-ui     = { path = "crates/molt-ui" }
+molt-core    = { path = "crates/molt-core" }
+molt-config  = { path = "crates/molt-config" }
+molt-storage = { path = "crates/molt-storage" }
+molt-engine  = { path = "crates/molt-engine" }
+molt-mcp     = { path = "crates/molt-mcp" }
+molt-ui      = { path = "crates/molt-ui" }
 
 # external
 tokio              = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util", "net", "time"] }
@@ -59,6 +62,16 @@ arboard            = { version = "3", default-features = false }
 chrono             = { version = "0.4", default-features = false, features = ["clock"] }
 strum              = { version = "0.27", features = ["derive"] }
 paste              = "1"
+
+# storage (molt-storage): encrypted append-only event log + snapshots
+chacha20poly1305   = "0.10"   # XChaCha20-Poly1305 AEAD for frames/snapshots/sealed keys
+hkdf               = "0.12"   # seed -> workspace id/key derivations
+sha2               = "0.10"
+crc32c             = "0.6"    # torn-write/bitrot detection over the ciphertext
+getrandom          = "0.2"    # OS CSPRNG: seeds, nonces, device key
+hex                = "0.4"
+bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
+rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
 # GUI (molt-ui). FemtoVG (pure-Rust GPU renderer) is the default — it can
 # rasterize color-emoji fonts (Twemoji nav icons / reactions) and fixes the

@@ -3,10 +3,16 @@
 //! Chat: the one ungated surface. Messages are typed [`ChatMessage`]s —
 //! the engine mutates and the GUI reads the same struct, and the wire
 //! (`read_state.applied`) serializes to the same JSON as before.
+//!
+//! Handlers follow the S0 shape: validate → build the [`WorkspaceEvent`] →
+//! [`State::record`] (apply + persist). Nothing here mutates `self.chat`
+//! directly.
 
 use std::collections::BTreeMap;
 
-use molt_core::{mockrand, ChatMessage, Command, Event, MemberId, MoltError, Reply};
+use molt_core::{
+    mockrand, ChatMessage, Command, Event, MemberId, MoltError, Reply, WorkspaceEvent,
+};
 
 use crate::{now_secs, Envelope, State};
 
@@ -17,10 +23,9 @@ impl State {
         body: String,
         quote: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        let from = self.config.member.clone();
+        let from = self.member();
         let trigger = self.chat.len();
-        self.push_message(from.clone(), body.clone(), quote);
-        self.emit(Event::Chat { from, body });
+        self.post_message(from, body, quote);
         self.spawn_sim_replies(trigger);
         Ok(Reply::Ack)
     }
@@ -33,22 +38,24 @@ impl State {
         body: String,
         quote: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        self.push_message(from.clone(), body.clone(), quote);
-        self.emit(Event::Chat { from, body });
+        self.post_message(from, body, quote);
         Ok(Reply::Ack)
     }
 
-    fn push_message(&mut self, from: MemberId, body: String, quote: Option<u64>) {
+    fn post_message(&mut self, from: MemberId, body: String, quote: Option<u64>) {
         // a quote only sticks when it points at an existing message
         let quote = quote.filter(|q| usize::try_from(*q).is_ok_and(|q| q < self.chat.len()));
-        self.chat.push(ChatMessage {
-            from,
-            body,
+        let msg = ChatMessage {
+            from: from.clone(),
+            body: body.clone(),
             ts: now_secs(),
             quote,
             reactions: BTreeMap::new(),
             deleted_by: None,
-        });
+        };
+        let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
+        self.record(env);
+        self.emit(Event::Chat { from, body });
     }
 
     /// Toggle the local member's emoji reaction: the emoji you already
@@ -60,22 +67,17 @@ impl State {
                 "the reaction must be a short emoji".into(),
             ));
         }
-        let me = self.config.member.clone();
-        let msg = self.chat_message_mut(index)?;
-        let had_this = msg
-            .reactions
-            .get(&emoji)
-            .is_some_and(|who| who.contains(&me));
-        for who in msg.reactions.values_mut() {
-            who.retain(|w| w != &me);
-        }
-        msg.reactions.retain(|_, who| !who.is_empty());
-        if !had_this {
-            msg.reactions
-                .entry(emoji.clone())
-                .or_default()
-                .push(me.clone());
-        }
+        self.check_chat_index(index)?;
+        let me = self.member();
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::ChatReacted {
+                index,
+                emoji: emoji.clone(),
+                by: me.clone(),
+            },
+        );
+        self.record(env);
         self.emit(Event::Reacted {
             index,
             emoji,
@@ -86,20 +88,26 @@ impl State {
 
     /// Wipe a message for everyone; only the deletion notice remains.
     pub(crate) fn cmd_delete_chat(&mut self, index: u64) -> Result<Reply, MoltError> {
-        let me = self.config.member.clone();
-        let msg = self.chat_message_mut(index)?;
-        msg.body.clear();
-        msg.reactions.clear();
-        msg.deleted_by = Some(me.clone());
+        self.check_chat_index(index)?;
+        let me = self.member();
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::ChatDeleted {
+                index,
+                by: me.clone(),
+            },
+        );
+        self.record(env);
         self.emit(Event::Deleted { index, by: me });
         Ok(Reply::Ack)
     }
 
-    fn chat_message_mut(&mut self, index: u64) -> Result<&mut ChatMessage, MoltError> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|idx| self.chat.get_mut(idx))
-            .ok_or(MoltError::UnknownMessage(index))
+    fn check_chat_index(&self, index: u64) -> Result<(), MoltError> {
+        if usize::try_from(index).is_ok_and(|i| i < self.chat.len()) {
+            Ok(())
+        } else {
+            Err(MoltError::UnknownMessage(index))
+        }
     }
 
     /// Simulate the rest of the republic: a few seconds after the local
@@ -107,7 +115,14 @@ impl State {
     /// of them quoting the message they answer). The repliers come from the
     /// active workspace's roster (offline members stay silent), or from the
     /// group config when nothing is open.
+    ///
+    /// **Session-only workspaces only.** A persisted workspace's log is the
+    /// authoritative shared history — a canned reply recorded there would
+    /// replay forever as a real message from a member who never spoke.
     pub(crate) fn spawn_sim_replies(&self, trigger: usize) {
+        if self.active.is_some() {
+            return;
+        }
         const LINES: [&str; 16] = [
             "sounds good to me",
             "can someone double-check the numbers?",
@@ -126,12 +141,13 @@ impl State {
             "good morning everyone",
             "that fence isn't going to fix itself 🙂",
         ];
-        let me = self.config.member.clone();
+        let me = self.member();
         let mut pool: Vec<String> = self
             .session
             .workspaces
             .iter()
-            .find(|w| w.name == self.session.active_workspace)
+            .find(|w| w.id == self.session.active_workspace)
+            .filter(|w| !w.members.is_empty())
             .map(|w| {
                 w.members
                     .iter()
@@ -139,7 +155,7 @@ impl State {
                     .map(|m| m.name.clone())
                     .collect()
             })
-            .unwrap_or_else(|| self.config.members.clone());
+            .unwrap_or_else(|| self.roster());
         pool.retain(|n| *n != me);
         if pool.is_empty() {
             return;

@@ -1,0 +1,1666 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! `molt-storage`: the on-disk reality of a workspace.
+//!
+//! Implements `documents/concept-workspace-storage.md`: a workspace directory
+//! holds a plaintext `manifest.toml` (the identity card the Open screen lists
+//! without decrypting), local `prefs.toml`, a sealed workspace key, an
+//! **encrypted, append-only event log** in framed segments, and state
+//! snapshots. The typed structs in `molt-core` are the schema; this crate is
+//! only the I/O.
+//!
+//! Frame layout (`.mlog` segments; the whole segment is encrypted per frame
+//! so appends never rewrite):
+//!
+//! ```text
+//! frame     := len:u32le | crc32c(ciphertext):u32le | nonce:24B | ciphertext
+//! plaintext := serde_json(EventEnvelope)
+//! aad       := workspace_id(32B) | segment_no:u64le | seq:u64le
+//! ```
+//!
+//! * The CRC is over the **ciphertext** — it exists solely for torn-write /
+//!   bitrot detection without decrypting. A plaintext crc would hand an
+//!   attacker a confirmation oracle for guessed content.
+//! * The AAD binds each frame to its position: an intact frame cannot be
+//!   reordered, replayed, or transplanted into another segment or workspace
+//!   without the AEAD open failing.
+//! * Torn-write recovery: a frame whose `len`/`crc` does not check out marks
+//!   the torn tail of the **last** segment — it is truncated to the last
+//!   valid frame boundary. The same damage in a *middle* segment is bitrot
+//!   and a hard error.
+//!
+//! Key hierarchy: the recovery seed (real OS-CSPRNG entropy, rendered as a
+//! BIP-39 phrase) is the root. `workspace_id = HKDF(seed, "molt-ws-id",
+//! member)`, `workspace_key = HKDF(seed, "molt-ws-key", workspace_id)`. The
+//! key is stored sealed to a device key (`~/.moltrepublic/device.key`, 0600)
+//! so day-to-day opens never touch the seed. Honest threat-model note: this
+//! protects the synced / backed-up workspace dir, not a fully compromised
+//! home directory (passphrase sealing is the opt-in v2, milestone S6).
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hkdf::Hkdf;
+use molt_core::{
+    EventEnvelope, ManifestWorkspace, RawEnvelope, WorkspaceEvent, WorkspaceId, WorkspaceManifest,
+    WorkspacePrefs, WorkspaceSnapshot, MANIFEST_FORMAT, STORAGE_VERSION,
+};
+use sha2::Sha256;
+
+/// Segment rotation threshold (~8 MiB keeps recovery scans and future
+/// S3 diff-uploads bounded).
+pub const SEGMENT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+/// Snapshots kept per workspace (newest N; older ones are deleted).
+pub const SNAPSHOTS_KEPT: usize = 2;
+/// Upper bound a frame's `len` field may claim (corruption guard).
+const FRAME_MAX_LEN: u32 = 64 * 1024 * 1024;
+/// The XChaCha20 nonce size.
+const NONCE_LEN: usize = 24;
+/// Frame header: len(4) + crc(4).
+const FRAME_HEADER_LEN: usize = 8;
+/// AAD segment number that marks a snapshot frame (never a real segment).
+const SNAPSHOT_SEGMENT: u64 = u64::MAX;
+/// Group-commit window: fsync at most this often under sustained load.
+const GROUP_COMMIT: Duration = Duration::from_millis(50);
+/// Bound of the writer queue; a full queue means the disk is falling behind.
+const WRITER_QUEUE: usize = 1024;
+/// `.trash` entries older than this are purged at startup (30 days).
+pub const TRASH_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Everything that can go wrong between a workspace dir and the engine.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Underlying I/O failure.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// The workspace is locked by another opener.
+    #[error("workspace is busy (held by pid {0})")]
+    Busy(String),
+    /// Structural damage that is not a recoverable torn tail.
+    #[error("corrupt: {0}")]
+    Corrupt(String),
+    /// A cryptographic operation failed (wrong key, tampered frame, …).
+    #[error("crypto: {0}")]
+    Crypto(String),
+    /// The workspace was written by a newer node version.
+    #[error("workspace version {0} is newer than supported {STORAGE_VERSION}")]
+    NewerVersion(u32),
+    /// The recovery phrase did not parse / carry valid entropy.
+    #[error("seed: {0}")]
+    BadSeed(String),
+    /// The target directory already exists.
+    #[error("workspace directory already exists: {0}")]
+    Exists(PathBuf),
+    /// A malformed file that is not the log (manifest, prefs, key file).
+    #[error("{0}")]
+    BadFile(String),
+}
+
+impl StorageError {
+    /// Map into the shared [`molt_core::MoltError`] vocabulary.
+    pub fn into_molt(self) -> molt_core::MoltError {
+        match self {
+            StorageError::Busy(pid) => molt_core::MoltError::WorkspaceBusy(pid),
+            other => molt_core::MoltError::Storage(other.to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seed & key hierarchy
+// ---------------------------------------------------------------------------
+
+/// Generate a fresh recovery phrase: 256 bits from the OS CSPRNG, rendered
+/// as 24 BIP-39 words — the 32-byte root the concept demands, matching the
+/// Monero posture (25-word/256-bit seeds) the wallet surface will need
+/// anyway. The full key hierarchy expands from this entropy via HKDF.
+pub fn generate_seed_phrase() -> Result<String, StorageError> {
+    let mut entropy = [0u8; 32];
+    getrandom::getrandom(&mut entropy)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let m = bip39::Mnemonic::from_entropy(&entropy)
+        .map_err(|e| StorageError::BadSeed(e.to_string()))?;
+    Ok(m.to_string())
+}
+
+/// Parse a recovery phrase back into its seed entropy (checksummed by the
+/// BIP-39 wordlist; typos are caught here, not by a failed decrypt later).
+pub fn seed_entropy(phrase: &str) -> Result<Vec<u8>, StorageError> {
+    let m = bip39::Mnemonic::parse_normalized(phrase.trim())
+        .map_err(|e| StorageError::BadSeed(e.to_string()))?;
+    Ok(m.to_entropy())
+}
+
+/// HKDF-SHA256: 32 bytes from `(ikm, tag || context)`.
+fn hkdf32(ikm: &[u8], tag: &str, context: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, ikm);
+    let mut info = Vec::with_capacity(tag.len() + context.len());
+    info.extend_from_slice(tag.as_bytes());
+    info.extend_from_slice(context);
+    let mut okm = [0u8; 32];
+    hk.expand(&info, &mut okm)
+        .expect("32 bytes is a valid HKDF output length");
+    okm
+}
+
+/// `workspace_id = HKDF(seed, "molt-ws-id", member)` — deterministic, so
+/// seed + own handle re-derive the identity; including the member handle
+/// gives two local instances of the same republic distinct ids and dirs.
+pub fn derive_workspace_id(seed: &[u8], member: &str) -> WorkspaceId {
+    hex::encode(hkdf32(seed, "molt-ws-id", member.as_bytes()))
+}
+
+/// `workspace_key = HKDF(seed, "molt-ws-key", workspace_id)` (32 B), used
+/// with XChaCha20-Poly1305 for frames, snapshots and exports.
+pub fn derive_workspace_key(seed: &[u8], id: &str) -> [u8; 32] {
+    hkdf32(seed, "molt-ws-key", id.as_bytes())
+}
+
+/// Decode the hex workspace id into the 32 raw bytes the AAD uses.
+fn id_bytes(id: &str) -> Result<[u8; 32], StorageError> {
+    let v = hex::decode(id).map_err(|e| StorageError::BadFile(format!("workspace id: {e}")))?;
+    <[u8; 32]>::try_from(v.as_slice())
+        .map_err(|_| StorageError::BadFile("workspace id is not 32 bytes".to_string()))
+}
+
+/// Where the device key lives for a given workspace root
+/// (`<root>/../device.key`, i.e. `~/.moltrepublic/device.key` by default).
+pub fn device_key_path(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .parent()
+        .unwrap_or(workspace_root)
+        .join("device.key")
+}
+
+/// Load the device key, creating it (0600) on first use.
+pub fn load_or_create_device_key(path: &Path) -> Result<[u8; 32], StorageError> {
+    match fs::read(path) {
+        Ok(bytes) => <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+            StorageError::BadFile(format!("device key {} is not 32 bytes", path.display()))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut key = [0u8; 32];
+            getrandom::getrandom(&mut key)
+                .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(path) {
+                Ok(mut f) => {
+                    f.write_all(&key)?;
+                    f.sync_all()?;
+                    Ok(key)
+                }
+                // lost a creation race: the other creator's key is the key
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    load_or_create_device_key(path)
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Seal the workspace key to the device key (`nonce || ciphertext`; the
+/// workspace id is the AAD, binding the blob to its workspace).
+fn seal_workspace_key(
+    device_key: &[u8; 32],
+    id: &[u8; 32],
+    ws_key: &[u8; 32],
+) -> Result<Vec<u8>, StorageError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let cipher = XChaCha20Poly1305::new(device_key.into());
+    let ct = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: ws_key,
+                aad: id,
+            },
+        )
+        .map_err(|_| StorageError::Crypto("sealing the workspace key failed".to_string()))?;
+    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Unseal `keys/workspace.key` with the device key.
+fn unseal_workspace_key(
+    device_key: &[u8; 32],
+    id: &[u8; 32],
+    blob: &[u8],
+) -> Result<[u8; 32], StorageError> {
+    if blob.len() <= NONCE_LEN {
+        return Err(StorageError::BadFile(
+            "sealed workspace key is too short".to_string(),
+        ));
+    }
+    let (nonce, ct) = blob.split_at(NONCE_LEN);
+    let cipher = XChaCha20Poly1305::new(device_key.into());
+    let pt = cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: id })
+        .map_err(|_| {
+            StorageError::Crypto(
+                "unsealing the workspace key failed (wrong device key?)".to_string(),
+            )
+        })?;
+    <[u8; 32]>::try_from(pt.as_slice())
+        .map_err(|_| StorageError::BadFile("unsealed workspace key is not 32 bytes".to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Frames
+// ---------------------------------------------------------------------------
+
+/// The AAD that binds a frame to `(workspace, segment, seq)`.
+fn frame_aad(id: &[u8; 32], segment: u64, seq: u64) -> [u8; 48] {
+    let mut aad = [0u8; 48];
+    aad[..32].copy_from_slice(id);
+    aad[32..40].copy_from_slice(&segment.to_le_bytes());
+    aad[40..48].copy_from_slice(&seq.to_le_bytes());
+    aad
+}
+
+/// Encrypt + frame one plaintext.
+fn encode_frame(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    seq: u64,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let aad = frame_aad(id, segment, seq);
+    let ct = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| StorageError::Crypto("frame encryption failed".to_string()))?;
+    let len = u32::try_from(ct.len())
+        .map_err(|_| StorageError::Corrupt("frame over 4 GiB".to_string()))?;
+    let mut out = Vec::with_capacity(FRAME_HEADER_LEN + NONCE_LEN + ct.len());
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&crc32c::crc32c(&ct).to_le_bytes());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Decrypt one frame body back into its plaintext.
+fn decrypt_frame(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    seq: u64,
+    nonce: &[u8],
+    ct: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let aad = frame_aad(id, segment, seq);
+    cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: &aad })
+        .map_err(|_| {
+            StorageError::Crypto(format!(
+                "frame authentication failed at segment {segment}, seq {seq} \
+                 (tampered, transplanted, or wrong key)"
+            ))
+        })
+}
+
+/// One structurally valid frame inside a segment buffer.
+struct RawFrame<'a> {
+    nonce: &'a [u8],
+    ciphertext: &'a [u8],
+    /// Byte offset just past this frame.
+    end: usize,
+}
+
+/// Split a segment buffer into structurally valid frames. Returns the frames
+/// and, when the buffer does not end on a frame boundary, the offset of the
+/// first invalid byte (the torn tail begins there).
+fn split_frames(data: &[u8]) -> (Vec<RawFrame<'_>>, Option<usize>) {
+    let mut frames = Vec::new();
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let rest = &data[pos..];
+        if rest.len() < FRAME_HEADER_LEN + NONCE_LEN {
+            return (frames, Some(pos));
+        }
+        let len_bytes: [u8; 4] = rest[0..4].try_into().unwrap_or([0; 4]);
+        let crc_bytes: [u8; 4] = rest[4..8].try_into().unwrap_or([0; 4]);
+        let len = u32::from_le_bytes(len_bytes);
+        if len == 0 || len > FRAME_MAX_LEN {
+            return (frames, Some(pos));
+        }
+        let Ok(len_usize) = usize::try_from(len) else {
+            return (frames, Some(pos));
+        };
+        let total = FRAME_HEADER_LEN + NONCE_LEN + len_usize;
+        if rest.len() < total {
+            return (frames, Some(pos));
+        }
+        let nonce = &rest[FRAME_HEADER_LEN..FRAME_HEADER_LEN + NONCE_LEN];
+        let ciphertext = &rest[FRAME_HEADER_LEN + NONCE_LEN..total];
+        if crc32c::crc32c(ciphertext) != u32::from_le_bytes(crc_bytes) {
+            return (frames, Some(pos));
+        }
+        pos += total;
+        frames.push(RawFrame {
+            nonce,
+            ciphertext,
+            end: pos,
+        });
+    }
+    (frames, None)
+}
+
+// ---------------------------------------------------------------------------
+// Paths, atomic writes, slug
+// ---------------------------------------------------------------------------
+
+/// Expand a leading `~` / `~/` against `$HOME`; leave other paths untouched.
+pub fn expand_tilde(input: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if input == "~" {
+        if let Some(h) = home {
+            return h;
+        }
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(h) = home {
+            return h.join(rest);
+        }
+    }
+    PathBuf::from(input)
+}
+
+/// The human half of a workspace directory name: lowercase, runs of
+/// non-alphanumerics collapsed to single dashes.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut dash = true; // suppress a leading dash
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+            dash = false;
+        } else if !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let trimmed = out.trim_end_matches('-');
+    if trimmed.is_empty() {
+        "workspace".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The directory name of a workspace: `<slug>.<short-id>`. Display names may
+/// repeat; the id disambiguates. Never parsed back.
+pub fn workspace_dirname(name: &str, id: &str) -> String {
+    format!("{}.{}", slugify(name), &id[..id.len().min(6)])
+}
+
+/// Write a file atomically through the workspace's same-fs `tmp/` dir.
+fn write_atomic(ws_dir: &Path, rel: &str, bytes: &[u8], mode_600: bool) -> Result<(), StorageError> {
+    let tmp_dir = ws_dir.join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+    let tmp = tmp_dir.join(rel.replace('/', "_"));
+    {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if mode_600 {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    let target = ws_dir.join(rel);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&tmp, &target)?;
+    // make the rename itself durable: without the parent-dir fsync a power
+    // loss can undo the rename even though the data blocks were synced
+    if let Some(parent) = target.parent() {
+        if let Ok(d) = File::open(parent) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Seconds since the Unix epoch (pre-epoch clocks clamp to 0). The one
+/// clock helper the storage layer, the engine and the tools share — event
+/// timestamps and backup/trash age math must not drift apart.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Manifest & prefs I/O
+// ---------------------------------------------------------------------------
+
+/// Read and (leniently) parse a workspace's `manifest.toml`.
+pub fn read_manifest(ws_dir: &Path) -> Result<WorkspaceManifest, StorageError> {
+    let path = ws_dir.join("manifest.toml");
+    let text = fs::read_to_string(&path)?;
+    let m: WorkspaceManifest = toml::from_str(&text)
+        .map_err(|e| StorageError::BadFile(format!("{}: {e}", path.display())))?;
+    if m.format != MANIFEST_FORMAT {
+        return Err(StorageError::BadFile(format!(
+            "{} is not a workspace manifest (format `{}`)",
+            path.display(),
+            m.format
+        )));
+    }
+    Ok(m)
+}
+
+fn write_manifest(ws_dir: &Path, m: &WorkspaceManifest) -> Result<(), StorageError> {
+    let text = toml::to_string_pretty(m)
+        .map_err(|e| StorageError::BadFile(format!("rendering manifest: {e}")))?;
+    write_atomic(ws_dir, "manifest.toml", text.as_bytes(), false)
+}
+
+/// Read a workspace's `prefs.toml`; a missing or broken file falls back to
+/// defaults (prefs are local convenience, never history).
+pub fn read_prefs(ws_dir: &Path) -> WorkspacePrefs {
+    let path = ws_dir.join("prefs.toml");
+    match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_default(),
+        Err(_) => WorkspacePrefs::default(),
+    }
+}
+
+/// Rewrite a workspace's `prefs.toml` (atomic via `tmp/`).
+pub fn write_prefs(ws_dir: &Path, p: &WorkspacePrefs) -> Result<(), StorageError> {
+    let text = toml::to_string_pretty(p)
+        .map_err(|e| StorageError::BadFile(format!("rendering prefs: {e}")))?;
+    write_atomic(ws_dir, "prefs.toml", text.as_bytes(), false)
+}
+
+// ---------------------------------------------------------------------------
+// The LOCK
+// ---------------------------------------------------------------------------
+
+/// The held per-workspace flock; dropping it releases the lock.
+struct WorkspaceLock {
+    _file: File,
+}
+
+fn acquire_lock(ws_dir: &Path) -> Result<WorkspaceLock, StorageError> {
+    let path = ws_dir.join("LOCK");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            // record the holder for the Busy message of the *next* claimant
+            let mut f = &file;
+            let _ = rustix::fs::ftruncate(&file, 0);
+            let _ = f.write_all(std::process::id().to_string().as_bytes());
+            Ok(WorkspaceLock { _file: file })
+        }
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+            let holder = fs::read_to_string(&path).unwrap_or_default();
+            let holder = holder.trim();
+            Err(StorageError::Busy(if holder.is_empty() {
+                "unknown".to_string()
+            } else {
+                holder.to_string()
+            }))
+        }
+        Err(e) => Err(StorageError::Io(e.into())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The opened workspace
+// ---------------------------------------------------------------------------
+
+/// What replaying the log (plus the newest snapshot) yields on open. The
+/// append position is [`OpenedWorkspace::next_seq`] — the one source of
+/// truth for where the log continues.
+pub struct LoadedState {
+    /// The newest valid snapshot, if any.
+    pub snapshot: Option<WorkspaceSnapshot>,
+    /// Envelopes with `seq > snapshot.at_seq`, in order.
+    pub tail: Vec<EventEnvelope>,
+    /// Frames written by a newer node that this build cannot apply. The
+    /// frames themselves stay untouched on disk; only this count surfaces.
+    /// Non-zero means the caller must not write to this workspace (a
+    /// partial history would fork state).
+    pub unknown_events: u64,
+}
+
+/// An open (locked) workspace directory: the append handle of the active
+/// segment plus everything needed to frame, encrypt and rotate.
+pub struct OpenedWorkspace {
+    dir: PathBuf,
+    /// The plaintext identity card.
+    pub manifest: WorkspaceManifest,
+    /// The local node preferences.
+    pub prefs: WorkspacePrefs,
+    key: [u8; 32],
+    id: [u8; 32],
+    _lock: WorkspaceLock,
+    seg_no: u64,
+    seg: File,
+    seg_len: u64,
+    /// The next seq this log expects (strictly monotonic).
+    pub next_seq: u64,
+    /// Unsynced appends are pending.
+    dirty: bool,
+}
+
+impl OpenedWorkspace {
+    /// The workspace directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Append one envelope to the active segment (rotating first when the
+    /// segment is full). The write is buffered by the OS; call [`Self::sync`]
+    /// (or let the writer task group-commit) to make it durable.
+    pub fn append(&mut self, env: &EventEnvelope) -> Result<(), StorageError> {
+        if env.seq != self.next_seq {
+            return Err(StorageError::Corrupt(format!(
+                "append out of order: got seq {}, expected {}",
+                env.seq, self.next_seq
+            )));
+        }
+        if self.seg_len >= SEGMENT_ROTATE_BYTES {
+            self.rotate()?;
+        }
+        let plaintext = serde_json::to_vec(env)
+            .map_err(|e| StorageError::Corrupt(format!("encoding envelope: {e}")))?;
+        let frame = encode_frame(&self.key, &self.id, self.seg_no, env.seq, &plaintext)?;
+        self.seg.write_all(&frame)?;
+        self.seg_len += u64::try_from(frame.len()).unwrap_or(u64::MAX);
+        self.next_seq += 1;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// fsync the active segment (the group-commit point).
+    pub fn sync(&mut self) -> Result<(), StorageError> {
+        if self.dirty {
+            self.seg.sync_data()?;
+            self.dirty = false;
+        }
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> Result<(), StorageError> {
+        self.sync()?;
+        self.seg_no += 1;
+        let path = self.dir.join("log").join(segment_name(self.seg_no));
+        self.seg = OpenOptions::new().append(true).create_new(true).open(path)?;
+        self.seg_len = 0;
+        Ok(())
+    }
+
+    /// Write a state snapshot (atomic via `tmp/` + rename; a torn snapshot
+    /// never shadows an older valid one), then prune to the newest
+    /// [`SNAPSHOTS_KEPT`].
+    pub fn write_snapshot(&mut self, snap: &WorkspaceSnapshot) -> Result<(), StorageError> {
+        let plaintext = serde_json::to_vec(snap)
+            .map_err(|e| StorageError::Corrupt(format!("encoding snapshot: {e}")))?;
+        let frame = encode_frame(&self.key, &self.id, SNAPSHOT_SEGMENT, snap.at_seq, &plaintext)?;
+        let rel = format!("snapshots/{:012}.msnap", snap.at_seq);
+        write_atomic(&self.dir, &rel, &frame, false)?;
+        self.prune_snapshots();
+        Ok(())
+    }
+
+    fn prune_snapshots(&self) {
+        let mut files = list_sorted(&self.dir.join("snapshots"), ".msnap");
+        files.reverse(); // newest first
+        for (_, path) in files.into_iter().skip(SNAPSHOTS_KEPT) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// Persist new prefs for this workspace.
+    pub fn set_prefs(&mut self, p: WorkspacePrefs) -> Result<(), StorageError> {
+        write_prefs(&self.dir, &p)?;
+        self.prefs = p;
+        Ok(())
+    }
+}
+
+/// `000042.mlog`-style segment file name.
+fn segment_name(no: u64) -> String {
+    format!("{no:06}.mlog")
+}
+
+/// Numeric-sorted `(number, path)` list of files with `ext` in `dir`.
+fn list_sorted(dir: &Path, ext: &str) -> Vec<(u64, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(stem) = name.strip_suffix(ext) {
+            if let Ok(no) = stem.parse::<u64>() {
+                out.push((no, path));
+            }
+        }
+    }
+    out.sort_by_key(|(no, _)| *no);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Create & open
+// ---------------------------------------------------------------------------
+
+/// Materialize a new workspace directory under `root` from its genesis
+/// event: manifest, prefs, sealed key, and a log whose frame 1 is the
+/// `Founded` genesis — the log is never empty. The directory is built in a
+/// same-fs staging dir and atomically renamed into place. Returns the
+/// workspace opened (locked, ready to append seq 2).
+pub fn create_workspace(
+    root: &Path,
+    seed: &[u8],
+    genesis: &EventEnvelope,
+) -> Result<OpenedWorkspace, StorageError> {
+    let WorkspaceEvent::Founded {
+        name,
+        rule_m,
+        rule_n,
+        member,
+        ..
+    } = &genesis.body
+    else {
+        return Err(StorageError::Corrupt(
+            "the genesis event must be Founded".to_string(),
+        ));
+    };
+    if genesis.seq != 1 {
+        return Err(StorageError::Corrupt("genesis must be seq 1".to_string()));
+    }
+
+    let id_hex = derive_workspace_id(seed, member);
+    let key = derive_workspace_key(seed, &id_hex);
+    let id = id_bytes(&id_hex)?;
+
+    fs::create_dir_all(root)?;
+    let dirname = workspace_dirname(name, &id_hex);
+    let final_dir = root.join(&dirname);
+    if final_dir.exists() {
+        return Err(StorageError::Exists(final_dir));
+    }
+
+    // stage under a dot-name (the Open scan skips dot-entries), same fs
+    let staging = root.join(format!(".create-{dirname}"));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    for sub in ["keys", "log", "snapshots", "tmp"] {
+        fs::create_dir_all(staging.join(sub))?;
+    }
+
+    let manifest = WorkspaceManifest {
+        format: MANIFEST_FORMAT.to_string(),
+        version: STORAGE_VERSION,
+        workspace: ManifestWorkspace {
+            id: id_hex.clone(),
+            name: name.clone(),
+            created: genesis.ts,
+            rule_m: *rule_m,
+            rule_n: *rule_n,
+        },
+        crypto: molt_core::CryptoParams::default(),
+    };
+    write_manifest(&staging, &manifest)?;
+    let prefs = WorkspacePrefs::default();
+    write_prefs(&staging, &prefs)?;
+
+    let device_key = load_or_create_device_key(&device_key_path(root))?;
+    let sealed = seal_workspace_key(&device_key, &id, &key)?;
+    write_atomic(&staging, "keys/workspace.key", &sealed, true)?;
+
+    // frame 1: the genesis
+    let plaintext = serde_json::to_vec(genesis)
+        .map_err(|e| StorageError::Corrupt(format!("encoding genesis: {e}")))?;
+    let frame = encode_frame(&key, &id, 1, genesis.seq, &plaintext)?;
+    let seg_path = staging.join("log").join(segment_name(1));
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&seg_path)?;
+        f.write_all(&frame)?;
+        f.sync_all()?;
+    }
+
+    fs::rename(&staging, &final_dir)?;
+    // best-effort: make the rename itself durable
+    if let Ok(d) = File::open(root) {
+        let _ = d.sync_all();
+    }
+
+    let lock = acquire_lock(&final_dir)?;
+    let seg = OpenOptions::new()
+        .append(true)
+        .open(final_dir.join("log").join(segment_name(1)))?;
+    let seg_len = u64::try_from(frame.len()).unwrap_or(0);
+    Ok(OpenedWorkspace {
+        dir: final_dir,
+        manifest,
+        prefs,
+        key,
+        id,
+        _lock: lock,
+        seg_no: 1,
+        seg,
+        seg_len,
+        next_seq: 2,
+        dirty: false,
+    })
+}
+
+/// Open an existing workspace directory: check the manifest version, take
+/// the LOCK, unseal the key, load the newest valid snapshot, replay the log
+/// tail (recovering a torn last segment), and position the writer.
+pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), StorageError> {
+    let manifest = read_manifest(ws_dir)?;
+    if manifest.version > STORAGE_VERSION {
+        return Err(StorageError::NewerVersion(manifest.version));
+    }
+    let lock = acquire_lock(ws_dir)?;
+
+    let root = ws_dir.parent().unwrap_or(ws_dir);
+    let device_key = load_or_create_device_key(&device_key_path(root))?;
+    let id = id_bytes(&manifest.workspace.id)?;
+    let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file))?;
+    let key = unseal_workspace_key(&device_key, &id, &sealed)?;
+    let prefs = read_prefs(ws_dir);
+
+    // replay the segments; seq is implicit and strictly monotonic from 1
+    let segments = list_sorted(&ws_dir.join("log"), ".mlog");
+    if segments.is_empty() {
+        return Err(StorageError::Corrupt(
+            "workspace has no log segments".to_string(),
+        ));
+    }
+    let mut history = Vec::new();
+    let mut unknown_events: u64 = 0;
+    let mut expected_seq: u64 = 1;
+    let last_idx = segments.len() - 1;
+    let mut last_seg = (1u64, 0u64); // (segment number, byte length after recovery)
+    for (idx, (seg_no, path)) in segments.iter().enumerate() {
+        let data = fs::read(path)?;
+        let (frames, torn_at) = split_frames(&data);
+        if let Some(pos) = torn_at {
+            if idx == last_idx {
+                tracing::warn!(
+                    segment = seg_no,
+                    at = pos,
+                    "torn tail truncated to the last valid frame boundary"
+                );
+                let f = OpenOptions::new().write(true).open(path)?;
+                f.set_len(u64::try_from(pos).unwrap_or(0))?;
+                f.sync_all()?;
+            } else {
+                return Err(StorageError::Corrupt(format!(
+                    "segment {} is damaged at byte {} but is not the last segment \
+                     (bitrot?) — refusing to guess",
+                    path.display(),
+                    pos
+                )));
+            }
+        }
+        let mut seg_len = 0u64;
+        for frame in &frames {
+            let plaintext = decrypt_frame(
+                &key,
+                &id,
+                *seg_no,
+                expected_seq,
+                frame.nonce,
+                frame.ciphertext,
+            )?;
+            match serde_json::from_slice::<EventEnvelope>(&plaintext) {
+                Ok(env) => {
+                    if env.seq != expected_seq {
+                        return Err(StorageError::Corrupt(format!(
+                            "envelope seq {} at log position {}",
+                            env.seq, expected_seq
+                        )));
+                    }
+                    history.push(env);
+                }
+                Err(_) => {
+                    // a frame from a newer node: keep it on disk, refuse to apply
+                    let raw: Result<RawEnvelope, _> = serde_json::from_slice(&plaintext);
+                    if raw.is_err() {
+                        return Err(StorageError::Corrupt(format!(
+                            "frame at seq {expected_seq} is not an event envelope"
+                        )));
+                    }
+                    unknown_events += 1;
+                }
+            }
+            expected_seq += 1;
+            seg_len = u64::try_from(frame.end).unwrap_or(seg_len);
+        }
+        last_seg = (*seg_no, seg_len);
+    }
+    let last_seq = expected_seq - 1;
+
+    // newest decodable snapshot wins — but only one the surviving log can
+    // continue from. A snapshot ahead of the log (partial dir copy, torn
+    // tail behind an old backup) would make the append position diverge
+    // from the positional seq the AAD binds, bricking every later open;
+    // such a snapshot is skipped and the state rebuilt from the log alone.
+    let mut snapshot: Option<WorkspaceSnapshot> = None;
+    let mut snaps = list_sorted(&ws_dir.join("snapshots"), ".msnap");
+    snaps.reverse();
+    for (at_seq, path) in snaps {
+        if at_seq > last_seq {
+            tracing::warn!(
+                path = %path.display(),
+                last_seq,
+                "snapshot is ahead of the log (partial restore?) — skipping it"
+            );
+            continue;
+        }
+        match read_snapshot(&key, &id, at_seq, &path) {
+            Ok(s) => {
+                snapshot = Some(s);
+                break;
+            }
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping snapshot"),
+        }
+    }
+    let floor = snapshot.as_ref().map(|s| s.at_seq).unwrap_or(0);
+    let tail: Vec<EventEnvelope> = history.into_iter().filter(|e| e.seq > floor).collect();
+
+    let (seg_no, seg_len) = last_seg;
+    let seg = OpenOptions::new()
+        .append(true)
+        .open(ws_dir.join("log").join(segment_name(seg_no)))?;
+    Ok((
+        OpenedWorkspace {
+            dir: ws_dir.to_path_buf(),
+            manifest,
+            prefs,
+            key,
+            id,
+            _lock: lock,
+            seg_no,
+            seg,
+            seg_len,
+            next_seq: last_seq + 1,
+            dirty: false,
+        },
+        LoadedState {
+            snapshot,
+            tail,
+            unknown_events,
+        },
+    ))
+}
+
+fn read_snapshot(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    at_seq: u64,
+    path: &Path,
+) -> Result<WorkspaceSnapshot, StorageError> {
+    let data = fs::read(path)?;
+    let (frames, torn) = split_frames(&data);
+    if frames.len() != 1 || torn.is_some() {
+        return Err(StorageError::Corrupt("snapshot framing".to_string()));
+    }
+    let plaintext = decrypt_frame(
+        key,
+        id,
+        SNAPSHOT_SEGMENT,
+        at_seq,
+        frames[0].nonce,
+        frames[0].ciphertext,
+    )?;
+    let snap: WorkspaceSnapshot = serde_json::from_slice(&plaintext)
+        .map_err(|e| StorageError::Corrupt(format!("snapshot decode: {e}")))?;
+    if snap.at_seq != at_seq {
+        return Err(StorageError::Corrupt(
+            "snapshot at_seq does not match its file name".to_string(),
+        ));
+    }
+    Ok(snap)
+}
+
+// ---------------------------------------------------------------------------
+// Scanning, trash
+// ---------------------------------------------------------------------------
+
+/// One workspace directory found under the root.
+pub struct ScanEntry {
+    /// The workspace directory.
+    pub dir: PathBuf,
+    /// Its plaintext identity card.
+    pub manifest: WorkspaceManifest,
+    /// Its local prefs.
+    pub prefs: WorkspacePrefs,
+    /// On-disk size in KiB.
+    pub size_kib: u64,
+}
+
+impl ScanEntry {
+    /// Project this directory entry into the session's workspace-list shape.
+    /// Only plaintext facts: sync/presence fields stay neutral (they are the
+    /// transport's runtime state), the member roster stays empty until the
+    /// workspace is opened and the genesis replays, and the recovery seed is
+    /// never on disk — the list shows an entry without revealing content.
+    pub fn info(&self) -> molt_core::WorkspaceInfo {
+        let w = &self.manifest.workspace;
+        let last_backup_min = self
+            .prefs
+            .last_backup
+            .map(|ts| u32::try_from(now_secs().saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1))
+            .unwrap_or(molt_core::WorkspaceInfo::NEVER);
+        molt_core::WorkspaceInfo {
+            id: w.id.clone(),
+            name: w.name.clone(),
+            detail: molt_core::WorkspaceInfo::rule_detail(w.rule_m, usize::from(w.rule_n)),
+            synced: true,
+            state: 0,
+            last_sync_min: 0,
+            sync_queue: 0,
+            s3: self.prefs.s3_backup,
+            size_kib: u32::try_from(self.size_kib).unwrap_or(u32::MAX),
+            last_backup_min,
+            seed: String::new(),
+            net: "tor".to_string(),
+            members: Vec::new(),
+        }
+    }
+}
+
+/// Scan `root/*/manifest.toml` — cheap, no decryption: exactly what the Open
+/// screen needs. Unreadable entries are skipped with a log line; dot-entries
+/// (`.trash`, staging) are ignored. Sorted by display name.
+pub fn scan_workspaces(root: &Path) -> Vec<ScanEntry> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(root) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || !dir.is_dir() {
+            continue;
+        }
+        match read_manifest(&dir) {
+            Ok(manifest) => {
+                let prefs = read_prefs(&dir);
+                let size_kib = dir_size(&dir).div_ceil(1024);
+                out.push(ScanEntry {
+                    dir,
+                    manifest,
+                    prefs,
+                    size_kib,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "skipping non-workspace entry");
+            }
+        }
+    }
+    out.sort_by(|a, b| a.manifest.workspace.name.cmp(&b.manifest.workspace.name));
+    out
+}
+
+/// Find the directory of the workspace with this id, if present under root.
+/// Deliberately lighter than [`scan_workspaces`]: it reads one manifest per
+/// candidate directory and never walks file sizes — this runs on the engine
+/// actor for open/delete/prefs, where a recursive stat storm would stall
+/// every operator.
+pub fn find_workspace_dir(root: &Path, id: &str) -> Option<PathBuf> {
+    let rd = fs::read_dir(root).ok()?;
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || !dir.is_dir() {
+            continue;
+        }
+        if let Ok(manifest) = read_manifest(&dir) {
+            if manifest.workspace.id == id {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(rd) = fs::read_dir(dir) else {
+        return total;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += dir_size(&path);
+        } else if let Ok(md) = entry.metadata() {
+            total += md.len();
+        }
+    }
+    total
+}
+
+/// Move a workspace directory to `root/.trash/<name>-<ts>` (recoverable
+/// delete). Returns the trash location.
+pub fn trash_workspace(root: &Path, ws_dir: &Path) -> Result<PathBuf, StorageError> {
+    let trash = root.join(".trash");
+    fs::create_dir_all(&trash)?;
+    let base = ws_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    let target = trash.join(format!("{base}-{}", now_secs()));
+    fs::rename(ws_dir, &target)?;
+    Ok(target)
+}
+
+/// Delete `.trash` entries older than `max_age_secs` (called at startup).
+pub fn purge_trash(root: &Path, max_age_secs: u64) {
+    let trash = root.join(".trash");
+    let Ok(rd) = fs::read_dir(&trash) else {
+        return;
+    };
+    let cutoff = now_secs().saturating_sub(max_age_secs);
+    for entry in rd.flatten() {
+        let path = entry.path();
+        // the timestamp is the suffix after the last '-'
+        let stamp = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.rsplit('-').next())
+            .and_then(|s| s.parse::<u64>().ok());
+        if let Some(ts) = stamp {
+            if ts <= cutoff {
+                if let Err(e) = fs::remove_dir_all(&path) {
+                    tracing::warn!(path = %path.display(), error = %e, "purging trash entry failed");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The writer task: one per open workspace
+// ---------------------------------------------------------------------------
+
+enum WriterMsg {
+    Append(EventEnvelope),
+    Prefs(WorkspacePrefs),
+    Snapshot(WorkspaceSnapshot),
+    Close(mpsc::SyncSender<()>),
+}
+
+/// A cheap handle to a workspace's writer thread (one writer per open
+/// workspace, same single-owner pattern as the engine actor). The engine
+/// applies an event in memory and enqueues the envelope; the thread frames,
+/// encrypts, appends and group-commits (fsync at most every 50 ms). The
+/// actor never blocks on a healthy disk.
+#[derive(Clone)]
+pub struct StorageHandle {
+    tx: mpsc::SyncSender<WriterMsg>,
+    failed: Arc<AtomicBool>,
+}
+
+impl StorageHandle {
+    /// Enqueue one envelope. Returns `false` when the bounded queue was full
+    /// (storage is lagging — the caller should surface that honestly); the
+    /// envelope is still delivered, blocking until there is room.
+    pub fn append(&self, env: EventEnvelope) -> bool {
+        match self.tx.try_send(WriterMsg::Append(env)) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(msg)) => {
+                let _ = self.tx.send(msg);
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.failed.store(true, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
+    /// Persist new prefs.
+    pub fn set_prefs(&self, p: WorkspacePrefs) {
+        let _ = self.tx.send(WriterMsg::Prefs(p));
+    }
+
+    /// Enqueue a snapshot write.
+    pub fn snapshot(&self, snap: WorkspaceSnapshot) {
+        let _ = self.tx.send(WriterMsg::Snapshot(snap));
+    }
+
+    /// Whether the writer hit a fatal error (dying disk); appends after this
+    /// are lost and the workspace should be closed.
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
+    /// Flush everything, optionally write a closing snapshot, fsync, release
+    /// the LOCK, and join the thread. Blocks until durable.
+    pub fn close(self, closing_snapshot: Option<WorkspaceSnapshot>) {
+        if let Some(snap) = closing_snapshot {
+            let _ = self.tx.send(WriterMsg::Snapshot(snap));
+        }
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::Close(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
+        }
+    }
+}
+
+/// Move an opened workspace onto its own writer thread and return the handle.
+pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
+    let (tx, rx) = mpsc::sync_channel::<WriterMsg>(WRITER_QUEUE);
+    let failed = Arc::new(AtomicBool::new(false));
+    let failed_flag = failed.clone();
+    std::thread::Builder::new()
+        .name("molt-storage-writer".to_string())
+        .spawn(move || {
+            let mut last_sync = Instant::now();
+            let fail = |flag: &AtomicBool, what: &str, e: &StorageError| {
+                tracing::error!(error = %e, "storage writer: {what} failed");
+                flag.store(true, Ordering::Relaxed);
+            };
+            let mut close_ack = None;
+            // unsynced appends are pending an fsync deadline
+            let mut dirty = false;
+            loop {
+                // idle and clean: sleep until work arrives (no 50 ms wakeups
+                // on an idle workspace); dirty: wake at the commit deadline
+                let msg = if dirty {
+                    rx.recv_timeout(GROUP_COMMIT)
+                } else {
+                    rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                };
+                match msg {
+                    Ok(WriterMsg::Append(env)) => {
+                        if let Err(e) = ws.append(&env) {
+                            fail(&failed_flag, "append", &e);
+                        }
+                        if !dirty {
+                            last_sync = Instant::now();
+                        }
+                        dirty = true;
+                        if last_sync.elapsed() >= GROUP_COMMIT {
+                            if let Err(e) = ws.sync() {
+                                fail(&failed_flag, "fsync", &e);
+                            }
+                            dirty = false;
+                            last_sync = Instant::now();
+                        }
+                    }
+                    Ok(WriterMsg::Prefs(p)) => {
+                        if let Err(e) = ws.set_prefs(p) {
+                            fail(&failed_flag, "prefs write", &e);
+                        }
+                    }
+                    Ok(WriterMsg::Snapshot(snap)) => {
+                        if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {
+                            fail(&failed_flag, "snapshot", &e);
+                        }
+                        dirty = false;
+                        last_sync = Instant::now();
+                    }
+                    Ok(WriterMsg::Close(ack)) => {
+                        if let Err(e) = ws.sync() {
+                            fail(&failed_flag, "closing fsync", &e);
+                        }
+                        close_ack = Some(ack);
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Err(e) = ws.sync() {
+                            fail(&failed_flag, "fsync", &e);
+                        }
+                        dirty = false;
+                        last_sync = Instant::now();
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = ws.sync();
+                        break;
+                    }
+                }
+            }
+            // the LOCK must be released before the closer is acked —
+            // otherwise an immediate reopen races the drop and sees Busy
+            drop(ws);
+            if let Some(ack) = close_ack {
+                let _ = ack.send(());
+            }
+        })
+        .expect("spawning the storage writer thread");
+    StorageHandle { tx, failed }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use molt_core::{ChatMessage, MemberId};
+    use std::collections::BTreeMap;
+
+    fn founded(seq_ts: u64) -> EventEnvelope {
+        EventEnvelope {
+            seq: 1,
+            ts: seq_ts,
+            by: "mithra".to_string(),
+            body: WorkspaceEvent::Founded {
+                name: "Chess Club".to_string(),
+                rule_m: 2,
+                rule_n: 3,
+                member: "mithra".to_string(),
+                roster: vec!["mithra".to_string(), "anahita".to_string()],
+            },
+        }
+    }
+
+    fn chat(seq: u64, body: &str) -> EventEnvelope {
+        EventEnvelope {
+            seq,
+            ts: 1_000_000 + seq,
+            by: "mithra".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage {
+                from: "mithra".to_string(),
+                body: body.to_string(),
+                ts: 1_000_000 + seq,
+                quote: None,
+                reactions: BTreeMap::new(),
+                deleted_by: None,
+            }),
+        }
+    }
+
+    fn make_ws(root: &Path, extra_events: u64) -> PathBuf {
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(root, &seed, &founded(42)).expect("create");
+        for i in 0..extra_events {
+            ws.append(&chat(2 + i, &format!("msg {i}"))).expect("append");
+        }
+        ws.sync().expect("sync");
+        ws.dir().to_path_buf()
+    }
+
+    #[test]
+    fn seed_phrase_is_24_words_and_roundtrips() {
+        let phrase = generate_seed_phrase().expect("gen");
+        assert_eq!(phrase.split(' ').count(), 24);
+        let entropy = seed_entropy(&phrase).expect("parse");
+        assert_eq!(entropy.len(), 32, "the 32-byte root of the key hierarchy");
+        assert!(seed_entropy("amber basalt cedar").is_err());
+        // two generations never collide
+        assert_ne!(phrase, generate_seed_phrase().expect("gen2"));
+    }
+
+    #[test]
+    fn derivations_are_deterministic_and_member_scoped() {
+        let seed = [7u8; 16];
+        let a = derive_workspace_id(&seed, "mithra");
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, derive_workspace_id(&seed, "mithra"));
+        // same DAO under two member identities => two distinct ids
+        assert_ne!(a, derive_workspace_id(&seed, "anahita"));
+        let k = derive_workspace_key(&seed, &a);
+        assert_eq!(k, derive_workspace_key(&seed, &a));
+        assert_ne!(k[..], derive_workspace_key(&seed, &derive_workspace_id(&seed, "anahita"))[..]);
+    }
+
+    #[test]
+    fn create_then_open_replays_the_full_history() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 3);
+
+        let (ws, loaded) = open_workspace(&dir).expect("open");
+        assert_eq!(ws.next_seq, 5);
+        assert!(loaded.snapshot.is_none());
+        assert_eq!(loaded.unknown_events, 0);
+        assert_eq!(loaded.tail.len(), 4);
+        assert!(matches!(
+            loaded.tail[0].body,
+            WorkspaceEvent::Founded { .. }
+        ));
+        assert!(matches!(loaded.tail[3].body, WorkspaceEvent::Chat(ref m) if m.body == "msg 2"));
+        assert_eq!(ws.manifest.workspace.name, "Chess Club");
+    }
+
+    #[test]
+    fn second_open_gets_busy_with_the_holder_pid() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 0);
+        let (_ws, _loaded) = open_workspace(&dir).expect("open");
+        match open_workspace(&dir) {
+            Err(StorageError::Busy(pid)) => {
+                assert_eq!(pid, std::process::id().to_string());
+            }
+            other => panic!("expected Busy, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn truncate_anywhere_recovers_the_maximal_valid_prefix() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 2); // 3 frames total
+        let seg = dir.join("log").join(segment_name(1));
+        let full = fs::read(&seg).expect("read");
+        let (frames, torn) = split_frames(&full);
+        assert_eq!(frames.len(), 3);
+        assert!(torn.is_none());
+        let boundaries: Vec<usize> = frames.iter().map(|f| f.end).collect();
+
+        for cut in 0..=full.len() {
+            fs::write(&seg, &full[..cut]).expect("chop");
+            let (ws, loaded) = open_workspace(&dir).expect("open never panics");
+            // the recovered history is the maximal prefix of whole frames
+            let want = boundaries.iter().filter(|b| **b <= cut).count();
+            assert_eq!(loaded.tail.len(), want, "cut at {cut}");
+            assert_eq!(ws.next_seq, u64::try_from(want).expect("small") + 1);
+            drop(ws);
+            // the truncation is persistent: the file now ends on a boundary
+            let after = fs::read(&seg).expect("reread");
+            assert_eq!(after.len(), boundaries[..want].last().copied().unwrap_or(0));
+            fs::write(&seg, &full).expect("restore");
+        }
+    }
+
+    #[test]
+    fn transplanted_frames_fail_authentication() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 2);
+        let seg = dir.join("log").join(segment_name(1));
+        let full = fs::read(&seg).expect("read");
+        let (frames, _) = split_frames(&full);
+        let (a, b) = (frames[1].end, frames[2].end);
+        // swap frames 2 and 3: structurally valid (crc intact), but the AAD
+        // binds each frame to its seq — the AEAD open must fail
+        let mut swapped = full[..frames[0].end].to_vec();
+        swapped.extend_from_slice(&full[a..b]);
+        swapped.extend_from_slice(&full[frames[0].end..a]);
+        fs::write(&seg, &swapped).expect("swap");
+        match open_workspace(&dir) {
+            Err(StorageError::Crypto(_)) => {}
+            other => panic!("expected Crypto error, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn snapshot_plus_tail_equals_replay_from_zero() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        for i in 0..4u64 {
+            ws.append(&chat(2 + i, &format!("m{i}"))).expect("append");
+        }
+        ws.sync().expect("sync");
+        // snapshot at seq 3 (pretend state), then two more events
+        let snap = WorkspaceSnapshot {
+            version: STORAGE_VERSION,
+            at_seq: 3,
+            state: molt_core::EngineStateDump {
+                name: "Chess Club".to_string(),
+                member: "mithra".to_string(),
+                ..Default::default()
+            },
+        };
+        ws.write_snapshot(&snap).expect("snapshot");
+        drop(ws);
+
+        let (ws, loaded) = open_workspace(&root.join(workspace_dirname(
+            "Chess Club",
+            &derive_workspace_id(&seed, "mithra"),
+        )))
+        .expect("open");
+        let got = loaded.snapshot.expect("snapshot loaded");
+        assert_eq!(got.at_seq, 3);
+        assert_eq!(got.state.name, "Chess Club");
+        // tail holds only seq 4 and 5
+        let seqs: Vec<u64> = loaded.tail.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![4, 5]);
+        assert_eq!(ws.next_seq, 6);
+    }
+
+    #[test]
+    fn snapshots_are_pruned_to_the_newest_two() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        for at in [1u64, 2, 3] {
+            let snap = WorkspaceSnapshot {
+                version: STORAGE_VERSION,
+                at_seq: at,
+                state: molt_core::EngineStateDump::default(),
+            };
+            // at_seq beyond the log is fine for this pruning-only test
+            ws.write_snapshot(&snap).expect("snapshot");
+        }
+        let files = list_sorted(&ws.dir().join("snapshots"), ".msnap");
+        let nos: Vec<u64> = files.iter().map(|(n, _)| *n).collect();
+        assert_eq!(nos, vec![2, 3]);
+    }
+
+    #[test]
+    fn unknown_event_variants_are_counted_not_fatal() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        // simulate a newer node: append a frame whose body variant we don't know
+        let raw = serde_json::json!({
+            "seq": 2, "ts": 5, "by": "x",
+            "body": { "type": "from_the_future", "x": 1 }
+        });
+        let plaintext = serde_json::to_vec(&raw).expect("encode");
+        let frame = encode_frame(
+            &derive_workspace_key(&seed, &ws.manifest.workspace.id),
+            &id_bytes(&ws.manifest.workspace.id).expect("id"),
+            1,
+            2,
+            &plaintext,
+        )
+        .expect("frame");
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(ws.dir().join("log").join(segment_name(1)))
+            .expect("open seg");
+        f.write_all(&frame).expect("write");
+        f.sync_all().expect("sync");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+
+        let (ws, loaded) = open_workspace(&dir).expect("open");
+        assert_eq!(loaded.unknown_events, 1);
+        assert_eq!(loaded.tail.len(), 1); // only the genesis is applicable
+        assert_eq!(ws.next_seq, 3, "the unknown frame still occupies seq 2");
+    }
+
+    #[test]
+    fn manifest_version_gate_refuses_newer_workspaces() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 0);
+        let manifest_path = dir.join("manifest.toml");
+        let text = fs::read_to_string(&manifest_path)
+            .expect("read")
+            .replace("version = 1", "version = 99");
+        fs::write(&manifest_path, text).expect("write");
+        // still listable (forward compatibility of the list screen) …
+        let entries = scan_workspaces(&root);
+        assert_eq!(entries.len(), 1);
+        // … but not openable
+        match open_workspace(&dir) {
+            Err(StorageError::NewerVersion(99)) => {}
+            other => panic!("expected NewerVersion, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn wrong_device_key_cannot_unseal() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 0);
+        // rotate the device key out from under the workspace
+        fs::remove_file(device_key_path(&root)).expect("rm");
+        let _ = load_or_create_device_key(&device_key_path(&root)).expect("new key");
+        match open_workspace(&dir) {
+            Err(StorageError::Crypto(msg)) => assert!(msg.contains("device key")),
+            other => panic!("expected Crypto, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn scan_lists_trash_hides_and_purge_expires() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 1);
+        let entries = scan_workspaces(&root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].manifest.workspace.name, "Chess Club");
+        assert!(entries[0].size_kib > 0);
+        let id = entries[0].manifest.workspace.id.clone();
+        assert_eq!(find_workspace_dir(&root, &id), Some(dir.clone()));
+
+        let trashed = trash_workspace(&root, &dir).expect("trash");
+        assert!(scan_workspaces(&root).is_empty());
+        assert!(trashed.exists());
+        // young entries survive a purge, expired ones do not
+        purge_trash(&root, TRASH_MAX_AGE_SECS);
+        assert!(trashed.exists());
+        purge_trash(&root, 0);
+        assert!(!trashed.exists());
+    }
+
+    #[test]
+    fn writer_thread_appends_and_closes_durably() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(42)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+        for i in 0..5u64 {
+            assert!(handle.append(chat(2 + i, &format!("t{i}"))));
+        }
+        let by: MemberId = "mithra".to_string();
+        handle.close(Some(WorkspaceSnapshot {
+            version: STORAGE_VERSION,
+            at_seq: 6,
+            state: molt_core::EngineStateDump {
+                member: by,
+                ..Default::default()
+            },
+        }));
+
+        let (ws, loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(ws.next_seq, 7);
+        assert_eq!(loaded.snapshot.expect("snap").at_seq, 6);
+        assert!(loaded.tail.is_empty()); // everything is under the snapshot floor
+    }
+
+    /// A snapshot pointing past the surviving log (partial dir copy, old
+    /// backup) must not poison the append position — it is skipped and the
+    /// state rebuilds from the log alone.
+    #[test]
+    fn snapshot_ahead_of_the_log_is_skipped() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        ws.append(&chat(2, "only real event")).expect("append");
+        ws.sync().expect("sync");
+        ws.write_snapshot(&WorkspaceSnapshot {
+            version: STORAGE_VERSION,
+            at_seq: 999, // claims history the log does not hold
+            state: molt_core::EngineStateDump::default(),
+        })
+        .expect("snapshot");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+
+        let (mut ws, loaded) = open_workspace(&dir).expect("open");
+        assert!(loaded.snapshot.is_none(), "the phantom snapshot is ignored");
+        assert_eq!(loaded.tail.len(), 2);
+        assert_eq!(ws.next_seq, 3, "append continues exactly after the log");
+        // and the workspace keeps working: append + reopen round-trips
+        ws.append(&chat(3, "after recovery")).expect("append");
+        ws.sync().expect("sync");
+        drop(ws);
+        let (ws, loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(loaded.tail.len(), 3);
+        assert_eq!(ws.next_seq, 4);
+    }
+
+    #[test]
+    fn slugs_and_dirnames_are_tame() {
+        assert_eq!(slugify("Family Office"), "family-office");
+        assert_eq!(slugify("  Ünïcode!! DAO  "), "ünïcode-dao");
+        assert_eq!(slugify("///"), "workspace");
+        let id = "a1b2c3d4e5f6";
+        assert_eq!(workspace_dirname("Family Office", id), "family-office.a1b2c3");
+    }
+}

@@ -1,9 +1,38 @@
 # Concept: creating and persisting workspaces — files and data structures
 
-Status: **design**. Today every workspace lives only in the engine session
-(`WorkspaceInfo` mock list); founding/joining/restoring produce in-memory
-entries and the “manual backup” is a display note. This document specifies
-the on-disk reality those flows will write.
+Status: **implemented through S3** (S0 event-applier refactor, S1
+`molt-storage`, S2 create/open/close/delete wiring + id addressing + real
+seeds, S3 snapshots). S4–S6 (manual `.molt.enc` export/import, S3 uploader,
+passphrase sealing) remain open, as do the fsck tool, golden fixtures, the
+VFS fault-injection harness and fuzzing from §8.
+
+Deliberate deviations from the letter of this document:
+
+* **Seed rendering**: the 32-byte CSPRNG root is rendered as 24 BIP-39
+  words (Monero-grade 256-bit entropy; Monero itself uses 25-word/256-bit
+  seeds) instead of a bespoke wordlist.
+* **Unknown newer events**: opening is *refused* with a clear error instead
+  of entering read-only mode (read-only gating across the command set is a
+  later refinement; refusing can never fork history).
+* **Durable-ack / deferred replies** (§6): not yet wired — the writer
+  group-commits every 50 ms and a lagging/failed writer surfaces as a
+  session notice (`storage-lagging` / `storage-failed`). Relatedly,
+  open/close/create still run synchronously on the actor (acceptable at
+  current log sizes; move to `spawn_blocking` + deferred reply when logs
+  grow), and a full writer queue falls back to a blocking send.
+* **Join/restore**: until the network and the restore paths (S4/S5) exist,
+  JoinFinish and RestoreFinish materialize their local dir as a *fresh*
+  genesis under a fresh seed through the same `molt-storage::create` path
+  the founder uses (RestoreFinish is idempotent: an existing "Restored
+  Republic" is re-opened, not re-created).
+* **Approval dedup**: `apply(Approved)` counts without per-member dedup on
+  purpose — the threshold machine is a simulation where one local operator
+  stands in for the whole group; real dedup arrives with real member
+  identities (FROST/MLS). The envelopes already record `by` for that day.
+* **Simulated chat replies** never reach a persisted workspace's log: the
+  demo reply bot only runs on session-only workspaces (a canned reply in
+  the authoritative encrypted history would replay forever as a real
+  message).
 
 ## 1. Goal and guiding constraints
 
