@@ -76,12 +76,15 @@ impl State {
                 rule_n: _,
                 member,
                 roster,
+                identities,
+                attestations: _,
             } => {
                 self.replica = Some(ReplicaState {
                     name: name.clone(),
                     member: member.clone(),
                     roster: roster.clone(),
                     rule_m: *rule_m,
+                    identities: identities.clone(),
                 });
             }
             WorkspaceEvent::MemberJoined { member } => {
@@ -193,6 +196,7 @@ impl State {
             member: replica.member,
             rule_m: replica.rule_m,
             roster: replica.roster,
+            identities: replica.identities,
             chat: self.chat.clone(),
             applied: self
                 .applied
@@ -226,6 +230,7 @@ impl State {
             member: dump.member,
             roster: dump.roster,
             rule_m: dump.rule_m,
+            identities: dump.identities,
         });
         self.chat = dump.chat;
         self.applied.clear();
@@ -290,6 +295,8 @@ mod tests {
                     rule_n: 3,
                     member: "petra".to_string(),
                     roster: vec!["petra".to_string(), "walter".to_string()],
+                    identities: Vec::new(),
+                    attestations: Vec::new(),
                 },
             ),
             e(2, "petra", WorkspaceEvent::Chat(msg("petra", "gm", 102))),

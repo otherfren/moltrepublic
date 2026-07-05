@@ -779,19 +779,21 @@ mod tests {
     #[test]
     fn co_equality_every_command_is_a_tool_or_documented_internal() {
         // engine-internal: the run tickers are the engine's own clock;
-        // net_delivered / net_peer_seen / net_send_failed are the node's
-        // own transport supervisor speaking (exposing them would let an
-        // agent impersonate a network peer); reload_settings /
+        // net_delivered / net_peer_seen / net_send_failed and the founding
+        // ritual's net_join_requested / net_seal_signed are the node's own
+        // transport/ritual tasks speaking (exposing them would let an agent
+        // forge network peers or ritual members); reload_settings /
         // config_notice are the config watcher's mirror path — an agent
         // that wants a reload edits via save_settings
         // (see documents/mcp-security.md)
-        const INTERNAL: [&str; 8] = [
+        const INTERNAL: [&str; 9] = [
             "restore_tick",
-            "create_tick",
             "join_tick",
             "net_delivered",
             "net_peer_seen",
             "net_send_failed",
+            "net_join_requested",
+            "net_seal_signed",
             "reload_settings",
             "config_notice",
         ];

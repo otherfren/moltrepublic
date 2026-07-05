@@ -58,6 +58,14 @@ export struct MemberSync {
     state: int, // 0 = synced, 1 = syncing, 2 = offline
 }
 
+// One row of the founding-ritual member list: the founder plus one per
+// seat. `detail` is the invite link while waiting, else the join status.
+export struct RitualSeat {
+    member: string, // display name, or "Invite k" while unactivated
+    detail: string, // the molt:// link, or the join/seal status
+    state: int, // 0 = waiting, 1 = key received, 2 = sealed (green)
+}
+
 // A local workspace/republic shown in the Open screen list.
 export struct WorkspaceItem {
     id: string, // the workspace id — the sole address of workspace verbs
@@ -274,7 +282,6 @@ export global Strings {
     in property <string> field-headless;
 
     // create (found a republic)
-    in property <string> mock-banner;
     in property <string> cw-title;
     in property <string> cw-grp-republic;
     // localized field placeholders (technical ones — URLs, IPs,
@@ -295,11 +302,13 @@ export global Strings {
     in property <string> cw-net-ok-nym;
     in property <string> cw-net-warn;
     in property <string> cw-found;
-    in property <string> cw-ph1;
-    in property <string> cw-ph2;
-    in property <string> cw-ph3;
     in property <string> cw-invites;
     in property <string> cw-invites-hint;
+    // founding-ritual lobby
+    in property <string> cw-members-title;
+    in property <string> cw-sealed-word;
+    in property <string> cw-ritual-hint;
+    in property <string> cw-log-title;
     in property <string> enter-republic;
 
     // open / join / restore

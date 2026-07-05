@@ -357,6 +357,29 @@ impl State {
         }
     }
 
+    /// Record in the workspace's `prefs.toml` that its other members are
+    /// in-process simulations (founded before the real network exists) —
+    /// so a later open knows to run their loopback peer engines. Same
+    /// writer-vs-direct discipline as [`Self::persist_backup_pref`].
+    pub(crate) fn persist_simulated_members(&mut self, id: &str, simulated: bool) {
+        if let Some(a) = &mut self.active {
+            if a.id == id {
+                a.prefs.simulated_members = simulated;
+                a.handle.set_prefs(a.prefs.clone());
+                return;
+            }
+        }
+        let Some(dir) = molt_storage::find_workspace_dir(&self.workspace_root(), id) else {
+            tracing::warn!(id, "simulated-members pref not persisted: directory missing");
+            return;
+        };
+        let mut prefs = molt_storage::read_prefs(&dir);
+        prefs.simulated_members = simulated;
+        if let Err(e) = molt_storage::write_prefs(&dir, &prefs) {
+            tracing::warn!(error = %e, "persisting simulated-members pref failed");
+        }
+    }
+
     pub(crate) fn cmd_delete_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));

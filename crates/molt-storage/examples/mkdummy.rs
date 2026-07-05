@@ -47,6 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rule_n: 3,
             member: member.to_string(),
             roster,
+            identities: Vec::new(),
+            attestations: Vec::new(),
         },
     };
     let mut ws = molt_storage::create_workspace(&root, &seed, &genesis)?;

@@ -539,6 +539,37 @@ fn ack_all(acks: Vec<AckToken>) {
     }
 }
 
+/// Send one whole message over a queue: chunk → wrap → send every block,
+/// retrying the transport until it accepts (short, bounded — the founding
+/// ritual's messages are tiny and the loopback hub rarely refuses). The
+/// one-shot counterpart to the outbox's fan-out, used by the founding
+/// ritual (transport concept §3.3) where there is no per-member cursor,
+/// just a handful of request/table/signature exchanges.
+pub async fn send_framed<T: Transport>(
+    transport: &T,
+    addr: &crate::SndQueueAddr,
+    wrap_key: &WrapKey,
+    id: crate::MsgId,
+    payload: &[u8],
+) -> Result<(), NetError> {
+    for chunk in chunk_message(id, payload)? {
+        let block = wrap(wrap_key, &chunk)?;
+        let mut tries = 0u32;
+        loop {
+            match transport.send(addr, block.clone()).await {
+                Ok(()) => break,
+                Err(e) if tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let _ = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // In-memory implementations (loopback demo, tests)
 // ---------------------------------------------------------------------------

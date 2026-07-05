@@ -336,6 +336,31 @@ pub struct WorkspaceInfo {
     pub members: Vec<MemberInfo>,
 }
 
+/// The human half of a workspace directory name: lowercase, runs of
+/// non-alphanumerics collapsed to single dashes. Shared vocabulary on
+/// purpose — `molt-storage` builds the real directory name from it and
+/// the GUI previews it live under the create wizard's name field, so the
+/// preview and the disk can never disagree.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut dash = true; // suppress a leading dash
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+            dash = false;
+        } else if !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let trimmed = out.trim_end_matches('-');
+    if trimmed.is_empty() {
+        "workspace".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// FNV-1a over a string: the one stable, non-cryptographic name hash the
 /// demo machinery shares (workspace ids, brain seeds) — never key material.
 pub fn fnv1a64(s: &str) -> u64 {
@@ -756,6 +781,12 @@ pub struct WorkspacePrefs {
     /// Unix seconds of the last completed backup; `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_backup: Option<u64>,
+    /// This republic's other members are in-process simulations (founded
+    /// before the real network exists, T3): the node runs their loopback
+    /// peer engines while the workspace is open. Never set on workspaces
+    /// whose members joined over a real transport.
+    #[serde(default)]
+    pub simulated_members: bool,
 }
 
 impl Default for WorkspacePrefs {
@@ -765,6 +796,7 @@ impl Default for WorkspacePrefs {
             version: STORAGE_VERSION,
             s3_backup: false,
             last_backup: None,
+            simulated_members: false,
         }
     }
 }
@@ -820,6 +852,54 @@ pub struct EventEnvelope {
     pub body: WorkspaceEvent,
 }
 
+/// One member's anchored identity: the per-workspace Ed25519 public key
+/// derived from that member's own recovery phrase (transport concept
+/// §3.3 — "all keys derive from this phrase" holds for every member).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberIdentity {
+    /// The member's display name (their own choice, delivered with the
+    /// invite activation).
+    pub member: MemberId,
+    /// The identity public key, lowercase hex (32 bytes Ed25519).
+    pub identity_pk: String,
+}
+
+/// One member's founding attestation: a signature with their identity key
+/// over [`roster_canonical_bytes`] of the final table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterAttestation {
+    /// The signing member.
+    pub member: MemberId,
+    /// The Ed25519 signature, lowercase hex (64 bytes).
+    pub sig: String,
+}
+
+/// The one canonical serialization of a roster table — what every member
+/// signs during the founding ritual's seal round and what every verifier
+/// reconstructs. Length-prefixed fields, entries in the given order (the
+/// ritual fixes the order: founder first, then invite order).
+pub fn roster_canonical_bytes(
+    ws_id: &str,
+    rule_m: u8,
+    rule_n: u8,
+    members: &[MemberIdentity],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-roster-v1\0");
+    out.extend_from_slice(ws_id.as_bytes());
+    out.push(rule_m);
+    out.push(rule_n);
+    for m in members {
+        let name = m.member.as_bytes();
+        out.extend_from_slice(&u32::try_from(name.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(name);
+        let pk = m.identity_pk.as_bytes();
+        out.extend_from_slice(&u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(pk);
+    }
+    out
+}
+
 /// What can happen in a workspace. **Additive-only evolution**: new kinds
 /// append variants; an older reader that meets an unknown variant must not
 /// write to that workspace (applying a partial history would fork state).
@@ -827,7 +907,11 @@ pub struct EventEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkspaceEvent {
     /// seq 1, exactly once: who this republic is. Rule, roster and the
-    /// acting member never exist outside the event stream.
+    /// acting member never exist outside the event stream. Since the
+    /// founding ritual precedes the workspace (transport concept §3.3),
+    /// the genesis carries the complete identity table and all n
+    /// attestations — the member list is sealed from birth. (Both fields
+    /// default empty so pre-ritual logs stay readable.)
     Founded {
         /// Display name at founding.
         name: String,
@@ -837,8 +921,14 @@ pub enum WorkspaceEvent {
         rule_n: u8,
         /// The acting member on this node.
         member: MemberId,
-        /// The full member roster (filled seats + open invites).
+        /// The full, final member roster (there are no open seats).
         roster: Vec<MemberId>,
+        /// name → identity key, founder first, then invite order.
+        #[serde(default)]
+        identities: Vec<MemberIdentity>,
+        /// Every member's signature over the canonical table.
+        #[serde(default)]
+        attestations: Vec<RosterAttestation>,
     },
     /// A seat filled via invite.
     MemberJoined {
@@ -953,6 +1043,10 @@ pub struct EngineStateDump {
     pub rule_m: u8,
     /// The member roster.
     pub roster: Vec<MemberId>,
+    /// The anchored name → identity-key table (empty on pre-ritual
+    /// workspaces).
+    #[serde(default)]
+    pub identities: Vec<MemberIdentity>,
     /// The chat log.
     pub chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface (keyed by surface name).
@@ -1056,26 +1150,12 @@ pub mod mockrand {
     }
 }
 
-use mockrand::lcg;
 
-// NOTE: the old `mock_seed` (12 words off a 48-word LCG list) is gone on
-// purpose: founded workspaces derive their key hierarchy from a real
-// OS-CSPRNG seed rendered as a BIP-39 phrase (`molt-storage::keys`). A key
-// hierarchy hanging off ~30 bits of hashed wall-clock is decorative
-// encryption. `mock_ticket` below still feeds the simulated invite flow.
-
-/// Derive a mock one-time invite ticket (10 base32 characters) from `entropy`.
-pub fn mock_ticket(entropy: u64) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut x = lcg(entropy ^ 0x9e37_79b9_7f4a_7c15);
-    let mut out = String::with_capacity(10);
-    for _ in 0..10 {
-        x = lcg(x);
-        let idx = usize::try_from((x >> 33) % 32).unwrap_or_default();
-        out.push(char::from(ALPHABET[idx]));
-    }
-    out
-}
+// NOTE: the old `mock_seed` (12 words off a 48-word LCG list) and
+// `mock_ticket` (10 base32 chars off an LCG) are gone on purpose: founded
+// workspaces derive their key hierarchy from a real OS-CSPRNG seed
+// rendered as a BIP-39 phrase (`molt-storage::keys`), and founding-ritual
+// tickets are real high-entropy single-use secrets (`molt-net::invite`).
 
 /// The shared core of every engine-run mock lifecycle (restore / create /
 /// join): step, progress, outcome and the live log. `#[serde(flatten)]`
@@ -1107,12 +1187,28 @@ impl RunCore {
     }
 }
 
-/// The (mock) founding lifecycle of a new republic. Shared session state like
-/// the restore: any operator can start it, both watch the same progress and
-/// live log, and the founding result (seed + invites) is readable by both.
+/// One row of the founding ritual's member list (transport concept §3.3):
+/// an invite that turns into a sealed member.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RitualSeatView {
+    /// The one-time `molt://invite/…` link (ephemeral — dies with the
+    /// ritual).
+    pub link: String,
+    /// The member's display name; empty until they activated the link.
+    pub member: String,
+    /// 0 = waiting for activation, 1 = key received (awaiting seal),
+    /// 2 = sealed (signature verified).
+    pub state: u8,
+}
+
+/// The founding-ritual lifecycle. Shared session state like the restore:
+/// any operator can start it, both watch the same list and live log. The
+/// workspace is created only when every seat is sealed (`run.outcome`
+/// flips to 1); until then nothing exists on disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateState {
-    /// The shared run lifecycle (step / progress / outcome / log).
+    /// The shared run lifecycle (step / outcome / log; the log carries
+    /// the ritual's real events, progress is unused).
     #[serde(flatten)]
     pub run: RunCore,
     /// The republic's name.
@@ -1125,10 +1221,10 @@ pub struct CreateState {
     pub members: u8,
     /// Transport: `"tor" | "nym" | "none"`.
     pub net: String,
-    /// The freshly derived recovery phrase (shown once, on success).
+    /// The founder's recovery phrase (shown during the ritual, then gone).
     pub seed: String,
-    /// One-time invite links for the other n−1 members.
-    pub invites: Vec<String>,
+    /// The ritual's member list: one row per future member.
+    pub seats: Vec<RitualSeatView>,
 }
 
 /// The (mock) join-via-invite lifecycle. Shared session state like the restore.
@@ -1460,11 +1556,14 @@ pub enum Command {
     RestoreFinish,
 
     // --- founding a republic (shared, co-equal) ---
-    /// Begin the (mock) founding run: validates the configuration, derives the
-    /// recovery phrase and the n−1 invite links, and moves the lifecycle to
-    /// the run view; the engine ticks the progress and the live log by itself.
+    /// Begin the founding ritual: validates the configuration, derives the
+    /// founder's recovery phrase and identity, mints the n−1 one-time
+    /// invite links and opens their invite queues. The workspace is
+    /// created only when every member activated their link AND signed the
+    /// final roster (transport concept §3.3) — until then nothing exists
+    /// on disk, and closing the wizard voids the links.
     CreateStart {
-        /// The new republic's name (must be unique locally).
+        /// The new republic's name.
         name: String,
         /// The founder's handle.
         member: String,
@@ -1475,14 +1574,44 @@ pub enum Command {
         /// Transport: `"tor" | "nym" | "none"`.
         net: String,
     },
-    /// Advance the (mock) founding one step. Sent by the engine's own ticker;
-    /// answered with an error once the run is over (which stops the ticker).
-    CreateTick,
-    /// Abandon the founding (idle again) and return to the choice screen.
+    /// Abandon the founding ritual: distributed links become worthless,
+    /// the disk stays untouched (unless the ritual already sealed — then
+    /// the created workspace stays listed, just not entered).
     CreateCancel,
-    /// Finish a successful founding: the new republic joins the local list,
-    /// becomes active, and the node moves straight to the main screen.
+    /// Enter the sealed republic: refused until every member is green
+    /// (key received and roster signature verified — the engine enforces
+    /// this for every operator, not just the GUI).
     CreateFinish,
+
+    // --- founding-ritual transport events (engine-internal) ---
+    /// A member activated their invite link: their JoinRequest arrived on
+    /// the invite queue. Sent by the node's own ritual transport tasks
+    /// (engine-internal, like `NetDelivered` — never an MCP tool: it
+    /// would allow forging members). The engine verifies the ticket MAC.
+    NetJoinRequested {
+        /// Which invite (0-based index into the ritual's seat list).
+        seat: u32,
+        /// The member's self-chosen display name.
+        member: MemberId,
+        /// The member's identity public key, lowercase hex.
+        identity_pk: String,
+        /// `HMAC(KDF(ticket), name ‖ pk)`, lowercase hex.
+        proof: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A member returned their seal signature over the final roster table
+    /// (engine-internal; the engine verifies it against the anchored key).
+    NetSealSigned {
+        /// Which invite (0-based index into the ritual's seat list).
+        seat: u32,
+        /// The Ed25519 signature over the canonical table, lowercase hex.
+        sig: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
 
     // --- joining via invite (shared, co-equal) ---
     /// Begin the (mock) join run for an invite link; the engine ticks the
@@ -1804,11 +1933,36 @@ mod tests {
     }
 
     #[test]
-    fn mock_generators_are_deterministic() {
-        let ticket = mock_ticket(42);
-        assert_eq!(ticket.len(), 10);
-        assert_eq!(ticket, mock_ticket(42));
-        assert_ne!(ticket, mock_ticket(43));
+    fn roster_canonical_bytes_are_stable_and_field_separated() {
+        let table = vec![
+            MemberIdentity {
+                member: "petra".to_string(),
+                identity_pk: "aa".repeat(32),
+            },
+            MemberIdentity {
+                member: "walter".to_string(),
+                identity_pk: "bb".repeat(32),
+            },
+        ];
+        let a = roster_canonical_bytes("f00", 2, 3, &table);
+        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table));
+        // any changed field changes the bytes
+        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table));
+        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1]));
+        // length prefixes prevent name/pk boundary games
+        let shifted = vec![MemberIdentity {
+            member: "petraa".to_string(),
+            identity_pk: format!("a{}", "a".repeat(63)),
+        }];
+        let plain = vec![MemberIdentity {
+            member: "petra".to_string(),
+            identity_pk: format!("aa{}", "a".repeat(62)),
+        }];
+        assert_ne!(
+            roster_canonical_bytes("f00", 1, 1, &shifted),
+            roster_canonical_bytes("f00", 1, 1, &plain)
+        );
     }
 
     #[test]

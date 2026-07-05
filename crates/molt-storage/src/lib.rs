@@ -46,6 +46,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
+pub use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use molt_core::{
     EventEnvelope, ManifestWorkspace, RawEnvelope, TransportState, WorkspaceEvent, WorkspaceId,
@@ -167,6 +169,45 @@ pub fn derive_workspace_id(seed: &[u8], member: &str) -> WorkspaceId {
 /// with XChaCha20-Poly1305 for frames, snapshots and exports.
 pub fn derive_workspace_key(seed: &[u8], id: &str) -> [u8; 32] {
     hkdf32(seed, "molt-ws-key", id.as_bytes())
+}
+
+/// The member's per-workspace **identity keypair** (transport concept
+/// §3.3): Ed25519, derived from the member's own recovery seed via the
+/// same HKDF hierarchy — per-workspace (keeps the fresh-per-group rule),
+/// deterministic (the phrase re-derives it after total loss), never
+/// random. Returns `(signing key, public key hex)`.
+pub fn derive_identity_key(seed: &[u8], id: &str) -> (SigningKey, String) {
+    let sk_bytes = hkdf32(seed, "molt-ws-identity", id.as_bytes());
+    let sk = SigningKey::from_bytes(&sk_bytes);
+    let pk = hex::encode(sk.verifying_key().to_bytes());
+    (sk, pk)
+}
+
+/// Sign `msg` with a member's identity key; returns the signature as
+/// lowercase hex (64 bytes).
+pub fn identity_sign(sk: &SigningKey, msg: &[u8]) -> String {
+    hex::encode(sk.sign(msg).to_bytes())
+}
+
+/// Verify an identity signature (hex sig, hex pk) over `msg`. False on any
+/// malformed input — never panics on untrusted data.
+pub fn identity_verify(pk_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
+    let Ok(pk_bytes) = hex::decode(pk_hex) else {
+        return false;
+    };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(vk) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    vk.verify_strict(msg, &Signature::from_bytes(&sig_arr)).is_ok()
 }
 
 /// Decode the hex workspace id into the 32 raw bytes the AAD uses.
@@ -404,27 +445,10 @@ pub fn expand_tilde(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
-/// The human half of a workspace directory name: lowercase, runs of
-/// non-alphanumerics collapsed to single dashes.
-pub fn slugify(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut dash = true; // suppress a leading dash
-    for c in name.chars() {
-        if c.is_alphanumeric() {
-            out.extend(c.to_lowercase());
-            dash = false;
-        } else if !dash {
-            out.push('-');
-            dash = true;
-        }
-    }
-    let trimmed = out.trim_end_matches('-');
-    if trimmed.is_empty() {
-        "workspace".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
+// The slug rule lives in molt-core (shared vocabulary: the GUI previews
+// the directory name live); re-exported here so storage callers keep
+// their one import path.
+pub use molt_core::slugify;
 
 /// The directory name of a workspace: `<slug>.<short-id>`. Display names may
 /// repeat; the id disambiguates. Never parsed back.
@@ -1495,6 +1519,8 @@ mod tests {
                 rule_n: 3,
                 member: "mithra".to_string(),
                 roster: vec!["mithra".to_string(), "anahita".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
             },
         }
     }
@@ -1535,6 +1561,29 @@ mod tests {
         assert!(seed_entropy("amber basalt cedar").is_err());
         // two generations never collide
         assert_ne!(phrase, generate_seed_phrase().expect("gen2"));
+    }
+
+    #[test]
+    fn identity_key_derives_deterministically_and_signs() {
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let id = derive_workspace_id(&seed, "petra");
+        let (sk, pk) = derive_identity_key(&seed, &id);
+        // deterministic: the phrase re-derives the same key
+        let (_sk2, pk2) = derive_identity_key(&seed, &id);
+        assert_eq!(pk, pk2);
+        assert_eq!(pk.len(), 64);
+        // per-workspace: a different id yields a different identity
+        let other = derive_workspace_id(&seed, "walter");
+        assert_ne!(pk, derive_identity_key(&seed, &other).1);
+        // sign/verify round-trips; tampered message or wrong key fail
+        let msg = b"the canonical roster table";
+        let sig = identity_sign(&sk, msg);
+        assert!(identity_verify(&pk, msg, &sig));
+        assert!(!identity_verify(&pk, b"other bytes", &sig));
+        assert!(!identity_verify(&derive_identity_key(&seed, &other).1, msg, &sig));
+        // malformed inputs never panic
+        assert!(!identity_verify("zz", msg, &sig));
+        assert!(!identity_verify(&pk, msg, "beef"));
     }
 
     #[test]

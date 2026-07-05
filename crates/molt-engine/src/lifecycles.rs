@@ -6,13 +6,13 @@
 //! and differ only in validation, log content and the finished workspace.
 
 use molt_core::{
-    demo_workspace_id, mock_ticket, roster_members, Command, CreateState, EventEnvelope,
-    InviteInfo, JoinState, MemberId, MemberInfo, MoltError, Reply, RestoreState, RunCore, Screen,
-    SessionScope, WorkspaceEvent, WorkspaceId, WorkspaceInfo,
+    demo_workspace_id, roster_members, Command, CreateState, EventEnvelope, InviteInfo, JoinState,
+    MemberId, MemberInfo, MoltError, Reply, RestoreState, RunCore, Screen, SessionScope,
+    WorkspaceEvent, WorkspaceId, WorkspaceInfo,
 };
 use tokio::sync::oneshot;
 
-use crate::{entropy_for, now_secs, ActiveStorage, Envelope, State};
+use crate::{now_secs, ActiveStorage, Envelope, State};
 
 /// Guard shared by every `*Start`: refuse while that run is in flight.
 fn guard_idle(run: &RunCore, err: fn(String) -> MoltError) -> Result<(), MoltError> {
@@ -46,6 +46,7 @@ impl State {
     /// task. Shared by the create / join / restore finishes (the joiner and
     /// the restorer materialize their local dir the same way the founder
     /// does). Returns the new workspace id.
+    #[allow(clippy::too_many_arguments)]
     fn materialize_workspace(
         &mut self,
         name: &str,
@@ -53,6 +54,8 @@ impl State {
         rule_m: u8,
         roster: Vec<MemberId>,
         seed_phrase: &str,
+        identities: Vec<molt_core::MemberIdentity>,
+        attestations: Vec<molt_core::RosterAttestation>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -67,6 +70,8 @@ impl State {
                 rule_n,
                 member: member.to_string(),
                 roster,
+                identities,
+                attestations,
             },
         };
         let root = self.workspace_root();
@@ -188,12 +193,16 @@ impl State {
             // until then the restored dir is founded fresh, like a create
             let seed = molt_storage::generate_seed_phrase()
                 .map_err(|e| MoltError::Restore(e.to_string()))?;
+            // restore rebuilds identities from the backup (S4/S5); until
+            // then the fresh local dir carries none
             self.materialize_workspace(
                 &name,
                 &member,
                 rule_m,
                 roster.clone(),
                 &seed,
+                Vec::new(),
+                Vec::new(),
                 MoltError::Restore,
             )?
         } else {
@@ -279,7 +288,7 @@ impl State {
         }
     }
 
-    // ---- founding (create) ---------------------------------------------
+    // ---- founding (create): the ritual (transport concept §3.3) --------
 
     pub(crate) fn cmd_create_start(
         &mut self,
@@ -305,159 +314,175 @@ impl State {
                 "threshold must be within 1..=members and members within 2..=13".to_string(),
             ));
         }
-        // Display names may repeat (the workspace id disambiguates), so
-        // there is deliberately no unique-name check here.
-        //
-        // The founding result is derived up front; the GUI reveals it only
-        // once the run succeeds. The recovery phrase is real entropy — the
-        // whole key hierarchy of the workspace hangs off it.
-        let entropy = entropy_for(&name);
+        // The founder's recovery phrase is real entropy — the workspace id
+        // and every key hangs off it. It is shown once during the ritual
+        // and never persisted into the shared session of a real workspace.
         let seed =
             molt_storage::generate_seed_phrase().map_err(|e| MoltError::Create(e.to_string()))?;
-        let invites: Vec<String> = (1..members)
-            .map(|k| {
-                InviteInfo {
-                    republic: name.clone(),
-                    threshold,
-                    members,
-                    inviter: member.clone(),
-                    ticket: mock_ticket(entropy.wrapping_add(u64::from(k))),
-                }
-                .render()
+
+        // any prior ritual/mesh belongs to a different context
+        self.teardown_ritual();
+        self.ritual_attestations.clear();
+        let links = self
+            .start_ritual(&name, &member, threshold, members, &seed)
+            .map_err(MoltError::Create)?;
+
+        let seats = links
+            .into_iter()
+            .map(|link| molt_core::RitualSeatView {
+                link,
+                member: String::new(),
+                state: 0,
             })
             .collect();
         self.session.create = CreateState {
             run: RunCore::started(),
-            name,
-            member,
+            name: name.clone(),
+            member: member.clone(),
             threshold,
             members,
             net,
             seed,
-            invites,
+            seats,
         };
+        self.session.create.run.log.push(format!(
+            "→ ritual opened · {member} (founder) · {threshold}-of-{members} · invites minted"
+        ));
+        self.session.create.run.log.push(
+            "→ links shared off-band · waiting for members to activate".to_string(),
+        );
         self.session.screen = Screen::Create;
         self.emit_session(SessionScope::Full);
-        self.spawn_ticker(Command::CreateTick);
-        Ok(Reply::Ack)
-    }
-
-    pub(crate) fn cmd_create_tick(&mut self) -> Result<Reply, MoltError> {
-        guard_ticking(&self.session.create.run, MoltError::Create)?;
-        self.create_tick();
-        self.emit_session(SessionScope::Create);
         Ok(Reply::Ack)
     }
 
     pub(crate) fn cmd_create_cancel(&mut self) -> Result<Reply, MoltError> {
+        // abandoning voids the distributed links; the disk stays untouched
+        // unless the ritual already sealed a workspace into being (then it
+        // simply stays listed, just not entered)
+        self.teardown_ritual();
+        self.ritual_attestations.clear();
         self.session.create = CreateState::default();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    pub(crate) fn cmd_create_finish(&mut self) -> Result<Reply, MoltError> {
-        guard_finished(&self.session.create.run, MoltError::Create)?;
+    /// When every seat is sealed, the republic is fully constituted:
+    /// the founder signs the same table, the genesis is written (carrying
+    /// the identity table AND all n attestations), and only now does the
+    /// workspace come into being. Idempotent — fires once.
+    pub(crate) fn maybe_finalize(&mut self) {
+        if self.session.create.run.outcome == 1 {
+            return; // already finalized
+        }
+        // every seat must be sealed (state 2)
+        if self.session.create.seats.iter().any(|s| s.state != 2) {
+            return;
+        }
+        let Some(ritual) = self.net_ritual.take() else {
+            return;
+        };
         let c = self.session.create.clone();
-        // roster: the founder plus one named seat per unused invite
-        let roster: Vec<MemberId> = std::iter::once(c.member.clone())
-            .chain((1..c.members).map(|k| format!("invite-{k}")))
-            .collect();
+        // finalize can fail (disk); on failure keep the ritual torn down
+        // but surface it — a fresh attempt re-mints
+        match self.finalize_founding(&c, ritual) {
+            Ok(id) => {
+                self.session.create.run.outcome = 1;
+                self.session.active_workspace = id;
+                self.session
+                    .create
+                    .run
+                    .log
+                    .push("✓ roster sealed by everyone · workspace created".to_string());
+            }
+            Err(e) => {
+                self.session.create.run.outcome = 2;
+                self.session
+                    .create
+                    .run
+                    .log
+                    .push(format!("✗ founding failed: {e}"));
+            }
+        }
+        self.ritual_attestations.clear();
+    }
+
+    /// Write the sealed genesis and materialize the workspace (or, on a
+    /// storage-less engine, just push a session entry). Returns the id.
+    fn finalize_founding(
+        &mut self,
+        c: &CreateState,
+        ritual: crate::founding::RitualRuntime,
+    ) -> Result<WorkspaceId, MoltError> {
+        // identities in ritual order: founder first, then seats
+        let identities = ritual.sealed_identities();
+        let roster: Vec<MemberId> = identities.iter().map(|i| i.member.clone()).collect();
+        // the founder signs the same canonical bytes; its attestation
+        // leads the list
+        let table =
+            molt_core::roster_canonical_bytes(ritual.ws_id(), c.threshold, c.members, &identities);
+        let founder_sig = molt_storage::identity_sign(ritual.founder_sk(), &table);
+        let mut attestations = vec![molt_core::RosterAttestation {
+            member: c.member.clone(),
+            sig: founder_sig,
+        }];
+        attestations.append(&mut self.ritual_attestations.clone());
+
         let id = if self.persist {
-            self.materialize_workspace(
+            let id = self.materialize_workspace(
                 &c.name,
                 &c.member,
                 c.threshold,
                 roster.clone(),
                 &c.seed,
+                identities.clone(),
+                attestations,
                 MoltError::Create,
-            )?
+            )?;
+            // this republic's members are simulated (no real network yet);
+            // the mesh runs their loopback peers when the workspace opens
+            self.persist_simulated_members(&id, true);
+            id
         } else {
             demo_workspace_id(&c.name)
         };
-        // the run state resets only once the workspace exists — a failed
-        // finish stays retryable, and the recovery phrase the wizard
-        // revealed keeps addressing something
-        self.session.create = CreateState::default();
+
         let s3 = self.session.settings.s3_backup;
         if s3 && self.persist {
             self.persist_backup_pref(&id, true);
         }
-        // The founder is synced; every invite is still an unused seat. On a
-        // persisted workspace the recovery phrase is NOT kept in the shared
-        // session (read_session would hand the root of the key hierarchy to
-        // every operator); it was shown once, in the wizard.
-        let members = roster_members(&roster, |m| m == c.member, "unused");
-        let seed = if self.persist {
-            String::new()
-        } else {
-            c.seed.clone()
-        };
+        // members show live (the ritual just sealed them all)
+        let members = roster_members(&roster, |_| true, "just now");
+        let seed = if self.persist { String::new() } else { c.seed.clone() };
         self.push_workspace_entry(
             &id,
             &c.name,
             c.threshold,
-            usize::from(c.members),
+            roster.len(),
             members,
             seed,
             c.net.clone(),
             s3,
         );
-        self.session.active_workspace = id;
+        Ok(id)
+    }
+
+    pub(crate) fn cmd_create_finish(&mut self) -> Result<Reply, MoltError> {
+        // "Enter republic" is refused until the ritual sealed a workspace
+        // — the engine enforces it for every operator, not just the GUI
+        if self.session.create.run.outcome != 1 {
+            return Err(MoltError::Create(
+                "the founding ritual is not complete — every member must sign first".to_string(),
+            ));
+        }
+        let id = self.session.active_workspace.clone();
+        self.session.create = CreateState::default();
         // straight into the new republic — no completion-screen stopover
+        self.session.active_workspace = id;
         self.session.screen = Screen::Main;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
-    }
-
-    /// One tick of the mock founding: advance the percentage and append a
-    /// phase-specific live-log line; the founding always succeeds (invalid
-    /// configurations are rejected at `CreateStart`).
-    fn create_tick(&mut self) {
-        let dir = self.session.settings.workspace_dir.clone();
-        let c = &mut self.session.create;
-        c.run.progress_pct = (c.run.progress_pct + 3).min(100);
-        let t = u32::from(c.run.progress_pct / 3);
-        if c.run.progress_pct >= 100 {
-            c.run.log.push(format!(
-                "✓ republic founded — {}-of-{} · {} invite(s) minted",
-                c.threshold,
-                c.members,
-                c.members - 1
-            ));
-            c.run.outcome = 1;
-            return;
-        }
-        if c.run.progress_pct < 30 {
-            if t % 2 == 0 {
-                c.run
-                    .log
-                    .push(format!("→ rng: entropy pool block {t} · ok"));
-            } else {
-                c.run
-                    .log
-                    .push(format!("→ kdf: argon2id pass {t} · 256 MiB"));
-            }
-        } else if c.run.progress_pct < 75 {
-            let share = t % u32::from(c.members) + 1;
-            c.run.log.push(format!(
-                "→ frost: share {share}/{} committed · vss ok",
-                c.members
-            ));
-        } else if t % 2 == 0 {
-            // the same slug rule the real directory gets (short-id elided —
-            // it only exists once the seed is committed at finish)
-            let slug = molt_storage::slugify(&c.name);
-            c.run
-                .log
-                .push(format!("→ ws: {dir}/{slug}.…/ manifest sealed"));
-        } else {
-            // members is validated to 2..=13, so there is at least 1 invite
-            let ticket = t % u32::from(c.members - 1) + 1;
-            c.run
-                .log
-                .push(format!("→ invite: ticket {ticket} minted · unused"));
-        }
     }
 
     // ---- join ------------------------------------------------------------
@@ -538,6 +563,8 @@ impl State {
                 j.rule_m,
                 roster.clone(),
                 &seed,
+                Vec::new(),
+                Vec::new(),
                 MoltError::Join,
             )?
         } else {

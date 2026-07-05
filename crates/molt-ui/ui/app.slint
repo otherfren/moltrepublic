@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, WorkspaceItem, MemberSync, InvitePreview, BackupRow } from "theme.slint";
+import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, WorkspaceItem, MemberSync, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
     AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -162,6 +162,10 @@ export component AppWindow inherits Window {
     // parse an invite link for the join preview — the same molt-core parser
     // the engine uses, so preview and run can never disagree
     pure callback parse-invite(string) -> InvitePreview;
+    // live folder preview for the create wizard: (workspace dir, typed
+    // name) → the on-disk path, from the same molt-core slug rule the
+    // storage layer uses ("" while the name is empty)
+    pure callback folder-preview(string, string) -> string;
     // whether a workspace of this name already exists (checks the mirrored
     // session list in Rust; the engine re-validates on create-start)
     // live run logs, mirrored from the engine session; copy-log("restore" |
@@ -210,16 +214,24 @@ export component AppWindow inherits Window {
     property <string> cw-member;
     property <int> cw-threshold: 2;
     property <int> cw-members: 3;
+    // the configured workspace root (mirrored from the session settings)
+    // and the live on-disk folder preview it yields for the typed name —
+    // re-evaluated on every keystroke via the two-way bound cw-name
+    in property <string> cw-dir;
+    property <string> cw-folder: root.folder-preview(root.cw-dir, root.cw-name);
     // the recommended threshold: the simple majority of n
     property <int> cw-rule-default: Math.floor(root.cw-members / 2) + 1;
-    // … and the founding lifecycle, mirrored from the engine session (the
-    // engine ticks progress + log and derives the seed + invites):
-    // step 0 = configure, 1 = run view; outcome 0 = running, 1 = founded
+    // … and the founding ritual, mirrored from the engine session:
+    // step 0 = configure, 1 = ritual lobby; outcome 0 = in ritual,
+    // 1 = sealed (workspace created), 2 = failed
     in property <int> cw-step: 0;
-    in property <float> cw-progress: 0.0;
     in property <int> cw-outcome: 0;
     in property <string> cw-seed;
-    in property <[string]> cw-invites;
+    // the member list: founder + one row per seat, rows turn green as
+    // members activate their link and sign the roster
+    in property <[RitualSeat]> cw-seats;
+    in property <int> cw-sealed;   // how many rows are green
+    in property <int> cw-total;    // total rows (n)
     // run-header labels ("who is being founded"), composed in Rust so an
     // MCP-started founding shows real values even with an empty local form
     in property <string> cw-run-name;
@@ -884,17 +896,29 @@ export component AppWindow inherits Window {
                         title: Strings.cw-grp-republic;
                         hint: Strings.cw-republic-hint;
                         icon: @image-url("assets/republic.svg");
-                        HorizontalLayout {
-                            spacing: 12px;
-                            AppField {
-                                horizontal-stretch: 3;
-                                text <=> root.cw-name;
-                                placeholder: Strings.ph-ws-name;
+                        VerticalLayout {
+                            spacing: 6px;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                AppField {
+                                    horizontal-stretch: 3;
+                                    text <=> root.cw-name;
+                                    placeholder: Strings.ph-ws-name;
+                                }
+                                AppField {
+                                    horizontal-stretch: 2;
+                                    text <=> root.cw-member;
+                                    placeholder: Strings.ph-member;
+                                }
                             }
-                            AppField {
-                                horizontal-stretch: 2;
-                                text <=> root.cw-member;
-                                placeholder: Strings.ph-member;
+                            // where this republic will live on disk, live
+                            // per keystroke (the trailing short id only
+                            // exists once the seed is committed at finish)
+                            if root.cw-folder != "": Text {
+                                text: root.cw-folder;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                overflow: elide;
                             }
                         }
                     }
@@ -1023,20 +1047,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Rectangle {
-                        background: Theme.accent-soft;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.accent;
-                        HorizontalLayout {
-                            padding: 12px;
-                            Text {
-                                text: Strings.mock-banner;
-                                color: Theme.accent;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
 
                     HorizontalLayout {
                         Rectangle {
@@ -1060,122 +1070,198 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                 }
 
-                // step 2/3: the running founding; on success the log gives
-                // way to the founding result (phrase + invites) and only
-                // "Enter republic" remains
-                if root.cw-step == 1: RunView {
+                // step 2: the founding ritual lobby. No progress animation:
+                // the founder's phrase, the live member list (rows turn
+                // green as members activate their link and sign the
+                // roster), and the real ritual event log. "Enter republic"
+                // unlocks only when every row is green (outcome == 1).
+                if root.cw-step == 1: VerticalLayout {
                     vertical-stretch: 1;
-                    title: root.cw-run-name;
-                    hint: root.cw-run-detail;
-                    icon: @image-url("assets/create.svg");
-                    progress: root.cw-progress;
-                    outcome: root.cw-outcome;
-                    ph1: Strings.cw-ph1;
-                    ph2: Strings.cw-ph2;
-                    ph3: Strings.cw-ph3;
-                    failed-label: Strings.rw-failed;
-                    log: root.cw-log;
-                    show-log: root.cw-outcome != 1;
-                    back-shown: false;
-                    finish-enabled: root.cw-outcome == 1;
-                    finish-label: Strings.enter-republic;
-                    finish => {
-                        root.create-finish();
-                    }
-                    copy-log-clicked => {
-                        root.copy-log("create");
-                        root.show-toast(Strings.toast-copied);
+                    spacing: 12px;
+
+                    SeedPanel {
+                        seed: root.cw-seed;
+                        copy-requested => {
+                            root.copy-text(root.cw-seed);
+                            root.show-toast(Strings.toast-copied);
+                        }
                     }
 
-                    // the founding result: save the phrase, hand out the invites
-                    if root.cw-outcome == 1: VerticalLayout {
-                        spacing: 12px;
-                        vertical-stretch: 1;
-                        SeedPanel {
-                            seed: root.cw-seed;
-                            copy-requested => {
-                                root.copy-text(root.cw-seed);
-                                root.show-toast(Strings.toast-copied);
-                            }
-                        }
-                        Rectangle {
-                            vertical-stretch: 1;
-                            background: Theme.panel-2;
-                            border-radius: Theme.win95 ? 0px : 8px;
-                            border-width: Theme.border-w;
-                            border-color: Theme.line;
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
+                    // the member list: founder + one row per seat
+                    Rectangle {
+                        vertical-stretch: 3;
+                        background: Theme.panel-2;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+                            HorizontalLayout {
                                 Text {
-                                    text: Strings.cw-invites;
+                                    text: Strings.cw-members-title;
                                     color: Theme.faint;
                                     font-size: Theme.fs-cap;
                                     font-weight: 700;
+                                    horizontal-stretch: 1;
                                 }
                                 Text {
-                                    text: Strings.cw-invites-hint;
-                                    color: Theme.faint;
+                                    text: "\{root.cw-sealed} / \{root.cw-total} \{Strings.cw-sealed-word}";
+                                    color: root.cw-outcome == 1 ? Theme.good : Theme.faint;
                                     font-size: Theme.fs-cap;
-                                    wrap: word-wrap;
                                 }
-                                Rectangle {
-                                    vertical-stretch: 1;
-                                    clip: true;
-                                    invfl := Flickable {
-                                        width: 100%;
-                                        height: 100%;
-                                        viewport-width: self.width;
-                                        viewport-height: invlist.preferred-height;
-                                        invlist := VerticalLayout {
-                                            spacing: 5px;
-                                            alignment: start;
-                                            for inv in root.cw-invites: Rectangle {
-                                                height: 36px;
-                                                border-radius: Theme.win95 ? 0px : 8px;
-                                                background: Theme.panel;
-                                                border-width: Theme.border-w;
-                                                border-color: Theme.line;
-                                                HorizontalLayout {
-                                                    padding-left: 10px;
-                                                    padding-right: 5px;
-                                                    spacing: 9px;
-                                                    Image {
-                                                        source: @image-url("assets/link.svg");
-                                                        colorize: Theme.accent;
-                                                        width: 15px;
-                                                        height: 15px;
-                                                        y: (parent.height - self.height) / 2;
-                                                    }
+                            }
+                            Text {
+                                text: Strings.cw-ritual-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                seatfl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: seatlist.preferred-height;
+                                    seatlist := VerticalLayout {
+                                        spacing: 5px;
+                                        alignment: start;
+                                        for seat in root.cw-seats: Rectangle {
+                                            height: 44px;
+                                            border-radius: Theme.win95 ? 0px : 8px;
+                                            background: Theme.panel;
+                                            border-width: Theme.border-w;
+                                            border-color: seat.state == 2 ? Theme.good : Theme.line;
+                                            HorizontalLayout {
+                                                padding-left: 12px;
+                                                padding-right: 6px;
+                                                spacing: 10px;
+                                                // status dot: gray waiting,
+                                                // amber key-in, green sealed
+                                                Rectangle {
+                                                    width: 11px;
+                                                    height: 11px;
+                                                    border-radius: 5.5px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    background: seat.state == 2 ? Theme.good
+                                                        : (seat.state == 1 ? Theme.warn : Theme.line);
+                                                }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    horizontal-stretch: 1;
                                                     Text {
-                                                        text: inv;
+                                                        text: seat.member;
                                                         color: Theme.text;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                        horizontal-stretch: 1;
+                                                        font-size: Theme.fs-body;
                                                         overflow: elide;
                                                     }
-                                                    AppButton {
-                                                        height: 28px;
-                                                        pad: 10px;
-                                                        y: (parent.height - self.height) / 2;
-                                                        label: Strings.ow-copy;
-                                                        clicked => {
-                                                            root.copy-text(inv);
-                                                            root.show-toast(Strings.toast-copied);
-                                                        }
+                                                    Text {
+                                                        text: seat.detail;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                                // copy the link while the seat waits
+                                                if seat.state == 0: AppButton {
+                                                    height: 28px;
+                                                    pad: 10px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    label: Strings.ow-copy;
+                                                    clicked => {
+                                                        root.copy-text(seat.detail);
+                                                        root.show-toast(Strings.toast-copied);
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    ScrollHint {
-                                        x: parent.width - 7px;
-                                        view-h: invfl.height;
-                                        content-h: invfl.viewport-height;
-                                        scroll-y: invfl.viewport-y;
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: seatfl.height;
+                                    content-h: seatfl.viewport-height;
+                                    scroll-y: seatfl.viewport-y;
+                                }
+                            }
+                        }
+                    }
+
+                    // the live ritual log: real events (activated · key
+                    // received · signed · workspace created)
+                    Rectangle {
+                        vertical-stretch: 2;
+                        background: Theme.panel-2;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: root.cw-outcome == 2 ? Theme.bad : Theme.line;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                Text {
+                                    text: Strings.cw-log-title;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                    horizontal-stretch: 1;
+                                }
+                                AppButton {
+                                    height: 26px;
+                                    pad: 9px;
+                                    label: Strings.ow-copy;
+                                    clicked => {
+                                        root.copy-log("create");
+                                        root.show-toast(Strings.toast-copied);
                                     }
                                 }
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                logfl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: loglist.preferred-height;
+                                    loglist := VerticalLayout {
+                                        spacing: 2px;
+                                        alignment: start;
+                                        for line in root.cw-log: Text {
+                                            text: line;
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            font-family: "monospace";
+                                            wrap: no-wrap;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: logfl.height;
+                                    content-h: logfl.viewport-height;
+                                    scroll-y: logfl.viewport-y;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            icon: @image-url("assets/create.svg");
+                            icon-set: true;
+                            label: Strings.enter-republic;
+                            enabled: root.cw-outcome == 1;
+                            clicked => {
+                                root.create-finish();
                             }
                         }
                     }
@@ -1800,20 +1886,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Rectangle {
-                        background: Theme.accent-soft;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.accent;
-                        HorizontalLayout {
-                            padding: 12px;
-                            Text {
-                                text: Strings.mock-banner;
-                                color: Theme.accent;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
                 }
                 if root.jw-step == 0: Rectangle {
                     vertical-stretch: 1;
@@ -2071,21 +2143,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                }
-
-                Rectangle {
-                    background: Theme.accent-soft;
-                    border-radius: Theme.win95 ? 0px : 8px;
-                    border-width: Theme.border-w;
-                    border-color: Theme.accent;
-                    HorizontalLayout {
-                        padding: 12px;
-                        Text {
-                            text: Strings.mock-banner;
-                            color: Theme.accent;
-                            wrap: word-wrap;
-                        }
-                    }
                 }
                 }
 

@@ -27,6 +27,7 @@
 mod chat;
 mod configstore;
 mod events;
+mod founding;
 mod lifecycles;
 mod net;
 mod proposals;
@@ -36,6 +37,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
+#[doc(hidden)]
+pub use founding::{run_ritual_member, InviteMaterial};
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
 use molt_core::{
@@ -106,6 +109,23 @@ pub fn spawn_with_storage(config: GroupConfig, session: SessionView) -> WalletHa
     spawn_inner(config, session, None, true)
 }
 
+/// Storage-backed engine whose founding ritual runs in **manual** mode:
+/// it does not spawn simulated members but hands each seat's
+/// [`founding::InviteMaterial`] out on the returned channel, so a *second*
+/// engine instance can run the member side ([`founding::run_ritual_member`])
+/// itself. This is the seam the two-instance dev test uses; over a real
+/// transport (T3) the same material is what the invite link carries.
+#[doc(hidden)]
+pub fn __spawn_manual_founding(
+    config: GroupConfig,
+    session: SessionView,
+) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx));
+    (handle, rx)
+}
+
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
 /// every settings change to that file (format-preserving, atomic) and watches
 /// it for external edits, which are validated and mirrored into the shared
@@ -120,7 +140,7 @@ pub fn spawn_with_config(
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true, None, None);
     Ok((handle, store))
 }
 
@@ -131,9 +151,10 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_actor(
     config: GroupConfig,
     session: SessionView,
@@ -142,10 +163,12 @@ fn spawn_actor(
     store: Option<ConfigStoreHandle>,
     persist: bool,
     net: Option<net::NetRuntime>,
+    ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
     let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
+    state.ritual_material_sink = ritual_material_sink;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -156,22 +179,6 @@ fn spawn_actor(
     });
 
     WalletHandle { cmd_tx, ev_tx }
-}
-
-/// Demo entropy for the mock generators: the given material hashed together
-/// with the current time. NOT cryptography and never key material — it only
-/// salts simulation output (mock invite tickets, reply timing); real key
-/// hierarchies come from `molt_storage::generate_seed_phrase`.
-pub(crate) fn entropy_for(material: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    material.hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or_default()
-        .hash(&mut h);
-    h.finish()
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -187,6 +194,9 @@ pub(crate) struct ReplicaState {
     pub(crate) member: MemberId,
     pub(crate) roster: Vec<MemberId>,
     pub(crate) rule_m: u8,
+    /// The anchored name → identity-key table from the genesis (empty on
+    /// pre-ritual workspaces).
+    pub(crate) identities: Vec<molt_core::MemberIdentity>,
 }
 
 /// The storage side of the open workspace: its id, directory, the engine's
@@ -228,9 +238,21 @@ pub(crate) struct State {
     /// The transport runtime (the demo loopback mesh today; a persisted
     /// workspace's supervisor once the T2 join flow wires real peers).
     pub(crate) net: Option<net::NetRuntime>,
-    /// Monotonic mesh-incarnation counter: `Net*` commands carry the
-    /// generation of the mesh that sent them, and commands from a
-    /// torn-down mesh are dropped (a delivery queued behind a workspace
+    /// The founding-ritual runtime (present only while a founding is in
+    /// flight — the workspace does not exist yet).
+    pub(crate) net_ritual: Option<founding::RitualRuntime>,
+    /// Seal signatures collected so far this ritual (founder first at
+    /// finalize).
+    pub(crate) ritual_attestations: Vec<molt_core::RosterAttestation>,
+    /// When set, the founding ritual does NOT spawn simulated members;
+    /// instead it hands the per-seat [`founding::InviteMaterial`] out on
+    /// this channel so a *second* engine instance runs the member side.
+    /// Only the two-instance dev test installs this.
+    pub(crate) ritual_material_sink:
+        Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
+    /// the generation of the runtime that sent them, and commands from a
+    /// torn-down runtime are dropped (a delivery queued behind a workspace
     /// switch must not land in the new context's log).
     pub(crate) net_generation: u64,
     /// Whether workspaces persist to disk at all ([`spawn`] = false).
@@ -272,6 +294,9 @@ impl State {
             replica: None,
             active: None,
             net,
+            net_ritual: None,
+            ritual_attestations: Vec::new(),
+            ritual_material_sink: None,
             net_generation: 0,
             persist,
             session,
@@ -395,9 +420,20 @@ impl State {
                 members,
                 net,
             } => self.cmd_create_start(name, member, threshold, members, net),
-            Command::CreateTick => self.cmd_create_tick(),
             Command::CreateCancel => self.cmd_create_cancel(),
             Command::CreateFinish => self.cmd_create_finish(),
+            Command::NetJoinRequested {
+                seat,
+                member,
+                identity_pk,
+                proof,
+                generation,
+            } => self.cmd_net_join_requested(seat, member, identity_pk, proof, generation),
+            Command::NetSealSigned {
+                seat,
+                sig,
+                generation,
+            } => self.cmd_net_seal_signed(seat, sig, generation),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinTick => self.cmd_join_tick(),
             Command::JoinCancel => self.cmd_join_cancel(),
@@ -442,6 +478,23 @@ mod tests {
         }
     }
 
+    /// Drive a founding to completion: the ritual runs its simulated
+    /// members asynchronously (activate → key → seal), so we poll the
+    /// session until the workspace is sealed (`create.run.outcome == 1`).
+    async fn await_founding(w: &WalletHandle) {
+        for _ in 0..600 {
+            let s = read_session(w).await;
+            if s.create.run.outcome == 1 {
+                return;
+            }
+            if s.create.run.outcome == 2 {
+                panic!("founding failed: {:?}", s.create.run.log);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("founding did not seal in time");
+    }
+
     async fn read_surface(w: &WalletHandle, surface: Surface) -> molt_core::SurfaceSnapshot {
         match w
             .execute(Command::ReadState { surface })
@@ -480,11 +533,7 @@ mod tests {
             })
             .await
             .expect("create start");
-            for _ in 0..60 {
-                if w.execute(Command::CreateTick).await.is_err() {
-                    break;
-                }
-            }
+            await_founding(&w).await;
             w.execute(Command::CreateFinish).await.expect("finish");
             let s = read_session(&w).await;
             let id = s.active_workspace.clone();
@@ -1019,7 +1068,8 @@ mod tests {
                 ));
             }
 
-            // a valid founding ticks to success with seed + n−1 invites
+            // a valid founding runs the ritual: two seats, each activated
+            // and sealed by a simulated member, then the workspace is born
             w.execute(Command::CreateStart {
                 name: "Chess Club".to_string(),
                 member: "petra".to_string(),
@@ -1029,21 +1079,29 @@ mod tests {
             })
             .await
             .expect("start");
-            for _ in 0..60 {
-                if w.execute(Command::CreateTick).await.is_err() {
-                    break;
-                }
-            }
+            // "Enter republic" is refused until every seat is sealed
+            assert!(matches!(
+                w.execute(Command::CreateFinish).await,
+                Err(MoltError::Create(_))
+            ));
+            await_founding(&w).await;
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
                     assert_eq!(s.create.run.outcome, 1);
                     assert_eq!(s.create.seed.split(' ').count(), 24);
-                    assert_eq!(s.create.invites.len(), 2);
-                    for inv in &s.create.invites {
-                        let info = molt_core::InviteInfo::parse(inv).expect("invite parses");
+                    assert_eq!(s.create.seats.len(), 2);
+                    for seat in &s.create.seats {
+                        assert_eq!(seat.state, 2, "every seat sealed");
+                        assert!(!seat.member.is_empty(), "the member named itself");
+                        let info =
+                            molt_core::InviteInfo::parse(&seat.link).expect("invite parses");
                         assert_eq!(info.republic, "Chess Club");
                         assert_eq!(info.inviter, "petra");
                     }
+                    // the log carries the real ritual events, not a fake anim
+                    assert!(s.create.run.log.iter().any(|l| l.contains("activated invite")));
+                    assert!(s.create.run.log.iter().any(|l| l.contains("signed the roster")));
+                    assert!(s.create.run.log.iter().any(|l| l.contains("workspace created")));
                 }
                 other => panic!("unexpected: {other:?}"),
             }

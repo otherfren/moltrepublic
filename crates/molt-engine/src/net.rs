@@ -245,11 +245,13 @@ impl State {
         self.net = None;
     }
 
-    /// Make sure the demo mesh matches the current session-only context:
-    /// no-op when a persisted workspace is open (real seats, no fakes) or
-    /// the mesh for this context already runs.
+    /// Make sure the demo mesh matches the current context. It runs for a
+    /// session-only context (boot demo group) AND for a persisted
+    /// workspace whose members are simulations (founded before the real
+    /// network exists — `prefs.simulated_members`). A persisted workspace
+    /// with real members gets no fakes.
     pub(crate) fn ensure_demo_net(&mut self) {
-        if self.active.is_some() {
+        if !self.wants_demo_mesh() {
             self.net = None;
             return;
         }
@@ -270,24 +272,38 @@ impl State {
         }
     }
 
-    /// The demo peers: the active workspace entry's non-offline members
-    /// (like the old simulator), else the boot group — always minus the
-    /// local member.
+    /// Whether this context should run simulated peer members: nothing
+    /// open (boot demo), or an open workspace explicitly flagged as
+    /// simulated in its prefs.
+    fn wants_demo_mesh(&self) -> bool {
+        match &self.active {
+            None => true,
+            Some(a) => a.prefs.simulated_members,
+        }
+    }
+
+    /// The demo peers: for a persisted simulated workspace, the replayed
+    /// genesis roster; for the session-only context, the active entry's
+    /// non-offline members, else the boot group — always minus the local
+    /// member.
     fn demo_peer_names(&self, owner: &MemberId) -> Vec<MemberId> {
-        let mut names: Vec<MemberId> = self
-            .session
-            .workspaces
-            .iter()
-            .find(|w| w.id == self.session.active_workspace)
-            .filter(|w| !w.members.is_empty())
-            .map(|w| {
-                w.members
-                    .iter()
-                    .filter(|m| m.state != 2) // offline members stay silent
-                    .map(|m| m.name.clone())
-                    .collect()
-            })
-            .unwrap_or_else(|| self.roster());
+        let mut names: Vec<MemberId> = if self.active.is_some() {
+            self.roster()
+        } else {
+            self.session
+                .workspaces
+                .iter()
+                .find(|w| w.id == self.session.active_workspace)
+                .filter(|w| !w.members.is_empty())
+                .map(|w| {
+                    w.members
+                        .iter()
+                        .filter(|m| m.state != 2) // offline members stay silent
+                        .map(|m| m.name.clone())
+                        .collect()
+                })
+                .unwrap_or_else(|| self.roster())
+        };
         names.retain(|n| n != owner);
         names.dedup();
         names
@@ -521,6 +537,7 @@ fn spawn_demo_peer(
         None,
         false,
         Some(net),
+        None,
     );
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown

@@ -127,6 +127,22 @@ pub fn run_app(
 
     // The join preview: the same molt-core invite parser the engine's join
     // run uses, so the preview and the run can never disagree.
+    // The create wizard's live folder preview: the same molt-core slug
+    // rule the storage layer builds the real directory name from, so the
+    // preview and the disk can never disagree. The trailing short id is
+    // elided — it derives from the seed, which only exists at finish.
+    ui.on_folder_preview(|dir, name| {
+        if name.trim().is_empty() {
+            return "".into();
+        }
+        format!(
+            "{}/{}.…",
+            dir.trim_end_matches('/'),
+            molt_core::slugify(&name)
+        )
+        .into()
+    });
+
     ui.on_parse_invite(|s| match molt_core::InviteInfo::parse(&s) {
         Some(i) => InvitePreview {
             valid: true,
@@ -1040,6 +1056,10 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
         ui.set_active_members(m)
     });
 
+    // the create wizard's folder preview roots at the configured
+    // workspace dir (shown raw, as configured — `~` and all)
+    ui.set_cw_dir(sv.settings.workspace_dir.clone().into());
+
     apply_runs(ui, sv);
     ui.global::<Theme>().set_theme_index(theme_index(&sv.theme));
     let lang = i32::from(sv.language == "de");
@@ -1089,7 +1109,28 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
 /// a `SessionChanged` with a run scope re-renders ONLY this, so the rest of
 /// the window keeps its focus/scroll state untouched).
+/// "Founder" label per language.
+fn strings_founder(lang: i32) -> &'static str {
+    if lang == 1 {
+        "Gründer · versiegelt"
+    } else {
+        "Founder · sealed"
+    }
+}
+
+/// A ritual seat's status line once the member activated (state 1/2).
+fn seat_state_label(lang: i32, state: u8) -> String {
+    match (lang, state) {
+        (1, 2) => "versiegelt",
+        (1, _) => "Schlüssel erhalten · signiert…",
+        (_, 2) => "sealed",
+        (_, _) => "key received · signing…",
+    }
+    .to_string()
+}
+
 fn apply_runs(ui: &AppWindow, sv: &SessionView) {
+    let lang = i32::from(sv.language == "de");
     // restore
     ui.set_rw_step(i32::from(sv.restore.run.step));
     ui.set_rw_way(sv.restore.way.clone().into());
@@ -1098,10 +1139,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
     sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
 
-    // founding; the run header is composed here so an MCP-started founding
-    // shows real values even with an empty local form
+    // founding ritual; the run header is composed here so an MCP-started
+    // founding shows real values even with an empty local form
     ui.set_cw_step(i32::from(sv.create.run.step));
-    ui.set_cw_progress(f32::from(sv.create.run.progress_pct) / 100.0);
     ui.set_cw_outcome(i32::from(sv.create.run.outcome));
     ui.set_cw_seed(sv.create.seed.clone().into());
     ui.set_cw_run_name(sv.create.name.clone().into());
@@ -1113,9 +1153,28 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         .into(),
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
-    sync_strings(&ui.get_cw_invites(), &sv.create.invites, |m| {
-        ui.set_cw_invites(m)
-    });
+    // the ritual member list: founder (always sealed) plus one row per seat
+    let mut seats: Vec<RitualSeat> = vec![RitualSeat {
+        member: sv.create.member.as_str().into(),
+        detail: strings_founder(lang).into(),
+        state: 2,
+    }];
+    for (i, s) in sv.create.seats.iter().enumerate() {
+        let (member, detail) = if s.member.is_empty() {
+            (format!("Invite {}", i + 1), s.link.clone())
+        } else {
+            (s.member.clone(), seat_state_label(lang, s.state))
+        };
+        seats.push(RitualSeat {
+            member: member.into(),
+            detail: detail.into(),
+            state: i32::from(s.state),
+        });
+    }
+    let sealed = seats.iter().filter(|s| s.state == 2).count();
+    ui.set_cw_sealed(i32::try_from(sealed).unwrap_or(0));
+    ui.set_cw_total(i32::try_from(seats.len()).unwrap_or(0));
+    sync_rows(&ui.get_cw_seats(), seats, |m| ui.set_cw_seats(m));
 
     // join
     ui.set_jw_step(i32::from(sv.join.run.step));
@@ -1699,7 +1758,6 @@ lexicon! {
     set_token_show: "Reveal", "Anzeigen";
     set_token_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";
-    mock_banner: "Mock: confirming does NOT create a workspace and writes nothing to disk.", "Mock: Bestätigen legt KEINEN Workspace an und schreibt nichts auf die Platte.";
     cw_title: "Found a new Republic", "Neue Republik gründen";
     cw_grp_republic: "Workspace", "Workspace";
     ph_ws_name: "My new republic", "Meine neue Republik";
@@ -1717,12 +1775,13 @@ lexicon! {
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
     cw_net_ok_nym: "Anonymized via the Nym mixnet.", "Anonymisiert via Nym-Mixnet.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
-    cw_found: "Found republic", "Republik gründen";
-    cw_ph1: "Generating group secret…", "Erzeuge Gruppengeheimnis…";
-    cw_ph2: "Deriving member shares…", "Leite Mitglieds-Shares ab…";
-    cw_ph3: "Sealing workspace & minting invites…", "Versiegle Workspace & präge Einladungen…";
+    cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
     cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";
+    cw_members_title: "Members", "Mitglieder";
+    cw_sealed_word: "sealed", "versiegelt";
+    cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
+    cw_log_title: "Ritual log", "Ritual-Protokoll";
     enter_republic: "Enter republic", "Republik betreten";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";

@@ -51,6 +51,8 @@ fn genesis(member: &str) -> EventEnvelope {
             rule_n: 2,
             member: member.to_string(),
             roster: vec!["ada".to_string(), "ben".to_string()],
+            identities: Vec::new(),
+            attestations: Vec::new(),
         },
     }
 }
