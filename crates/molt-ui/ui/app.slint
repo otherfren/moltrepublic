@@ -88,6 +88,12 @@ export component AppWindow inherits Window {
     in property <AppScreen> screen: AppScreen.choice;
     in property <int> lang-index: 0;
     in property <string> notice;
+    // a failed config write ("save-failed: …", raw detail from the engine);
+    // empty = none. Split off `notice` in Rust so slint needs no string ops.
+    in property <string> notice-failed;
+    // comma-joined config keys that changed but only apply on restart
+    // (session.restart_required); empty = none. Persistent, not a toast.
+    in property <string> restart-keys;
     in property <string> config-path;
 
     // ---- active workspace (main header), live-mirrored from the engine ----
@@ -106,6 +112,12 @@ export component AppWindow inherits Window {
     callback navigate(AppScreen);
     callback set-language(int);
     callback save-settings();
+    // leave the settings screen — handled in Rust: navigates straight back
+    // when the draft is clean, raises the unsaved-changes modal otherwise
+    callback close-settings();
+    // the unsaved-changes modal's two ways forward (both leave settings)
+    callback save-and-leave();
+    callback discard-and-leave();
     callback rotate-token();
     callback quit();
     // body + quoted log index (-1 = plain message)
@@ -157,7 +169,10 @@ export component AppWindow inherits Window {
     // (theme changes are routed via the Theme.picked global callback, bound in Rust)
 
     // ---- local UI working state (not shared) ----
-    property <AppScreen> settings-return: AppScreen.choice;
+    // read from Rust (close-settings needs the return target), so in-out
+    in-out property <AppScreen> settings-return: AppScreen.choice;
+    // modal: leaving settings with unsaved draft edits (raised from Rust)
+    in-out property <bool> confirm-leave-open: false;
     // mirrored from the engine session (co-equal): which surface the main
     // view shows and which of its sub-views is active; changing them is a
     // SelectSurface / SelectView command
@@ -409,6 +424,8 @@ export component AppWindow inherits Window {
     function handle-escape() {
         if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
+        } else if (root.confirm-leave-open) {
+            root.confirm-leave-open = false;
         } else if (root.confirm-close-open) {
             root.confirm-close-open = false;
         } else if (root.confirm-delete-open) {
@@ -441,6 +458,9 @@ export component AppWindow inherits Window {
             } else {
                 root.navigate(AppScreen.choice);
             }
+        } else if (root.screen == AppScreen.settings) {
+            // guarded: raises the unsaved-changes modal when the draft is dirty
+            root.close-settings();
         }
     }
 
@@ -2611,7 +2631,7 @@ export component AppWindow inherits Window {
                     AppButton {
                         label: "×";
                         clicked => {
-                            root.navigate(root.settings-return);
+                            root.close-settings();
                         }
                     }
                 }
@@ -3143,10 +3163,36 @@ export component AppWindow inherits Window {
                             font-size: Theme.fs-cap;
                             wrap: word-wrap;
                         }
+                        // persistent (not a toast): these values only take
+                        // effect on the next start of the node
+                        if root.restart-keys != "": Text {
+                            text: "\{Strings.set-restart-note}  \{root.restart-keys}";
+                            color: Theme.warn;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
                         if root.notice == "saved": Text {
                             text: Strings.set-save-note;
                             color: Theme.accent;
                             font-size: Theme.fs-cap;
+                        }
+                        if root.notice == "config-reloaded": Text {
+                            text: Strings.set-reloaded-note;
+                            color: Theme.accent;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        if root.notice == "config-conflict": Text {
+                            text: Strings.set-conflict-note;
+                            color: Theme.bad;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        if root.notice-failed != "": Text {
+                            text: root.notice-failed;
+                            color: Theme.bad;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
                         }
                     }
                 }
@@ -3155,7 +3201,7 @@ export component AppWindow inherits Window {
                     AppButton {
                         label: Strings.set-close;
                         clicked => {
-                            root.navigate(root.settings-return);
+                            root.close-settings();
                         }
                     }
                     Rectangle {
@@ -3257,6 +3303,31 @@ export component AppWindow inherits Window {
 
     // Modal: confirm quitting the program while a workspace is open
     // (raised from Rust's window close-requested handler).
+    // Modal: leaving the settings screen with unsaved draft edits. Three ways
+    // out: save to config.toml and leave, discard the draft and leave, or
+    // stay (cancel / Escape / scrim click).
+    if root.confirm-leave-open: ConfirmModal {
+        title: Strings.unsaved-title;
+        body: Strings.unsaved-body;
+        // three buttons in the row (cancel / discard / save) need more width
+        // than the two-button default
+        dialog-width: 520px;
+        confirm-label: Strings.unsaved-save;
+        alt-label: Strings.unsaved-discard;
+        cancel-label: Strings.unsaved-cancel;
+        confirmed => {
+            root.confirm-leave-open = false;
+            root.save-and-leave();
+        }
+        alted => {
+            root.confirm-leave-open = false;
+            root.discard-and-leave();
+        }
+        dismissed => {
+            root.confirm-leave-open = false;
+        }
+    }
+
     if root.confirm-quit-open: ConfirmModal {
         title: Strings.quit-title;
         body: Strings.quit-body;

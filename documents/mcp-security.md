@@ -187,7 +187,14 @@ live-mirrors, an agent reads via `read_session`, `read_state`,
   is nothing to expose. If it ever gains a real effect it becomes a command
   first.
 * **Engine-internal commands** (`RestoreTick` / `CreateTick` / `JoinTick`,
-  `ChatFrom`). These exist in the command enum but are deliberately not MCP
-  tools: ticks are the engine's own clock, and `ChatFrom` (the demo reply
-  simulator) posts under *other members' names* — exposing it would let any
-  client impersonate members.
+  `ChatFrom`, `ReloadSettings`, `ConfigNotice`). These exist in the command
+  enum but are deliberately not MCP tools: ticks are the engine's own clock,
+  and `ChatFrom` (the demo reply simulator) posts under *other members'
+  names* — exposing it would let any client impersonate members.
+  `ReloadSettings` and `ConfigNotice` are the config watcher's mirror path
+  (file → session): `ReloadSettings` as a tool would let a client bypass
+  `save_settings` (and with it the persist path and its validation
+  semantics), and `ConfigNotice` would let a client forge "saved" /
+  "save-failed" toasts in the user's GUI. An agent that wants a reload edits
+  via `save_settings`; an agent that wants the file re-read edits the file —
+  the watcher picks it up.

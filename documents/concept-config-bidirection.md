@@ -1,8 +1,23 @@
 # Concept: bi-directional config — the app edits `config.toml` at runtime
 
-Status: **design** (nothing here is implemented yet; today `SaveSettings` is a
-session-only mock and the file is written exclusively by `--generate-config`
-and `--repair-config`).
+Status: **implemented** through C1–C3 plus the restart-required surfacing of
+C4 (`molt-engine/src/configstore.rs`, `molt-config::update`). `SaveSettings`
+persists for real; the watcher mirrors external edits; the settings UI warns
+persistently about restart-required changes and guards leaving with unsaved
+draft edits. Deliberate implementation deviations from the text below:
+
+* One internal notice command `ConfigNotice { notice }` instead of
+  `ConfigPersisted { ok, detail }` — it also carries `config-conflict`.
+* Echo suppression compares the **full last-written bytes** instead of a
+  digest (the file is tiny; a byte compare is strictly stronger), which also
+  replaces the `(mtime, len, hash)` poll tuple: the poll reads and compares.
+* Cross-instance safety uses a `<config>.lock` PID file (fail fast naming the
+  holder, stale locks swept via `/proc/<pid>`) instead of `flock` — no added
+  dependency, and the error can name the PID portably.
+* Still open from C4: applying `mcp.token` / `mcp.allow` rotation to the
+  *live* MCP acceptor (until then they are honestly listed as
+  restart-required) and per-field "needs restart" hints next to each widget
+  (today: one persistent warning line naming the changed keys).
 
 ## 1. Goal and non-goals
 

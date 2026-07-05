@@ -621,9 +621,13 @@ export component ConfirmModal inherits Rectangle {
     in property <string> body;
     in property <string> confirm-label;
     in property <string> cancel-label: Strings.close-ws-cancel;
+    // optional third action between Cancel and Confirm (e.g. "discard"),
+    // rendered only when a label is set
+    in property <string> alt-label;
     in property <bool> confirm-enabled: true;
     in property <length> dialog-width: 400px;
     callback confirmed();
+    callback alted();
     callback dismissed();
     width: 100%;
     height: 100%;
@@ -674,6 +678,12 @@ export component ConfirmModal inherits Rectangle {
                     label: root.cancel-label;
                     clicked => {
                         root.dismissed();
+                    }
+                }
+                if root.alt-label != "": AppButton {
+                    label: root.alt-label;
+                    clicked => {
+                        root.alted();
                     }
                 }
                 AppButton {

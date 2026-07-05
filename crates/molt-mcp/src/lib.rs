@@ -522,7 +522,7 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "save_settings",
             command: "save_settings",
-            description: "Store the node settings (mock — nothing is written to disk). Replaces the settings wholesale; read_session first, then pass back the changed fields.",
+            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -731,9 +731,19 @@ mod tests {
     /// on the documented internal list (see documents/mcp-security.md).
     #[test]
     fn co_equality_every_command_is_a_tool_or_documented_internal() {
-        // engine-internal: the run tickers are the engine's own clock, and
-        // chat_from (the reply simulator) would allow member impersonation
-        const INTERNAL: [&str; 4] = ["restore_tick", "create_tick", "join_tick", "chat_from"];
+        // engine-internal: the run tickers are the engine's own clock,
+        // chat_from (the reply simulator) would allow member impersonation,
+        // and reload_settings / config_notice are the config watcher's
+        // mirror path — an agent that wants a reload edits via save_settings
+        // (see documents/mcp-security.md)
+        const INTERNAL: [&str; 6] = [
+            "restore_tick",
+            "create_tick",
+            "join_tick",
+            "chat_from",
+            "reload_settings",
+            "config_notice",
+        ];
         let mut covered: Vec<&str> = tools().iter().map(|t| t.command).collect();
         covered.extend(INTERNAL);
         covered.sort_unstable();

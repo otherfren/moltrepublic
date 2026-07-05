@@ -180,9 +180,11 @@ impl Screen {
     }
 }
 
-/// The node's editable settings, mirrored from `config.toml` at startup. In this
-/// scaffold "saving" is a mock (nothing is written to disk); the values live in
-/// the engine session so the GUI and an MCP agent edit the *same* settings.
+/// The node's editable settings, mirrored from `config.toml` at startup and
+/// kept in sync with it in both directions: a save persists to the file
+/// (format-preserving, atomic), an external file edit is watched, validated
+/// and mirrored back into the session. The values live in the engine session
+/// so the GUI and an MCP agent edit the *same* settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
     /// Start without a GUI (MCP-only).
@@ -730,7 +732,7 @@ pub struct RestoreState {
 }
 
 /// The whole shared app/session state: which screen, which language, the last
-/// wizard outcome, a transient notice (e.g. the mock-save toast) and the
+/// wizard outcome, a transient notice (e.g. the settings-save toast) and the
 /// settings. Both operators read and mutate this through the command set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionView {
@@ -747,6 +749,13 @@ pub struct SessionView {
     pub theme: String,
     /// A transient notice key for the GUI (e.g. `"saved"`); cleared on navigate.
     pub notice: String,
+    /// Config keys (file names, e.g. `"mcp.port"`) whose current value
+    /// differs from what the node booted with and which only take effect on
+    /// restart. Set by the engine on every save/reload; NOT transient — it
+    /// stays until the values return to the boot state or the node restarts.
+    /// The GUI renders it as a persistent "restart required" warning.
+    #[serde(default)]
+    pub restart_required: Vec<String>,
     /// The editable settings.
     pub settings: SessionSettings,
     /// The locally known workspaces (mock list, shared).
@@ -773,6 +782,7 @@ impl Default for SessionView {
             language: "en".to_string(),
             theme: "classic".to_string(),
             notice: String::new(),
+            restart_required: Vec::new(),
             settings: SessionSettings::default(),
             workspaces: WorkspaceInfo::demo_set(),
             backup_orphans: BackupOrphan::demo_set(),
@@ -889,11 +899,33 @@ pub enum Command {
         /// The new theme name.
         theme: String,
     },
-    /// Store the (mock) settings into the session. Nothing is written to disk;
-    /// this records the values and raises a "saved" notice.
+    /// Store the settings into the session and persist them to the node's
+    /// `config.toml` (format-preserving, atomic). The reply does not wait for
+    /// the disk; the write outcome lands in the session notice ("saved" /
+    /// "save-failed: …") via [`Command::ConfigNotice`].
     SaveSettings {
         /// The settings to store.
         settings: SessionSettings,
+    },
+    /// Mirror externally edited `config.toml` values into the shared session.
+    /// Sent by the engine's own config watcher when the file changes on disk
+    /// (engine-internal, like the run tickers — not an MCP tool: agents that
+    /// want a reload edit via `save_settings`).
+    ReloadSettings {
+        /// The settings read from the file.
+        settings: SessionSettings,
+        /// GUI language from `[ui].lang`.
+        language: String,
+        /// GUI theme from `[ui].theme`.
+        theme: String,
+    },
+    /// Report a config-persistence outcome into the session notice ("saved",
+    /// "save-failed: …", "config-conflict"). Sent by the engine's own config
+    /// store task after an asynchronous write or a rejected external edit
+    /// (engine-internal, not an MCP tool).
+    ConfigNotice {
+        /// The notice key (plus optional detail) to show.
+        notice: String,
     },
     // --- workspaces & restore (shared, co-equal) ---
     /// Open a locally known workspace: it becomes active and the node moves
@@ -1201,6 +1233,9 @@ pub enum MoltError {
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),
+    /// A settings value failed validation (nothing was stored or written).
+    #[error("settings: {0}")]
+    Settings(String),
     /// The named workspace is not in the local list.
     #[error("unknown workspace `{0}`")]
     UnknownWorkspace(String),

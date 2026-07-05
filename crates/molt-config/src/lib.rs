@@ -62,12 +62,36 @@ pub struct StorageConfig {
     /// Directory holding this node's per-group workspaces. `~` expands to $HOME.
     #[serde(default = "default_workspace_dir")]
     pub workspace_dir: String,
+    /// Automatically back workspaces up to an S3-compatible store.
+    #[serde(default)]
+    pub s3_backup: bool,
+    /// S3 endpoint / bucket URL the automatic backup targets.
+    #[serde(default)]
+    pub s3_endpoint: String,
+    /// S3 access key id.
+    #[serde(default)]
+    pub s3_access_key: String,
+    /// S3 secret key.
+    #[serde(default)]
+    pub s3_secret_key: String,
+    /// S3 bucket name.
+    #[serde(default = "default_s3_bucket")]
+    pub s3_bucket: String,
+    /// Automatic-backup interval in minutes.
+    #[serde(default = "default_s3_interval_min")]
+    pub s3_interval_min: u16,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         StorageConfig {
             workspace_dir: default_workspace_dir(),
+            s3_backup: false,
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: default_s3_bucket(),
+            s3_interval_min: default_s3_interval_min(),
         }
     }
 }
@@ -194,6 +218,17 @@ pub fn default_workspace_dir() -> String {
     "~/.moltrepublic/workspaces".to_string()
 }
 
+/// Default S3 bucket name. Deliberately inconspicuous — the bucket listing
+/// should not advertise what it holds. Mirrors `molt_core::SessionSettings`.
+pub fn default_s3_bucket() -> String {
+    "media-archive".to_string()
+}
+
+/// Default automatic-backup interval (minutes). Mirrors `molt_core::SessionSettings`.
+pub fn default_s3_interval_min() -> u16 {
+    60
+}
+
 /// Default MCP server TCP port.
 pub fn default_mcp_port() -> u16 {
     4040
@@ -242,6 +277,18 @@ pub struct Settings {
     pub headless: bool,
     /// Per-group workspace root (`~` allowed).
     pub workspace_dir: String,
+    /// Automatically back workspaces up to an S3-compatible store.
+    pub s3_backup: bool,
+    /// S3 endpoint / bucket URL the automatic backup targets.
+    pub s3_endpoint: String,
+    /// S3 access key id.
+    pub s3_access_key: String,
+    /// S3 secret key.
+    pub s3_secret_key: String,
+    /// S3 bucket name.
+    pub s3_bucket: String,
+    /// Automatic-backup interval in minutes.
+    pub s3_interval_min: u16,
     /// Anonymity network: `"tor" | "nym" | "none"`.
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
@@ -265,6 +312,12 @@ impl Default for Settings {
         Settings {
             headless: false,
             workspace_dir: default_workspace_dir(),
+            s3_backup: false,
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: default_s3_bucket(),
+            s3_interval_min: default_s3_interval_min(),
             anonymity: "tor".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
@@ -306,6 +359,12 @@ impl From<&Config> for Settings {
         Settings {
             headless: c.node.headless,
             workspace_dir: c.storage.workspace_dir.clone(),
+            s3_backup: c.storage.s3_backup,
+            s3_endpoint: c.storage.s3_endpoint.clone(),
+            s3_access_key: c.storage.s3_access_key.clone(),
+            s3_secret_key: c.storage.s3_secret_key.clone(),
+            s3_bucket: c.storage.s3_bucket.clone(),
+            s3_interval_min: c.storage.s3_interval_min,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
@@ -336,6 +395,14 @@ headless = {headless}
 [storage]
 # Per-group workspace root. "~" = $HOME.
 workspace_dir = {workspace_dir}
+# Automatic backup of workspaces to an S3-compatible store.
+s3_backup = {s3_backup}
+s3_endpoint = {s3_endpoint}
+s3_access_key = {s3_access_key}
+s3_secret_key = {s3_secret_key}
+s3_bucket = {s3_bucket}
+# Automatic-backup interval in minutes.
+s3_interval_min = {s3_interval_min}
 
 [mcp]
 # MCP server TCP port. Always served (UI + headless).
@@ -371,6 +438,12 @@ theme = {theme}
 "#,
         headless = settings.headless,
         workspace_dir = toml_str(&settings.workspace_dir),
+        s3_backup = settings.s3_backup,
+        s3_endpoint = toml_str(&settings.s3_endpoint),
+        s3_access_key = toml_str(&settings.s3_access_key),
+        s3_secret_key = toml_str(&settings.s3_secret_key),
+        s3_bucket = toml_str(&settings.s3_bucket),
+        s3_interval_min = settings.s3_interval_min,
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
         mcp_token = toml_str(&settings.mcp_token),
@@ -397,12 +470,32 @@ pub fn salvage(text: &str) -> Settings {
     {
         s.headless = headless;
     }
-    if let Some(dir) = value
-        .get("storage")
-        .and_then(|st| st.get("workspace_dir"))
-        .and_then(toml::Value::as_str)
-    {
-        s.workspace_dir = dir.to_string();
+    if let Some(storage) = value.get("storage") {
+        if let Some(dir) = storage.get("workspace_dir").and_then(toml::Value::as_str) {
+            s.workspace_dir = dir.to_string();
+        }
+        if let Some(b) = storage.get("s3_backup").and_then(toml::Value::as_bool) {
+            s.s3_backup = b;
+        }
+        if let Some(v) = storage.get("s3_endpoint").and_then(toml::Value::as_str) {
+            s.s3_endpoint = v.to_string();
+        }
+        if let Some(v) = storage.get("s3_access_key").and_then(toml::Value::as_str) {
+            s.s3_access_key = v.to_string();
+        }
+        if let Some(v) = storage.get("s3_secret_key").and_then(toml::Value::as_str) {
+            s.s3_secret_key = v.to_string();
+        }
+        if let Some(v) = storage.get("s3_bucket").and_then(toml::Value::as_str) {
+            s.s3_bucket = v.to_string();
+        }
+        if let Some(v) = storage
+            .get("s3_interval_min")
+            .and_then(toml::Value::as_integer)
+            .and_then(|p| u16::try_from(p).ok())
+        {
+            s.s3_interval_min = v;
+        }
     }
     if let Some(anonymity) = value.get("transport").and_then(|t| t.get("anonymity")) {
         if let Some(net) = anonymity.get("network").and_then(toml::Value::as_str) {
@@ -504,6 +597,113 @@ pub fn write(path: &Path, settings: &Settings, make_backup: bool) -> std::io::Re
 }
 
 // ---------------------------------------------------------------------------
+// Format-preserving runtime rewrite (toml_edit).
+// ---------------------------------------------------------------------------
+
+/// Rewrite `text` so it carries exactly the values in `settings`, preserving
+/// everything the user hand-wrote into the file: comments, key order, spacing.
+///
+/// This is the write path of the bi-directional config (see
+/// `documents/concept-config-bidirection.md`): [`render`] produces our
+/// canonical file for `--generate-config`, but a runtime save must not
+/// clobber a user-maintained file, so it edits the existing document instead.
+/// Fails only when `text` is not parseable TOML — the caller must not guess
+/// on a broken file (the user may be mid-edit).
+pub fn update(text: &str, settings: &Settings) -> Result<String, toml_edit::TomlError> {
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    apply(settings, &mut doc);
+    Ok(doc.to_string())
+}
+
+/// Set exactly the keys that map from [`Settings`] on `doc` — the inverse of
+/// `Config → Settings`. Keys keep their position and comments; a key whose
+/// value is already correct is left untouched (so even its same-line comment
+/// survives); missing tables/keys are created.
+pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
+    let node = table_at(doc.as_table_mut(), &["node"]);
+    set_bool(node, "headless", settings.headless);
+
+    let storage = table_at(doc.as_table_mut(), &["storage"]);
+    set_str(storage, "workspace_dir", &settings.workspace_dir);
+    set_bool(storage, "s3_backup", settings.s3_backup);
+    set_str(storage, "s3_endpoint", &settings.s3_endpoint);
+    set_str(storage, "s3_access_key", &settings.s3_access_key);
+    set_str(storage, "s3_secret_key", &settings.s3_secret_key);
+    set_str(storage, "s3_bucket", &settings.s3_bucket);
+    set_int(
+        storage,
+        "s3_interval_min",
+        i64::from(settings.s3_interval_min),
+    );
+
+    let mcp = table_at(doc.as_table_mut(), &["mcp"]);
+    set_int(mcp, "port", i64::from(settings.mcp_port));
+    set_str(mcp, "allow", &settings.mcp_allow);
+    set_str(mcp, "token", &settings.mcp_token);
+
+    let anon = table_at(doc.as_table_mut(), &["transport", "anonymity"]);
+    set_str(anon, "network", &settings.anonymity);
+
+    let tor = table_at(doc.as_table_mut(), &["transport", "anonymity", "tor"]);
+    set_str(tor, "mode", &settings.tor_mode);
+    set_int(tor, "port", i64::from(settings.tor_port));
+
+    let ui = table_at(doc.as_table_mut(), &["ui"]);
+    set_str(ui, "lang", &settings.lang);
+    set_str(ui, "theme", &settings.theme);
+}
+
+/// Walk (and create where missing) the table at `path`. Inline tables the
+/// user wrote (`transport = { anonymity = { … } }`) are edited in place;
+/// only a non-table value standing where a table belongs is replaced.
+fn table_at<'a>(
+    mut t: &'a mut dyn toml_edit::TableLike,
+    path: &[&str],
+) -> &'a mut dyn toml_edit::TableLike {
+    for seg in path {
+        let missing = !t.get(seg).is_some_and(|i| i.as_table_like().is_some());
+        if missing {
+            t.insert(seg, toml_edit::table());
+        }
+        t = t
+            .get_mut(seg)
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .expect("segment was just ensured to be a table");
+    }
+    t
+}
+
+/// Set `key` to `item`. An existing key is updated in place (its Key — and
+/// with it the comment block above it — keeps its decor; `insert` would mint
+/// a fresh Key and drop that); a missing key is appended.
+fn set_item(t: &mut dyn toml_edit::TableLike, key: &str, item: toml_edit::Item) {
+    match t.get_mut(key) {
+        Some(existing) => *existing = item,
+        None => {
+            t.insert(key, item);
+        }
+    }
+}
+
+fn set_str(t: &mut dyn toml_edit::TableLike, key: &str, v: &str) {
+    if t.get(key).and_then(toml_edit::Item::as_str) != Some(v) {
+        set_item(t, key, toml_edit::value(v));
+    }
+}
+
+fn set_bool(t: &mut dyn toml_edit::TableLike, key: &str, v: bool) {
+    if t.get(key).and_then(toml_edit::Item::as_bool) != Some(v) {
+        set_item(t, key, toml_edit::value(v));
+    }
+}
+
+fn set_int(t: &mut dyn toml_edit::TableLike, key: &str, v: i64) {
+    if t.get(key).and_then(toml_edit::Item::as_integer) != Some(v) {
+        set_item(t, key, toml_edit::value(v));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -566,9 +766,24 @@ mod tests {
         // A non-default Settings survives a render -> salvage round-trip
         // unchanged: this is the property the GUI relies on when it writes a
         // runtime edit and the file is later read back.
-        let original = Settings {
+        let original = non_default_settings();
+        let salvaged = salvage(&render(&original));
+        assert_eq!(original, salvaged);
+        // And the rendered text is accepted by the strict parser too.
+        assert!(parse(&render(&original)).is_ok());
+    }
+
+    /// A settings value with every field off its default.
+    fn non_default_settings() -> Settings {
+        Settings {
             headless: true,
             workspace_dir: "/srv/molt/ws".to_string(),
+            s3_backup: true,
+            s3_endpoint: "https://s3.example.org".to_string(),
+            s3_access_key: "AK".to_string(),
+            s3_secret_key: "SK".to_string(),
+            s3_bucket: "holiday-pics".to_string(),
+            s3_interval_min: 15,
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
@@ -577,11 +792,63 @@ mod tests {
             mcp_token: "deadbeefcafef00d".to_string(),
             lang: "de".to_string(),
             theme: "brutalism".to_string(),
-        };
-        let salvaged = salvage(&render(&original));
-        assert_eq!(original, salvaged);
-        // And the rendered text is accepted by the strict parser too.
-        assert!(parse(&render(&original)).is_ok());
+        }
+    }
+
+    #[test]
+    fn update_round_trips_every_field() {
+        // Settings -> apply(toml_edit) -> strict parse -> Settings equality:
+        // the property the runtime save path relies on.
+        let original = non_default_settings();
+        let updated = update(&render(&Settings::default()), &original).expect("update");
+        let config = parse(&updated).expect("updated text stays strictly parseable");
+        assert_eq!(Settings::from(&config), original);
+    }
+
+    #[test]
+    fn update_preserves_comments_order_and_unknown_formatting() {
+        // A user-maintained file: odd ordering, hand-written comments, extra
+        // blank lines. A runtime save must keep all of it.
+        let fixture = "\
+# my precious node config -- do not touch!
+
+[ui]
+lang = \"de\"   # weil deutsch
+
+[mcp]
+# my private port
+port = 4041
+allow = \"127.0.0.1\"
+token = \"abc\"
+
+[node]
+headless = false
+";
+        let mut settings = salvage(fixture);
+        settings.mcp_port = 5555;
+        let updated = update(fixture, &settings).expect("update");
+        // comments survive
+        assert!(updated.contains("# my precious node config -- do not touch!"));
+        assert!(updated.contains("# my private port"));
+        assert!(
+            updated.contains("# weil deutsch"),
+            "same-line comment of an unchanged key survives"
+        );
+        // order survives: [ui] still first, [node] still last of the three
+        let ui = updated.find("[ui]").expect("[ui]");
+        let mcp = updated.find("[mcp]").expect("[mcp]");
+        let node = updated.find("[node]").expect("[node]");
+        assert!(ui < mcp && mcp < node, "table order changed:\n{updated}");
+        // the changed value landed, missing tables were created, and the
+        // result parses strictly
+        assert!(updated.contains("port = 5555"));
+        let config = parse(&updated).expect("updated fixture parses strictly");
+        assert_eq!(Settings::from(&config), settings);
+    }
+
+    #[test]
+    fn update_rejects_broken_toml() {
+        assert!(update("this is not::: toml", &Settings::default()).is_err());
     }
 
     #[test]

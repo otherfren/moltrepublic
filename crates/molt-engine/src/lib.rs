@@ -23,11 +23,15 @@
 //! three engine-run mocks: restore / create / join over one `RunCore`).
 
 mod chat;
+mod configstore;
 mod lifecycles;
 mod proposals;
 mod session;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+pub use configstore::ConfigStoreHandle;
 
 use molt_core::{
     ChatMessage, Command, Event, GroupConfig, MoltError, ProposalState, Reply, SessionScope,
@@ -80,11 +84,51 @@ impl WalletHandle {
 /// `session` is the initial shared app/session state (screen, language, settings)
 /// — usually built from the loaded `config.toml`. Must be called from within a
 /// runtime context (the actor is `tokio::spawn`ed).
+///
+/// This variant runs without config persistence (unit tests, ephemeral
+/// nodes); `moltd` uses [`spawn_with_config`] so settings round-trip with
+/// the node's `config.toml`.
 pub fn spawn(config: GroupConfig, session: SessionView) -> WalletHandle {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_inner(config, session, None)
+}
+
+/// Start the engine bound to `config_path`: a [`configstore`] task persists
+/// every settings change to that file (format-preserving, atomic) and watches
+/// it for external edits, which are validated and mirrored into the shared
+/// session. Fails fast when another node already runs on the same config.
+///
+/// The returned [`ConfigStoreHandle`] is for the binary's shutdown path
+/// (flush pending writes, release the lock); the engine holds its own clone.
+pub fn spawn_with_config(
+    config: GroupConfig,
+    session: SessionView,
+    config_path: PathBuf,
+) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let store = configstore::spawn(config_path, cmd_tx.clone())?;
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()));
+    Ok((handle, store))
+}
+
+fn spawn_inner(
+    config: GroupConfig,
+    session: SessionView,
+    store: Option<ConfigStoreHandle>,
+) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(config, session, cmd_tx, cmd_rx, store)
+}
+
+fn spawn_actor(
+    config: GroupConfig,
+    session: SessionView,
+    cmd_tx: mpsc::Sender<Envelope>,
+    mut cmd_rx: mpsc::Receiver<Envelope>,
+    store: Option<ConfigStoreHandle>,
+) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
-    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone());
+    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -141,6 +185,11 @@ pub(crate) struct State {
     pub(crate) next_id: u64,
     /// The shared app/session state (screen, language, settings, …).
     pub(crate) session: SessionView,
+    /// The config file owner (None = no persistence: tests, ephemeral nodes).
+    pub(crate) store: Option<ConfigStoreHandle>,
+    /// The settings the node booted with — restart-required keys are flagged
+    /// by comparing the current session against this snapshot.
+    pub(crate) boot_settings: molt_core::SessionSettings,
 }
 
 impl State {
@@ -149,11 +198,13 @@ impl State {
         session: SessionView,
         ev_tx: broadcast::Sender<Event>,
         cmd_tx: mpsc::Sender<Envelope>,
+        store: Option<ConfigStoreHandle>,
     ) -> Self {
         let mut applied = HashMap::new();
         for s in Surface::ALL {
             applied.insert(s, Vec::new());
         }
+        let boot_settings = session.settings.clone();
         State {
             config,
             ev_tx,
@@ -163,6 +214,8 @@ impl State {
             proposals: HashMap::new(),
             next_id: 1,
             session,
+            store,
+            boot_settings,
         }
     }
 
@@ -214,6 +267,12 @@ impl State {
             Command::SetLanguage { lang } => self.cmd_set_language(lang),
             Command::SetTheme { theme } => self.cmd_set_theme(theme),
             Command::SaveSettings { settings } => self.cmd_save_settings(settings),
+            Command::ReloadSettings {
+                settings,
+                language,
+                theme,
+            } => self.cmd_reload_settings(settings, language, theme),
+            Command::ConfigNotice { notice } => self.cmd_config_notice(notice),
             Command::OpenWorkspace { name } => self.cmd_open_workspace(name),
             Command::CloseWorkspace => self.cmd_close_workspace(),
             Command::DeleteWorkspace { name } => self.cmd_delete_workspace(name),

@@ -116,13 +116,12 @@ fn main() -> anyhow::Result<()> {
         settings: molt_core::SessionSettings {
             headless: config.node.headless,
             workspace_dir: config.storage.workspace_dir.clone(),
-            // S3 backup is a session-only mock; config.toml has no key for it yet.
-            s3_backup: false,
-            s3_endpoint: String::new(),
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_bucket: molt_core::SessionSettings::default().s3_bucket,
-            s3_interval_min: molt_core::SessionSettings::default().s3_interval_min,
+            s3_backup: config.storage.s3_backup,
+            s3_endpoint: config.storage.s3_endpoint.clone(),
+            s3_access_key: config.storage.s3_access_key.clone(),
+            s3_secret_key: config.storage.s3_secret_key.clone(),
+            s3_bucket: config.storage.s3_bucket.clone(),
+            s3_interval_min: config.storage.s3_interval_min,
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),
@@ -133,9 +132,17 @@ fn main() -> anyhow::Result<()> {
         // workspace list (demo mock), active workspace, restore lifecycle
         ..molt_core::SessionView::default()
     };
-    // Group is workspace-specific; scaffold uses the demo 2-of-3 group.
-    let wallet =
-        rt.block_on(async move { molt_engine::spawn(molt_core::GroupConfig::demo(), session) });
+    // Group is workspace-specific; the node currently runs the simulated
+    // 2-of-3 group. The engine is bound to the config file: settings changes
+    // persist to it (format-preserving, atomic) and external edits of it are
+    // watched, validated and mirrored into the shared session.
+    let (wallet, config_store) = {
+        let path = config_path.clone();
+        rt.block_on(async move {
+            molt_engine::spawn_with_config(molt_core::GroupConfig::demo(), session, path)
+        })
+        .with_context(|| format!("binding the engine to {}", config_path.display()))?
+    };
 
     // Always-on MCP over TCP, UI + headless. The bind address, peer-IP allowlist
     // and required token all come from [mcp] in the config.
@@ -163,34 +170,39 @@ fn main() -> anyhow::Result<()> {
     }
     tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
 
-    if config.node.headless {
+    let result = if config.node.headless {
         tracing::info!("mode: headless (config: node.headless = true)");
-        return run_headless(
+        run_headless(
             &rt,
             wallet,
             cli.mcp_tcp.as_deref(),
             allow_all,
             allowlist,
             mcp_token,
-        );
-    }
-
-    // UI mode (default): GUI on main thread; fall back to headless stdio MCP if it can't start.
-    tracing::info!("mode: UI (GUI on main thread)");
-    match molt_ui::run_app(wallet.clone(), rt.handle().clone(), config_path.clone()) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            tracing::warn!(error = %e, "GUI unavailable; falling back to headless MCP");
-            run_headless(
-                &rt,
-                wallet,
-                cli.mcp_tcp.as_deref(),
-                allow_all,
-                allowlist,
-                mcp_token,
-            )
+        )
+    } else {
+        // UI mode (default): GUI on main thread; fall back to headless stdio
+        // MCP if it can't start.
+        tracing::info!("mode: UI (GUI on main thread)");
+        match molt_ui::run_app(wallet.clone(), rt.handle().clone(), config_path.clone()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "GUI unavailable; falling back to headless MCP");
+                run_headless(
+                    &rt,
+                    wallet,
+                    cli.mcp_tcp.as_deref(),
+                    allow_all,
+                    allowlist,
+                    mcp_token,
+                )
+            }
         }
-    }
+    };
+
+    // Flush any pending (debounced) config write and release the config lock.
+    rt.block_on(config_store.shutdown());
+    result
 }
 
 // ---------------------------------------------------------------------------

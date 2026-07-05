@@ -47,6 +47,8 @@ tokio              = { version = "1", features = ["rt-multi-thread", "macros", "
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 toml               = "0.8"
+toml_edit          = "0.22"   # format-preserving config.toml rewrites (comments survive a save)
+tempfile           = "3"      # dev-dependency of the config/store tests
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 thiserror          = "1"

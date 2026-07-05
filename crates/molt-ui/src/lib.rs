@@ -16,8 +16,10 @@
 //!
 //! This crate hosts the multi-stage front of the node — a first-run wizard
 //! (create / open / join / restore), a shared completion screen, the main
-//! placeholder, and a settings panel. The whole flow is a **mock**: no workspace
-//! is created and **nothing is written to disk**.
+//! surfaces view, and a settings panel. The settings are real (they persist
+//! to the node's `config.toml` and mirror external edits of it); the
+//! workspace lifecycles are still a **simulation** — no workspace is created
+//! on disk yet.
 //!
 //! The GUI is a **live-mirror of the engine's shared session**, not a holder of
 //! its own state. Every action (navigate, switch language, save settings, finish
@@ -148,6 +150,11 @@ pub fn run_app(
         });
     }
 
+    // The previously applied session settings: the mirror uses it to refresh
+    // the settings draft only on real changes, the leave-guard to detect a
+    // dirty draft.
+    let last_settings: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+
     // --- actions: each becomes a Command on the shared engine ---
     {
         let rt = rt.clone();
@@ -215,6 +222,92 @@ pub fn run_app(
             ui.set_cfg_mcp_token(molt_config::random_token().into());
             let settings = read_settings_draft(&ui);
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
+        });
+    }
+    {
+        // Leaving settings is guarded: a clean draft navigates straight back;
+        // a dirty one raises the unsaved-changes modal (save / discard / stay).
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let last = last_settings.clone();
+        ui.on_close_settings(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let dirty = last
+                .lock()
+                .ok()
+                .and_then(|l| l.clone())
+                .is_some_and(|s| s != read_settings_draft(&ui));
+            if dirty {
+                ui.set_confirm_leave_open(true);
+            } else {
+                issue(
+                    &rt,
+                    &w,
+                    &ui.as_weak(),
+                    Command::Navigate {
+                        screen: to_screen(ui.get_settings_return()),
+                    },
+                );
+            }
+        });
+    }
+    {
+        // Modal "Save & continue": persist the draft, then leave — but only
+        // when the engine accepted it (a validation error keeps the user on
+        // the settings screen, with the error as a toast).
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_save_and_leave(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let settings = read_settings_draft(&ui);
+            let screen = to_screen(ui.get_settings_return());
+            let w = w.clone();
+            let weak = ui.as_weak();
+            rt.spawn(async move {
+                match w.execute(Command::SaveSettings { settings }).await {
+                    Ok(_) => {
+                        let _ = w.execute(Command::Navigate { screen }).await;
+                    }
+                    Err(e) => {
+                        let msg = format!("⚠ {e}");
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.invoke_show_toast(msg.into());
+                            }
+                        });
+                    }
+                }
+            });
+        });
+    }
+    {
+        // Modal "Discard & continue": reset the draft to the live session
+        // values, then leave.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let last = last_settings.clone();
+        ui.on_discard_and_leave(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if let Some(s) = last.lock().ok().and_then(|l| l.clone()) {
+                apply_settings_fields(&ui, &s);
+            }
+            issue(
+                &rt,
+                &w,
+                &ui.as_weak(),
+                Command::Navigate {
+                    screen: to_screen(ui.get_settings_return()),
+                },
+            );
         });
     }
     // Quit confirmed from the modal: end the Slint event loop so `ui.run()`
@@ -543,8 +636,8 @@ pub fn run_app(
     {
         let weak = ui.as_weak();
         let w = wallet.clone();
+        let last_settings = last_settings.clone();
         rt.spawn(async move {
-            let last_settings: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
             let mut rx = w.subscribe();
             push_session(&w, &weak, &last_settings, SessionScope::Full).await;
             push_surfaces(&w, &weak).await;
@@ -800,18 +893,25 @@ async fn push_session(
         });
         return;
     }
-    let changed = {
+    let (changed, prev) = {
         let mut last = last_settings.lock().expect("settings cache poisoned");
-        let changed = last.as_ref() != Some(&sv.settings);
+        let prev = last.clone();
+        let changed = prev.as_ref() != Some(&sv.settings);
         if changed {
             *last = Some(sv.settings.clone());
         }
-        changed
+        (changed, prev)
     };
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            apply_session(&ui, &sv, changed);
+            // Draft protection: a settings change arriving while the user has
+            // unsaved edits open (an external config reload, an MCP save) must
+            // not wipe what they typed. The notice/leave-guard tells them; the
+            // draft stays until they Save or discard.
+            let editing = ui.get_screen() == AppScreen::Settings
+                && prev.is_some_and(|p| p != read_settings_draft(&ui));
+            apply_session(&ui, &sv, changed && !editing);
         }
     });
 }
@@ -881,27 +981,45 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     let lang = i32::from(sv.language == "de");
     ui.set_lang_index(lang);
     ui.set_notice(sv.notice.clone().into());
+    // a failed write carries its detail in the notice; split it off so the
+    // settings footer can render it in the error tone without string ops
+    ui.set_notice_failed(
+        if sv.notice.starts_with("save-failed") {
+            sv.notice.clone()
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+    // persistent restart warning: which changed keys only apply on restart
+    ui.set_restart_keys(sv.restart_required.join(", ").into());
 
     if !settings_changed {
         apply_strings(ui, lang);
         return;
     }
-    ui.set_cfg_headless(sv.settings.headless);
-    ui.set_cfg_workspace_dir(sv.settings.workspace_dir.clone().into());
-    ui.set_cfg_s3_backup(sv.settings.s3_backup);
-    ui.set_cfg_s3_endpoint(sv.settings.s3_endpoint.clone().into());
-    ui.set_cfg_s3_access(sv.settings.s3_access_key.clone().into());
-    ui.set_cfg_s3_secret(sv.settings.s3_secret_key.clone().into());
-    ui.set_cfg_s3_bucket(sv.settings.s3_bucket.clone().into());
-    ui.set_cfg_s3_interval(i32::from(sv.settings.s3_interval_min));
-    ui.set_cfg_mcp_port(sv.settings.mcp_port as i32);
-    ui.set_cfg_mcp_allow(sv.settings.mcp_allow.clone().into());
-    ui.set_cfg_mcp_token(sv.settings.mcp_token.clone().into());
-    ui.set_cfg_network_index(net_index(&sv.settings.anonymity));
-    ui.set_cfg_tor_mode_index(mode_index(&sv.settings.tor_mode));
-    ui.set_cfg_tor_port(sv.settings.tor_port as i32);
+    apply_settings_fields(ui, &sv.settings);
 
     apply_strings(ui, lang);
+}
+
+/// Push one settings value into the draft form fields (the mirror on real
+/// changes, and the leave-guard's "discard" reset).
+fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
+    ui.set_cfg_headless(s.headless);
+    ui.set_cfg_workspace_dir(s.workspace_dir.clone().into());
+    ui.set_cfg_s3_backup(s.s3_backup);
+    ui.set_cfg_s3_endpoint(s.s3_endpoint.clone().into());
+    ui.set_cfg_s3_access(s.s3_access_key.clone().into());
+    ui.set_cfg_s3_secret(s.s3_secret_key.clone().into());
+    ui.set_cfg_s3_bucket(s.s3_bucket.clone().into());
+    ui.set_cfg_s3_interval(i32::from(s.s3_interval_min));
+    ui.set_cfg_mcp_port(s.mcp_port as i32);
+    ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
+    ui.set_cfg_mcp_token(s.mcp_token.clone().into());
+    ui.set_cfg_network_index(net_index(&s.anonymity));
+    ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
+    ui.set_cfg_tor_port(s.tor_port as i32);
 }
 
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
@@ -1419,7 +1537,7 @@ macro_rules! lexicon {
 lexicon! {
     choice_title: "Welcome", "Willkommen";
     choice_subtitle: "Choose how to begin.", "Wähle, wie du beginnen möchtest.";
-    choice_mock_note: "Demo build — nothing is saved to disk.", "Demo — nichts wird auf der Platte gespeichert.";
+    choice_mock_note: "Simulation — workspaces are not stored on disk yet.", "Simulation — Workspaces werden noch nicht auf der Platte gespeichert.";
     choice_group_republic: "New republic", "Neue Republik";
     choice_create_title: "Create", "Gründen";
     choice_create_sub: "A new workspace", "Workspace erstellen";
@@ -1442,7 +1560,7 @@ lexicon! {
     field_mcp_allow: "Allowed client IPs", "Erlaubte Client-IPs";
     field_mcp_token: "API token", "API-Token";
     set_rotate: "Rotate", "Rotieren";
-    set_token_note: "Clients send this as the token in their initialize request. Rotating replaces it immediately.", "Clients senden dies als token im initialize-Request. Rotieren ersetzt es sofort.";
+    set_token_note: "Clients send this as the token in their initialize request. Rotating saves a fresh token to config.toml; the running MCP endpoint picks it up on the next restart.", "Clients senden dies als token im initialize-Request. Rotieren speichert ein frisches Token in die config.toml; der laufende MCP-Endpunkt übernimmt es beim nächsten Neustart.";
     set_token_show: "Reveal", "Anzeigen";
     set_token_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";
@@ -1566,9 +1684,17 @@ lexicon! {
     bk_col_size: "Size", "Größe";
     bk_col_last: "Last backup", "Letztes Backup";
     set_save: "Save", "Speichern";
-    set_save_note: "Mock: not written to disk.", "Mock: nicht auf die Platte geschrieben.";
+    set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";
     set_close: "Close", "Schließen";
-    set_path_label: "Would write to", "Würde schreiben nach";
+    set_path_label: "Writes to", "Schreibt nach";
+    set_reloaded_note: "config.toml changed on disk — settings reloaded.", "config.toml wurde auf der Platte geändert — Einstellungen neu geladen.";
+    set_conflict_note: "config.toml on disk is invalid — the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig — die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
+    set_restart_note: "Takes effect after a restart:", "Wirkt erst nach einem Neustart:";
+    unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
+    unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
+    unsaved_save: "Save & continue", "Speichern & weiter";
+    unsaved_discard: "Discard & continue", "Verwerfen & weiter";
+    unsaved_cancel: "Cancel", "Abbruch";
     mv_send: "Send", "Senden";
     mv_propose: "Propose", "Vorschlagen";
     mv_approve: "Approve", "Zustimmen";

@@ -2780,7 +2780,9 @@ name = "molt-config"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "tempfile",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -2797,8 +2799,10 @@ dependencies = [
 name = "molt-engine"
 version = "0.0.1"
 dependencies = [
+ "molt-config",
  "molt-core",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

@@ -1,19 +1,24 @@
-# moltrepublic-demo
+# MoltRepublic
 
-A Rust scaffold for **MoltRepublic** — a private, server-less republic of agents
-and the people behind them, sharing six surfaces (organization, chat, memory,
-quests, vault, wallet — organization is read-only, chat is ungated) over one
-channel, where everything that matters changes only at an m-of-n threshold.
-Each surface opens into sub-views (e.g. wallet: balance / history / send /
-receive / status / settings); the selected surface *and* view are shared
-session state, so an MCP agent's navigation mirrors live into the GUI. See `../moltrepublic-docs` for the full design and
-`../konkinwallet` for the predecessor wallet client whose layout and conventions
-this scaffold follows.
+**MoltRepublic** is a private, server-less republic of agents and the people
+behind them, sharing six surfaces (organization, chat, memory, quests, vault,
+wallet — organization is read-only, chat is ungated) over one channel, where
+everything that matters changes only at an m-of-n threshold. Each surface
+opens into sub-views (e.g. wallet: balance / history / send / receive /
+status / settings); the selected surface *and* view are shared session state,
+so an MCP agent's navigation mirrors live into the GUI. See
+`../moltrepublic-docs` for the full design and `../konkinwallet` for the
+predecessor wallet client whose layout and conventions this codebase follows.
 
-This scaffold establishes the **spine** and one load-bearing invariant: there is
-**one command set**, executed in **one place**, driven by **two co-equal
-operators** — a human via the GUI and an agent via MCP. Neither can do anything
-the other cannot.
+The product is being built in two tracks: the UI/UX layer grows piece by
+piece as a working simulation of the full experience, and the real backends
+are implemented behind it — behind the *same* contract, so the simulation is
+the living specification of what each real backend must fulfil.
+
+The codebase stands on one load-bearing invariant: there is **one command
+set**, executed in **one place**, driven by **two co-equal operators** — a
+human via the GUI and an agent via MCP. Neither can do anything the other
+cannot.
 
 ## Architecture
 
@@ -37,9 +42,10 @@ crates/
   `documents/mcp-security.md` for the co-equality audit and its deliberate
   exceptions.
 
-> The threshold logic is a faithful **simulation** (no FROST/MLS/network yet).
-> The real signing + transport backends are future surface crates (R2–R6 /
-> W1–W4 in the docs) that plug in behind the same contract.
+> The threshold logic is currently a faithful **simulation** (no
+> FROST/MLS/network yet). The real signing + transport backends are the next
+> surface crates (R2–R6 / W1–W4 in the docs) and plug in behind the same
+> contract — the simulation defines what they must fulfil.
 
 ## Configuration
 
@@ -72,7 +78,7 @@ At startup the config is found in this order (first match wins), unless
 If none is found, the node aborts and tells you to `--generate-config`. The file
 is parsed strictly: `deny_unknown_fields` makes typos and unknown fields hard
 errors. The group/threshold set is workspace-specific and not part of the node
-config; the scaffold runs a demo 2-of-3 group.
+config; the node currently runs a simulated 2-of-3 group.
 
 ```toml
 [node]
@@ -80,6 +86,9 @@ headless = false                       # true = headless (MCP-only, no GUI)
 
 [storage]
 workspace_dir = "~/.moltrepublic/workspaces"   # "~" = $HOME
+s3_backup = false                      # automatic workspace backup to S3
+s3_endpoint = ""                       # + access/secret key, bucket, interval
+s3_interval_min = 60
 
 [mcp]
 port = 4040                            # MCP server TCP port (127.0.0.1); always served
@@ -94,6 +103,31 @@ port = 9050                            # local tor SOCKS port; only when mode = 
 [ui]
 lang = "en"                            # "en" | "de"
 ```
+
+### The config is bi-directional
+
+`config.toml` and the running node stay in sync in both directions (design:
+`documents/concept-config-bidirection.md`):
+
+* **App → file.** Saving the settings (GUI Save button, `save_settings` MCP
+  tool — co-equal as always) persists them to the very file the node started
+  from. The write is **format-preserving** (your comments, ordering and
+  spacing survive — `toml_edit`), **atomic** (temp-and-rename with fsync: a
+  crash or power cut leaves the old or the new file, never a torn one) and
+  **coalesced** (a burst of saves becomes one write). Language and theme
+  clicks persist too, silently.
+* **File → app.** The running node watches the file. An external edit (your
+  editor, a provisioning script) is validated and mirrored into the shared
+  session — GUI and MCP agents see the new values without a restart. A broken
+  or invalid file is never applied and never overwritten while you are
+  mid-edit: the node keeps the last good values, shows `config-conflict`, and
+  applies your edit as soon as it parses again.
+* **Restart-required keys.** Not every key can take effect live (`mcp.*`,
+  `node.headless`, `transport.*`). Changes to them persist and mirror, but
+  the session carries `restart_required` naming them — the GUI shows a
+  persistent warning, agents read the same list via `read_session`.
+* **One node per config.** A `<config>.lock` file (holder's PID inside) makes
+  a second `moltd` on the same config refuse to start.
 
 `[transport.anonymity.tor].mode` (used only when `network = "tor"`):
 
