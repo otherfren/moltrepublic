@@ -72,6 +72,12 @@ pub struct SmpConn {
     pub session_id: Vec<u8>,
     /// Monotonic correlation counter.
     corr: u64,
+    /// A response block already read (the server piggybacks the next `MSG`
+    /// on an `ACK` reply), buffered for the next `recv_next`.
+    pending_block: Option<Vec<u8>>,
+    /// The msg id of a delivered-but-not-yet-acked message; acked lazily on
+    /// the next `recv_next` (the SMP ACK/next-MSG ping-pong).
+    ack_pending: Option<Vec<u8>>,
 }
 
 impl SmpConn {
@@ -84,6 +90,8 @@ impl SmpConn {
             version: 0,
             session_id: Vec::new(),
             corr: 0,
+            pending_block: None,
+            ack_pending: None,
         };
         conn.handshake().await?;
         Ok(conn)
@@ -167,7 +175,7 @@ impl SmpConn {
         push_short(&mut cmd, &spki_x25519(&dh_pk));
         cmd.push(b'0'); // basicAuth: none
         cmd.push(if subscribe { b'S' } else { b'C' });
-        cmd.push(b'F'); // sndSecure: no
+        cmd.push(b'T'); // sndSecure: the sender may secure the queue (SKEY)
 
         let (_corr, _entity, command) = self.send_signed(&auth_sk, &[], &cmd).await?;
         let (recipient_id, sender_id, server_dh) = parse_ids(&command)?;
@@ -180,29 +188,49 @@ impl SmpConn {
         })
     }
 
-    /// Send one message to a queue's **sender** id (unsigned — the first
-    /// message an unsecured queue accepts). `body` is the opaque payload
-    /// the recipient receives (our own per-queue wrap rides inside it).
-    /// The server wraps it in the server→recipient layer on delivery.
-    pub async fn send_to(&mut self, sender_id: &[u8], body: &[u8]) -> Result<(), NetError> {
-        // SEND = "SEND" SP msgFlags("F", 1 byte) SP Tail(body)
+    /// Secure a queue as the **sender** (`SKEY`, v8+): assert a fresh
+    /// Ed25519 sender key so the server will accept our signed `SEND`s.
+    /// Returns the key to sign subsequent sends with. Needs the queue's
+    /// `NEW` to have set `sndSecure`.
+    pub async fn secure_as_sender(
+        &mut self,
+        sender_id: &[u8],
+    ) -> Result<ed25519_dalek::SigningKey, NetError> {
+        let mut sk_bytes = [0u8; 32];
+        getrandom::getrandom(&mut sk_bytes).map_err(|e| NetError::Crypto(e.to_string()))?;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let mut cmd = Vec::new();
+        cmd.extend_from_slice(b"SKEY ");
+        push_short(&mut cmd, &spki_ed25519(&sk.verifying_key().to_bytes()));
+        let (_c, _e, resp) = self.send_signed(&sk, sender_id, &cmd).await?;
+        if resp.starts_with(b"OK") {
+            Ok(sk)
+        } else {
+            Err(NetError::Crypto(format!(
+                "SKEY rejected: {}",
+                String::from_utf8_lossy(&resp[..resp.len().min(48)])
+            )))
+        }
+    }
+
+    /// Send one message to a queue's **sender** id, signed with the key
+    /// from [`Self::secure_as_sender`] — the queue must be secured first.
+    /// `body` is the opaque payload the recipient receives (our per-queue
+    /// wrap rides inside it); the server wraps it in the server→recipient
+    /// layer on delivery.
+    pub async fn send_to(
+        &mut self,
+        sender_id: &[u8],
+        sender_key: &ed25519_dalek::SigningKey,
+        body: &[u8],
+    ) -> Result<(), NetError> {
+        // SEND = "SEND" SP msgFlags("F") SP Tail(body)
         let mut cmd = Vec::new();
         cmd.extend_from_slice(b"SEND ");
-        cmd.push(b'F'); // no notification
+        cmd.push(b'F');
         cmd.push(b' ');
         cmd.extend_from_slice(body);
-        // unsigned transmission, entity = sender_id
-        let corr = self.next_corr();
-        let mut authorized = Vec::new();
-        authorized.push(CORR_PRESENT);
-        authorized.extend_from_slice(&corr);
-        push_short(&mut authorized, sender_id);
-        authorized.extend_from_slice(&cmd);
-        let mut tx = Vec::new();
-        push_short(&mut tx, &[]); // empty authorization
-        tx.extend_from_slice(&authorized);
-        self.write_block(&wrap_transmission(&tx)).await?;
-        let (_c, _e, resp) = parse_first_response(&self.read_block().await?)?;
+        let (_c, _e, resp) = self.send_signed(sender_key, sender_id, &cmd).await?;
         if resp.starts_with(b"OK") {
             Ok(())
         } else {
@@ -213,39 +241,46 @@ impl SmpConn {
         }
     }
 
-    /// Receive one delivered `MSG` on a subscribed connection and decrypt
-    /// the server→recipient layer, returning `(msgId, plaintext body)`.
-    /// `plaintext` is `timestamp(8) | msgFlags(2) | SP | body`.
-    pub async fn recv_msg(&mut self, q: &NewQueue) -> Result<(Vec<u8>, Vec<u8>), NetError> {
-        let (_corr, _entity, command) = parse_first_response(&self.read_block().await?)?;
-        if !command.starts_with(b"MSG ") {
-            return Err(NetError::Framing(format!(
-                "expected MSG, got {}",
-                String::from_utf8_lossy(&command[..command.len().min(16)])
-            )));
-        }
-        let mut p = 4;
-        let msg_id = read_short(&command, &mut p)?;
-        let ciphertext = command.get(p..).unwrap_or(&[]);
-        // decrypt: SalsaBox(server_dh, recipient_dh), nonce = msgId
-        let plaintext = crypto_box_open(&q.server_dh, &q.dh_secret, &msg_id, ciphertext)?;
-        Ok((msg_id, plaintext))
-    }
-
-    /// Acknowledge a delivered message (`ACK`, signed with the recipient
-    /// key) so the server can release it.
-    pub async fn ack(&mut self, q: &NewQueue, msg_id: &[u8]) -> Result<(), NetError> {
-        let mut cmd = Vec::new();
-        cmd.extend_from_slice(b"ACK ");
-        push_short(&mut cmd, msg_id);
-        let (_c, _e, resp) = self.send_signed(&q.auth_sk, &q.recipient_id, &cmd).await?;
-        if resp.starts_with(b"OK") {
-            Ok(())
-        } else {
-            Err(NetError::Crypto(format!(
-                "ACK rejected: {}",
-                String::from_utf8_lossy(&resp[..resp.len().min(32)])
-            )))
+    /// Receive the next message on a subscribed connection, decrypting the
+    /// server→recipient layer. Returns the plaintext body (the bytes the
+    /// sender sent, with the server's `timestamp|flags|SP` prefix
+    /// stripped). Handles the SMP ping-pong: the previous message is
+    /// `ACK`ed here (the server piggybacks the next `MSG` on the ACK
+    /// reply), and bare `OK`s / pushed deliveries are followed until a
+    /// message arrives.
+    pub async fn recv_next(&mut self, q: &NewQueue) -> Result<Vec<u8>, NetError> {
+        loop {
+            // ack the previously delivered message; its reply may be the
+            // next MSG (buffered) or OK
+            if let Some(msg_id) = self.ack_pending.take() {
+                let mut cmd = Vec::new();
+                cmd.extend_from_slice(b"ACK ");
+                push_short(&mut cmd, &msg_id);
+                let block = self.send_signed_raw(&q.auth_sk, &q.recipient_id, &cmd).await?;
+                self.pending_block = Some(block);
+            }
+            let block = match self.pending_block.take() {
+                Some(b) => b,
+                None => self.read_block().await?,
+            };
+            let (_corr, _entity, command) = parse_first_response(&block)?;
+            if command.starts_with(b"MSG ") {
+                let mut p = 4;
+                let msg_id = read_short(&command, &mut p)?;
+                let ciphertext = command.get(p..).unwrap_or(&[]);
+                let plaintext = crypto_box_open(&q.server_dh, &q.dh_secret, &msg_id, ciphertext)?;
+                self.ack_pending = Some(msg_id);
+                // strip the server framing: timestamp(8) flags(2) SP(1)
+                let body = plaintext.get(11..).unwrap_or(&[]).to_vec();
+                return Ok(body);
+            }
+            // OK (or "END"/"ERR") — keep waiting for a pushed MSG
+            if command.starts_with(b"ERR") {
+                return Err(NetError::Crypto(format!(
+                    "server error during subscribe: {}",
+                    String::from_utf8_lossy(&command[..command.len().min(32)])
+                )));
+            }
         }
     }
 
@@ -260,6 +295,19 @@ impl SmpConn {
         entity: &[u8],
         command: &[u8],
     ) -> Result<Response, NetError> {
+        let block = self.send_signed_raw(key, entity, command).await?;
+        parse_first_response(&block)
+    }
+
+    /// As [`Self::send_signed`] but returns the raw reply block content —
+    /// the subscription loop buffers it because an `ACK` reply may carry
+    /// the next `MSG`.
+    async fn send_signed_raw(
+        &mut self,
+        key: &ed25519_dalek::SigningKey,
+        entity: &[u8],
+        command: &[u8],
+    ) -> Result<Vec<u8>, NetError> {
         use ed25519_dalek::Signer;
         let corr = self.next_corr();
         // authorized (wire, v7+) = corrId | entityId | command
@@ -278,8 +326,7 @@ impl SmpConn {
         push_short(&mut tx, &sig);
         tx.extend_from_slice(&authorized);
         self.write_block(&wrap_transmission(&tx)).await?;
-        let block = self.read_block().await?;
-        parse_first_response(&block)
+        self.read_block().await
     }
 
     fn next_corr(&mut self) -> [u8; 24] {

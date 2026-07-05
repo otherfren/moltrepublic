@@ -14,22 +14,25 @@ async fn round_trip(url: &str, label: &str) {
     // Instance R: create + subscribe a queue
     let mut r = SmpConn::connect(&s).await.expect("R connect");
     let q = r.new_queue(true).await.expect("NEW+SUB");
-    // Instance S: an independent connection, send to the queue's sender id
+    // Instance S: an independent connection, secure the queue then send
+    // three messages to its sender id
     let mut sender = SmpConn::connect(&s).await.expect("S connect");
-    let payload = b"molt ritual: hello from instance S";
-    sender.send_to(&q.sender_id, payload).await.expect("SEND");
-    // Instance R: receive + decrypt the server->recipient layer
-    let (msg_id, plain) = r.recv_msg(&q).await.expect("recv MSG");
-    // plaintext = timestamp(8) | msgFlags(2) | SP | body
-    assert!(plain.len() > 11, "msg body present");
-    let body = &plain[11..];
-    assert!(
-        body.windows(payload.len()).any(|w| w == payload),
-        "[{label}] delivered body must contain the sent payload; got {:?}",
-        String::from_utf8_lossy(&body[..body.len().min(64)])
-    );
-    r.ack(&q, &msg_id).await.expect("ACK");
-    println!("OK [{label}]: two instances exchanged a message over SMP (msgId {} bytes)", msg_id.len());
+    let key = sender.secure_as_sender(&q.sender_id).await.expect("SKEY");
+    for i in 0..3u8 {
+        let payload = format!("molt ritual message {i} from instance S");
+        sender.send_to(&q.sender_id, &key, payload.as_bytes()).await.expect("SEND");
+    }
+    // Instance R: receive + decrypt each, in order
+    for i in 0..3u8 {
+        let body = r.recv_next(&q).await.expect("recv");
+        let want = format!("molt ritual message {i} from instance S");
+        assert!(
+            body.windows(want.len()).any(|w| w == want.as_bytes()),
+            "[{label}] message {i} must arrive intact; got {:?}",
+            String::from_utf8_lossy(&body[..body.len().min(64)])
+        );
+    }
+    println!("OK [{label}]: two instances exchanged 3 secured messages over SMP");
 }
 
 #[tokio::test]

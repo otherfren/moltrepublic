@@ -15,11 +15,14 @@ use crate::NetError;
 /// One SMP transport block (SMP fixes this at 16 KiB).
 pub const SMP_BLOCK_LEN: usize = 16 * 1024;
 
-/// Bytes reserved for SMP's own transport framing inside a block (command
-/// tag, ids, correlation data). The exact split lands with `SmpTransport`
-/// (T3); until then the reserve keeps every layer honest about not owning
-/// the full block.
-pub const SMP_FRAMING_RESERVE: usize = 64;
+/// Bytes reserved inside a 16 KiB SMP block for everything that is not our
+/// payload, so one [`PaddedBlock`] always fits in exactly one SMP message.
+/// Budget (measured against the live server, T3): the server delivers our
+/// bytes as `sentMsgBody` inside `rcvMsgBody = timestamp(8) ‖ flags(2) ‖
+/// SP(1) ‖ body`, padded to 16 066, then crypto_box'd (+16 tag) into an
+/// `MSG` transmission (tag+msgId+corr+entity) inside a transport block.
+/// 384 bytes of reserve keeps a comfortable margin under all of that.
+pub const SMP_FRAMING_RESERVE: usize = 384;
 
 /// The size of the opaque payload we hand to `SEND`: one block minus the
 /// SMP framing reserve. Every [`PaddedBlock`] is exactly this long.

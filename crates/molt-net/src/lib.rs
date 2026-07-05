@@ -78,22 +78,29 @@ pub enum NetError {
 
 /// A queue id: random, meaningless bytes — no accounts, no user identifiers.
 /// Sender and recipient of one queue are never linkable to other queues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct QueueId(pub [u8; 16]);
+/// Variable length: the loopback hub mints 16 bytes, real SMP servers
+/// assign 16–24.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QueueId(pub Vec<u8>);
 
 impl QueueId {
-    /// A fresh random id from the OS CSPRNG.
+    /// A fresh 16-byte random id from the OS CSPRNG (loopback).
     pub fn fresh() -> Result<QueueId, NetError> {
         let mut b = [0u8; 16];
         getrandom::getrandom(&mut b)
             .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-        Ok(QueueId(b))
+        Ok(QueueId(b.to_vec()))
+    }
+
+    /// Wrap a server-assigned id.
+    pub fn from_bytes(b: Vec<u8>) -> QueueId {
+        QueueId(b)
     }
 }
 
 impl std::fmt::Display for QueueId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        f.write_str(&hex::encode(&self.0))
     }
 }
 

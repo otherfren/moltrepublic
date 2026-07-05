@@ -129,14 +129,14 @@ impl LoopbackHub {
         let id = QueueId::fresh()?;
         let mut hub = self.inner.lock().map_err(|_| NetError::Closed)?;
         hub.queues.insert(
-            id,
+            id.clone(),
             Queue {
                 sub: None,
                 pending: HashMap::new(),
             },
         );
         Ok(QueuePair {
-            rcv: RcvQueue { id },
+            rcv: RcvQueue { id: id.clone() },
             snd: SndQueueAddr {
                 server: "loopback".to_string(),
                 id,
@@ -166,9 +166,10 @@ impl LoopbackHub {
             };
             if let Some(sub) = sub {
                 let ack_hub = hub.clone();
+                let ack_queue = queue.clone();
                 let ack = AckToken::new(move || {
                     if let Ok(mut h) = ack_hub.inner.lock() {
-                        if let Some(q) = h.queues.get_mut(&queue) {
+                        if let Some(q) = h.queues.get_mut(&ack_queue) {
                             q.pending.remove(&delivery);
                         }
                     }
@@ -303,7 +304,7 @@ impl Transport for LoopbackTransport {
             scheduled
         };
         for (id, attempt, delay) in scheduled {
-            self.hub.schedule(addr.id, id, attempt, delay);
+            self.hub.schedule(addr.id.clone(), id, attempt, delay);
         }
         Ok(())
     }
@@ -318,7 +319,7 @@ impl Transport for LoopbackTransport {
         };
         // store-and-forward: everything unacked flows to the new subscriber
         for id in pending {
-            self.hub.schedule(q.id, id, 0, Duration::ZERO);
+            self.hub.schedule(q.id.clone(), id, 0, Duration::ZERO);
         }
         Ok(rx)
     }
