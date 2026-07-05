@@ -290,12 +290,13 @@ fn spawn_founder_recv(
 /// member side against the founder's hub.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct InviteMaterial {
+pub struct InviteMaterial<T: molt_net::Transport = molt_net::LoopbackTransport> {
     /// The seat this invite fills (0-based).
     pub seat: u32,
-    /// The shared transport (the founder's loopback hub today; an SMP
-    /// transport at T3).
-    pub transport: molt_net::LoopbackTransport,
+    /// The transport to reach the founder — the loopback hub for the demo
+    /// mesh, an [`molt_net::smp::SmpTransport`] for a real member joining
+    /// over SMP. `run_ritual_member` is generic over it.
+    pub transport: T,
     /// member → founder queue (JoinRequest, then SealSigned).
     pub invite_snd: SndQueueAddr,
     pub invite_wrap: WrapKey,
@@ -316,8 +317,8 @@ pub struct InviteMaterial {
 /// exact code path a remote member's node will run over SMP at T3 — here
 /// it runs over the founder's loopback hub.
 #[doc(hidden)]
-pub async fn run_ritual_member(
-    m: InviteMaterial,
+pub async fn run_ritual_member<T: molt_net::Transport>(
+    m: InviteMaterial<T>,
     name: String,
     phrase: String,
     mut cancel: Option<mpsc::Receiver<()>>,
