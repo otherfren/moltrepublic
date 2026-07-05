@@ -251,6 +251,38 @@ effect is fully captured by a snapshot floor — only once a retention story
 is decided; the append-only default is to keep everything (it *is* the
 shared history of the republic).
 
+### 3.5 `transport.state` — the log is the outbox, cursors are the bookmark
+
+(Storage contract for the transport concept §2/§6; owned by `molt-net`,
+recorded here because it is an on-disk structure beside the log.)
+
+There is **no separate on-disk send queue**. Outbound delivery state is a
+small encrypted sidecar per workspace, `transport.state` — sibling of the
+log, rewritten atomically like `prefs.toml` but encrypted with a sub-key
+derived from the workspace key (its content is sensitive: queue addresses
+and keys). It holds:
+
+* **Delivery cursors** `member → acked_seq`: everything in the log with
+  `seq > acked_seq` and an outbound-relevant payload is pending for that
+  member. Crash between append and send → resend; crash between send and
+  cursor bump → resend; the receiver's dedup absorbs both. Cursors are
+  bookkeeping, not history — deleting the file costs re-sends, never data.
+* **Receive dedup windows** per sender (MLS epoch/generation high-water
+  plus a bounded out-of-order window). Node-local by nature: two nodes'
+  windows legitimately differ, so they must never enter the shared log.
+* **Queue table**: per-connection queue addresses, per-queue wrapping keys,
+  rotation state (transport concept §3.2).
+* **MLS ratchet state** — deliberately in this overwrite-in-place file and
+  *not* in the append-only log: MLS forward secrecy consists of deleting
+  old key material; a log that remembers every ratchet state would undo it
+  (transport concept §6, incl. the write-ahead fsync rule).
+* Optionally a passive last-seen timestamp map (presence survives
+  restarts).
+
+`MemberSeen` remains a legal event variant but is no longer broadcast or
+required — presence is derived passively from inbound traffic (transport
+concept §3.4).
+
 ## 4. Lifecycle wiring (what replaces which mock)
 
 | Flow | Today | With storage |
