@@ -631,7 +631,15 @@ pub fn run_app(
             loop {
                 match rx.recv().await {
                     Ok(Event::SessionChanged { scope }) => {
-                        push_session(&w, &weak, &last_settings, scope).await
+                        push_session(&w, &weak, &last_settings, scope).await;
+                        // A Full session change can mean a workspace was
+                        // opened or closed — the surface state (replayed
+                        // chat history!) changed with it, without any
+                        // chat/proposal event firing. Run-scoped ticks
+                        // (90 ms) deliberately skip this.
+                        if scope == SessionScope::Full {
+                            push_surfaces(&w, &weak).await;
+                        }
                     }
                     // Any surface event (chat / propose / approve / …) re-reads
                     // the surfaces, so the GUI mirrors what an MCP agent did.
