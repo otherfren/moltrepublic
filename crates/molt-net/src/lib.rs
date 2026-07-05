@@ -44,7 +44,9 @@ use std::future::Future;
 
 pub use block::{PaddedBlock, PADDED_BLOCK_LEN, SMP_BLOCK_LEN, SMP_FRAMING_RESERVE};
 pub use chunk::{msg_id, MsgId, Reassembler, CHUNK_PAYLOAD_BUDGET};
-pub use invite::{join_mac, mint_ticket, verify_join_mac, JoinRequest, RitualMsg, SealSigned};
+pub use invite::{
+    join_mac, mint_ticket, verify_join_mac, JoinRequest, ReplyHandover, RitualMsg, SealSigned,
+};
 pub use supervisor::send_framed;
 pub use loopback::{ChaosPolicy, LoopbackHub, LoopbackTransport};
 pub use supervisor::{

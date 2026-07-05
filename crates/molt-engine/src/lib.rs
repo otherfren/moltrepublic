@@ -427,8 +427,9 @@ impl State {
                 member,
                 identity_pk,
                 proof,
+                reply,
                 generation,
-            } => self.cmd_net_join_requested(seat, member, identity_pk, proof, generation),
+            } => self.cmd_net_join_requested(seat, member, identity_pk, proof, reply, generation),
             Command::NetSealSigned {
                 seat,
                 sig,

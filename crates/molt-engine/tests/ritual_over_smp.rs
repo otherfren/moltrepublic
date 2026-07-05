@@ -2,16 +2,17 @@
 #![allow(missing_docs)]
 
 //! THE END GOAL: the founding ritual run between **two independent
-//! instances** that communicate over a **real SMP server** (transport
-//! concept §3.3). Founder and member each hold their own `SmpTransport`;
-//! nothing is shared beyond the invite link material (as it would travel
-//! off-band) and the wire.
+//! instances** over a **real SMP server** (transport concept §3.3) — and
+//! the member side is the engine's *actual* [`molt_engine::run_ritual_member`],
+//! not a reimplementation. Founder and member each hold their own
+//! [`SmpTransport`]; nothing is shared beyond the invite link material (as
+//! it travels off-band) and the wire.
 //!
-//! Uses the real ritual crypto verbatim — `molt_net::invite` (ticket,
-//! MAC, `RitualMsg`), `molt_storage` identity keys, and
-//! `molt_core::roster_canonical_bytes` — over `molt_net::send_framed` /
-//! per-queue wrapping, exactly as the engine's ritual does, only the
-//! transport is `SmpTransport` instead of the loopback hub.
+//! The member creates the queue it receives on and advertises it inside the
+//! `JoinRequest` (SMP's queue model). The founder side here mirrors the
+//! engine's `spawn_founder_recv` + `maybe_seal` — those are `State`-coupled,
+//! so the test drives the same steps against the same crypto
+//! (`molt_net::invite`, `molt_storage` identity, `roster_canonical_bytes`).
 //!
 //! `#[ignore]` (real network):
 //! `cargo test -p molt-engine --test ritual_over_smp -- --ignored --nocapture`
@@ -19,7 +20,9 @@
 use molt_core::{roster_canonical_bytes, MemberIdentity};
 use molt_net::invite::{self, RitualMsg};
 use molt_net::smp::{SmpServer, SmpTransport};
-use molt_net::{send_framed, msg_id, wrap, Reassembler, SndQueueAddr, Transport, WrapKey};
+use molt_net::{
+    msg_id, send_framed, wrap, QueueId, Reassembler, SndQueueAddr, Transport, WrapKey,
+};
 use molt_net::chunk::PushOutcome;
 
 const KONKIN: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io";
@@ -51,6 +54,17 @@ async fn recv_ritual(
     }
 }
 
+/// Rebuild the founder's send handle to the member's reply queue from the
+/// handover the member advertised in its `JoinRequest`.
+fn reply_target(r: &invite::ReplyHandover) -> (SndQueueAddr, WrapKey) {
+    let id = hex::decode(&r.queue_id).expect("queue id hex");
+    let wrap_bytes: [u8; 32] = hex::decode(&r.wrap).expect("wrap hex").try_into().expect("32 bytes");
+    (
+        SndQueueAddr { server: r.server.clone(), id: QueueId::from_bytes(id) },
+        WrapKey::from_bytes(wrap_bytes),
+    )
+}
+
 async fn ritual(url: &str, label: &str) {
     let server = SmpServer::parse(url).expect("parse");
     let ws_id = "smp-ritual-workspace";
@@ -58,57 +72,39 @@ async fn ritual(url: &str, label: &str) {
 
     // ---- FOUNDER instance: its own transport + identity + invite queue --
     let founder_t = SmpTransport::new(server.clone());
-    let founder_seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().unwrap())
-        .expect("seed");
+    let founder_seed =
+        molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
+            .expect("seed");
     let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&founder_seed, ws_id);
-    // the queue the founder RECEIVES the join/seal on
     let invite_q = founder_t.create_queue().await.expect("invite NEW");
     let invite_wrap = WrapKey::fresh().expect("wrap");
     let mut founder_rx = founder_t.subscribe(&invite_q.rcv).await.expect("SUB invite");
 
-    // the off-band invite link carries: {invite_snd, invite_wrap, ticket,
-    // ws_id}. Hand them to the member instance.
-    let link_invite_snd: SndQueueAddr = invite_q.snd.clone();
-    let link_invite_wrap = invite_wrap.clone();
-    let link_ticket = ticket.clone();
-
-    // ---- MEMBER instance: a *separate* transport, own identity, own
-    // reply queue (in SMP each party creates the queue it receives on) ----
+    // the off-band invite link carries {invite_snd, invite_wrap, ticket}.
+    // Hand them to the member instance as InviteMaterial.
     let member_t = SmpTransport::new(server.clone());
-    let member_seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().unwrap())
-        .expect("seed");
-    // same workspace id as the founder, the member's own seed → a distinct
-    // key that still belongs to this workspace's roster
-    let (member_sk, member_pk) = molt_storage::derive_identity_key(&member_seed, ws_id);
-    let reply_q = member_t.create_queue().await.expect("reply NEW");
-    let reply_wrap = WrapKey::fresh().expect("wrap");
-    let mut member_rx = member_t.subscribe(&reply_q.rcv).await.expect("SUB reply");
-
-    // MEMBER → FOUNDER: activate the invite. The JoinRequest carries the
-    // member's name+key and (SMP-specific) where to reach it: its reply
-    // queue address + wrap key travel alongside (here as extra fields the
-    // founder reads out of band, mirroring the concept's "reply pair").
-    let name = "remote-member".to_string();
-    let join = RitualMsg::Join(invite::JoinRequest {
+    let material = molt_engine::InviteMaterial {
         seat: 0,
-        name: name.clone(),
-        identity_pk: member_pk.clone(),
-        mac: invite::join_mac(&link_ticket, &name, &member_pk),
-    });
-    send_framed(
-        &member_t,
-        &link_invite_snd,
-        &link_invite_wrap,
-        msg_id(&name, "founder", 1),
-        &serde_json::to_vec(&join).unwrap(),
-    )
-    .await
-    .expect("send JoinRequest over SMP");
+        transport: member_t.clone(),
+        invite_snd: invite_q.snd.clone(),
+        invite_wrap: invite_wrap.clone(),
+        ticket: ticket.clone(),
+    };
 
-    // FOUNDER: receive the JoinRequest, verify the ticket MAC, anchor key
+    // ---- MEMBER instance: the REAL engine member code over its own SMP
+    // transport. It derives its identity from its phrase, creates+subscribes
+    // its reply queue, sends the MAC-bound JoinRequest advertising it, awaits
+    // the table, signs, and returns its identity pk. ----
+    let member_phrase = molt_storage::generate_seed_phrase().expect("phrase");
+    let member_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(material, "remote-member".into(), member_phrase, None).await
+    });
+
+    // FOUNDER: receive the JoinRequest, verify the ticket MAC, learn the
+    // member's identity + reply queue
     let mut founder_reasm = Reassembler::new();
     let RitualMsg::Join(req) =
-        recv_ritual(&mut founder_rx, &invite_wrap, &mut founder_reasm, 15).await
+        recv_ritual(&mut founder_rx, &invite_wrap, &mut founder_reasm, 20).await
     else {
         panic!("[{label}] expected JoinRequest");
     };
@@ -116,53 +112,32 @@ async fn ritual(url: &str, label: &str) {
         invite::verify_join_mac(&ticket, &req.name, &req.identity_pk, &req.mac),
         "[{label}] the join MAC must verify against the ticket"
     );
-    assert_eq!(req.identity_pk, member_pk, "member's real key arrived");
+    let (reply_snd, reply_wrap) =
+        reply_target(req.reply.as_ref().expect("member advertised a reply queue"));
 
-    // FOUNDER: build the sealed roster table and sign it
+    // FOUNDER: build + sign the canonical roster, send the table to the
+    // member's reply queue
     let identities = vec![
         MemberIdentity { member: "founder".into(), identity_pk: founder_pk.clone() },
         MemberIdentity { member: req.name.clone(), identity_pk: req.identity_pk.clone() },
     ];
     let table = roster_canonical_bytes(ws_id, 2, 2, &identities);
     let founder_sig = molt_storage::identity_sign(&founder_sk, &table);
-
-    // FOUNDER → MEMBER: send the canonical table to sign (over the member's
-    // reply queue, which the member created and subscribed to)
     let seal = RitualMsg::Seal { table: hex::encode(&table) };
     send_framed(
         &founder_t,
-        &reply_q.snd,
+        &reply_snd,
         &reply_wrap,
         msg_id("founder", "member", 1),
-        &serde_json::to_vec(&seal).unwrap(),
+        &serde_json::to_vec(&seal).expect("encode seal"),
     )
     .await
     .expect("send table over SMP");
 
-    // MEMBER: receive the table, sign it, send the signature back
-    let mut member_reasm = Reassembler::new();
-    let RitualMsg::Seal { table: got } =
-        recv_ritual(&mut member_rx, &reply_wrap, &mut member_reasm, 15).await
-    else {
-        panic!("[{label}] expected Seal table");
-    };
-    let table_bytes = hex::decode(&got).unwrap();
-    let member_sig = molt_storage::identity_sign(&member_sk, &table_bytes);
-    let signed = RitualMsg::Signed(invite::SealSigned { seat: 0, sig: member_sig });
-    send_framed(
-        &member_t,
-        &link_invite_snd,
-        &link_invite_wrap,
-        msg_id(&name, "founder", 2),
-        &serde_json::to_vec(&signed).unwrap(),
-    )
-    .await
-    .expect("send SealSigned over SMP");
-
-    // FOUNDER: receive the member's signature, verify it against the
+    // FOUNDER: receive the member's seal signature and verify it against the
     // anchored key — the ritual is sealed
     let RitualMsg::Signed(sealed) =
-        recv_ritual(&mut founder_rx, &invite_wrap, &mut founder_reasm, 15).await
+        recv_ritual(&mut founder_rx, &invite_wrap, &mut founder_reasm, 20).await
     else {
         panic!("[{label}] expected SealSigned");
     };
@@ -170,12 +145,18 @@ async fn ritual(url: &str, label: &str) {
         molt_storage::identity_verify(&req.identity_pk, &table, &sealed.sig),
         "[{label}] the member's seal signature must verify over the roster table"
     );
-    // and the founder's own attestation verifies too
     assert!(molt_storage::identity_verify(&founder_pk, &table, &founder_sig));
+
+    // the real member code returns the pk it anchored — it must match
+    let member_pk = member_task
+        .await
+        .expect("member task panicked")
+        .expect("member ritual failed");
+    assert_eq!(member_pk, req.identity_pk, "member's returned pk matches its join");
 
     println!(
         "OK [{label}]: founding ritual completed between two instances over SMP — \
-         both roster attestations verify"
+         real run_ritual_member on the member side, both attestations verify"
     );
 }
 

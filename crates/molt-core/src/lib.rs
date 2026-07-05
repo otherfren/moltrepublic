@@ -1603,6 +1603,12 @@ pub enum Command {
         identity_pk: String,
         /// `HMAC(KDF(ticket), name ‖ pk)`, lowercase hex.
         proof: String,
+        /// The member's reply-queue handover (JSON of the transport's
+        /// `ReplyHandover`) so the founder can send the canonical table
+        /// back. Opaque here — core has no transport dependency. Empty on
+        /// the legacy path where the founder pre-created the reply queue.
+        #[serde(default)]
+        reply: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

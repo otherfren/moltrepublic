@@ -69,6 +69,22 @@ pub fn verify_join_mac(ticket: &str, name: &str, identity_pk: &str, mac_hex: &st
     diff == 0
 }
 
+/// Where the founder sends the canonical table back: the reply queue the
+/// joining member created and subscribed to. In SMP each party owns the
+/// queue it *receives* on, so the reply queue belongs to the member and its
+/// address travels here, inside the `JoinRequest`. All fields are strings so
+/// the handover needs no serde on the transport address types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyHandover {
+    /// The reply queue's server (`smp://fingerprint@host`; the loopback hub
+    /// ignores it).
+    pub server: String,
+    /// The reply queue's send-side id, lowercase hex.
+    pub queue_id: String,
+    /// The reply queue's per-queue wrap key, lowercase hex.
+    pub wrap: String,
+}
+
 /// One member's activation of a founding invite (transport concept §3.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinRequest {
@@ -80,6 +96,10 @@ pub struct JoinRequest {
     pub identity_pk: String,
     /// `join_mac(ticket, name, identity_pk)`.
     pub mac: String,
+    /// The member's reply queue, so the founder can send the table back.
+    /// `None` only on the legacy path where the founder pre-created it.
+    #[serde(default)]
+    pub reply: Option<ReplyHandover>,
 }
 
 /// One member's seal signature over the final roster table.
@@ -129,6 +149,7 @@ mod tests {
                 name: "juno".into(),
                 identity_pk: "aa".repeat(32),
                 mac: "bb".repeat(32),
+                reply: None,
             }),
             RitualMsg::Seal {
                 table: "cc".repeat(40),

@@ -49,6 +49,13 @@ impl WrapKey {
     pub fn from_bytes(k: [u8; 32]) -> WrapKey {
         WrapKey(k)
     }
+
+    /// The raw key bytes, for in-band handover — the reply-queue key a
+    /// joining member advertises to the founder so the founder can wrap the
+    /// canonical table for it. Secret material; do not log.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
 }
 
 impl std::fmt::Debug for WrapKey {

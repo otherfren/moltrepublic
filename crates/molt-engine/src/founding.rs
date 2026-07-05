@@ -25,13 +25,16 @@ use tokio::sync::mpsc;
 use crate::{Envelope, State};
 
 /// One seat's transport material, held by the founder for the ritual's
-/// lifetime: the ticket it verifies against, the queue it sends the table
-/// on, and (once collected) the member's anchored identity.
+/// lifetime: the ticket it verifies against, the reply queue the member
+/// advertised (learned from its JoinRequest — in SMP the member owns the
+/// queue it receives on), and (once collected) the member's anchored
+/// identity.
 struct SeatRuntime {
     ticket: String,
-    /// founder → member: where the canonical table goes.
-    reply_snd: SndQueueAddr,
-    reply_wrap: WrapKey,
+    /// founder → member: where the canonical table goes. Learned from the
+    /// member's JoinRequest (`None` until the member activates the link).
+    reply_snd: Option<SndQueueAddr>,
+    reply_wrap: Option<WrapKey>,
     /// The member's identity, once their JoinRequest verified.
     identity: Option<MemberIdentity>,
 }
@@ -141,8 +144,6 @@ impl State {
             let ticket = invite::mint_ticket().map_err(|e| e.to_string())?;
             let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
             let invite_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-            let reply_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
-            let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
 
             // the founder's recv task on the invite queue → internal
             // NetJoinRequested / NetSealSigned commands
@@ -174,8 +175,6 @@ impl State {
                 transport: transport.clone(),
                 invite_snd: invite_q.snd.clone(),
                 invite_wrap: invite_wrap.clone(),
-                reply_rcv: reply_q.rcv.clone(),
-                reply_wrap: reply_wrap.clone(),
                 ticket: ticket.clone(),
             };
             if manual {
@@ -188,8 +187,9 @@ impl State {
 
             seats.push(SeatRuntime {
                 ticket,
-                reply_snd: reply_q.snd.clone(),
-                reply_wrap,
+                // the member advertises its reply queue in the JoinRequest
+                reply_snd: None,
+                reply_wrap: None,
                 identity: None,
             });
         }
@@ -266,6 +266,12 @@ fn spawn_founder_recv(
                     member: j.name,
                     identity_pk: j.identity_pk,
                     proof: j.mac,
+                    // the member's reply-queue handover, opaque to core
+                    reply: j
+                        .reply
+                        .as_ref()
+                        .and_then(|r| serde_json::to_string(r).ok())
+                        .unwrap_or_default(),
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
@@ -300,9 +306,6 @@ pub struct InviteMaterial<T: molt_net::Transport = molt_net::LoopbackTransport> 
     /// member → founder queue (JoinRequest, then SealSigned).
     pub invite_snd: SndQueueAddr,
     pub invite_wrap: WrapKey,
-    /// founder → member queue (the canonical table to sign).
-    pub reply_rcv: RcvQueue,
-    pub reply_wrap: WrapKey,
     /// The single-use ticket.
     pub ticket: String,
 }
@@ -329,12 +332,30 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     let member_id = molt_storage::derive_workspace_id(&entropy, "member");
     let (sk, pk) = molt_storage::derive_identity_key(&entropy, &member_id);
 
-    // activate: JoinRequest, MAC-bound to the ticket
+    // create the reply queue we (the member) receive the canonical table
+    // on, and subscribe *before* announcing it — so the founder's table can
+    // never race ahead of our subscription. In SMP each party owns the
+    // queue it receives on; this is exactly that queue.
+    let reply_q = m.transport.create_queue().await.map_err(|e| e.to_string())?;
+    let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
+    let mut rx = m
+        .transport
+        .subscribe(&reply_q.rcv)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // activate: JoinRequest, MAC-bound to the ticket, advertising our reply
+    // queue so the founder knows where to send the table
     let join = invite::RitualMsg::Join(invite::JoinRequest {
         seat: m.seat,
         name: name.clone(),
         identity_pk: pk.clone(),
         mac: invite::join_mac(&m.ticket, &name, &pk),
+        reply: Some(invite::ReplyHandover {
+            server: reply_q.snd.server.clone(),
+            queue_id: hex::encode(&reply_q.snd.id.0),
+            wrap: hex::encode(reply_wrap.to_bytes()),
+        }),
     });
     let payload = serde_json::to_vec(&join).map_err(|e| e.to_string())?;
     supervisor::send_framed(
@@ -347,12 +368,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // await the canonical table on the reply queue, sign it, send back
-    let mut rx = m
-        .transport
-        .subscribe(&m.reply_rcv)
-        .await
-        .map_err(|e| e.to_string())?;
+    // await the canonical table on our reply queue, sign it, send back
     let mut reasm = molt_net::Reassembler::new();
     loop {
         let delivery = match &mut cancel {
@@ -365,7 +381,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                 None => return Err("queue closed".to_string()),
             },
         };
-        let Ok(plain) = molt_net::wrap::unwrap_block(&m.reply_wrap, &delivery.block) else {
+        let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
             delivery.ack.ack();
             continue;
         };
@@ -421,6 +437,23 @@ const SIM_NAMES: [&str; 12] = [
     "mira", "juno", "bassa", "tarek", "noor", "eli", "vega", "sol", "rune", "ada", "kai", "wren",
 ];
 
+/// Parse a member's reply-queue handover (JSON of [`invite::ReplyHandover`])
+/// into the founder's send address + wrap key. `None` if absent or
+/// malformed — the founder then rejects the join, since the seat could
+/// never be sealed without a reply queue.
+fn parse_reply_handover(reply: &str) -> Option<(SndQueueAddr, WrapKey)> {
+    let r: invite::ReplyHandover = serde_json::from_str(reply).ok()?;
+    let id = hex::decode(&r.queue_id).ok()?;
+    let wrap_bytes: [u8; 32] = hex::decode(&r.wrap).ok()?.try_into().ok()?;
+    Some((
+        SndQueueAddr {
+            server: r.server,
+            id: molt_net::QueueId::from_bytes(id),
+        },
+        WrapKey::from_bytes(wrap_bytes),
+    ))
+}
+
 /// The ritual command handlers (`cmd_net_join_requested`,
 /// `cmd_net_seal_signed`), split out so the transport plumbing above stays
 /// readable. They are inherent `State` methods — no re-export needed.
@@ -438,6 +471,7 @@ mod ritual_ops {
             member: MemberId,
             identity_pk: String,
             proof: String,
+            reply: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
@@ -457,10 +491,18 @@ mod ritual_ops {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
                 return Ok(molt_core::Reply::Ack);
             }
+            // the member advertised the reply queue for its table; without a
+            // usable one the seat can never be sealed, so reject the join
+            let Some((reply_snd, reply_wrap)) = parse_reply_handover(&reply) else {
+                tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
+                return Ok(molt_core::Reply::Ack);
+            };
             s.identity = Some(MemberIdentity {
                 member: member.clone(),
                 identity_pk,
             });
+            s.reply_snd = Some(reply_snd);
+            s.reply_wrap = Some(reply_wrap);
             // reflect into the session seat + log
             if let Some(view) = self.session.create.seats.get_mut(idx) {
                 view.member = member.clone();
@@ -504,9 +546,12 @@ mod ritual_ops {
                 return;
             };
             for (idx, s) in ritual.seats.iter().enumerate() {
+                // every joined seat has a reply queue (set on join); skip
+                // any that somehow doesn't rather than panic
+                let (Some(addr), Some(wrap)) = (s.reply_snd.clone(), s.reply_wrap.clone()) else {
+                    continue;
+                };
                 let transport = ritual.transport.clone();
-                let addr = s.reply_snd.clone();
-                let wrap = s.reply_wrap.clone();
                 let id = ritual.next_msg_id(&format!("seal-{idx}"));
                 let payload = payload.clone();
                 tokio::spawn(async move {
