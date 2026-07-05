@@ -168,18 +168,76 @@ never changes afterwards (matching today's roster derivation: founder plus
 one named seat per invite). There are exactly two kinds of invite:
 
 * **Seat invite** — minted by the founder, at founding, one per open seat;
-  a completed join fills that seat (`MemberJoined`). The founder is the
-  approver.
+  a completed join fills that seat (`MemberJoined` plus the joiner's
+  anchored `MemberKey`, below). The founder is the approver. There is no
+  seat proof here — the seat is empty, no key is anchored yet: ticket MAC
+  and manual approval carry the trust, and the join is exactly the moment
+  the joiner's identity key *becomes* anchored.
 * **Recovery invite** — minted by *any* member, for an already-filled seat
   whose holder lost their workspace but still holds their recovery phrase.
   The minting member is the approver. MLS: Remove(old leaf) + Add(new
   KeyPackage) in a single commit; the shared log records the additive
   event variant `MemberRestored { member }`, and the rejoined node
-  re-syncs the full workspace. Division of labor: the **seed** re-derives
-  the workspace identity and keys ("all keys derive from this phrase" —
-  the restore screen's standing rule); the **recovery link** contributes
-  only the transport path and the ticket; the human check stays where it
-  is — the manual approval.
+  re-syncs the full workspace. Division of labor: the **phrase**
+  re-derives the member's identity key, which answers the seat proof
+  (below); the **recovery link** contributes only the transport path and
+  the ticket (= the challenge); the human check stays where it is — the
+  manual approval.
+
+**Member identity & seat proof.** Every member — founder and joiners
+alike — holds their *own* secret recovery phrase; from it the node derives
+a per-workspace **identity keypair** (Ed25519, via the storage concept's
+HKDF hierarchy, §5 there; per-workspace derivation keeps the
+fresh-per-group rule — nothing cross-group linkable). The private key is
+cached in `transport.state` for day-to-day signing; the phrase re-derives
+it after total loss — "all keys derive from this phrase", the restore
+screen's standing rule, now holds for *every* member, not only the
+founder (today's "the joiner keeps no recovery phrase" is hereby a mock
+artifact, like the once-only link display). The *public* keys are anchored
+in the shared log as `MemberKey { member, identity_pk }` events: the
+founder's right after genesis, each joiner's appended by its join commit.
+The same key is the identity inside the member's MLS KeyPackage
+credential — one identity, two anchors, and the approver's node checks
+that they match.
+
+**The founding ritual completes on the sealed roster.** Founding is not
+done when the wizard closes — it is done when the republic is fully
+constituted. Three stages, all in the shared log:
+
+1. **Genesis** — `Founded` (rule, named seats) plus the founder's
+   `MemberKey`.
+2. **Constitution** — seat invites go out; each accepted join appends
+   `MemberJoined` + `MemberKey`; the roster fills.
+3. **Sealing** — when the last seat fills, every node that observes the
+   full roster automatically appends `RosterAttested { member, sig }`: a
+   signature with its identity key over the canonical serialization of
+   (workspace id, rule, ordered name → pubkey table). Once all n
+   attestations are in the log, the member list is **immutable and signed
+   by everyone** — the founding ritual is complete.
+
+Attestations of offline members trickle in as they connect; until all n
+are present the workspace is fully usable, the roster is merely
+"constituted, not yet sealed" (its entries are still MLS-authenticated).
+After sealing, membership never changes: recovery replaces an MLS leaf,
+never a name or a pubkey.
+
+Recovery is then a **challenge–response against the anchored key** — the
+fresh single-use ticket in the recovery link *is* the challenge. The
+rejoining node re-derives its identity key from its phrase and sends
+`JoinRequest{ KeyPackage, mac, seat_sig }` with
+`seat_sig = Sign(identity_sk, ticket ‖ KeyPackage ‖ workspace id)`.
+Non-interactive on purpose: the proof survives the store-and-forward,
+approver-may-be-offline first leg, and replay is dead because the ticket
+is spent on first use. The approver's node verifies `seat_sig` against the
+pubkey the log anchors for that seat and only then surfaces the approval
+dialog; a request with a missing or invalid seat proof never reaches the
+human.
+
+**Lost phrase = lost seat (v1, deliberate).** A member who lost workspace
+*and* phrase cannot rejoin. There is deliberately no override — founder
+fiat or a quorum reseat would be a second, weaker rejoin path that
+devalues the proof. A governance-gated reseat (m-of-n proposal) is a
+later, separate concept point; until then the seat stays visibly dead.
 
 Ticket lifecycle: **minted → shared → spent | re-minted**. Re-minting
 voids the predecessor ticket; at most one valid ticket exists per seat at
@@ -208,18 +266,26 @@ Where the UI shows invites (target state; spec for T2):
    affected member, over a private channel".
 4. **Approval surface** (concretizing the manual approval above): header
    notice plus dialog on the approver's node — joiner display name,
-   KeyPackage fingerprint, target seat; for recovery joins additionally a
-   workspace-id-match indicator. Accept / Reject.
-5. **Joiner side** — the join wizard is unchanged. Recovery runs through
-   the existing restore screen's "Social peer-restore" path: recovery
-   phrase + recovery link (placeholder `molt://invite/…`), then the same
-   three-phase run.
+   KeyPackage fingerprint, target seat; for recovery joins the
+   **seat-proof verdict** (signature verified against the seat's anchored
+   `MemberKey`; requests failing the proof are dropped before any UI).
+   Accept / Reject.
+5. **Joiner side** — the join wizard gains one step: it reveals the
+   joiner's *own* recovery phrase (generated locally, shown once — the
+   same contract the founding wizard already has for the founder).
+   Recovery runs through the existing restore screen's "Social
+   peer-restore" path: recovery phrase + recovery link (placeholder
+   `molt://invite/…`), then the same three-phase run.
 6. **MCP co-equality** — the same verbs exist as operator commands:
    `remint_invite(seat)`, `mint_recovery_invite(member)`,
    `approve_join` / `reject_join`; open invites are readable in the
    status. The approval verbs are ordinary operator commands, **not** on
    the INTERNAL list — approving is a human decision and must be
    reachable from both surfaces.
+7. **Founding-ritual status** — until the roster is sealed, the workspace
+   detail shows the constitution state ("k of n seats filled, j of n
+   attestations"); on sealing it flips to a quiet permanent "sealed"
+   badge. The same state is readable over MCP.
 
 ### 3.4 Delivery semantics
 
@@ -299,6 +365,12 @@ Where the UI shows invites (target state; spec for T2):
 
 * MLS credentials: per-group fresh identities (docs' rule “fresh-per-group”)
   — the KeyPackage carries no cross-group linkable identifier.
+* Member identity keys (§3.3): per-workspace Ed25519 pairs derived from
+  each member's own recovery phrase (storage concept §5) — so
+  fresh-per-group holds for them too. The private key is cached in
+  `transport.state`; only public keys ever enter the shared log
+  (`MemberKey`, `RosterAttested`). The phrase is the sole recovery path —
+  no escrow, no reset (§3.3, "lost phrase = lost seat").
 * SMP servers learn: queue ids, sizes (uniform), timing, IP of a Tor exit
   or their own onion service. They never learn membership, group size, or
   content — and specifically they cannot link two queues they host into one
@@ -339,8 +411,10 @@ without sockets, everything below tests without the engine.
   identical engine state (the deterministic actor makes “converged” a
   strict equality); dedup holds under duplication; outbox drains after
   partitions heal; the invite → approval → join state machine runs end to
-  end over loopback, including the inviter-offline wait and rejection of
-  reused or forged tickets. The existing reply simulator is retired by
+  end over loopback, including the inviter-offline wait, rejection of
+  reused or forged tickets, and rejection of recovery requests with a
+  missing or invalid seat proof; the founding ritual seals (all
+  `RosterAttested` present) once the last loopback peer joins. The existing reply simulator is retired by
   making the simulated members real loopback peers — the demo becomes a
   3-node network in one process.
 * **Protocol tier**: SMP framing/padding round-trip property tests (every
@@ -375,9 +449,11 @@ without sockets, everything below tests without the engine.
 2. **T2** MLS integration (OpenMLS) behind `MlsTask`, incl. the
    `transport.state` write-ahead discipline; invite/join state machine real
    over loopback: ticket MAC, single-use enforcement, and the inviter
-   approval surface; invite persistence (`transport.state` invite table)
-   with the members-grid invite UI (show / copy / re-issue), and the
-   recovery rejoin through the Social-peer-restore path.
+   approval surface; member identity keys with `MemberKey` anchoring,
+   roster sealing (`RosterAttested`) and seat-proof verification; invite
+   persistence (`transport.state` invite table) with the members-grid
+   invite UI (show / copy / re-issue), and the recovery rejoin through the
+   Social-peer-restore path.
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak

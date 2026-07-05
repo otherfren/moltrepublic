@@ -281,6 +281,10 @@ and keys). It holds:
   *not* in the append-only log: MLS forward secrecy consists of deleting
   old key material; a log that remembers every ratchet state would undo it
   (transport concept §6, incl. the write-ahead fsync rule).
+* **Identity key cache**: the member's per-workspace Ed25519 private key
+  (§5) for day-to-day signing (`RosterAttested`, recovery seat proof).
+  Losing the file costs nothing here either — the recovery phrase
+  re-derives the key; only the *public* key lives in the shared log.
 * Optionally a passive last-seen timestamp map (presence survives
   restarts).
 
@@ -288,7 +292,13 @@ and keys). It holds:
 required — presence is derived passively from inbound traffic (transport
 concept §3.4). `MemberRestored { member }` joins the enum as an additive
 variant when the recovery rejoin lands (transport concept §3.3): same
-seat, new MLS leaf, full re-sync.
+seat, new MLS leaf, full re-sync. Two more additive variants land with
+member identity (transport concept §3.3, "Member identity & seat proof"):
+`MemberKey { member, identity_pk }` — the seat's anchored identity public
+key, appended right after genesis for the founder and by each join commit
+for a joiner — and `RosterAttested { member, sig }` — one per member once
+all seats are filled; all n together seal the immutable name → pubkey
+roster and complete the founding ritual.
 
 ## 4. Lifecycle wiring (what replaces which mock)
 
@@ -324,6 +334,13 @@ change shape, the mocks just gain organs.
     republic (same seed, two identities) distinct ids and directories.
   * `workspace_key = HKDF(seed, "molt-ws-key", workspace_id)` (32 B), used
     with XChaCha20-Poly1305 for frames, snapshots and exports.
+  * `identity_sk   = HKDF(seed, "molt-member-key", workspace_id)` → Ed25519
+    keypair — the member's per-workspace identity (transport concept §3.3:
+    public key anchored via `MemberKey`, exercised by `RosterAttested` and
+    the recovery seat proof). The private key is cached in
+    `transport.state` (§3.5); after total loss the phrase re-derives it —
+    the seat proof comes from nowhere else, so every member (joiners
+    included) holds their own phrase.
   * Restore-from-file/S3 additionally has the plaintext manifest and uses
     its `id` as a cross-check against the re-derived one.
 * The key is stored **sealed** in `keys/workspace.key` (so day-to-day opens
