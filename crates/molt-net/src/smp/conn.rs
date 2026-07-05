@@ -52,8 +52,12 @@ pub struct NewQueue {
     pub sender_id: Vec<u8>,
     /// The recipient's Ed25519 command-auth key.
     pub auth_sk: ed25519_dalek::SigningKey,
-    /// The recipient's X25519 DH secret (message-body decryption).
-    pub dh_secret: x25519_dalek::StaticSecret,
+    /// The recipient's X25519 DH secret (raw), for decrypting the
+    /// server→recipient message layer.
+    pub dh_secret: [u8; 32],
+    /// The server's X25519 DH public key from `IDS` — the other half of
+    /// the server→recipient shared secret.
+    pub server_dh: [u8; 32],
 }
 
 /// An open, handshaked SMP connection to one server.
@@ -140,11 +144,12 @@ impl SmpConn {
         }
     }
 
-    /// Create a queue on this server (`NEW`) with a freshly generated
-    /// Ed25519 recipient-auth key and X25519 DH key. Returns the queue's
-    /// server-assigned ids and the keys the recipient keeps. Verified
-    /// against the live server (returns `IDS`).
-    pub async fn new_queue(&mut self) -> Result<NewQueue, NetError> {
+    /// Create a queue on this server (`NEW`). When `subscribe` is set the
+    /// server subscribes this connection to the queue immediately (`MSG`s
+    /// arrive here). Returns the queue's server-assigned ids, the keys the
+    /// recipient keeps, and the server's DH key. Verified against the live
+    /// server (returns `IDS`).
+    pub async fn new_queue(&mut self, subscribe: bool) -> Result<NewQueue, NetError> {
         let mut sk_bytes = [0u8; 32];
         getrandom::getrandom(&mut sk_bytes).map_err(|e| NetError::Crypto(e.to_string()))?;
         let auth_sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
@@ -155,23 +160,93 @@ impl SmpConn {
         let dh_pk = x25519_dalek::PublicKey::from(&dh_secret).to_bytes();
 
         // NEW = "NEW " authPk(SPKI,short) dhPk(SPKI,short) basicAuth("0")
-        //       subscribeMode("C") sndSecure("F")
+        //       subscribeMode("S"|"C") sndSecure("F")
         let mut cmd = Vec::new();
         cmd.extend_from_slice(b"NEW ");
         push_short(&mut cmd, &spki_ed25519(&auth_pk));
         push_short(&mut cmd, &spki_x25519(&dh_pk));
         cmd.push(b'0'); // basicAuth: none
-        cmd.push(b'C'); // subscribeMode: create only
+        cmd.push(if subscribe { b'S' } else { b'C' });
         cmd.push(b'F'); // sndSecure: no
 
         let (_corr, _entity, command) = self.send_signed(&auth_sk, &[], &cmd).await?;
-        let (recipient_id, sender_id) = parse_ids(&command)?;
+        let (recipient_id, sender_id, server_dh) = parse_ids(&command)?;
         Ok(NewQueue {
             recipient_id,
             sender_id,
             auth_sk,
-            dh_secret,
+            dh_secret: dh_secret.to_bytes(),
+            server_dh,
         })
+    }
+
+    /// Send one message to a queue's **sender** id (unsigned — the first
+    /// message an unsecured queue accepts). `body` is the opaque payload
+    /// the recipient receives (our own per-queue wrap rides inside it).
+    /// The server wraps it in the server→recipient layer on delivery.
+    pub async fn send_to(&mut self, sender_id: &[u8], body: &[u8]) -> Result<(), NetError> {
+        // SEND = "SEND" SP msgFlags("F", 1 byte) SP Tail(body)
+        let mut cmd = Vec::new();
+        cmd.extend_from_slice(b"SEND ");
+        cmd.push(b'F'); // no notification
+        cmd.push(b' ');
+        cmd.extend_from_slice(body);
+        // unsigned transmission, entity = sender_id
+        let corr = self.next_corr();
+        let mut authorized = Vec::new();
+        authorized.push(CORR_PRESENT);
+        authorized.extend_from_slice(&corr);
+        push_short(&mut authorized, sender_id);
+        authorized.extend_from_slice(&cmd);
+        let mut tx = Vec::new();
+        push_short(&mut tx, &[]); // empty authorization
+        tx.extend_from_slice(&authorized);
+        self.write_block(&wrap_transmission(&tx)).await?;
+        let (_c, _e, resp) = parse_first_response(&self.read_block().await?)?;
+        if resp.starts_with(b"OK") {
+            Ok(())
+        } else {
+            Err(NetError::Crypto(format!(
+                "SEND rejected: {}",
+                String::from_utf8_lossy(&resp[..resp.len().min(48)])
+            )))
+        }
+    }
+
+    /// Receive one delivered `MSG` on a subscribed connection and decrypt
+    /// the server→recipient layer, returning `(msgId, plaintext body)`.
+    /// `plaintext` is `timestamp(8) | msgFlags(2) | SP | body`.
+    pub async fn recv_msg(&mut self, q: &NewQueue) -> Result<(Vec<u8>, Vec<u8>), NetError> {
+        let (_corr, _entity, command) = parse_first_response(&self.read_block().await?)?;
+        if !command.starts_with(b"MSG ") {
+            return Err(NetError::Framing(format!(
+                "expected MSG, got {}",
+                String::from_utf8_lossy(&command[..command.len().min(16)])
+            )));
+        }
+        let mut p = 4;
+        let msg_id = read_short(&command, &mut p)?;
+        let ciphertext = command.get(p..).unwrap_or(&[]);
+        // decrypt: SalsaBox(server_dh, recipient_dh), nonce = msgId
+        let plaintext = crypto_box_open(&q.server_dh, &q.dh_secret, &msg_id, ciphertext)?;
+        Ok((msg_id, plaintext))
+    }
+
+    /// Acknowledge a delivered message (`ACK`, signed with the recipient
+    /// key) so the server can release it.
+    pub async fn ack(&mut self, q: &NewQueue, msg_id: &[u8]) -> Result<(), NetError> {
+        let mut cmd = Vec::new();
+        cmd.extend_from_slice(b"ACK ");
+        push_short(&mut cmd, msg_id);
+        let (_c, _e, resp) = self.send_signed(&q.auth_sk, &q.recipient_id, &cmd).await?;
+        if resp.starts_with(b"OK") {
+            Ok(())
+        } else {
+            Err(NetError::Crypto(format!(
+                "ACK rejected: {}",
+                String::from_utf8_lossy(&resp[..resp.len().min(32)])
+            )))
+        }
     }
 
     /// Send a signed transmission (`entity` = queue id, empty for `NEW`)
@@ -283,6 +358,9 @@ fn wrap_transmission(tx: &[u8]) -> Vec<u8> {
 /// A parsed server response transmission: `(corrId, entityId, command)`.
 type Response = (Vec<u8>, Vec<u8>, Vec<u8>);
 
+/// A parsed `IDS`: `(recipientId, senderId, serverDhKey)`.
+type Ids = (Vec<u8>, Vec<u8>, [u8; 32]);
+
 /// Parse the first transmission of a server response block into
 /// `(corrId, entityId, command)`.
 fn parse_first_response(content: &[u8]) -> Result<Response, NetError> {
@@ -353,20 +431,48 @@ fn spki_x25519(pk: &[u8; 32]) -> Vec<u8> {
     v
 }
 
-/// Parse an `IDS` response command into `(recipientId, senderId)`, or map a
-/// server `ERR` into a [`NetError`].
-fn parse_ids(command: &[u8]) -> Result<(Vec<u8>, Vec<u8>), NetError> {
+/// Parse an `IDS` response into `(recipientId, senderId, serverDhKey)`, or
+/// map a server `ERR` into a [`NetError`]. `IDS = "IDS " rid sid
+/// srvDhPub(SPKI,short) sndSecure`.
+fn parse_ids(command: &[u8]) -> Result<Ids, NetError> {
     if command.starts_with(b"IDS ") {
         let mut p = 4;
         let rid = read_short(command, &mut p)?;
         let sid = read_short(command, &mut p)?;
-        Ok((rid, sid))
+        let srv_dh_spki = read_short(command, &mut p)?;
+        // the X25519 public key is the last 32 bytes of the SPKI DER
+        let server_dh = <[u8; 32]>::try_from(
+            srv_dh_spki
+                .get(srv_dh_spki.len().saturating_sub(32)..)
+                .unwrap_or(&[]),
+        )
+        .map_err(|_| NetError::Framing("IDS server DH key is not 32 bytes".into()))?;
+        Ok((rid, sid, server_dh))
     } else {
         Err(NetError::Crypto(format!(
             "NEW not accepted: {}",
             String::from_utf8_lossy(&command[..command.len().min(48)])
         )))
     }
+}
+
+/// NaCl crypto_box open (XSalsa20-Poly1305) of the server→recipient
+/// message layer: shared secret = DH(recipient_dh, server_dh), nonce =
+/// msgId.
+fn crypto_box_open(
+    server_dh: &[u8; 32],
+    recipient_dh: &[u8; 32],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, NetError> {
+    use crypto_box::aead::Aead;
+    let nonce = <[u8; 24]>::try_from(nonce)
+        .map_err(|_| NetError::Framing("MSG nonce is not 24 bytes".into()))?;
+    let their_pk = crypto_box::PublicKey::from(*server_dh);
+    let my_sk = crypto_box::SecretKey::from(*recipient_dh);
+    crypto_box::SalsaBox::new(&their_pk, &my_sk)
+        .decrypt(&nonce.into(), ciphertext)
+        .map_err(|_| NetError::Crypto("MSG decryption failed".into()))
 }
 
 fn read_corr(b: &[u8], p: &mut usize) -> Result<Vec<u8>, NetError> {

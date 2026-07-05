@@ -11,7 +11,7 @@ async fn full_stack(url: &str, label: &str) {
     let s = SmpServer::parse(url).expect("parse");
     let mut conn = SmpConn::connect(&s).await.expect("handshake");
     conn.ping().await.expect("PING/PONG");
-    let q = conn.new_queue().await.expect("NEW→IDS");
+    let q = conn.new_queue(false).await.expect("NEW→IDS");
     assert!((16..=24).contains(&q.recipient_id.len()));
     println!("OK [{label}] v{} — PING/PONG + NEW created queue rid={}", conn.version, hex::encode(&q.recipient_id));
 }
