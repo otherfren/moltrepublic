@@ -13,8 +13,10 @@
 //! ritual run over `SmpTransport` exactly as they run over
 //! `LoopbackTransport` today.
 
+pub mod conn;
 pub mod server;
 pub mod tls;
 
+pub use conn::SmpConn;
 pub use server::{SmpServer, SMP_PORT};
 pub use tls::test_connection;
