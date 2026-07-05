@@ -17,7 +17,9 @@ pub mod conn;
 pub mod ed448;
 pub mod server;
 pub mod tls;
+pub mod transport;
 
 pub use conn::SmpConn;
 pub use server::{SmpServer, SMP_PORT};
 pub use tls::test_connection;
+pub use transport::SmpTransport;

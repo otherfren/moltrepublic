@@ -45,6 +45,7 @@ const OUR_MIN_VERSION: u16 = 7;
 /// (with `auth_sk`) to `SUB`/`ACK`; `sender_id` is handed to the sender to
 /// `SEND` — this is exactly the SMP `QueuePair` the transport concept's
 /// invite handover carries.
+#[derive(Clone)]
 pub struct NewQueue {
     /// The recipient-side queue id (the creator subscribes on this).
     pub recipient_id: Vec<u8>,
@@ -188,6 +189,37 @@ impl SmpConn {
         })
     }
 
+    /// Retire a queue we created (`DEL`, signed with the recipient key).
+    pub async fn delete(
+        &mut self,
+        recipient_id: &[u8],
+        auth_sk: &ed25519_dalek::SigningKey,
+    ) -> Result<(), NetError> {
+        let (_c, _e, resp) = self.send_signed(auth_sk, recipient_id, b"DEL").await?;
+        if resp.starts_with(b"OK") {
+            Ok(())
+        } else {
+            Err(NetError::Crypto(format!(
+                "DEL rejected: {}",
+                String::from_utf8_lossy(&resp[..resp.len().min(32)])
+            )))
+        }
+    }
+
+    /// Subscribe this connection to a queue we created (`SUB`, signed with
+    /// the recipient key). Any following `recv_next` yields its messages.
+    /// Call on a connection distinct from the sender's.
+    pub async fn sub(
+        &mut self,
+        recipient_id: &[u8],
+        auth_sk: &ed25519_dalek::SigningKey,
+    ) -> Result<(), NetError> {
+        // the SUB reply is OK (no messages) or the first MSG — buffer it
+        let block = self.send_signed_raw(auth_sk, recipient_id, b"SUB").await?;
+        self.pending_block = Some(block);
+        Ok(())
+    }
+
     /// Secure a queue as the **sender** (`SKEY`, v8+): assert a fresh
     /// Ed25519 sender key so the server will accept our signed `SEND`s.
     /// Returns the key to sign subsequent sends with. Needs the queue's
@@ -270,8 +302,14 @@ impl SmpConn {
                 let ciphertext = command.get(p..).unwrap_or(&[]);
                 let plaintext = crypto_box_open(&q.server_dh, &q.dh_secret, &msg_id, ciphertext)?;
                 self.ack_pending = Some(msg_id);
-                // strip the server framing: timestamp(8) flags(2) SP(1)
-                let body = plaintext.get(11..).unwrap_or(&[]).to_vec();
+                // rcvMsgBody = timestamp(8) msgFlags SP body, where msgFlags
+                // is "F"/"T" then "take till space" — so strip the 8-byte
+                // timestamp and skip to the first space, the body follows
+                let after_ts = plaintext.get(8..).unwrap_or(&[]);
+                let body = match after_ts.iter().position(|&b| b == b' ') {
+                    Some(sp) => after_ts.get(sp + 1..).unwrap_or(&[]).to_vec(),
+                    None => Vec::new(),
+                };
                 return Ok(body);
             }
             // OK (or "END"/"ERR") — keep waiting for a pushed MSG
