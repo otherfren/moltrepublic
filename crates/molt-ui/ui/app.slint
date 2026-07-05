@@ -130,14 +130,11 @@ export component AppWindow inherits Window {
     callback select-surface(string);
     // select a surface AND one of its sub-views (a SelectView command)
     callback select-view(string, string);
-    // share a file into the chat (metadata only; Rust derives the mock
-    // size/type/date from the chosen name) and act on shared files
-    callback share-file(string);
+    // share a file into the chat: opens the native file picker; Rust reads
+    // the real metadata (name, size, type, date) — no bytes are uploaded
+    callback share-pick();
     callback download-file(int);
     callback remove-file(int);
-    // modal: mock file picker for the chat share button
-    property <bool> attach-modal-open: false;
-    property <string> attach-name;
     // toggle the local member's emoji reaction on chat message #i (ReactChat)
     callback toggle-reaction(int, string);
     // wipe chat message #i and leave the deletion notice (DeleteChat)
@@ -442,8 +439,6 @@ export component AppWindow inherits Window {
             root.confirm-delmsg-open = false;
         } else if (root.backup-modal-open) {
             root.backup-modal-open = false;
-        } else if (root.attach-modal-open) {
-            root.attach-modal-open = false;
         } else if (root.restore-file-modal-open) {
             root.restore-file-modal-open = false;
         } else if (root.ws-dir-modal-open) {
@@ -2432,7 +2427,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                // share a file: opens the (mock) picker —
+                                // share a file: opens the native picker —
                                 // only the metadata will enter the chat
                                 VerticalLayout {
                                     alignment: end;
@@ -2452,8 +2447,7 @@ export component AppWindow inherits Window {
                                         }
                                         at-ta := TouchArea {
                                             clicked => {
-                                                root.attach-name = "";
-                                                root.attach-modal-open = true;
+                                                root.share-pick();
                                             }
                                         }
                                     }
@@ -3633,62 +3627,6 @@ export component AppWindow inherits Window {
 
     // Modal: manual backup — pick where the workspace is written as one
     // encrypted blob (mock: confirming records the note, writes nothing).
-    // Modal: share a file into the chat — a mock picker (no real file
-    // dialog): type a name or take a suggestion. Only the metadata is
-    // posted; the bytes stay on this disk.
-    if root.attach-modal-open: ConfirmModal {
-        dialog-width: 440px;
-        title: Strings.at-title;
-        body: Strings.at-body;
-        confirm-label: Strings.at-share;
-        confirm-enabled: root.attach-name != "";
-        dismissed => {
-            root.attach-modal-open = false;
-        }
-        confirmed => {
-            root.attach-modal-open = false;
-            root.share-file(root.attach-name);
-        }
-        AppField {
-            text <=> root.attach-name;
-            placeholder: Strings.at-ph;
-        }
-        Text {
-            text: Strings.at-pick;
-            color: Theme.dim;
-            font-size: Theme.fs-cap;
-        }
-        VerticalLayout {
-            spacing: 6px;
-            for f in [
-                "family-budget-2026.ods",
-                "dao-charter.pdf",
-                "meeting-notes.md",
-                "garden-photo.jpg",
-            ]: Rectangle {
-                height: 28px;
-                border-radius: Theme.win95 ? 0px : 6px;
-                border-width: 1px;
-                border-color: root.attach-name == f ? Theme.accent : Theme.line;
-                background: sg-ta.has-hover ? Theme.raised : Theme.panel-2;
-                Text {
-                    x: 10px;
-                    text: f;
-                    color: Theme.text;
-                    font-size: Theme.fs-cap;
-                    vertical-alignment: center;
-                    height: 100%;
-                }
-                sg-ta := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => {
-                        root.attach-name = f;
-                    }
-                }
-            }
-        }
-    }
-
     if root.backup-modal-open: ConfirmModal {
         dialog-width: 440px;
         title: Strings.bk-title;

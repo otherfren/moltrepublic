@@ -80,6 +80,9 @@ rustix             = { version = "1", features = ["fs"] }   # flock for the per-
 # backend-winit gives a real window.
 slint       = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "compat-1-2"] }
 slint-build = "1"
+# native file picker (chat file sharing). XDG portal backend: pure Rust
+# (zbus), no GTK build dependency; talks to the desktop's portal service.
+rfd         = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [workspace.package]
 version    = "0.0.1"

@@ -22,6 +22,7 @@ serde_json.workspace = true
 tracing.workspace = true
 # clipboard for the seed copy button (X11: contents live as long as the app)
 arboard.workspace = true
+rfd.workspace = true
 chrono.workspace = true
 paste.workspace = true
 

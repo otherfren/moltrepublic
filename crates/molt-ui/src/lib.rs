@@ -554,30 +554,43 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_share_file(move |name| {
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return;
-            }
-            // a path from the mock picker is reduced to its file name —
-            // where the file lives is this node's business
-            let name = name
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(name.as_str())
-                .to_string();
-            let (size, kind, modified) = mock_file_meta(&name);
-            issue(
-                &rt,
-                &w,
-                &weak,
-                Command::ShareFile {
+        ui.on_share_pick(move || {
+            let w = w.clone();
+            let weak = weak.clone();
+            // the native picker runs async (XDG portal) off the UI thread;
+            // only the file's METADATA is read and shared — no bytes move
+            rt.spawn(async move {
+                let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
+                    return; // cancelled
+                };
+                let name = file.file_name();
+                let (size, modified) = std::fs::metadata(file.path())
+                    .map(|md| {
+                        let modified = md
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0); // 0 = the engine stamps "now"
+                        (md.len(), modified)
+                    })
+                    .unwrap_or((0, 0));
+                let kind = file_kind_label(&name);
+                let cmd = Command::ShareFile {
                     name,
                     size,
                     kind,
                     modified,
-                },
-            );
+                };
+                if let Err(e) = w.execute(cmd).await {
+                    let msg = format!("⚠ {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_show_toast(msg.into());
+                        }
+                    });
+                }
+            });
         });
     }
     {
@@ -1453,30 +1466,22 @@ fn file_date_label(ts: u64) -> String {
         .to_string()
 }
 
-/// Mock file metadata for the (mock) picker: without a real file dialog the
-/// size and date derive deterministically from the name (FNV-1a), the type
-/// from the extension — stable per name, plausible to look at.
-fn mock_file_meta(name: &str) -> (u64, String, u64) {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in name.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let size = 2_048 + h % 4_000_000; // 2 KiB .. ~4 MiB
+/// The display type of a shared file, from its extension (proper MIME
+/// sniffing can come with the transport; the label is presentation).
+fn file_kind_label(name: &str) -> String {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
-    let kind = match ext.as_deref() {
+    match ext.as_deref() {
         Some("pdf") => "PDF",
-        Some("jpg" | "jpeg" | "png" | "webp" | "gif") => "Image",
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "svg") => "Image",
         Some("md" | "txt") => "Text",
         Some("ods" | "xlsx" | "csv") => "Spreadsheet",
         Some("odt" | "docx") => "Document",
         Some("zip" | "tar" | "gz" | "7z") => "Archive",
+        Some("mp3" | "ogg" | "flac" | "opus") => "Audio",
+        Some("mp4" | "mkv" | "webm") => "Video",
         _ => "File",
     }
-    .to_string();
-    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-    let modified = now.saturating_sub(h % (30 * 24 * 3600)); // within ~30 days
-    (size, kind, modified)
+    .to_string()
 }
 
 /// The whole-log pass over a chat: author-block zebra (the stripe flips
@@ -1838,11 +1843,6 @@ lexicon! {
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
     mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
-    at_title: "Share a file", "Datei teilen";
-    at_body: "Only the file's metadata (name, size, type, date) is posted to the chat. Members download from your device while the file exists. (Mock — no file dialog yet, nothing is uploaded.)", "Nur die Metadaten der Datei (Name, Größe, Typ, Datum) werden in den Chat gestellt. Mitglieder laden von deinem Gerät herunter, solange die Datei existiert. (Mock — noch kein Dateidialog, nichts wird hochgeladen.)";
-    at_ph: "~/Documents/report.pdf", "~/Dokumente/bericht.pdf";
-    at_pick: "Or pick a suggestion:", "Oder einen Vorschlag wählen:";
-    at_share: "Share", "Teilen";
     toast_download: "Downloading (mock):", "Lade herunter (Mock):";
     toast_file_removed: "Local file deleted — the share is no longer available.", "Lokale Datei gelöscht — die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";

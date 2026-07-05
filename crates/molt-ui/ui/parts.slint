@@ -570,8 +570,12 @@ export component ChatRow inherits Rectangle {
     }
     // quiet affordances, always visible top-right: delete (reddish, kept
     // away from the outer edge), copy, and quote at the very edge — only
-    // their shading reacts to hovering; tombstones offer none of them
-    if root.line.deleted-by == "": Rectangle {
+    // their shading reacts to hovering; tombstones offer none of them.
+    // An own LIVE file share hides this message-delete: its card carries
+    // the one delete that matters there (the local file) — two trash
+    // icons on one entry read as duplicates. Once the file is removed
+    // (card grey), deleting the message becomes available again.
+    if root.line.deleted-by == "" && !(root.line.has-file && root.line.own && root.line.file-available): Rectangle {
         x: parent.width - 82px;
         y: 4px;
         width: 22px;
