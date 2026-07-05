@@ -139,6 +139,8 @@ fn main() -> anyhow::Result<()> {
             anonymity: config.transport.anonymity.network.as_str().to_string(),
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
+            smp_server: config.transport.smp.server.clone(),
+            smp_url: config.transport.smp.url.clone(),
         },
         // the scanned on-disk workspaces replace the demo list
         workspaces,

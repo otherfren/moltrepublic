@@ -226,6 +226,12 @@ pub struct SessionSettings {
     pub tor_mode: String,
     /// Local Tor SOCKS port.
     pub tor_port: u16,
+    /// SMP server selection: `"public"` (bundled default) or `"custom"`.
+    #[serde(default)]
+    pub smp_server: String,
+    /// Custom SMP server URL, used when `smp_server = "custom"`.
+    #[serde(default)]
+    pub smp_url: String,
 }
 
 impl Default for SessionSettings {
@@ -245,6 +251,8 @@ impl Default for SessionSettings {
             anonymity: "tor".to_string(),
             tor_mode: "local".to_string(),
             tor_port: 9050,
+            smp_server: "public".to_string(),
+            smp_url: String::new(),
         }
     }
 }
@@ -1285,6 +1293,12 @@ pub struct SessionView {
     pub theme: String,
     /// A transient notice key for the GUI (e.g. `"saved"`); cleared on navigate.
     pub notice: String,
+    /// Transient result of the settings panel's "Test connection" against
+    /// the SMP server: `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
+    /// Never persisted; lives here (not in [`SessionSettings`]) so a test in
+    /// flight does not look like an unsaved settings edit.
+    #[serde(default)]
+    pub smp_test: String,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -1319,6 +1333,7 @@ impl Default for SessionView {
             language: "en".to_string(),
             theme: "classic".to_string(),
             notice: String::new(),
+            smp_test: String::new(),
             restart_required: Vec::new(),
             settings: SessionSettings::default(),
             workspaces: WorkspaceInfo::demo_set(),
@@ -1623,6 +1638,21 @@ pub enum Command {
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// Test connectivity to an SMP server (the settings panel's Test
+    /// button): a live TLS handshake, run off the actor, whose result lands
+    /// in `settings.smp_test`. Safe to expose — it only dials a server.
+    NetTestServer {
+        /// The `smp://<fingerprint>@host[:port]` URL to test. Empty tests
+        /// the currently-configured server (public default or custom URL).
+        #[serde(default)]
+        url: String,
+    },
+    /// The outcome of a [`Command::NetTestServer`] handshake, reported back
+    /// from the off-actor probe task (engine-internal, never an MCP tool).
+    NetTestResult {
+        /// `"ok"` or `"error: …"`; written verbatim into `settings.smp_test`.
+        result: String,
     },
 
     // --- joining via invite (shared, co-equal) ---

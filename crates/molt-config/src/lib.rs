@@ -103,6 +103,35 @@ pub struct TransportConfig {
     /// Anonymity settings for node traffic.
     #[serde(default)]
     pub anonymity: AnonymityConfig,
+    /// SMP messaging server selection.
+    #[serde(default)]
+    pub smp: SmpConfig,
+}
+
+/// SMP messaging server selection (`[transport.smp]`): which SimpleX
+/// messaging server the founding ritual (and, from T3 on, all group
+/// traffic) routes over.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmpConfig {
+    /// `"public"` = the bundled default server ([`default_public_smp`]);
+    /// `"custom"` = use `url`. Anything else is salvaged back to `"public"`.
+    #[serde(default = "default_smp_server")]
+    pub server: String,
+    /// A custom SMP server URL (`smp://<base64-fingerprint>@host[:port]`),
+    /// used when `server = "custom"`. Not validated here (molt-config has no
+    /// transport dependency) — the GUI's Test button validates it live.
+    #[serde(default)]
+    pub url: String,
+}
+
+impl Default for SmpConfig {
+    fn default() -> Self {
+        SmpConfig {
+            server: default_smp_server(),
+            url: String::new(),
+        }
+    }
 }
 
 /// How node traffic is anonymized: which network, plus that network's settings.
@@ -244,6 +273,19 @@ pub fn default_lang() -> String {
     "en".to_string()
 }
 
+/// Default SMP server selection: the bundled public server.
+pub fn default_smp_server() -> String {
+    "public".to_string()
+}
+
+/// The bundled public SMP server, used when `[transport.smp].server =
+/// "public"`. An official SimpleX server (Ed448 CA), so users who cannot
+/// run their own server still have a working default. Verified reachable by
+/// the `smp_*` live tests.
+pub fn default_public_smp() -> String {
+    "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@smp8.simplex.im".to_string()
+}
+
 /// Default MCP client allowlist: loopback only.
 pub fn default_mcp_allow() -> String {
     "127.0.0.1".to_string()
@@ -295,6 +337,11 @@ pub struct Settings {
     pub tor_mode: String,
     /// Local Tor SOCKS port.
     pub tor_port: u16,
+    /// SMP server selection: `"public"` (bundled default) or `"custom"`.
+    pub smp_server: String,
+    /// Custom SMP server URL (`smp://<fp>@host[:port]`), used when
+    /// `smp_server = "custom"`.
+    pub smp_url: String,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated list`).
@@ -321,6 +368,8 @@ impl Default for Settings {
             anonymity: "tor".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
+            smp_server: default_smp_server(),
+            smp_url: String::new(),
             mcp_port: default_mcp_port(),
             mcp_allow: default_mcp_allow(),
             mcp_token: String::new(),
@@ -368,6 +417,8 @@ impl From<&Config> for Settings {
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
+            smp_server: c.transport.smp.server.clone(),
+            smp_url: c.transport.smp.url.clone(),
             mcp_port: c.mcp.port,
             mcp_allow: c.mcp.allow.clone(),
             mcp_token: c.mcp.token.clone(),
@@ -430,6 +481,15 @@ mode = {tor_mode}
 # Local tor SOCKS port. Used only when mode = "local".
 port = {tor_port}
 
+[transport.smp]
+# Which SimpleX messaging server the founding ritual routes over:
+#   "public" = a bundled official SimpleX server (no server to host yourself)
+#   "custom" = the `url` below (e.g. your own server)
+server = {smp_server}
+# Custom SMP server URL: smp://<base64-fingerprint>@host[:port].
+# Used only when server = "custom". Test it from the GUI settings.
+url = {smp_url}
+
 [ui]
 # GUI language: "en" | "de".
 lang = {lang}
@@ -450,6 +510,8 @@ theme = {theme}
         anonymity = toml_str(&settings.anonymity),
         tor_mode = toml_str(&settings.tor_mode),
         tor_port = settings.tor_port,
+        smp_server = toml_str(&settings.smp_server),
+        smp_url = toml_str(&settings.smp_url),
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
     )
@@ -516,6 +578,16 @@ pub fn salvage(text: &str) -> Settings {
             {
                 s.tor_port = port;
             }
+        }
+    }
+    if let Some(smp) = value.get("transport").and_then(|t| t.get("smp")) {
+        if let Some(v) = smp.get("server").and_then(toml::Value::as_str) {
+            if matches!(v, "public" | "custom") {
+                s.smp_server = v.to_string();
+            }
+        }
+        if let Some(v) = smp.get("url").and_then(toml::Value::as_str) {
+            s.smp_url = v.to_string();
         }
     }
     if let Some(mcp) = value.get("mcp") {
@@ -647,6 +719,10 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     let tor = table_at(doc.as_table_mut(), &["transport", "anonymity", "tor"]);
     set_str(tor, "mode", &settings.tor_mode);
     set_int(tor, "port", i64::from(settings.tor_port));
+
+    let smp = table_at(doc.as_table_mut(), &["transport", "smp"]);
+    set_str(smp, "server", &settings.smp_server);
+    set_str(smp, "url", &settings.smp_url);
 
     let ui = table_at(doc.as_table_mut(), &["ui"]);
     set_str(ui, "lang", &settings.lang);
@@ -787,6 +863,8 @@ mod tests {
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
+            smp_server: "custom".to_string(),
+            smp_url: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io".to_string(),
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),

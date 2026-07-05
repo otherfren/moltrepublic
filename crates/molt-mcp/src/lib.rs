@@ -289,6 +289,8 @@ fn settings_arg(args: &Value) -> SessionSettings {
         anonymity: text("anonymity", d.anonymity),
         tor_mode: text("tor_mode", d.tor_mode),
         tor_port: port("tor_port", d.tor_port),
+        smp_server: text("smp_server", d.smp_server),
+        smp_url: text("smp_url", d.smp_url),
     }
 }
 
@@ -586,11 +588,27 @@ fn tools() -> Vec<ToolDef> {
                     "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },
                     "anonymity": { "type": "string", "enum": ["tor", "nym", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
-                    "tor_port": { "type": "integer" }
+                    "tor_port": { "type": "integer" },
+                    "smp_server": { "type": "string", "enum": ["public", "custom"], "description": "SMP messaging server: bundled public default, or the custom smp_url" },
+                    "smp_url": { "type": "string", "description": "custom SMP server URL (smp://<fingerprint>@host), used when smp_server = custom" }
                 }
             }),
             build: |args| Ok(Command::SaveSettings {
                 settings: settings_arg(args),
+            }),
+        },
+        ToolDef {
+            name: "test_smp_server",
+            command: "net_test_server",
+            description: "Test connectivity to an SMP messaging server (a live TLS handshake, the settings panel's Test button). The result lands in session.smp_test (\"ok\" or \"error: …\"). Pass an explicit url, or omit it to test the configured server.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "smp://<fingerprint>@host to test; omit to test the configured server" }
+                }
+            }),
+            build: |args| Ok(Command::NetTestServer {
+                url: args.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
             }),
         },
         ToolDef {
@@ -782,11 +800,12 @@ mod tests {
         // net_delivered / net_peer_seen / net_send_failed and the founding
         // ritual's net_join_requested / net_seal_signed are the node's own
         // transport/ritual tasks speaking (exposing them would let an agent
-        // forge network peers or ritual members); reload_settings /
-        // config_notice are the config watcher's mirror path — an agent
-        // that wants a reload edits via save_settings
+        // forge network peers or ritual members); net_test_result is the
+        // node's own SMP probe reporting back (net_test_server is the tool);
+        // reload_settings / config_notice are the config watcher's mirror
+        // path — an agent that wants a reload edits via save_settings
         // (see documents/mcp-security.md)
-        const INTERNAL: [&str; 9] = [
+        const INTERNAL: [&str; 10] = [
             "restore_tick",
             "join_tick",
             "net_delivered",
@@ -794,6 +813,7 @@ mod tests {
             "net_send_failed",
             "net_join_requested",
             "net_seal_signed",
+            "net_test_result",
             "reload_settings",
             "config_notice",
         ];

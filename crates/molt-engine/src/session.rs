@@ -116,6 +116,59 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Test connectivity to an SMP server (the settings panel's Test button).
+    /// Resolves the target (explicit `url`, else the configured custom or
+    /// public server), marks the test in flight, and runs the real TLS
+    /// handshake **off the actor** — the outcome returns as
+    /// [`molt_core::Command::NetTestResult`] so the actor never blocks on the
+    /// network.
+    pub(crate) fn cmd_net_test_server(&mut self, url: String) -> Result<Reply, MoltError> {
+        let url = if url.trim().is_empty() {
+            if self.session.settings.smp_server == "custom" {
+                self.session.settings.smp_url.clone()
+            } else {
+                molt_config::default_public_smp()
+            }
+        } else {
+            url
+        };
+        // parse in-actor so an obviously malformed URL fails fast
+        let server = match molt_net::smp::SmpServer::parse(url.trim()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.session.smp_test = format!("error: {e}");
+                self.emit_session(SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
+        };
+        self.session.smp_test = "testing".to_string();
+        self.emit_session(SessionScope::Full);
+        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+            tokio::spawn(async move {
+                let result = match molt_net::smp::test_connection(&server).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e}"),
+                };
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx
+                    .send(crate::Envelope {
+                        cmd: molt_core::Command::NetTestResult { result },
+                        reply,
+                    })
+                    .await;
+            });
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Record an SMP connection-test outcome into the session (fed back from
+    /// the off-actor probe task).
+    pub(crate) fn cmd_net_test_result(&mut self, result: String) -> Result<Reply, MoltError> {
+        self.session.smp_test = result;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Queue the current session settings for persistence (no-op without a
     /// config store). `notify` puts the outcome into the session notice.
     fn persist_settings(&mut self, notify: bool) {

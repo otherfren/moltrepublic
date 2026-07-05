@@ -232,6 +232,25 @@ pub fn run_app(
         });
     }
     {
+        // Test the SMP server currently in the draft (not the saved one), so
+        // the user can validate a custom URL before saving. Public mode tests
+        // the bundled default. The result streams back into `cfg-smp-test`.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_test_smp_server(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let url = if ui.get_cfg_smp_custom() {
+                ui.get_cfg_smp_url().to_string()
+            } else {
+                molt_config::default_public_smp()
+            };
+            issue(&rt, &w, &ui.as_weak(), Command::NetTestServer { url });
+        });
+    }
+    {
         // Leaving settings is guarded: a clean draft navigates straight back;
         // a dirty one raises the unsaved-changes modal (save / discard / stay).
         let rt = rt.clone();
@@ -928,6 +947,8 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         anonymity: net_name(ui.get_cfg_network_index()),
         tor_mode: mode_name(ui.get_cfg_tor_mode_index()),
         tor_port: ui.get_cfg_tor_port() as u16,
+        smp_server: if ui.get_cfg_smp_custom() { "custom" } else { "public" }.to_string(),
+        smp_url: ui.get_cfg_smp_url().to_string(),
     }
 }
 
@@ -1077,6 +1098,10 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     );
     // persistent restart warning: which changed keys only apply on restart
     ui.set_restart_keys(sv.restart_required.join(", ").into());
+    // the SMP connection-test status is transient and lives outside the
+    // settings draft, so push it on every update — even while the user has
+    // an unsaved URL open and `settings_changed` is suppressed
+    ui.set_cfg_smp_test(sv.smp_test.clone().into());
 
     if !settings_changed {
         apply_strings(ui, lang);
@@ -1104,6 +1129,8 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
+    ui.set_cfg_smp_custom(s.smp_server == "custom");
+    ui.set_cfg_smp_url(s.smp_url.clone().into());
 }
 
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
@@ -1746,6 +1773,15 @@ lexicon! {
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
+    field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";
+    smp_public: "Public default", "Öffentlicher Standard";
+    smp_custom: "Custom server", "Eigener Server";
+    field_smp_url: "Server URL", "Server-URL";
+    smp_test: "Test connection", "Verbindung testen";
+    smp_untested: "not tested yet", "noch nicht getestet";
+    smp_testing: "testing…", "teste…";
+    smp_ok: "reachable ✓", "erreichbar ✓";
+    smp_hint: "The founding ritual and group messages route over this SMP server. The public default needs no server of your own; a custom URL looks like smp://<fingerprint>@host.", "Das Gründungsritual und Gruppennachrichten laufen über diesen SMP-Server. Der öffentliche Standard braucht keinen eigenen Server; eine eigene URL sieht aus wie smp://<fingerprint>@host.";
     field_threshold: "Threshold (m)", "Schwelle (m)";
     field_members: "Members (n)", "Mitglieder (n)";
     field_language: "Language", "Sprache";

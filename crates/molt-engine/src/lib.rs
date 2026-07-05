@@ -435,6 +435,8 @@ impl State {
                 sig,
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, generation),
+            Command::NetTestServer { url } => self.cmd_net_test_server(url),
+            Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinTick => self.cmd_join_tick(),
             Command::JoinCancel => self.cmd_join_cancel(),

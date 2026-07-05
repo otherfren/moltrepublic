@@ -291,6 +291,13 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-network-index: 0;
     in-out property <int> cfg-tor-mode-index: 0;
     in-out property <int> cfg-tor-port: 9050;
+    // SMP messaging server: false = bundled public server, true = custom url.
+    in-out property <bool> cfg-smp-custom: false;
+    in-out property <string> cfg-smp-url;
+    // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
+    in property <string> cfg-smp-test;
+    // run a live connectivity test against the SMP server in the draft
+    callback test-smp-server();
     in-out property <bool> cfg-s3-backup: false;
     in-out property <string> cfg-s3-endpoint;
     in-out property <string> cfg-s3-access;
@@ -3177,6 +3184,64 @@ export component AppWindow inherits Window {
                                     minimum: 1;
                                     maximum: 65535;
                                 }
+                            }
+                            // SMP messaging server: public default vs a custom
+                            // URL, with a live connectivity test
+                            FieldLabel {
+                                label: Strings.field-smp-server;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    AppButton {
+                                        label: Strings.smp-public;
+                                        primary: !root.cfg-smp-custom;
+                                        clicked => {
+                                            root.cfg-smp-custom = false;
+                                        }
+                                    }
+                                    AppButton {
+                                        label: Strings.smp-custom;
+                                        primary: root.cfg-smp-custom;
+                                        clicked => {
+                                            root.cfg-smp-custom = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if root.cfg-smp-custom: FieldLabel {
+                                label: Strings.field-smp-url;
+                                AppField {
+                                    text <=> root.cfg-smp-url;
+                                    placeholder: "smp://<fingerprint>@host";
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: start;
+                                AppButton {
+                                    label: Strings.smp-test;
+                                    clicked => {
+                                        root.test-smp-server();
+                                    }
+                                }
+                                Text {
+                                    vertical-alignment: center;
+                                    text: root.cfg-smp-test == "" ? Strings.smp-untested
+                                        : root.cfg-smp-test == "testing" ? Strings.smp-testing
+                                        : root.cfg-smp-test == "ok" ? Strings.smp-ok
+                                        : root.cfg-smp-test;
+                                    color: root.cfg-smp-test == "ok" ? Theme.good
+                                        : (root.cfg-smp-test != "" && root.cfg-smp-test != "testing")
+                                            ? Theme.bad
+                                            : Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            Text {
+                                text: Strings.smp-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
                         if root.set-tab == 4: VerticalLayout {

@@ -342,6 +342,8 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         anonymity: s.anonymity.clone(),
         tor_mode: s.tor_mode.clone(),
         tor_port: s.tor_port,
+        smp_server: s.smp_server.clone(),
+        smp_url: s.smp_url.clone(),
         mcp_port: s.mcp_port,
         mcp_allow: s.mcp_allow.clone(),
         mcp_token: s.mcp_token.clone(),
@@ -368,6 +370,8 @@ fn session_settings(s: &Settings) -> SessionSettings {
         anonymity: s.anonymity.clone(),
         tor_mode: s.tor_mode.clone(),
         tor_port: s.tor_port,
+        smp_server: s.smp_server.clone(),
+        smp_url: s.smp_url.clone(),
     }
 }
 
