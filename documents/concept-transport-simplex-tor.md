@@ -148,8 +148,10 @@ queue is otherwise an open spam surface).
 **Join is approved, not automatic.** A valid request surfaces on the
 inviter's node as an approval prompt (joiner's display name + KeyPackage
 fingerprint); only an explicit accept runs the MLS Add/Commit and sends
-Welcome + per-member queue addresses back on a fresh pair. This is a small
-new inviter-side surface, in keeping with the deliberate m-of-n ethos —
+Welcome + per-member queue addresses back on a fresh pair. The approver is
+whoever minted the invite — the founder for seat invites, the minting
+member for recovery invites (see the lifecycle below). This is a small new
+inviter-side surface, in keeping with the deliberate m-of-n ethos —
 whoever holds a leaked link still does not get in.
 
 The three phases the join-run mock already displays ("contacting inviter /
@@ -160,6 +162,64 @@ the whole first leg: request queued on the invite queue
 "contacting inviter" with elapsed time, not a fake spinner), then awaiting
 the inviter's manual approval. Only the inviter's accept advances to
 phase 2.
+
+**Invite lifecycle, persistence & UI.** Seats are fixed at founding — n
+never changes afterwards (matching today's roster derivation: founder plus
+one named seat per invite). There are exactly two kinds of invite:
+
+* **Seat invite** — minted by the founder, at founding, one per open seat;
+  a completed join fills that seat (`MemberJoined`). The founder is the
+  approver.
+* **Recovery invite** — minted by *any* member, for an already-filled seat
+  whose holder lost their workspace but still holds their recovery phrase.
+  The minting member is the approver. MLS: Remove(old leaf) + Add(new
+  KeyPackage) in a single commit; the shared log records the additive
+  event variant `MemberRestored { member }`, and the rejoined node
+  re-syncs the full workspace. Division of labor: the **seed** re-derives
+  the workspace identity and keys ("all keys derive from this phrase" —
+  the restore screen's standing rule); the **recovery link** contributes
+  only the transport path and the ticket; the human check stays where it
+  is — the manual approval.
+
+Ticket lifecycle: **minted → shared → spent | re-minted**. Re-minting
+voids the predecessor ticket; at most one valid ticket exists per seat at
+any time.
+
+Persistence: unspent invite material (ticket secret, invite-queue address,
+its wrapping key) lives node-locally in the **minter's** `transport.state`
+(storage concept §3.5). Losing that file loses links, never seats — seats
+live in the shared log; the founder simply re-mints. Today's behavior —
+links shown once in the founding wizard, then gone forever — is hereby
+marked a mock artifact, not a design.
+
+Where the UI shows invites (target state; spec for T2):
+
+1. **Founding wizard, step 3** — unchanged: first display of the n−1
+   links, per-link copy, and the existing "share each once, over a
+   private channel" hint.
+2. **Workspace detail, members grid** — open seats become *actionable on
+   the founder's node*: clicking the chip reveals the link (elided) with
+   **Copy** and **Re-issue** (confirmation required; the old ticket is
+   voided on confirm). Every other node keeps rendering open seats as
+   today's passive chips — it holds no ticket material, there is nothing
+   it could show.
+3. **Filled seats, any node** — context action **Issue recovery link**:
+   mints a recovery invite, copies it, toasts; hint "share only with the
+   affected member, over a private channel".
+4. **Approval surface** (concretizing the manual approval above): header
+   notice plus dialog on the approver's node — joiner display name,
+   KeyPackage fingerprint, target seat; for recovery joins additionally a
+   workspace-id-match indicator. Accept / Reject.
+5. **Joiner side** — the join wizard is unchanged. Recovery runs through
+   the existing restore screen's "Social peer-restore" path: recovery
+   phrase + recovery link (placeholder `molt://invite/…`), then the same
+   three-phase run.
+6. **MCP co-equality** — the same verbs exist as operator commands:
+   `remint_invite(seat)`, `mint_recovery_invite(member)`,
+   `approve_join` / `reject_join`; open invites are readable in the
+   status. The approval verbs are ordinary operator commands, **not** on
+   the INTERNAL list — approving is a human decision and must be
+   reachable from both surfaces.
 
 ### 3.4 Delivery semantics
 
@@ -315,7 +375,9 @@ without sockets, everything below tests without the engine.
 2. **T2** MLS integration (OpenMLS) behind `MlsTask`, incl. the
    `transport.state` write-ahead discipline; invite/join state machine real
    over loopback: ticket MAC, single-use enforcement, and the inviter
-   approval surface.
+   approval surface; invite persistence (`transport.state` invite table)
+   with the members-grid invite UI (show / copy / re-issue), and the
+   recovery rejoin through the Social-peer-restore path.
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak

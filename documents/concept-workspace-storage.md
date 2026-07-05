@@ -272,6 +272,11 @@ and keys). It holds:
   windows legitimately differ, so they must never enter the shared log.
 * **Queue table**: per-connection queue addresses, per-queue wrapping keys,
   rotation state (transport concept §3.2).
+* **Invite table**: unspent invite material held by the *minter* — per
+  open seat (founder) or per outstanding recovery invite (any member):
+  ticket secret, invite-queue address, its wrapping key (transport concept
+  §3.3). Losing the file costs a re-mint, never data — seats live in the
+  shared log.
 * **MLS ratchet state** — deliberately in this overwrite-in-place file and
   *not* in the append-only log: MLS forward secrecy consists of deleting
   old key material; a log that remembers every ratchet state would undo it
@@ -281,7 +286,9 @@ and keys). It holds:
 
 `MemberSeen` remains a legal event variant but is no longer broadcast or
 required — presence is derived passively from inbound traffic (transport
-concept §3.4).
+concept §3.4). `MemberRestored { member }` joins the enum as an additive
+variant when the recovery rejoin lands (transport concept §3.3): same
+seat, new MLS leaf, full re-sync.
 
 ## 4. Lifecycle wiring (what replaces which mock)
 
