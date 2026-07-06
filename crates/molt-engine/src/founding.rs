@@ -17,12 +17,62 @@
 //! founding animation is gone.
 
 use molt_core::{Command, MemberId, MemberIdentity, RosterAttestation};
+use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::supervisor;
-use molt_net::{invite, msg_id, LoopbackHub, RcvQueue, SndQueueAddr, Transport, WrapKey};
+use molt_net::{
+    invite, msg_id, Delivery, LoopbackHub, LoopbackTransport, NetError, PaddedBlock, QueuePair,
+    RcvQueue, SndQueueAddr, Transport, WrapKey,
+};
 use molt_storage::SigningKey;
 use tokio::sync::mpsc;
 
 use crate::{Envelope, State};
+
+/// The transport a founding ritual runs over. The in-app demo founds over
+/// the in-process loopback hub (with simulated members); a real founding
+/// runs over the configured SMP server. One enum so the founder side — the
+/// recv loops, `maybe_seal`, teardown — is written once and dispatches at
+/// runtime, and so [`InviteMaterial`] and [`RitualRuntime`] have a single
+/// concrete transport type.
+#[doc(hidden)]
+#[derive(Clone)]
+pub enum RitualTransport {
+    /// In-process hub (the demo's simulated members). The held transport
+    /// keeps the hub's Arc alive, so the ritual's queues live with it.
+    Loopback(LoopbackTransport),
+    /// A real SMP server.
+    Smp(SmpTransport),
+}
+
+impl Transport for RitualTransport {
+    async fn create_queue(&self) -> Result<QueuePair, NetError> {
+        match self {
+            RitualTransport::Loopback(t) => t.create_queue().await,
+            RitualTransport::Smp(t) => t.create_queue().await,
+        }
+    }
+
+    async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {
+        match self {
+            RitualTransport::Loopback(t) => t.send(addr, block).await,
+            RitualTransport::Smp(t) => t.send(addr, block).await,
+        }
+    }
+
+    async fn subscribe(&self, q: &RcvQueue) -> Result<mpsc::Receiver<Delivery>, NetError> {
+        match self {
+            RitualTransport::Loopback(t) => t.subscribe(q).await,
+            RitualTransport::Smp(t) => t.subscribe(q).await,
+        }
+    }
+
+    async fn delete_queue(&self, q: &RcvQueue) -> Result<(), NetError> {
+        match self {
+            RitualTransport::Loopback(t) => t.delete_queue(q).await,
+            RitualTransport::Smp(t) => t.delete_queue(q).await,
+        }
+    }
+}
 
 /// One seat's transport material, held by the founder for the ritual's
 /// lifetime: the ticket it verifies against, the reply queue the member
@@ -39,12 +89,13 @@ struct SeatRuntime {
     identity: Option<MemberIdentity>,
 }
 
-/// The founder-side ritual runtime: the loopback hub, the founder's own
+/// The founder-side ritual runtime: the transport, the founder's own
 /// identity, the seats, and the keepalives for the simulated joiners.
 pub(crate) struct RitualRuntime {
-    // the transport holds the hub's Arc, so keeping it alive keeps every
-    // ritual queue alive; dropping the runtime tears the whole hub down
-    transport: molt_net::LoopbackTransport,
+    // for loopback the transport holds the hub's Arc, so keeping it alive
+    // keeps every ritual queue alive; dropping the runtime tears it down.
+    // `maybe_seal` sends the canonical table over this.
+    transport: RitualTransport,
     ws_id: String,
     rule_m: u8,
     rule_n: u8,
@@ -121,44 +172,26 @@ impl State {
         };
         self.net_generation += 1;
         let generation = self.net_generation;
-
-        let hub = LoopbackHub::calm();
-        let transport = hub.transport();
         let seat_count = usize::from(rule_n).saturating_sub(1);
 
-        // one invite queue (member → founder) and one reply queue
-        // (founder → member) per seat
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err("engine stopped".to_string());
         };
+        // manual mode (the two-instance dev test / a real founding): don't
+        // spawn simulated members — hand the invite material out so a second
+        // engine runs the member side itself
+        let manual = self.ritual_material_sink.is_some();
+
+        // tickets, links and seats are set up synchronously — the ticket is
+        // the link's secret, minted without any I/O. Queue creation is the
+        // only async part (real on SMP), handled per transport below.
         let mut seats = Vec::with_capacity(seat_count);
         let mut links = Vec::with_capacity(seat_count);
-        let mut sim = Vec::with_capacity(seat_count);
-        let mut materials = Vec::with_capacity(seat_count);
-        // manual mode (the two-instance dev test): don't spawn simulated
-        // members — hand the invite material out so a second engine runs
-        // the member side itself
-        let manual = self.ritual_material_sink.is_some();
+        let mut seat_setup = Vec::with_capacity(seat_count);
         for seat in 0..seat_count {
             let seat_u32 = u32::try_from(seat).unwrap_or(u32::MAX);
             let ticket = invite::mint_ticket().map_err(|e| e.to_string())?;
-            let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
             let invite_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-
-            // the founder's recv task on the invite queue → internal
-            // NetJoinRequested / NetSealSigned commands
-            spawn_founder_recv(
-                &transport,
-                invite_q.rcv.clone(),
-                invite_wrap.clone(),
-                seat_u32,
-                generation,
-                cmd_tx.clone(),
-            );
-
-            // the visible preview link (the real transport handover is the
-            // InviteMaterial below; T3 encodes the full payload into the
-            // link)
             links.push(
                 molt_core::InviteInfo {
                     republic: name.to_string(),
@@ -169,22 +202,7 @@ impl State {
                 }
                 .render(),
             );
-
-            let material = InviteMaterial {
-                seat: seat_u32,
-                transport: transport.clone(),
-                invite_snd: invite_q.snd.clone(),
-                invite_wrap: invite_wrap.clone(),
-                ticket: ticket.clone(),
-            };
-            if manual {
-                materials.push(material);
-            } else {
-                // the simulated member: its own seed → identity, real
-                // JoinRequest + seal signature over real queues
-                sim.push(spawn_sim_member(material)?);
-            }
-
+            seat_setup.push((seat_u32, ticket.clone(), invite_wrap));
             seats.push(SeatRuntime {
                 ticket,
                 // the member advertises its reply queue in the JoinRequest
@@ -193,14 +211,70 @@ impl State {
                 identity: None,
             });
         }
-        // hand the material to the waiting test instance (manual mode)
-        if let Some(sink) = &self.ritual_material_sink {
-            let _ = sink.send(materials);
-        }
 
-        // `hub` drops here; `transport` (and its task clones) hold the
-        // shared Arc, so every ritual queue stays alive until the runtime
-        // is dropped
+        // A real founding over SMP is opt-in (manual mode + the flag set by
+        // __spawn_manual_founding_over_smp): the founder's queues live on the
+        // configured server and real remote members join over it. Everything
+        // else — the in-app demo — founds over the in-process loopback hub
+        // with simulated members.
+        let (transport, sim) = if manual && self.ritual_over_smp {
+            let url = if self.session.settings.smp_server == "custom" {
+                self.session.settings.smp_url.clone()
+            } else {
+                molt_config::default_public_smp()
+            };
+            let server = SmpServer::parse(url.trim()).map_err(|e| e.to_string())?;
+            let transport = RitualTransport::Smp(SmpTransport::new(server));
+            // SMP queue creation is async: provision off the actor, wire each
+            // seat's recv loop, then hand the material out
+            spawn_smp_provisioning(
+                transport.clone(),
+                seat_setup,
+                generation,
+                cmd_tx.clone(),
+                self.ritual_material_sink.clone(),
+            );
+            (transport, Vec::new())
+        } else {
+            // loopback: the hub creates queues synchronously right here
+            let hub = LoopbackHub::calm();
+            let transport = RitualTransport::Loopback(hub.transport());
+            let mut sim = Vec::with_capacity(seat_count);
+            let mut materials = Vec::with_capacity(seat_count);
+            for (seat_u32, ticket, invite_wrap) in &seat_setup {
+                let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
+                spawn_founder_recv(
+                    transport.clone(),
+                    invite_q.rcv.clone(),
+                    invite_wrap.clone(),
+                    *seat_u32,
+                    generation,
+                    cmd_tx.clone(),
+                );
+                let material = InviteMaterial {
+                    seat: *seat_u32,
+                    transport: transport.clone(),
+                    invite_snd: invite_q.snd.clone(),
+                    invite_wrap: invite_wrap.clone(),
+                    ticket: ticket.clone(),
+                };
+                if manual {
+                    materials.push(material);
+                } else {
+                    // the simulated member: its own seed → identity, real
+                    // JoinRequest + seal signature over real queues
+                    sim.push(spawn_sim_member(material)?);
+                }
+            }
+            if let Some(sink) = &self.ritual_material_sink {
+                let _ = sink.send(materials);
+            }
+            // `hub` drops here; `transport` (and its task clones) hold the
+            // shared Arc, so every ritual queue stays alive until the runtime
+            // is dropped
+            (transport, sim)
+        };
+
         self.net_ritual = Some(RitualRuntime {
             transport,
             ws_id,
@@ -232,16 +306,16 @@ impl State {
 }
 
 /// The founder's recv loop on one invite queue: unwrap, reassemble, parse
-/// a [`invite::RitualMsg`], and issue the matching internal command.
+/// a [`invite::RitualMsg`], and issue the matching internal command. Runs
+/// over whichever [`RitualTransport`] the ritual chose.
 fn spawn_founder_recv(
-    transport: &molt_net::LoopbackTransport,
+    transport: RitualTransport,
     rcv: RcvQueue,
     wrap: WrapKey,
     seat: u32,
     generation: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
-    let transport = transport.clone();
     tokio::spawn(async move {
         let Ok(mut rx) = transport.subscribe(&rcv).await else {
             return;
@@ -289,6 +363,51 @@ fn spawn_founder_recv(
     });
 }
 
+/// Provision the founder's per-seat invite queues over SMP **off the actor**
+/// — SMP `create_queue` is a live NEW round-trip, which the synchronous
+/// command handler must not block on. Each seat gets its recv loop wired,
+/// and the full per-seat material is handed to the waiting instance once
+/// every queue is up. Manual mode only: a real founding invites real remote
+/// members, so there are no simulated joiners here.
+fn spawn_smp_provisioning(
+    transport: RitualTransport,
+    seat_setup: Vec<(u32, String, WrapKey)>,
+    generation: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+    sink: Option<std::sync::mpsc::Sender<Vec<InviteMaterial>>>,
+) {
+    tokio::spawn(async move {
+        let mut materials = Vec::with_capacity(seat_setup.len());
+        for (seat, ticket, invite_wrap) in seat_setup {
+            let invite_q = match transport.create_queue().await {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::warn!(seat, error = %e, "SMP invite-queue provisioning failed");
+                    return; // the sink stays silent; the waiting side times out
+                }
+            };
+            spawn_founder_recv(
+                transport.clone(),
+                invite_q.rcv.clone(),
+                invite_wrap.clone(),
+                seat,
+                generation,
+                cmd_tx.clone(),
+            );
+            materials.push(InviteMaterial {
+                seat,
+                transport: transport.clone(),
+                invite_snd: invite_q.snd,
+                invite_wrap,
+                ticket,
+            });
+        }
+        if let Some(sink) = sink {
+            let _ = sink.send(materials);
+        }
+    });
+}
+
 /// One founding invite's full transport handover — everything a member's
 /// node needs to activate and seal (transport concept §3.3: the payload
 /// the `molt://invite/…` link will carry in-band once T3 encodes it).
@@ -296,12 +415,13 @@ fn spawn_founder_recv(
 /// member side against the founder's hub.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct InviteMaterial<T: molt_net::Transport = molt_net::LoopbackTransport> {
+pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
     /// The seat this invite fills (0-based).
     pub seat: u32,
-    /// The transport to reach the founder — the loopback hub for the demo
-    /// mesh, an [`molt_net::smp::SmpTransport`] for a real member joining
-    /// over SMP. `run_ritual_member` is generic over it.
+    /// The transport the founder reached the member over — the loopback hub
+    /// for the demo mesh, the SMP server for a real founding. A genuinely
+    /// separate instance uses its *own* transport and only reads the address
+    /// / wrap / ticket below; `run_ritual_member` is generic over `T`.
     pub transport: T,
     /// member → founder queue (JoinRequest, then SealSigned).
     pub invite_snd: SndQueueAddr,

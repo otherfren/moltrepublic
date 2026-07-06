@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
-pub use founding::{run_ritual_member, InviteMaterial};
+pub use founding::{run_ritual_member, InviteMaterial, RitualTransport};
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
 use molt_core::{
@@ -122,7 +122,23 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx));
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false);
+    (handle, rx)
+}
+
+/// Like [`__spawn_manual_founding`], but the founding runs over the **real
+/// SMP server** configured in `session.settings` (custom url or the public
+/// default) instead of the loopback hub. The founder's queues live on the
+/// server; a genuinely separate instance joins over its own SMP transport.
+/// This is the seam the two-instance-over-SMP dev test uses.
+#[doc(hidden)]
+pub fn __spawn_manual_founding_over_smp(
+    config: GroupConfig,
+    session: SessionView,
+) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true);
     (handle, rx)
 }
 
@@ -140,7 +156,17 @@ pub fn spawn_with_config(
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, Some(store.clone()), true, None, None);
+    let handle = spawn_actor(
+        config,
+        session,
+        cmd_tx,
+        cmd_rx,
+        Some(store.clone()),
+        true,
+        None,
+        None,
+        false,
+    );
     Ok((handle, store))
 }
 
@@ -151,7 +177,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -164,11 +190,13 @@ fn spawn_actor(
     persist: bool,
     net: Option<net::NetRuntime>,
     ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    ritual_over_smp: bool,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
     let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
     state.ritual_material_sink = ritual_material_sink;
+    state.ritual_over_smp = ritual_over_smp;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -250,6 +278,10 @@ pub(crate) struct State {
     /// Only the two-instance dev test installs this.
     pub(crate) ritual_material_sink:
         Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    /// When set (with a material sink), a founding runs over the configured
+    /// **SMP** server instead of the loopback hub — the real-transport path.
+    /// Off by default so the in-app demo founds over loopback.
+    pub(crate) ritual_over_smp: bool,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -297,6 +329,7 @@ impl State {
             net_ritual: None,
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
+            ritual_over_smp: false,
             net_generation: 0,
             persist,
             session,

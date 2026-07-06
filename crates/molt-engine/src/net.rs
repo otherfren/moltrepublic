@@ -538,6 +538,7 @@ fn spawn_demo_peer(
         false,
         Some(net),
         None,
+        false,
     );
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown
