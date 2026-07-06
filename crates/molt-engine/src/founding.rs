@@ -3,18 +3,18 @@
 //! The founding ritual (transport concept §3.3): the republic is
 //! constituted *before* any workspace touches the disk.
 //!
-//! The founder mints one single-use invite per future member and opens a
-//! transport pair per seat. Each member — here a simulated loopback node,
-//! the real member-side code path once T3 lands — derives its own
-//! identity key from its own recovery phrase, activates the link
-//! (`JoinRequest`, MAC-bound to the ticket), and later signs the final
-//! canonical roster table (`SealSigned`). Only when every seat is sealed
-//! does the engine write the `Founded` genesis — carrying the complete
-//! identity table and all n attestations, so the member list is signed by
-//! everyone from birth.
+//! The founder mints one single-use invite per future member and provisions a
+//! transport queue per seat. Each member — a real remote node over SMP, or a
+//! simulated loopback node in the offline test seam — derives its own identity
+//! key from its own recovery phrase, activates the link (`JoinRequest`,
+//! MAC-bound to the ticket), and later signs the final canonical roster table
+//! (`SealSigned`). Only when every seat is sealed does the founder write the
+//! `Founded` genesis — carrying the complete identity table and all n
+//! attestations — and distribute the sealed roster so every member writes its
+//! own workspace. The roster is salted by a neutral, content-derived
+//! [`molt_storage::republic_id`], so no member's seed privileges the founder.
 //!
-//! Every leg lands in the wizard's live log as a real event; the fake
-//! founding animation is gone.
+//! Every leg lands in the wizard's live log as a real event.
 
 use molt_core::{Command, MemberId, MemberIdentity, RosterAttestation};
 use molt_net::smp::{SmpServer, SmpTransport};
@@ -87,6 +87,9 @@ struct SeatRuntime {
     reply_wrap: Option<WrapKey>,
     /// The member's identity, once their JoinRequest verified.
     identity: Option<MemberIdentity>,
+    /// Whether this seat's seal signature was already accepted — a second
+    /// (distinct) `SealSigned` must not push a duplicate attestation.
+    sealed: bool,
 }
 
 /// The founder-side ritual runtime: the transport, the founder's own
@@ -235,6 +238,7 @@ impl State {
                 reply_snd: None,
                 reply_wrap: None,
                 identity: None,
+                sealed: false,
             });
         }
 
@@ -327,11 +331,18 @@ impl State {
         self.net_ritual = None;
     }
 
-    /// Whether a ritual command's incarnation is still current.
+    /// Whether a ritual command's incarnation is still current: the ritual
+    /// must still be installed AND still be the live incarnation. Binding to
+    /// `net_generation` (bumped by a new founding, or by opening a workspace /
+    /// starting the mesh) means an abandoned founding's late seals are dropped
+    /// even on paths that switch context without an explicit teardown.
     fn ritual_generation_current(&self, generation: Option<u64>) -> bool {
         match generation {
             None => true,
-            Some(g) => self.net_ritual.as_ref().is_some_and(|r| r.generation == g),
+            Some(g) => {
+                g == self.net_generation
+                    && self.net_ritual.as_ref().is_some_and(|r| r.generation == g)
+            }
         }
     }
 }
@@ -420,7 +431,19 @@ fn spawn_smp_provisioning(
                 Ok(q) => q,
                 Err(e) => {
                     tracing::warn!(seat, error = %e, "SMP invite-queue provisioning failed");
-                    return; // the sink stays silent; the waiting side times out
+                    // tell the founder the founding cannot proceed instead of
+                    // leaving the create wizard stuck with no links, forever
+                    let (reply, _rx) = tokio::sync::oneshot::channel();
+                    let _ = cmd_tx
+                        .send(Envelope {
+                            cmd: Command::NetRitualFailed {
+                                error: format!("could not reach the SMP server: {e}"),
+                                generation: Some(generation),
+                            },
+                            reply,
+                        })
+                        .await;
+                    return;
                 }
             };
             spawn_founder_recv(
@@ -550,7 +573,7 @@ impl FoundingInvite {
 /// must be the neutral content-derived value, every attestation must verify
 /// against its member's anchored key over the canonical table, and every
 /// member must have signed (n identities, n attestations).
-fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), String> {
+pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), String> {
     let rid = molt_storage::republic_id(&s.name, s.rule_m, s.rule_n, &s.identities);
     if rid != s.republic_id {
         return Err("republic id does not match the roster content".to_string());
@@ -604,11 +627,21 @@ pub async fn ritual_join_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    let outcome = run_ritual_member(material, name, phrase, true, cancel).await?;
+    let outcome = run_ritual_member(material, name.clone(), phrase, true, cancel).await?;
     let sealed = outcome
         .sealed
         .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
     verify_sealed_roster(&sealed)?;
+    // refuse a roster that does not anchor our own (name, key) pair: a founder
+    // that excluded us — or anchored our key under a different name — must not
+    // leave us holding a workspace whose own acting member is not in its roster
+    if !sealed
+        .identities
+        .iter()
+        .any(|i| i.member == name && i.identity_pk == outcome.pk)
+    {
+        return Err("the sealed roster does not anchor our own (name, key)".to_string());
+    }
     Ok(sealed)
 }
 
@@ -626,21 +659,7 @@ pub async fn join_founding_over_smp(
 ) -> Result<molt_core::WorkspaceId, String> {
     let sealed = ritual_join_over_smp(link, name.clone(), phrase.clone(), None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
-    let genesis = molt_core::EventEnvelope {
-        seq: 1,
-        ts: molt_storage::now_secs(),
-        by: name.clone(),
-        body: molt_core::WorkspaceEvent::Founded {
-            name: sealed.name,
-            rule_m: sealed.rule_m,
-            rule_n: sealed.rule_n,
-            member: name,
-            roster: sealed.roster,
-            identities: sealed.identities,
-            attestations: sealed.attestations,
-            republic_id: sealed.republic_id,
-        },
-    };
+    let genesis = sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
     Ok(opened.manifest.workspace.id.clone())
 }
@@ -865,6 +884,30 @@ mod ritual_ops {
             Ok(molt_core::Reply::Ack)
         }
 
+        /// The founder's SMP provisioning failed (e.g. server unreachable):
+        /// fail the create run and tear the ritual down, so the wizard shows
+        /// the error instead of waiting for links that will never come.
+        pub(crate) fn cmd_net_ritual_failed(
+            &mut self,
+            error: String,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if !self.ritual_generation_current(generation)
+                || self.session.create.run.outcome != 0
+            {
+                return Ok(molt_core::Reply::Ack);
+            }
+            self.session.create.run.outcome = 2;
+            self.session
+                .create
+                .run
+                .log
+                .push(format!("✗ founding failed: {error}"));
+            self.teardown_ritual();
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
         /// A member activated their link. Verify the ticket MAC, anchor
         /// their identity, and — once every seat's key is in — send the
         /// canonical table to all members to sign. Verification failures
@@ -987,6 +1030,9 @@ mod ritual_ops {
                 let Some(s) = ritual.seats.get(idx) else {
                     return Ok(molt_core::Reply::Ack);
                 };
+                if s.sealed {
+                    return Ok(molt_core::Reply::Ack); // this seat already sealed
+                }
                 let Some(who) = &s.identity else {
                     return Ok(molt_core::Reply::Ack);
                 };
@@ -1000,12 +1046,15 @@ mod ritual_ops {
                 tracing::warn!(seat, "founding seal rejected: bad signature");
                 return Ok(molt_core::Reply::Ack);
             }
-            // record the attestation on the seat
+            // spend the seat so a second, distinct SealSigned cannot push a
+            // duplicate attestation (which would bloat the roster and make
+            // every honest joiner's verification fail)
             if let Some(ritual) = &mut self.net_ritual {
                 if let Some(s) = ritual.seats.get_mut(idx) {
-                    s.identity = s.identity.take(); // (kept; sig stored below)
+                    s.sealed = true;
                 }
             }
+            // record the attestation (the seat's identity was anchored on join)
             self.ritual_attestations
                 .push(RosterAttestation { member: member.clone(), sig });
             if let Some(view) = self.session.create.seats.get_mut(idx) {
@@ -1021,5 +1070,113 @@ mod ritual_ops {
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
+
+    /// A fully-signed 2-member sealed roster with real keys.
+    fn valid_roster() -> SealedRoster {
+        let (sk_a, pk_a) = molt_storage::derive_identity_key(&[1u8; 32], "a");
+        let (sk_b, pk_b) = molt_storage::derive_identity_key(&[2u8; 32], "b");
+        let identities = vec![
+            MemberIdentity { member: "founder".into(), identity_pk: pk_a },
+            MemberIdentity { member: "member".into(), identity_pk: pk_b },
+        ];
+        let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities);
+        let attestations = vec![
+            RosterAttestation { member: "founder".into(), sig: molt_storage::identity_sign(&sk_a, &table) },
+            RosterAttestation { member: "member".into(), sig: molt_storage::identity_sign(&sk_b, &table) },
+        ];
+        SealedRoster {
+            name: "R".into(),
+            republic_id,
+            rule_m: 2,
+            rule_n: 2,
+            roster: vec!["founder".into(), "member".into()],
+            identities,
+            attestations,
+        }
+    }
+
+    #[test]
+    fn verify_sealed_roster_accepts_a_valid_roster() {
+        assert!(verify_sealed_roster(&valid_roster()).is_ok());
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_forged_republic_id() {
+        let mut s = valid_roster();
+        s.republic_id = "deadbeef".into();
+        assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_missing_signature() {
+        let mut s = valid_roster();
+        s.attestations.pop();
+        assert!(verify_sealed_roster(&s).is_err(), "n identities need n attestations");
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_an_attestation_for_an_unknown_member() {
+        let mut s = valid_roster();
+        s.attestations[1].member = "impostor".into();
+        assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_bad_signature() {
+        let mut s = valid_roster();
+        // flip the leading hex nibble of one signature
+        let sig = &mut s.attestations[0].sig;
+        let first = if sig.starts_with('a') { 'b' } else { 'a' };
+        sig.replace_range(0..1, &first.to_string());
+        assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    fn sample_invite() -> FoundingInvite {
+        FoundingInvite {
+            info: molt_core::InviteInfo {
+                republic: "Chess Club".into(),
+                threshold: 2,
+                members: 2,
+                inviter: "walter".into(),
+                ticket: "ab".repeat(32),
+            },
+            server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.example.org".into(),
+            queue_id: "cd".repeat(12),
+            wrap: "ef".repeat(32),
+            seat: 0,
+        }
+    }
+
+    #[test]
+    fn founding_invite_round_trips() {
+        let link = sample_invite().render();
+        let back = FoundingInvite::parse(&link).expect("parses");
+        assert_eq!(back.server, sample_invite().server);
+        assert_eq!(back.queue_id, sample_invite().queue_id);
+        assert_eq!(back.wrap, sample_invite().wrap);
+        assert_eq!(back.seat, 0);
+    }
+
+    #[test]
+    fn founding_invite_parse_rejects_malformed_handovers() {
+        let preview = sample_invite().info.render();
+        // no handover segment at all (a bare preview link)
+        assert!(FoundingInvite::parse(&preview).is_none());
+        // trailing segment not valid hex
+        assert!(FoundingInvite::parse(&format!("{preview}/zzzz")).is_none());
+        // valid hex, but fewer than four newline-separated fields
+        let short = hex::encode("only\ntwo\nfields");
+        assert!(FoundingInvite::parse(&format!("{preview}/{short}")).is_none());
+        // valid hex + four fields, but a non-numeric seat
+        let bad_seat = hex::encode("smp://x@h\ncd\nef\nnotanumber");
+        assert!(FoundingInvite::parse(&format!("{preview}/{bad_seat}")).is_none());
     }
 }

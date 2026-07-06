@@ -308,6 +308,11 @@ pub(crate) struct State {
     /// torn-down runtime are dropped (a delivery queued behind a workspace
     /// switch must not land in the new context's log).
     pub(crate) net_generation: u64,
+    /// A separate incarnation counter for the **join** flow (an off-actor SMP
+    /// join, possibly long-running). Kept apart from `net_generation` so a
+    /// concurrent founding/mesh change can neither be mistaken for a stale
+    /// join nor silently drop a live one.
+    pub(crate) join_generation: u64,
     /// Whether workspaces persist to disk at all ([`spawn`] = false).
     pub(crate) persist: bool,
     /// The shared app/session state (screen, language, settings, …).
@@ -353,6 +358,7 @@ impl State {
             ritual_over_smp: false,
             ritual_sim: false,
             net_generation: 0,
+            join_generation: 0,
             persist,
             session,
             store,
@@ -498,9 +504,10 @@ impl State {
                 generation,
             } => self.cmd_net_ritual_link_ready(seat, link, generation),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
-            Command::JoinTick => self.cmd_join_tick(),
             Command::JoinCancel => self.cmd_join_cancel(),
-            Command::JoinFinish => self.cmd_join_finish(),
+            Command::NetRitualFailed { error, generation } => {
+                self.cmd_net_ritual_failed(error, generation)
+            }
             Command::NetJoinSealed { sealed, generation } => {
                 self.cmd_net_join_sealed(sealed, generation)
             }
@@ -1264,6 +1271,149 @@ mod tests {
             }
             // cancel stops the run and invalidates the background task's result
             w.execute(Command::JoinCancel).await.expect("cancel");
+        });
+    }
+
+    /// A joinable link with a bogus host (the background ritual task will fail,
+    /// but our directly-injected commands are processed first, in-process).
+    fn joinable_link() -> String {
+        crate::FoundingInvite {
+            info: molt_core::InviteInfo {
+                republic: "R".to_string(),
+                threshold: 2,
+                members: 2,
+                inviter: "walter".to_string(),
+                ticket: "ab".repeat(32),
+            },
+            server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
+                .to_string(),
+            queue_id: "cd".repeat(12),
+            wrap: "ef".repeat(32),
+            seat: 0,
+        }
+        .render()
+    }
+
+    fn valid_sealed_roster() -> molt_core::SealedRoster {
+        use molt_core::{MemberIdentity, RosterAttestation};
+        let (sk_a, pk_a) = molt_storage::derive_identity_key(&[1u8; 32], "a");
+        let (sk_b, pk_b) = molt_storage::derive_identity_key(&[2u8; 32], "b");
+        let identities = vec![
+            MemberIdentity { member: "founder".to_string(), identity_pk: pk_a },
+            MemberIdentity { member: "petra".to_string(), identity_pk: pk_b },
+        ];
+        let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities);
+        let attestations = vec![
+            RosterAttestation { member: "founder".to_string(), sig: molt_storage::identity_sign(&sk_a, &table) },
+            RosterAttestation { member: "petra".to_string(), sig: molt_storage::identity_sign(&sk_b, &table) },
+        ];
+        molt_core::SealedRoster {
+            name: "R".to_string(),
+            republic_id,
+            rule_m: 2,
+            rule_n: 2,
+            roster: vec!["founder".to_string(), "petra".to_string()],
+            identities,
+            attestations,
+        }
+    }
+
+    #[test]
+    fn join_failure_surfaces_into_the_run_and_drops_stale_reports() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string() })
+                .await
+                .expect("start");
+            // a stale-generation failure is ignored
+            w.execute(Command::NetJoinFailed { error: "old".to_string(), generation: Some(999) })
+                .await
+                .expect("stale");
+            match w.execute(Command::ReadSession).await.expect("read") {
+                Reply::Session(s) => assert_eq!(s.join.run.outcome, 0, "stale failure ignored"),
+                other => panic!("unexpected: {other:?}"),
+            }
+            // the current-generation failure surfaces into the run
+            w.execute(Command::NetJoinFailed { error: "boom".to_string(), generation: Some(1) })
+                .await
+                .expect("fail");
+            match w.execute(Command::ReadSession).await.expect("read2") {
+                Reply::Session(s) => {
+                    assert_eq!(s.join.run.outcome, 2);
+                    assert!(s.join.run.log.iter().any(|l| l.contains("boom")));
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn join_seals_into_the_republic_from_a_valid_roster() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string() })
+                .await
+                .expect("start");
+            let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
+            w.execute(Command::NetJoinSealed { sealed, generation: Some(1) })
+                .await
+                .expect("sealed");
+            match w.execute(Command::ReadSession).await.expect("read") {
+                Reply::Session(s) => {
+                    assert_eq!(s.screen, Screen::Main, "entered the republic");
+                    assert_eq!(s.join, molt_core::JoinState::default(), "join reset");
+                    assert!(s.workspaces.iter().any(|ws| ws.name == "R"), "workspace added");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+
+            // a garbage roster fails the join rather than materialising anything
+            let w2 = spawn(GroupConfig::demo(), SessionView::default());
+            w2.execute(Command::JoinStart { invite: joinable_link(), member: "x".to_string() })
+                .await
+                .expect("start2");
+            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), generation: Some(1) })
+                .await
+                .expect("bad");
+            match w2.execute(Command::ReadSession).await.expect("read2") {
+                Reply::Session(s) => assert_eq!(s.join.run.outcome, 2, "garbage roster fails"),
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn leaving_the_create_screen_abandons_an_in_flight_founding() {
+        rt().block_on(async {
+            // manual seam: the ritual opens but no member joins, so it stays
+            // open (it cannot seal and hijack the session behind our back)
+            let (w, _material_rx) =
+                __spawn_manual_founding(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::CreateStart {
+                name: "Duet".to_string(),
+                member: "founder".to_string(),
+                threshold: 2,
+                members: 2,
+                net: "tor".to_string(),
+            })
+            .await
+            .expect("start");
+            match w.execute(Command::ReadSession).await.expect("read") {
+                Reply::Session(s) => {
+                    assert_ne!(s.create, molt_core::CreateState::default(), "founding is open")
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+            // navigating away abandons it (the session is in-memory)
+            w.execute(Command::Navigate { screen: Screen::Choice }).await.expect("nav");
+            match w.execute(Command::ReadSession).await.expect("read2") {
+                Reply::Session(s) => {
+                    assert_eq!(s.screen, Screen::Choice);
+                    assert_eq!(s.create, molt_core::CreateState::default(), "founding abandoned");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
         });
     }
 

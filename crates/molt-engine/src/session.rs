@@ -22,6 +22,14 @@ use crate::{ActiveStorage, State};
 
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
+        // leaving an in-flight founding abandons it (the session is in-memory):
+        // its recv loops must not seal a workspace and hijack the session — and
+        // materialising it would even close the user's active workspace
+        if screen != Screen::Create && self.net_ritual.is_some() {
+            self.teardown_ritual();
+            self.ritual_attestations.clear();
+            self.session.create = molt_core::CreateState::default();
+        }
         self.session.screen = screen;
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);

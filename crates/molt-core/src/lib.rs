@@ -904,6 +904,31 @@ pub struct SealedRoster {
     pub attestations: Vec<RosterAttestation>,
 }
 
+impl SealedRoster {
+    /// Build the local `Founded` genesis envelope for a member. The single
+    /// place a `Founded` body is constructed for a real founding, so a new
+    /// genesis field cannot be forgotten at one of the call sites (founder
+    /// finalize, GUI join, standalone join). `member` is this node's own local
+    /// handle; `ts` the founding timestamp.
+    pub fn into_genesis(&self, member: &str, ts: u64) -> EventEnvelope {
+        EventEnvelope {
+            seq: 1,
+            ts,
+            by: member.to_string(),
+            body: WorkspaceEvent::Founded {
+                name: self.name.clone(),
+                rule_m: self.rule_m,
+                rule_n: self.rule_n,
+                member: member.to_string(),
+                roster: self.roster.clone(),
+                identities: self.identities.clone(),
+                attestations: self.attestations.clone(),
+                republic_id: self.republic_id.clone(),
+            },
+        }
+    }
+}
+
 /// The one canonical serialization of a roster table — what every member
 /// signs during the founding ritual's seal round and what every verifier
 /// reconstructs. Length-prefixed fields, entries in the given order (the
@@ -1106,9 +1131,11 @@ pub struct WorkspaceSnapshot {
     pub state: EngineStateDump,
 }
 
-/// A parsed (mock) invite link. The one wire format both the GUI preview and
-/// the engine's join run use: `molt://invite/<republic>/<m>of<n>/<inviter>/<ticket>`
-/// (spaces in the republic name travel as dashes).
+/// The display preview of an invite link, parsed for the GUI:
+/// `molt://invite/<republic>/<m>of<n>/<inviter>/<ticket>` (spaces in the
+/// republic name travel as dashes). A real founding link appends a transport
+/// handover segment (see `molt_engine::FoundingInvite`) which this parse
+/// ignores — only that richer form is actually joinable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteInfo {
     /// Display name of the republic (dashes decoded back to spaces).
@@ -1193,8 +1220,8 @@ pub mod mockrand {
 // rendered as a BIP-39 phrase (`molt-storage::keys`), and founding-ritual
 // tickets are real high-entropy single-use secrets (`molt-net::invite`).
 
-/// The shared core of every engine-run mock lifecycle (restore / create /
-/// join): step, progress, outcome and the live log. `#[serde(flatten)]`
+/// The shared core of every engine-run lifecycle (restore / create / join):
+/// step, progress, outcome and the live log. `#[serde(flatten)]`
 /// keeps the session JSON identical to the previous inline fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCore {
@@ -1269,7 +1296,7 @@ pub struct CreateState {
     pub simulated: bool,
 }
 
-/// The (mock) join-via-invite lifecycle. Shared session state like the restore.
+/// The join-via-invite lifecycle (real over SMP). Shared session state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinState {
     /// The shared run lifecycle (step / progress / outcome / log).
@@ -1350,9 +1377,9 @@ pub struct SessionView {
     pub active_workspace: WorkspaceId,
     /// The (mock) restore lifecycle.
     pub restore: RestoreState,
-    /// The (mock) founding lifecycle.
+    /// The founding lifecycle (real over SMP).
     pub create: CreateState,
-    /// The (mock) join-via-invite lifecycle.
+    /// The join-via-invite lifecycle (real over SMP).
     pub join: JoinState,
 }
 
@@ -1699,6 +1726,16 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The founder's off-actor SMP provisioning failed (e.g. the server is
+    /// unreachable), so the founding can never seal (engine-internal). The
+    /// engine fails the create run rather than leaving it stuck. Not a tool.
+    NetRitualFailed {
+        /// A human-readable reason.
+        error: String,
+        /// Ritual incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// A real SMP join completed: the off-actor join task verified the sealed
     /// roster the founder distributed (engine-internal). The engine writes the
     /// joiner's own workspace from it. Never an MCP tool.
@@ -1719,23 +1756,19 @@ pub enum Command {
     },
 
     // --- joining via invite (shared, co-equal) ---
-    /// Begin the (mock) join run for an invite link; the engine ticks the
-    /// progress and the live log by itself. Any non-empty invite is accepted
-    /// for now — real validation comes with the network implementation.
+    /// Begin joining a republic from its `molt://invite/…` link. The link must
+    /// carry the SMP transport handover (a bare preview link is rejected); the
+    /// engine runs the real join over SMP off the actor, shows the joiner's own
+    /// recovery phrase, and enters the republic on its own once the founder
+    /// seals — its outcome arrives as `NetJoinSealed` / `NetJoinFailed`.
     JoinStart {
         /// The `molt://invite/…` link.
         invite: String,
         /// The joiner's handle.
         member: String,
     },
-    /// Advance the (mock) join one step. Sent by the engine's own ticker;
-    /// answered with an error once the run is over (which stops the ticker).
-    JoinTick,
     /// Abandon the join (idle again) and return to the choice screen.
     JoinCancel,
-    /// Finish a successful join: the joined republic appears in the local
-    /// list, becomes active, and the node moves straight to the main screen.
-    JoinFinish,
 }
 
 impl Command {

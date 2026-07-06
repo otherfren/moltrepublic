@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The engine-run mock lifecycles: restore, founding (create) and join.
-//! They share one skeleton — a [`RunCore`] (step / progress / outcome /
-//! log), a 90 ms self-ticker, cancel-to-choice and finish-into-workspace —
-//! and differ only in validation, log content and the finished workspace.
+//! The engine-run lifecycles: **founding** (create) and **join** are real
+//! over SMP — founding provisions invite queues and waits for real members to
+//! seal; joining runs the member ritual off the actor and enters the republic
+//! once the founder distributes the sealed roster. **restore** is still a mock
+//! (its real backup paths are storage milestones S4/S5). They share a
+//! [`RunCore`] (step / progress / outcome / log) and cancel-to-choice.
 
 use molt_core::{
-    demo_workspace_id, roster_members, Command, CreateState, EventEnvelope, JoinState,
-    MemberId, MemberInfo, MoltError, Reply, RestoreState, RunCore, Screen, SessionScope,
-    WorkspaceEvent, WorkspaceId, WorkspaceInfo,
+    demo_workspace_id, roster_members, Command, CreateState, JoinState, MemberId, MemberInfo,
+    MoltError, Reply, RestoreState, RunCore, Screen, SessionScope, WorkspaceId, WorkspaceInfo,
 };
 use tokio::sync::oneshot;
 
@@ -47,7 +48,6 @@ impl State {
     /// the restorer materialize their local dir the same way the founder
     /// does). Returns the new workspace id.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn materialize_workspace(
         &mut self,
         name: &str,
@@ -62,21 +62,19 @@ impl State {
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
         let rule_n = u8::try_from(roster.len()).unwrap_or(u8::MAX);
-        let genesis = EventEnvelope {
-            seq: 1,
-            ts: now_secs(),
-            by: member.to_string(),
-            body: WorkspaceEvent::Founded {
-                name: name.to_string(),
-                rule_m,
-                rule_n,
-                member: member.to_string(),
-                roster,
-                identities,
-                attestations,
-                republic_id,
-            },
-        };
+        // one place builds the `Founded` body (SealedRoster::into_genesis) so a
+        // new genesis field can't be forgotten between the founder, GUI-join
+        // and standalone-join paths
+        let genesis = molt_core::SealedRoster {
+            name: name.to_string(),
+            republic_id,
+            rule_m,
+            rule_n,
+            roster,
+            identities,
+            attestations,
+        }
+        .into_genesis(member, now_secs());
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
@@ -451,8 +449,7 @@ impl State {
         }];
         attestations.append(&mut self.ritual_attestations.clone());
 
-        // distribute the complete sealed roster to every member so each writes
-        // its own workspace (own seed) from the same constitution
+        // the complete sealed roster every member (founder included) writes
         let sealed = molt_core::SealedRoster {
             name: c.name.clone(),
             republic_id: republic_id.clone(),
@@ -462,10 +459,11 @@ impl State {
             identities: identities.clone(),
             attestations: attestations.clone(),
         };
-        if let Ok(json) = serde_json::to_string(&sealed) {
-            ritual.distribute_genesis(json);
-        }
 
+        // write the FOUNDER's own workspace first. If the disk fails, the
+        // founding fails cleanly and no member is left committed to a
+        // constitution the founder never persisted (a retry re-mints a fresh
+        // founder identity, so distributing first would orphan them).
         let id = if self.persist {
             let id = self.materialize_workspace(
                 &c.name,
@@ -478,13 +476,17 @@ impl State {
                 republic_id.clone(),
                 MoltError::Create,
             )?;
-            // this republic's members are simulated (no real network yet);
-            // the mesh runs their loopback peers when the workspace opens
             self.persist_simulated_members(&id, true);
             id
         } else {
             demo_workspace_id(&c.name)
         };
+
+        // only now distribute the sealed roster to every member so each writes
+        // its own workspace (own seed) from the same constitution
+        if let Ok(json) = serde_json::to_string(&sealed) {
+            ritual.distribute_genesis(json);
+        }
 
         let s3 = self.session.settings.s3_backup;
         if s3 && self.persist {
@@ -543,12 +545,15 @@ impl State {
                 "not a joinable invite link — it carries no transport details".to_string(),
             ));
         };
+        // starting a join abandons any founding the user had open — its
+        // recv loops must not seal and hijack the session behind our back
+        self.teardown_ritual();
         // the joiner's own recovery phrase (shown once during the join); its
         // identity and its own workspace derive from it
         let seed =
             molt_storage::generate_seed_phrase().map_err(|e| MoltError::Join(e.to_string()))?;
-        self.net_generation += 1;
-        let generation = self.net_generation;
+        self.join_generation += 1;
+        let generation = self.join_generation;
         let mut run = RunCore::started();
         run.log.push(
             "→ join request sent over SMP · waiting for every member to seal the roster".to_string(),
@@ -602,16 +607,25 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted join bumped the generation — drop stale results
-        if generation != Some(self.net_generation) || self.session.join.run.outcome != 0 {
+        if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
             return Ok(Reply::Ack);
         }
         let sealed: molt_core::SealedRoster = match serde_json::from_str(&sealed) {
             Ok(s) => s,
             Err(e) => return self.cmd_net_join_failed(format!("decoding sealed roster: {e}"), generation),
         };
+        // the off-actor task already verified this, but re-checking here keeps
+        // the actor from ever materialising an unverified roster (defence in
+        // depth against a forged internal command)
+        if let Err(e) = crate::founding::verify_sealed_roster(&sealed) {
+            return self.cmd_net_join_failed(e, generation);
+        }
         let j = self.session.join.clone();
         let id = if self.persist {
-            self.materialize_workspace(
+            // materialising can fail on disk; a bare `?` would drop the error
+            // into the (already discarded) reply channel and hang the join at
+            // "in progress" — surface it into the run instead
+            match self.materialize_workspace(
                 &sealed.name,
                 &j.member,
                 sealed.rule_m,
@@ -621,10 +635,16 @@ impl State {
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
                 MoltError::Join,
-            )?
+            ) {
+                Ok(id) => id,
+                Err(e) => return self.cmd_net_join_failed(e.to_string(), generation),
+            }
         } else {
             demo_workspace_id(&sealed.name)
         };
+        // the join is done — advance the incarnation so a late result from the
+        // (finished) join task can't retroactively touch the reset run
+        self.join_generation += 1;
         let members = roster_members(&sealed.roster, |_| true, "just now");
         self.session.join = JoinState::default();
         self.push_workspace_entry(
@@ -649,7 +669,7 @@ impl State {
         error: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if generation != Some(self.net_generation) || self.session.join.run.outcome != 0 {
+        if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
             return Ok(Reply::Ack);
         }
         self.session.join.run.outcome = 2;
@@ -658,130 +678,13 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    pub(crate) fn cmd_join_tick(&mut self) -> Result<Reply, MoltError> {
-        guard_ticking(&self.session.join.run, MoltError::Join)?;
-        self.join_tick();
-        self.emit_session(SessionScope::Join);
-        Ok(Reply::Ack)
-    }
-
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
         // invalidate any in-flight join task so its late result is dropped
-        self.net_generation += 1;
+        self.join_generation += 1;
         self.session.join = JoinState::default();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
-    }
-
-    pub(crate) fn cmd_join_finish(&mut self) -> Result<Reply, MoltError> {
-        guard_finished(&self.session.join.run, MoltError::Join)?;
-        let j = self.session.join.clone();
-        // Inviter and joiner are synced; the rest of the roster is only
-        // learned as those members come online.
-        let mut roster: Vec<MemberId> = Vec::new();
-        if !j.inviter.is_empty() {
-            roster.push(j.inviter.clone());
-        }
-        roster.push(j.member.clone());
-        for k in 3..=j.rule_n {
-            roster.push(format!("member-{k}"));
-        }
-        let id = if self.persist {
-            // until the network exists, the "received" group history is a
-            // fresh local genesis under a fresh seed (the joiner keeps no
-            // recovery phrase — restoring is the founder's power)
-            let seed = molt_storage::generate_seed_phrase()
-                .map_err(|e| MoltError::Join(e.to_string()))?;
-            self.materialize_workspace(
-                &j.republic,
-                &j.member,
-                j.rule_m,
-                roster.clone(),
-                &seed,
-                Vec::new(),
-                Vec::new(),
-                String::new(), // mock join; the real SMP join carries the republic id
-                MoltError::Join,
-            )?
-        } else {
-            demo_workspace_id(&j.republic)
-        };
-        // reset only after the fallible part — a failed finish stays retryable
-        self.session.join = JoinState::default();
-        let members = roster_members(
-            &roster,
-            |m| m == j.member || (!j.inviter.is_empty() && m == j.inviter),
-            "not seen yet",
-        );
-        // a joiner holds no group recovery phrase (yet)
-        self.push_workspace_entry(
-            &id,
-            &j.republic,
-            j.rule_m,
-            usize::from(j.rule_n),
-            members,
-            String::new(),
-            "tor".to_string(),
-            false,
-        );
-        self.session.active_workspace = id;
-        // straight into the joined republic — no completion-screen stopover
-        self.session.screen = Screen::Main;
-        self.emit_session(SessionScope::Full);
-        Ok(Reply::Ack)
-    }
-
-    /// One tick of the mock join: advance the percentage and append a
-    /// phase-specific live-log line; the run flips to success at 100 %
-    /// (every non-empty invite is accepted for now).
-    fn join_tick(&mut self) {
-        let j = &mut self.session.join;
-        j.run.progress_pct = (j.run.progress_pct + 2).min(100);
-        let t = u32::from(j.run.progress_pct / 2);
-        if j.run.progress_pct >= 100 {
-            j.run.log.push(format!(
-                "✓ joined {} — {}-of-{} · workspace synced",
-                j.republic, j.rule_m, j.rule_n
-            ));
-            j.run.outcome = 1;
-            return;
-        }
-        if j.run.progress_pct < 30 {
-            if t % 2 == 0 {
-                let who = if j.inviter.is_empty() {
-                    "the inviter"
-                } else {
-                    j.inviter.as_str()
-                };
-                j.run
-                    .log
-                    .push(format!("→ smp: contacting {who} · tor circuit hop {t}"));
-            } else {
-                j.run
-                    .log
-                    .push("→ mls: KeyPackage published · awaiting welcome".to_string());
-            }
-        } else if j.run.progress_pct < 75 {
-            if t == 15 {
-                j.run.log.push(format!(
-                    "↓ mls: welcome received · epoch 0 · group {}",
-                    j.republic
-                ));
-            } else {
-                j.run
-                    .log
-                    .push(format!("↓ sync: surface batch {}/22 · sha256 ok", t - 15));
-            }
-        } else if t % 3 == 0 {
-            j.run
-                .log
-                .push(format!("→ ws: {} materialized locally", j.republic));
-        } else {
-            j.run
-                .log
-                .push(format!("→ verify: merkle node {t} ok · member proof valid"));
-        }
     }
 
     // ---- the shared self-ticker ------------------------------------------

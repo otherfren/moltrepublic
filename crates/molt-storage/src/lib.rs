@@ -1532,8 +1532,42 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use molt_core::{ChatMessage, MemberId};
+    use molt_core::{ChatMessage, MemberId, MemberIdentity};
     use std::collections::BTreeMap;
+
+    fn ids() -> Vec<MemberIdentity> {
+        vec![
+            MemberIdentity { member: "founder".into(), identity_pk: "aa".repeat(32) },
+            MemberIdentity { member: "juno".into(), identity_pk: "bb".repeat(32) },
+            MemberIdentity { member: "mira".into(), identity_pk: "cc".repeat(32) },
+        ]
+    }
+
+    #[test]
+    fn republic_id_is_order_independent_and_deterministic() {
+        let a = ids();
+        let mut rev = a.clone();
+        rev.reverse();
+        // the load-bearing property: every member computes the SAME id no
+        // matter what order its local identity table happens to be in
+        assert_eq!(
+            republic_id("Chess Club", 2, 3, &a),
+            republic_id("Chess Club", 2, 3, &rev),
+        );
+        // deterministic across calls
+        assert_eq!(republic_id("Chess Club", 2, 3, &a), republic_id("Chess Club", 2, 3, &a));
+    }
+
+    #[test]
+    fn republic_id_changes_with_name_rules_and_keys() {
+        let base = republic_id("Chess Club", 2, 3, &ids());
+        assert_ne!(base, republic_id("Chess Clubs", 2, 3, &ids()), "name matters");
+        assert_ne!(base, republic_id("Chess Club", 3, 3, &ids()), "m matters");
+        assert_ne!(base, republic_id("Chess Club", 2, 4, &ids()), "n matters");
+        let mut changed = ids();
+        changed[0].identity_pk = "dd".repeat(32);
+        assert_ne!(base, republic_id("Chess Club", 2, 3, &changed), "a key matters");
+    }
 
     fn founded(seq_ts: u64) -> EventEnvelope {
         EventEnvelope {

@@ -527,14 +527,6 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_join_finish(move || {
-            issue(&rt, &w, &weak, Command::JoinFinish);
-        });
-    }
-    {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
         ui.on_select_surface(move |key| {
             let Some(surface) = Surface::parse(&key) else {
                 return;

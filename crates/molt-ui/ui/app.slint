@@ -151,10 +151,10 @@ export component AppWindow inherits Window {
     callback create-start(string, string, int, int, string);
     callback create-cancel();
     callback create-finish();
-    // join verbs (engine-backed; the engine parses the invite and ticks)
+    // join verbs (engine-backed; the real SMP join runs off the actor and
+    // enters the republic on its own once the founder seals)
     callback join-start(string, string);
     callback join-cancel();
-    callback join-finish();
     // copy a text (seed / invite link) into the system clipboard, in Rust
     callback copy-text(string);
     // read the system clipboard (for the paste buttons), handled in Rust
@@ -1953,11 +1953,9 @@ export component AppWindow inherits Window {
                         failed-label: Strings.jw-failed;
                         log: root.jw-log;
                         back-shown: false;
-                        finish-enabled: root.jw-outcome == 1;
-                        finish-label: Strings.enter-republic;
-                        finish => {
-                            root.join-finish();
-                        }
+                        // the engine enters the republic on its own once the
+                        // founder seals — there is no finish button to press
+                        finish-enabled: false;
                         copy-log-clicked => {
                             root.copy-log("join");
                             root.show-toast(Strings.toast-copied);
