@@ -1288,6 +1288,10 @@ pub struct JoinState {
     pub rule_n: u8,
     /// Parsed inviter handle (empty if unparsed).
     pub inviter: String,
+    /// The joiner's freshly generated recovery phrase, shown once during the
+    /// join (its identity + own workspace derive from it). Empty while idle.
+    #[serde(default)]
+    pub seed: String,
 }
 
 /// The (mock) restore lifecycle. Shared session state: any operator can start
@@ -1692,6 +1696,24 @@ pub enum Command {
         /// The full `molt://invite/…` link (with the transport handover).
         link: String,
         /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A real SMP join completed: the off-actor join task verified the sealed
+    /// roster the founder distributed (engine-internal). The engine writes the
+    /// joiner's own workspace from it. Never an MCP tool.
+    NetJoinSealed {
+        /// JSON of the verified `SealedRoster`.
+        sealed: String,
+        /// Join incarnation (a cancelled/restarted join drops stale results).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A real SMP join failed (engine-internal): surfaced into the join run.
+    NetJoinFailed {
+        /// A human-readable reason.
+        error: String,
+        /// Join incarnation.
         #[serde(default)]
         generation: Option<u64>,
     },

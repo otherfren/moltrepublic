@@ -39,7 +39,8 @@ use std::path::PathBuf;
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use founding::{
-    join_founding_over_smp, run_ritual_member, FoundingInvite, InviteMaterial, RitualTransport,
+    join_founding_over_smp, ritual_join_over_smp, run_ritual_member, FoundingInvite, InviteMaterial,
+    RitualTransport,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
@@ -481,6 +482,12 @@ impl State {
             Command::JoinTick => self.cmd_join_tick(),
             Command::JoinCancel => self.cmd_join_cancel(),
             Command::JoinFinish => self.cmd_join_finish(),
+            Command::NetJoinSealed { sealed, generation } => {
+                self.cmd_net_join_sealed(sealed, generation)
+            }
+            Command::NetJoinFailed { error, generation } => {
+                self.cmd_net_join_failed(error, generation)
+            }
         }
     }
 }
@@ -1168,79 +1175,72 @@ mod tests {
     }
 
     #[test]
-    fn join_lifecycle_accepts_any_nonempty_invite() {
+    fn join_requires_a_joinable_link() {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
 
-            // a well-formed invite ticks to success and lands in the republic
-            w.execute(Command::JoinStart {
-                invite: "molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa".to_string(),
-                member: "petra".to_string(),
-            })
-            .await
-            .expect("start");
-            for _ in 0..60 {
-                if w.execute(Command::JoinTick).await.is_err() {
-                    break;
-                }
+            // empty, plain text, and a bare preview link (no transport
+            // handover) are all rejected — a real join needs a link that
+            // carries the SMP address
+            for bad in [
+                "  ",
+                "not-an-invite",
+                "molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa",
+            ] {
+                assert!(
+                    matches!(
+                        w.execute(Command::JoinStart {
+                            invite: bad.to_string(),
+                            member: "petra".to_string(),
+                        })
+                        .await,
+                        Err(MoltError::Join(_))
+                    ),
+                    "should reject `{bad}`"
+                );
             }
             match w.execute(Command::ReadSession).await.expect("read") {
-                Reply::Session(s) => {
-                    assert_eq!(s.join.run.outcome, 1);
-                    assert_eq!(s.join.republic, "Chess Club");
-                    assert!(!s.join.run.log.is_empty());
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
-            w.execute(Command::JoinFinish).await.expect("finish");
-            match w.execute(Command::ReadSession).await.expect("read2") {
-                Reply::Session(s) => {
-                    assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, demo_workspace_id("Chess Club"));
-                    let ws = s
-                        .workspaces
-                        .iter()
-                        .find(|w| w.name == "Chess Club")
-                        .expect("workspace added");
-                    assert_eq!(ws.detail, "2-of-3");
-                    assert_eq!(ws.members.len(), 3);
-                    assert_eq!(ws.members[0].name, "walter");
-                    assert_eq!(ws.members[1].name, "petra");
-                }
+                Reply::Session(s) => assert_eq!(s.join, molt_core::JoinState::default()),
                 other => panic!("unexpected: {other:?}"),
             }
 
-            // an empty invite is rejected up front …
-            assert!(matches!(
-                w.execute(Command::JoinStart {
-                    invite: "  ".to_string(),
-                    member: "petra".to_string(),
-                })
-                .await,
-                Err(MoltError::Join(_))
-            ));
-
-            // … but any non-empty invite is accepted (real validation comes
-            // with the network implementation) and joins under fallbacks
+            // a real founding link (with the transport handover) starts the
+            // join: the joiner's own recovery phrase is shown and the run is in
+            // progress (the background ritual over a bogus host will fail, but
+            // we cancel before that lands)
+            let link = crate::FoundingInvite {
+                info: molt_core::InviteInfo {
+                    republic: "Chess Club".to_string(),
+                    threshold: 2,
+                    members: 2,
+                    inviter: "walter".to_string(),
+                    ticket: "ab".repeat(32),
+                },
+                server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
+                    .to_string(),
+                queue_id: "cd".repeat(12),
+                wrap: "ef".repeat(32),
+                seat: 0,
+            }
+            .render();
             w.execute(Command::JoinStart {
-                invite: "not-an-invite".to_string(),
+                invite: link,
                 member: "petra".to_string(),
             })
             .await
-            .expect("start2");
-            for _ in 0..60 {
-                if w.execute(Command::JoinTick).await.is_err() {
-                    break;
-                }
-            }
-            match w.execute(Command::ReadSession).await.expect("read3") {
+            .expect("a joinable link starts the join");
+            match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
-                    assert_eq!(s.join.run.outcome, 1);
-                    assert_eq!(s.join.republic, "Joined Republic");
-                    assert_eq!((s.join.rule_m, s.join.rule_n), (2, 3));
+                    assert_eq!(s.screen, Screen::Join);
+                    assert_eq!(s.join.republic, "Chess Club");
+                    assert_eq!((s.join.rule_m, s.join.rule_n), (2, 2));
+                    assert!(!s.join.seed.is_empty(), "the joiner's recovery phrase is shown");
+                    assert_eq!(s.join.run.outcome, 0, "still joining");
                 }
                 other => panic!("unexpected: {other:?}"),
             }
+            // cancel stops the run and invalidates the background task's result
+            w.execute(Command::JoinCancel).await.expect("cancel");
         });
     }
 

@@ -23,8 +23,9 @@ use std::time::Duration;
 use std::path::Path;
 
 use molt_core::{
-    Command, MemberIdentity, Reply, RosterAttestation, SessionSettings, SessionView, WorkspaceEvent,
+    Command, MemberIdentity, Reply, Screen, SessionSettings, SessionView, WorkspaceEvent,
 };
+use molt_core::RosterAttestation;
 use molt_engine::{FoundingInvite, WalletHandle};
 
 const KONKIN: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io";
@@ -239,5 +240,126 @@ async fn engine_founds_over_smp_across_two_instances() {
     println!(
         "OK: two engine instances founded over real SMP — both hold the same \
          sealed roster on their own disks (a={a_id:.8}, b={b_ws_id:.8}), all attestations verify"
+    );
+}
+
+/// The joiner drives the ACTUAL engine `JoinStart` lifecycle (not the
+/// standalone helper): paste the link, and the engine runs the real SMP join
+/// off the actor, materialises the joiner's own workspace, and enters it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "engine join over the real smp.konkin.io"]
+async fn engine_join_lifecycle_over_smp_enters_the_republic() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let root_b = tmp.path().join("joiner");
+
+    // A: founder engine over SMP, publishes the real link
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            smp_server: "custom".to_string(),
+            smp_url: KONKIN.to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, _rx) =
+        molt_engine::__spawn_manual_founding_over_smp(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Join Duet".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let link = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let s = read_session(&a).await;
+            if let Some(seat0) = s.create.seats.first() {
+                if FoundingInvite::parse(&seat0.link).is_some() {
+                    break seat0.link.clone();
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline, "A never published a link");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+
+    // B: a normal storage-backed engine drives the real JoinStart — the link
+    // carries the server, so B needs no SMP config of its own
+    let session_b = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_b.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let b = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session_b);
+    b.execute(Command::JoinStart { invite: link, member: "member-b".to_string() })
+        .await
+        .expect("join start");
+
+    // the joiner's own recovery phrase is shown while it waits
+    let joining = read_session(&b).await;
+    assert_eq!(joining.screen, Screen::Join);
+    assert!(!joining.join.seed.is_empty(), "the joiner's phrase is shown");
+
+    // B's join completes → it enters the republic with its own workspace
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let b_id = loop {
+        let s = read_session(&b).await;
+        if !s.active_workspace.is_empty() {
+            assert_eq!(s.screen, Screen::Main, "joiner entered the republic");
+            break s.active_workspace.clone();
+        }
+        assert_ne!(s.join.run.outcome, 2, "join must not fail: {:?}", s.join.run.log);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the engine join did not complete: {:?}",
+            s.join.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let a_id = read_session(&a).await.active_workspace.clone();
+    assert!(!a_id.is_empty(), "A sealed its own workspace");
+
+    // both hold the same sealed roster on their own disks
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+    let a_founded = read_founded(&root_a, &a_id);
+    let b_founded = read_founded(&root_b, &b_id);
+    assert_ne!(a_id, b_id, "each member's local workspace id is its own");
+    assert!(!a_founded.republic_id.is_empty());
+    assert_eq!(a_founded.republic_id, b_founded.republic_id, "same republic id");
+    assert_eq!(a_founded.identities, b_founded.identities, "same roster");
+    assert_eq!(a_founded.attestations, b_founded.attestations, "same attestations");
+    assert_eq!(a_founded.attestations.len(), 2, "both signed");
+
+    let table = molt_core::roster_canonical_bytes(
+        &b_founded.republic_id,
+        b_founded.rule_m,
+        b_founded.rule_n,
+        &b_founded.identities,
+    );
+    for att in &b_founded.attestations {
+        let id = b_founded
+            .identities
+            .iter()
+            .find(|i| i.member == att.member)
+            .expect("attestation names a member");
+        assert!(
+            molt_storage::identity_verify(&id.identity_pk, &table, &att.sig),
+            "attestation for {} does not verify",
+            att.member
+        );
+    }
+    println!(
+        "OK: joiner drove the engine JoinStart over real SMP and entered the \
+         republic with its own workspace (b={b_id:.8})"
     );
 }

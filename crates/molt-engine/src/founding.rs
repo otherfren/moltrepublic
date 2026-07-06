@@ -570,21 +570,21 @@ fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), String> {
     Ok(())
 }
 
-/// Join a founding from its real invite link **over SMP**: parse the
-/// handover, build our *own* [`SmpTransport`] for the founder's server, run
-/// the member side, verify the sealed roster the founder distributes, and
-/// write our **own** workspace under `root` from our **own** seed (own local
-/// id + keys; the shared republic id lives in the genesis). Returns the local
-/// workspace id. The reusable entry point for a separate node — a second
-/// moltd, the GUI join flow — to join over SMP from just the shared link.
+/// Run the member side of a founding **over SMP** from its real invite link,
+/// and return the verified sealed roster: parse the handover, build our *own*
+/// [`SmpTransport`] for the founder's server, run the ritual (`cancel` ends
+/// the wait early), wait for the founder to distribute the sealed roster, and
+/// verify it. Writing the workspace is the caller's job (the engine
+/// materialises it into its state; [`join_founding_over_smp`] writes it
+/// standalone). `cancel` lets the GUI abort a join that is waiting.
 #[doc(hidden)]
-pub async fn join_founding_over_smp(
+pub async fn ritual_join_over_smp(
     link: &str,
     name: String,
     phrase: String,
-    root: &std::path::Path,
-) -> Result<molt_core::WorkspaceId, String> {
-    let inv = FoundingInvite::parse(link).ok_or("not a founding invite link")?;
+    cancel: Option<mpsc::Receiver<()>>,
+) -> Result<molt_core::SealedRoster, String> {
+    let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
     let wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
         .map_err(|e| e.to_string())?
@@ -602,14 +602,27 @@ pub async fn join_founding_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    let outcome = run_ritual_member(material, name.clone(), phrase.clone(), true, None).await?;
+    let outcome = run_ritual_member(material, name, phrase, true, cancel).await?;
     let sealed = outcome
         .sealed
         .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
     verify_sealed_roster(&sealed)?;
+    Ok(sealed)
+}
 
-    // our own workspace, from our own seed — the shared roster + republic id
-    // ride in the genesis; the local id/keys are ours alone
+/// Join a founding from its real link over SMP and write our **own** workspace
+/// under `root` from our **own** seed (own local id + keys; the shared
+/// republic id rides in the genesis). Returns the local workspace id. The
+/// standalone entry (a second moltd, tests); the GUI join uses
+/// [`ritual_join_over_smp`] and materialises into engine state instead.
+#[doc(hidden)]
+pub async fn join_founding_over_smp(
+    link: &str,
+    name: String,
+    phrase: String,
+    root: &std::path::Path,
+) -> Result<molt_core::WorkspaceId, String> {
+    let sealed = ritual_join_over_smp(link, name.clone(), phrase.clone(), None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = molt_core::EventEnvelope {
         seq: 1,

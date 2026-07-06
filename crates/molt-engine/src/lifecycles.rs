@@ -6,7 +6,7 @@
 //! and differ only in validation, log content and the finished workspace.
 
 use molt_core::{
-    demo_workspace_id, roster_members, Command, CreateState, EventEnvelope, InviteInfo, JoinState,
+    demo_workspace_id, roster_members, Command, CreateState, EventEnvelope, JoinState,
     MemberId, MemberInfo, MoltError, Reply, RestoreState, RunCore, Screen, SessionScope,
     WorkspaceEvent, WorkspaceId, WorkspaceInfo,
 };
@@ -536,29 +536,125 @@ impl State {
             return Err(MoltError::Join("the handle must not be empty".to_string()));
         }
         let invite = invite.trim().to_string();
-        if invite.is_empty() {
-            return Err(MoltError::Join("the invite must not be empty".to_string()));
-        }
-        // Any non-empty invite is accepted for now (real validation comes
-        // with the network implementation). A well-formed molt:// link
-        // contributes the republic's details; anything else joins under
-        // fallback values.
-        let info = InviteInfo::parse(&invite);
+        // a real join needs a link that carries the SMP transport handover —
+        // a bare preview link is not joinable
+        let Some(inv) = crate::founding::FoundingInvite::parse(&invite) else {
+            return Err(MoltError::Join(
+                "not a joinable invite link — it carries no transport details".to_string(),
+            ));
+        };
+        // the joiner's own recovery phrase (shown once during the join); its
+        // identity and its own workspace derive from it
+        let seed =
+            molt_storage::generate_seed_phrase().map_err(|e| MoltError::Join(e.to_string()))?;
+        self.net_generation += 1;
+        let generation = self.net_generation;
+        let mut run = RunCore::started();
+        run.log.push(
+            "→ join request sent over SMP · waiting for every member to seal the roster".to_string(),
+        );
         self.session.join = JoinState {
-            run: RunCore::started(),
-            invite,
-            member,
-            republic: info
-                .as_ref()
-                .map(|i| i.republic.clone())
-                .unwrap_or_else(|| "Joined Republic".to_string()),
-            rule_m: info.as_ref().map(|i| i.threshold).unwrap_or(2),
-            rule_n: info.as_ref().map(|i| i.members).unwrap_or(3),
-            inviter: info.as_ref().map(|i| i.inviter.clone()).unwrap_or_default(),
+            run,
+            invite: invite.clone(),
+            member: member.clone(),
+            republic: inv.info.republic.clone(),
+            rule_m: inv.info.threshold,
+            rule_n: inv.info.members,
+            inviter: inv.info.inviter.clone(),
+            seed: seed.clone(),
         };
         self.session.screen = Screen::Join;
         self.emit_session(SessionScope::Full);
-        self.spawn_ticker(Command::JoinTick);
+
+        // run the real member ritual off the actor (it waits, possibly long,
+        // for the founder to seal); the outcome returns as an internal command
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Join("engine stopped".to_string()));
+        };
+        tokio::spawn(async move {
+            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, None).await {
+                Ok(sealed) => match serde_json::to_string(&sealed) {
+                    Ok(json) => Command::NetJoinSealed {
+                        sealed: json,
+                        generation: Some(generation),
+                    },
+                    Err(e) => Command::NetJoinFailed {
+                        error: e.to_string(),
+                        generation: Some(generation),
+                    },
+                },
+                Err(e) => Command::NetJoinFailed {
+                    error: e,
+                    generation: Some(generation),
+                },
+            };
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// A real SMP join completed: verify came from the off-actor task; write
+    /// the joiner's own workspace from its own seed and enter the republic.
+    pub(crate) fn cmd_net_join_sealed(
+        &mut self,
+        sealed: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        // a cancelled/restarted join bumped the generation — drop stale results
+        if generation != Some(self.net_generation) || self.session.join.run.outcome != 0 {
+            return Ok(Reply::Ack);
+        }
+        let sealed: molt_core::SealedRoster = match serde_json::from_str(&sealed) {
+            Ok(s) => s,
+            Err(e) => return self.cmd_net_join_failed(format!("decoding sealed roster: {e}"), generation),
+        };
+        let j = self.session.join.clone();
+        let id = if self.persist {
+            self.materialize_workspace(
+                &sealed.name,
+                &j.member,
+                sealed.rule_m,
+                sealed.roster.clone(),
+                &j.seed,
+                sealed.identities.clone(),
+                sealed.attestations.clone(),
+                sealed.republic_id.clone(),
+                MoltError::Join,
+            )?
+        } else {
+            demo_workspace_id(&sealed.name)
+        };
+        let members = roster_members(&sealed.roster, |_| true, "just now");
+        self.session.join = JoinState::default();
+        self.push_workspace_entry(
+            &id,
+            &sealed.name,
+            sealed.rule_m,
+            sealed.roster.len(),
+            members,
+            String::new(),
+            "tor".to_string(),
+            self.session.settings.s3_backup,
+        );
+        self.session.active_workspace = id;
+        self.session.screen = Screen::Main;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// A real SMP join failed: surface the reason in the join run (retryable).
+    pub(crate) fn cmd_net_join_failed(
+        &mut self,
+        error: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.net_generation) || self.session.join.run.outcome != 0 {
+            return Ok(Reply::Ack);
+        }
+        self.session.join.run.outcome = 2;
+        self.session.join.run.log.push(format!("✗ join failed: {error}"));
+        self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
@@ -570,6 +666,8 @@ impl State {
     }
 
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
+        // invalidate any in-flight join task so its late result is dropped
+        self.net_generation += 1;
         self.session.join = JoinState::default();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
