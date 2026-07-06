@@ -1197,8 +1197,9 @@ export component AppWindow inherits Window {
                                                         overflow: elide;
                                                     }
                                                 }
-                                                // copy the link while the seat waits
-                                                if seat.state == 0: AppButton {
+                                                // copy the link once it is ready
+                                                // (empty until the queue is up)
+                                                if seat.state == 0 && seat.detail != "": AppButton {
                                                     height: 28px;
                                                     pad: 10px;
                                                     y: (parent.height - self.height) / 2;

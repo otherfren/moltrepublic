@@ -1188,7 +1188,15 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     }];
     for (i, s) in sv.create.seats.iter().enumerate() {
         let (member, detail) = if s.member.is_empty() {
-            (format!("Invite {}", i + 1), s.link.clone())
+            // only offer the link once it is genuinely joinable (carries the
+            // transport handover); until the queue is provisioned it is a
+            // non-joinable preview, so show nothing to copy yet
+            let detail = if molt_engine::FoundingInvite::parse(&s.link).is_some() {
+                s.link.clone()
+            } else {
+                String::new()
+            };
+            (format!("Invite {}", i + 1), detail)
         } else {
             (s.member.clone(), seat_state_label(lang, s.state))
         };
