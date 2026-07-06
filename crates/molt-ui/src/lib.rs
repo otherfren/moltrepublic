@@ -1211,6 +1211,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_republic(sv.join.republic.clone().into());
     ui.set_jw_rule(format!("{}-of-{}", sv.join.rule_m, sv.join.rule_n).into());
     ui.set_jw_inviter(sv.join.inviter.clone().into());
+    // the joiner's own recovery phrase, generated + shown once (like the
+    // founder's on the create screen)
+    ui.set_jw_seed(sv.join.seed.clone().into());
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
 }
 

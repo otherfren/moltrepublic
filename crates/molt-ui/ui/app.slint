@@ -255,6 +255,8 @@ export component AppWindow inherits Window {
     in property <string> jw-republic;
     in property <string> jw-rule;
     in property <string> jw-inviter;
+    // the joiner's own recovery phrase, generated + shown once during the join
+    in property <string> jw-seed;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
     property <string> rw-seed;
@@ -1922,30 +1924,43 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                 }
 
-                // step 2: the running join with progress bar + live log
-                // (a mock join always succeeds, so there is no back button)
-                if root.jw-step == 1: RunView {
+                // step 2: the real SMP join. The joiner's own recovery phrase
+                // is shown once (record it now), then the live log while it
+                // waits for every member to seal. On success the engine enters
+                // the republic on its own — no finish button, no fake progress.
+                if root.jw-step == 1: VerticalLayout {
                     vertical-stretch: 1;
-                    title: root.jw-republic;
-                    hint: root.jw-inviter == "" ? root.jw-rule
-                        : "\{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
-                    icon: @image-url("assets/join.svg");
-                    progress: root.jw-progress;
-                    outcome: root.jw-outcome;
-                    ph1: Strings.jw-ph1;
-                    ph2: Strings.jw-ph2;
-                    ph3: Strings.jw-ph3;
-                    failed-label: Strings.jw-failed;
-                    log: root.jw-log;
-                    back-shown: false;
-                    finish-enabled: root.jw-outcome == 1;
-                    finish-label: Strings.enter-republic;
-                    finish => {
-                        root.join-finish();
+                    spacing: 12px;
+                    if root.jw-seed != "": SeedPanel {
+                        seed: root.jw-seed;
+                        copy-requested => {
+                            root.copy-text(root.jw-seed);
+                            root.show-toast(Strings.toast-copied);
+                        }
                     }
-                    copy-log-clicked => {
-                        root.copy-log("join");
-                        root.show-toast(Strings.toast-copied);
+                    RunView {
+                        vertical-stretch: 1;
+                        title: root.jw-republic;
+                        hint: root.jw-inviter == "" ? root.jw-rule
+                            : "\{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
+                        icon: @image-url("assets/join.svg");
+                        progress: root.jw-progress;
+                        outcome: root.jw-outcome;
+                        ph1: Strings.jw-ph1;
+                        ph2: Strings.jw-ph2;
+                        ph3: Strings.jw-ph3;
+                        failed-label: Strings.jw-failed;
+                        log: root.jw-log;
+                        back-shown: false;
+                        finish-enabled: root.jw-outcome == 1;
+                        finish-label: Strings.enter-republic;
+                        finish => {
+                            root.join-finish();
+                        }
+                        copy-log-clicked => {
+                            root.copy-log("join");
+                            root.show-toast(Strings.toast-copied);
+                        }
                     }
                 }
             }
