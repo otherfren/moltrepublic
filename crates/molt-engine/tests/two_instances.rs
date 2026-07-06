@@ -82,9 +82,12 @@ async fn founding_ritual_completes_across_two_instances() {
     // side with its own freshly generated recovery phrase and identity
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, None)
+        // collect_genesis = false: this test checks the founder's genesis, not
+        // the joiner's own workspace
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, None)
             .await
             .expect("B completes the member side")
+            .pk
     });
     let b_pk = b_task.await.expect("B task");
 
@@ -122,6 +125,7 @@ async fn founding_ritual_completes_across_two_instances() {
         rule_n,
         identities,
         attestations,
+        republic_id,
         ..
     } = &log[0].body
     else {
@@ -138,8 +142,14 @@ async fn founding_ritual_completes_across_two_instances() {
         .expect("member-b anchored");
     assert_eq!(b_entry.identity_pk, b_pk, "B's own derived key is anchored");
 
+    // the roster is salted by the neutral republic id, not any local ws id
+    assert_eq!(
+        *republic_id,
+        molt_storage::republic_id("Duet", *rule_m, *rule_n, identities),
+        "the republic id is the content-derived value"
+    );
     // every attestation verifies against the anchored key over the table
-    let table = molt_core::roster_canonical_bytes(&id, *rule_m, *rule_n, identities);
+    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities);
     for att in attestations {
         let identity = identities
             .iter()

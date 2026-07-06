@@ -127,6 +127,14 @@ pub enum RitualMsg {
     },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
+    /// founder → member: the complete sealed roster (JSON of the transport's
+    /// `SealedRoster`), sent once every seat has signed, so the member writes
+    /// its own genesis. Opaque here — this layer keeps no core types.
+    Genesis {
+        /// JSON of the sealed roster (identities + all attestations + the
+        /// republic id).
+        sealed: String,
+    },
 }
 
 #[cfg(test)]

@@ -78,6 +78,7 @@ impl State {
                 roster,
                 identities,
                 attestations: _,
+                republic_id: _,
             } => {
                 self.replica = Some(ReplicaState {
                     name: name.clone(),
@@ -297,6 +298,7 @@ mod tests {
                     roster: vec!["petra".to_string(), "walter".to_string()],
                     identities: Vec::new(),
                     attestations: Vec::new(),
+                    republic_id: String::new(),
                 },
             ),
             e(2, "petra", WorkspaceEvent::Chat(msg("petra", "gm", 102))),

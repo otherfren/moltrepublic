@@ -47,6 +47,7 @@ impl State {
     /// the restorer materialize their local dir the same way the founder
     /// does). Returns the new workspace id.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn materialize_workspace(
         &mut self,
         name: &str,
@@ -56,6 +57,7 @@ impl State {
         seed_phrase: &str,
         identities: Vec<molt_core::MemberIdentity>,
         attestations: Vec<molt_core::RosterAttestation>,
+        republic_id: String,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -72,6 +74,7 @@ impl State {
                 roster,
                 identities,
                 attestations,
+                republic_id,
             },
         };
         let root = self.workspace_root();
@@ -203,6 +206,7 @@ impl State {
                 &seed,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // restore rebuilds the republic id at S4/S5
                 MoltError::Restore,
             )?
         } else {
@@ -434,16 +438,33 @@ impl State {
         // identities in ritual order: founder first, then seats
         let identities = ritual.sealed_identities();
         let roster: Vec<MemberId> = identities.iter().map(|i| i.member.clone()).collect();
-        // the founder signs the same canonical bytes; its attestation
-        // leads the list
+        // the neutral, content-derived republic id is the roster salt every
+        // member computes identically; the founder signs the same canonical
+        // bytes and its attestation leads the list
+        let republic_id = ritual.republic_id(&identities);
         let table =
-            molt_core::roster_canonical_bytes(ritual.ws_id(), c.threshold, c.members, &identities);
+            molt_core::roster_canonical_bytes(&republic_id, c.threshold, c.members, &identities);
         let founder_sig = molt_storage::identity_sign(ritual.founder_sk(), &table);
         let mut attestations = vec![molt_core::RosterAttestation {
             member: c.member.clone(),
             sig: founder_sig,
         }];
         attestations.append(&mut self.ritual_attestations.clone());
+
+        // distribute the complete sealed roster to every member so each writes
+        // its own workspace (own seed) from the same constitution
+        let sealed = molt_core::SealedRoster {
+            name: c.name.clone(),
+            republic_id: republic_id.clone(),
+            rule_m: c.threshold,
+            rule_n: c.members,
+            roster: roster.clone(),
+            identities: identities.clone(),
+            attestations: attestations.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&sealed) {
+            ritual.distribute_genesis(json);
+        }
 
         let id = if self.persist {
             let id = self.materialize_workspace(
@@ -454,6 +475,7 @@ impl State {
                 &c.seed,
                 identities.clone(),
                 attestations,
+                republic_id.clone(),
                 MoltError::Create,
             )?;
             // this republic's members are simulated (no real network yet);
@@ -581,6 +603,7 @@ impl State {
                 &seed,
                 Vec::new(),
                 Vec::new(),
+                String::new(), // mock join; the real SMP join carries the republic id
                 MoltError::Join,
             )?
         } else {

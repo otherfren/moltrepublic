@@ -882,6 +882,28 @@ pub struct RosterAttestation {
     pub sig: String,
 }
 
+/// The complete sealed roster the founder distributes to every member at the
+/// end of the ritual, so each writes its **own** `Founded` genesis (own seed,
+/// own local workspace) from the same shared constitution. The member fills
+/// in its own local `member` handle when materialising.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedRoster {
+    /// The republic's display name.
+    pub name: String,
+    /// The neutral, content-derived republic id (the roster salt).
+    pub republic_id: String,
+    /// Approval threshold (m).
+    pub rule_m: u8,
+    /// Member count (n).
+    pub rule_n: u8,
+    /// Member handles in ritual order (founder first, then invite order).
+    pub roster: Vec<MemberId>,
+    /// name → identity key, same order.
+    pub identities: Vec<MemberIdentity>,
+    /// Every member's signature over the canonical table.
+    pub attestations: Vec<RosterAttestation>,
+}
+
 /// The one canonical serialization of a roster table — what every member
 /// signs during the founding ritual's seal round and what every verifier
 /// reconstructs. Length-prefixed fields, entries in the given order (the
@@ -937,6 +959,13 @@ pub enum WorkspaceEvent {
         /// Every member's signature over the canonical table.
         #[serde(default)]
         attestations: Vec<RosterAttestation>,
+        /// The republic's neutral, content-derived id
+        /// ([`crate::roster_canonical_bytes`]' salt) the attestations were
+        /// signed over — stored so every member verifies against the same
+        /// value, independent of its own local workspace id. Empty on
+        /// pre-republic-id genesis frames.
+        #[serde(default)]
+        republic_id: String,
     },
     /// A seat filled via invite.
     MemberJoined {

@@ -88,6 +88,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
         roster,
         identities,
         attestations,
+        republic_id,
         ..
     } = &genesis.body
     else {
@@ -105,9 +106,18 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     let roster_names: Vec<&str> = roster.iter().map(String::as_str).collect();
     assert_eq!(names, roster_names);
 
+    // the roster is salted by the neutral, content-derived republic id — not
+    // the founder's (or anyone's) local workspace id
+    assert!(!republic_id.is_empty(), "the republic id is set");
+    assert_eq!(
+        *republic_id,
+        molt_storage::republic_id("Sealed Club", *rule_m, *rule_n, identities),
+        "republic id is the content-derived value"
+    );
+
     // THE guarantee: every attestation verifies against the anchored key
     // over the one canonical table
-    let table = molt_core::roster_canonical_bytes(&id, *rule_m, *rule_n, identities);
+    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities);
     for att in attestations {
         let identity = identities
             .iter()
@@ -121,7 +131,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     }
 
     // a tampered table breaks every signature (sanity: the check has teeth)
-    let bad = molt_core::roster_canonical_bytes(&id, 3, *rule_n, identities);
+    let bad = molt_core::roster_canonical_bytes(republic_id, 3, *rule_n, identities);
     assert!(!molt_storage::identity_verify(
         &identities[0].identity_pk,
         &bad,

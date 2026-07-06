@@ -20,7 +20,11 @@
 
 use std::time::Duration;
 
-use molt_core::{Command, Reply, SessionSettings, SessionView, WorkspaceEvent};
+use std::path::Path;
+
+use molt_core::{
+    Command, MemberIdentity, Reply, RosterAttestation, SessionSettings, SessionView, WorkspaceEvent,
+};
 use molt_engine::{FoundingInvite, WalletHandle};
 
 const KONKIN: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io";
@@ -30,6 +34,35 @@ async fn read_session(w: &WalletHandle) -> Box<SessionView> {
         Reply::Session(s) => s,
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// The sealed-roster fields of a workspace's on-disk genesis.
+struct FoundedView {
+    name: String,
+    rule_m: u8,
+    rule_n: u8,
+    identities: Vec<MemberIdentity>,
+    attestations: Vec<RosterAttestation>,
+    republic_id: String,
+}
+
+fn read_founded(root: &Path, id: &str) -> FoundedView {
+    let dir = molt_storage::find_workspace_dir(root, id).expect("dir");
+    let (ws, _loaded) = molt_storage::open_workspace(&dir).expect("open");
+    let log = ws.read_log_from(1).expect("genesis");
+    let WorkspaceEvent::Founded {
+        name,
+        rule_m,
+        rule_n,
+        identities,
+        attestations,
+        republic_id,
+        ..
+    } = log[0].body.clone()
+    else {
+        panic!("first event is not Founded");
+    };
+    FoundedView { name, rule_m, rule_n, identities, attestations, republic_id }
 }
 
 /// The invite link carries the transport handover *and* still shows a
@@ -123,16 +156,25 @@ async fn engine_founds_over_smp_across_two_instances() {
     // from the link's handover and joins over SMP with its own recovery phrase.
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let link_for_b = link.clone();
+    let root_b = tmp.path().join("member-b");
+    let root_b_arg = root_b.clone();
     let b_task = tokio::spawn(async move {
-        molt_engine::join_founding_over_smp(&link_for_b, "member-b".to_string(), b_phrase)
-            .await
-            .expect("B joins the founding from the link over SMP")
+        molt_engine::join_founding_over_smp(
+            &link_for_b,
+            "member-b".to_string(),
+            b_phrase,
+            &root_b_arg,
+        )
+        .await
+        .expect("B joins from the link over SMP and writes its own workspace")
     });
-    let b_pk = b_task.await.expect("B task");
+    // B's join returns only after the founder distributed the sealed roster,
+    // so by here A has finalized
+    let b_ws_id = b_task.await.expect("B task");
 
-    // --- A seals and the workspace comes into being
+    // --- A's workspace comes into being
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let id = loop {
+    let a_id = loop {
         let s = read_session(&a).await;
         if s.create.run.outcome == 1 {
             break s.active_workspace.clone();
@@ -145,39 +187,57 @@ async fn engine_founds_over_smp_across_two_instances() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-
-    let s = read_session(&a).await;
-    assert_eq!(s.create.seats[0].member, "member-b");
-    assert_eq!(s.create.seats[0].state, 2, "sealed");
     a.execute(Command::CreateFinish).await.expect("enter");
-
-    // --- A's on-disk genesis anchors B's real key with a verifying
-    // attestation — the two independent instances founded a real republic
-    // over the real SMP server
     a.execute(Command::CloseWorkspace).await.expect("close");
-    let dir = molt_storage::find_workspace_dir(&root_a, &id).expect("dir");
-    let (ws, _loaded) = molt_storage::open_workspace(&dir).expect("open");
-    let log = ws.read_log_from(1).expect("genesis");
-    let WorkspaceEvent::Founded { rule_m, rule_n, identities, attestations, .. } = &log[0].body
-    else {
-        panic!("first event is not Founded");
-    };
-    assert_eq!((*rule_m, *rule_n), (2, 2));
-    assert_eq!(identities.len(), 2, "founder + member-b");
-    assert_eq!(attestations.len(), 2, "both signed");
 
-    let b_entry = identities.iter().find(|i| i.member == "member-b").expect("member-b anchored");
-    assert_eq!(b_entry.identity_pk, b_pk, "B's own derived key is anchored");
+    // --- both instances hold the SAME sealed constitution, each on its OWN
+    // disk under its OWN seed-derived id
+    let a_founded = read_founded(&root_a, &a_id);
+    let b_founded = read_founded(&root_b, &b_ws_id);
 
-    let table = molt_core::roster_canonical_bytes(&id, *rule_m, *rule_n, identities);
-    for att in attestations {
-        let identity =
-            identities.iter().find(|i| i.member == att.member).expect("attestation names a member");
+    // distinct LOCAL ids (each from its own seed) …
+    assert_ne!(a_id, b_ws_id, "each member's local workspace id is its own");
+    // … but one shared republic + roster + attestations
+    assert!(!a_founded.republic_id.is_empty(), "the republic id is set");
+    assert_eq!(a_founded.republic_id, b_founded.republic_id, "same republic id");
+    assert_eq!(a_founded.identities, b_founded.identities, "same identity roster");
+    assert_eq!(a_founded.attestations, b_founded.attestations, "same attestations");
+    assert_eq!(a_founded.identities.len(), 2, "founder + member-b");
+    assert_eq!(a_founded.attestations.len(), 2, "both signed");
+
+    // the republic id is the neutral, content-derived value (no member's seed)
+    assert_eq!(
+        a_founded.republic_id,
+        molt_storage::republic_id(
+            &a_founded.name,
+            a_founded.rule_m,
+            a_founded.rule_n,
+            &a_founded.identities
+        ),
+        "republic id is the content-derived value"
+    );
+
+    // every attestation verifies against the republic-id table (NOT a local id)
+    let table = molt_core::roster_canonical_bytes(
+        &a_founded.republic_id,
+        a_founded.rule_m,
+        a_founded.rule_n,
+        &a_founded.identities,
+    );
+    for att in &a_founded.attestations {
+        let id = a_founded
+            .identities
+            .iter()
+            .find(|i| i.member == att.member)
+            .expect("attestation names a member");
         assert!(
-            molt_storage::identity_verify(&identity.identity_pk, &table, &att.sig),
+            molt_storage::identity_verify(&id.identity_pk, &table, &att.sig),
             "attestation for {} does not verify",
             att.member
         );
     }
-    println!("OK: two engine instances founded a republic over real SMP — genesis verifies");
+    println!(
+        "OK: two engine instances founded over real SMP — both hold the same \
+         sealed roster on their own disks (a={a_id:.8}, b={b_ws_id:.8}), all attestations verify"
+    );
 }

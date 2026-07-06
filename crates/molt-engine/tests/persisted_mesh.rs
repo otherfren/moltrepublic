@@ -53,6 +53,7 @@ fn genesis(member: &str) -> EventEnvelope {
             roster: vec!["ada".to_string(), "ben".to_string()],
             identities: Vec::new(),
             attestations: Vec::new(),
+            republic_id: String::new(),
         },
     }
 }

@@ -96,8 +96,11 @@ async fn ritual(url: &str, label: &str) {
     // its reply queue, sends the MAC-bound JoinRequest advertising it, awaits
     // the table, signs, and returns its identity pk. ----
     let member_phrase = molt_storage::generate_seed_phrase().expect("phrase");
+    // collect_genesis = false: the founder side here is hand-rolled and does
+    // not distribute a genesis, so the member stops at its seal signature
     let member_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(material, "remote-member".into(), member_phrase, None).await
+        molt_engine::run_ritual_member(material, "remote-member".into(), member_phrase, false, None)
+            .await
     });
 
     // FOUNDER: receive the JoinRequest, verify the ticket MAC, learn the
@@ -151,7 +154,8 @@ async fn ritual(url: &str, label: &str) {
     let member_pk = member_task
         .await
         .expect("member task panicked")
-        .expect("member ritual failed");
+        .expect("member ritual failed")
+        .pk;
     assert_eq!(member_pk, req.identity_pk, "member's returned pk matches its join");
 
     println!(

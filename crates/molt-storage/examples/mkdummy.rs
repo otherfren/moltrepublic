@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             roster,
             identities: Vec::new(),
             attestations: Vec::new(),
+            republic_id: String::new(),
         },
     };
     let mut ws = molt_storage::create_workspace(&root, &seed, &genesis)?;

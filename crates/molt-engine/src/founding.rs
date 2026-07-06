@@ -96,7 +96,9 @@ pub(crate) struct RitualRuntime {
     // keeps every ritual queue alive; dropping the runtime tears it down.
     // `maybe_seal` sends the canonical table over this.
     transport: RitualTransport,
-    ws_id: String,
+    /// The republic's display name — an input to the neutral
+    /// [`molt_storage::republic_id`] (the roster salt).
+    name: String,
     rule_m: u8,
     rule_n: u8,
     founder: MemberIdentity,
@@ -122,9 +124,16 @@ impl RitualRuntime {
         Some(out)
     }
 
+    /// The republic's neutral, content-derived id — the roster salt every
+    /// member computes identically once all keys are in.
+    pub(crate) fn republic_id(&self, identities: &[MemberIdentity]) -> String {
+        molt_storage::republic_id(&self.name, self.rule_m, self.rule_n, identities)
+    }
+
     /// The canonical bytes every member signs once the table is complete.
     fn canonical(&self, identities: &[MemberIdentity]) -> Vec<u8> {
-        molt_core::roster_canonical_bytes(&self.ws_id, self.rule_m, self.rule_n, identities)
+        let rid = self.republic_id(identities);
+        molt_core::roster_canonical_bytes(&rid, self.rule_m, self.rule_n, identities)
     }
 
     fn next_msg_id(&self, tag: &str) -> molt_net::MsgId {
@@ -134,15 +143,31 @@ impl RitualRuntime {
         msg_id("founder", tag, n)
     }
 
+    /// Send the complete sealed roster to every member's reply queue, so each
+    /// writes its own genesis. Fire-and-forget (a member already gone just
+    /// misses it); every seat has a reply queue by the time this is called.
+    pub(crate) fn distribute_genesis(&self, sealed_json: String) {
+        let msg = invite::RitualMsg::Genesis { sealed: sealed_json };
+        let Ok(payload) = serde_json::to_vec(&msg) else {
+            return;
+        };
+        for (idx, s) in self.seats.iter().enumerate() {
+            let (Some(addr), Some(wrap)) = (s.reply_snd.clone(), s.reply_wrap.clone()) else {
+                continue;
+            };
+            let transport = self.transport.clone();
+            let id = self.next_msg_id(&format!("genesis-{idx}"));
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                let _ = supervisor::send_framed(&transport, &addr, &wrap, id, &payload).await;
+            });
+        }
+    }
+
     /// The final identity table (founder first); only valid once every
     /// seat is sealed, which the caller has already checked.
     pub(crate) fn sealed_identities(&self) -> Vec<MemberIdentity> {
         self.full_identities().unwrap_or_else(|| vec![self.founder.clone()])
-    }
-
-    /// The workspace id this ritual derived from the founder's seed.
-    pub(crate) fn ws_id(&self) -> &str {
-        &self.ws_id
     }
 
     /// The founder's signing key (for the founder's own attestation).
@@ -281,7 +306,7 @@ impl State {
 
         self.net_ritual = Some(RitualRuntime {
             transport,
-            ws_id,
+            name: name.to_string(),
             rule_m,
             rule_n,
             founder,
@@ -357,7 +382,8 @@ fn spawn_founder_recv(
                     sig: s.sig,
                     generation: Some(generation),
                 },
-                invite::RitualMsg::Seal { .. } => continue, // founder→member only
+                // founder→member only:
+                invite::RitualMsg::Seal { .. } | invite::RitualMsg::Genesis { .. } => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
             if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
@@ -518,17 +544,46 @@ impl FoundingInvite {
     }
 }
 
+/// Verify a distributed sealed roster before trusting it: the republic id
+/// must be the neutral content-derived value, every attestation must verify
+/// against its member's anchored key over the canonical table, and every
+/// member must have signed (n identities, n attestations).
+fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), String> {
+    let rid = molt_storage::republic_id(&s.name, s.rule_m, s.rule_n, &s.identities);
+    if rid != s.republic_id {
+        return Err("republic id does not match the roster content".to_string());
+    }
+    if s.attestations.len() != s.identities.len() {
+        return Err("roster is not fully signed by every member".to_string());
+    }
+    let table = molt_core::roster_canonical_bytes(&s.republic_id, s.rule_m, s.rule_n, &s.identities);
+    for att in &s.attestations {
+        let id = s
+            .identities
+            .iter()
+            .find(|i| i.member == att.member)
+            .ok_or_else(|| format!("attestation for unknown member {}", att.member))?;
+        if !molt_storage::identity_verify(&id.identity_pk, &table, &att.sig) {
+            return Err(format!("attestation for {} does not verify", att.member));
+        }
+    }
+    Ok(())
+}
+
 /// Join a founding from its real invite link **over SMP**: parse the
-/// handover, build our *own* [`SmpTransport`] for the founder's server, and
-/// run the member side. Returns our anchored identity pk. The reusable entry
-/// point for a separate node — a second moltd, the GUI join flow — to join
-/// over SMP from just the link the founder shared off-band.
+/// handover, build our *own* [`SmpTransport`] for the founder's server, run
+/// the member side, verify the sealed roster the founder distributes, and
+/// write our **own** workspace under `root` from our **own** seed (own local
+/// id + keys; the shared republic id lives in the genesis). Returns the local
+/// workspace id. The reusable entry point for a separate node — a second
+/// moltd, the GUI join flow — to join over SMP from just the shared link.
 #[doc(hidden)]
 pub async fn join_founding_over_smp(
     link: &str,
     name: String,
     phrase: String,
-) -> Result<String, String> {
+    root: &std::path::Path,
+) -> Result<molt_core::WorkspaceId, String> {
     let inv = FoundingInvite::parse(link).ok_or("not a founding invite link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
     let wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
@@ -547,25 +602,98 @@ pub async fn join_founding_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    run_ritual_member(material, name, phrase, None).await
+    let outcome = run_ritual_member(material, name.clone(), phrase.clone(), true, None).await?;
+    let sealed = outcome
+        .sealed
+        .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
+    verify_sealed_roster(&sealed)?;
+
+    // our own workspace, from our own seed — the shared roster + republic id
+    // ride in the genesis; the local id/keys are ours alone
+    let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
+    let genesis = molt_core::EventEnvelope {
+        seq: 1,
+        ts: molt_storage::now_secs(),
+        by: name.clone(),
+        body: molt_core::WorkspaceEvent::Founded {
+            name: sealed.name,
+            rule_m: sealed.rule_m,
+            rule_n: sealed.rule_n,
+            member: name,
+            roster: sealed.roster,
+            identities: sealed.identities,
+            attestations: sealed.attestations,
+            republic_id: sealed.republic_id,
+        },
+    };
+    let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
+    Ok(opened.manifest.workspace.id.clone())
+}
+
+/// What the member side produced: its anchored identity pk, and — when it
+/// waited for it (`collect_genesis`) — the sealed roster the founder
+/// distributed at the end, from which the member writes its **own** workspace.
+#[doc(hidden)]
+pub struct JoinOutcome {
+    /// The member's identity public key (what the founder anchored).
+    pub pk: String,
+    /// The complete sealed roster, present only when `collect_genesis` was
+    /// set and the founder finished distributing it.
+    pub sealed: Option<molt_core::SealedRoster>,
+}
+
+/// Receive the next complete [`invite::RitualMsg`] on the member's reply
+/// queue (unwrap, reassemble); `cancel` ends the wait early.
+async fn next_ritual_msg(
+    rx: &mut mpsc::Receiver<Delivery>,
+    cancel: &mut Option<mpsc::Receiver<()>>,
+    wrap: &WrapKey,
+    reasm: &mut molt_net::Reassembler,
+) -> Result<invite::RitualMsg, String> {
+    loop {
+        let delivery = match cancel {
+            Some(c) => tokio::select! {
+                _ = c.recv() => return Err("ritual cancelled".to_string()),
+                d = rx.recv() => match d { Some(d) => d, None => return Err("queue closed".into()) },
+            },
+            None => match rx.recv().await {
+                Some(d) => d,
+                None => return Err("queue closed".to_string()),
+            },
+        };
+        let Ok(plain) = molt_net::wrap::unwrap_block(wrap, &delivery.block) else {
+            delivery.ack.ack();
+            continue;
+        };
+        let outcome = reasm.push(&plain);
+        delivery.ack.ack();
+        let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
+            continue;
+        };
+        if let Ok(msg) = serde_json::from_slice::<invite::RitualMsg>(&bytes) {
+            return Ok(msg);
+        }
+    }
 }
 
 /// The member side of the founding ritual, as a standalone unit both the
 /// founder's simulated members and a real second instance run: derive the
-/// identity from `phrase`, activate the invite (`JoinRequest`, MAC-bound
-/// to the ticket), await the canonical table, sign it and return the
-/// signature. Returns the member's identity public key on success.
+/// identity from `phrase`, activate the invite (`JoinRequest`, MAC-bound to
+/// the ticket), await the canonical table, sign it, and — when
+/// `collect_genesis` — wait for the founder to distribute the complete sealed
+/// roster (so the caller can write the member's own workspace). Simulated
+/// members pass `false`; a real joining node passes `true`.
 ///
-/// `cancel` (if any) ends the wait early (ritual teardown). This is the
-/// exact code path a remote member's node will run over SMP at T3 — here
-/// it runs over the founder's loopback hub.
+/// `cancel` (if any) ends the wait early (ritual teardown). This is the exact
+/// code path a remote member's node runs over SMP.
 #[doc(hidden)]
 pub async fn run_ritual_member<T: molt_net::Transport>(
     m: InviteMaterial<T>,
     name: String,
     phrase: String,
+    collect_genesis: bool,
     mut cancel: Option<mpsc::Receiver<()>>,
-) -> Result<String, String> {
+) -> Result<JoinOutcome, String> {
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     // per-workspace identity, deterministic from the member's own phrase —
     // a real, verifiable key the founder anchors on activation
@@ -608,45 +736,43 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // await the canonical table on our reply queue, sign it, send back
+    // await the canonical table on our reply queue, sign it, send it back
     let mut reasm = molt_net::Reassembler::new();
+    let table = loop {
+        if let invite::RitualMsg::Seal { table } =
+            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
+        {
+            break table;
+        }
+    };
+    let table_bytes = hex::decode(&table).map_err(|e| e.to_string())?;
+    let sig = molt_storage::identity_sign(&sk, &table_bytes);
+    let signed = invite::RitualMsg::Signed(invite::SealSigned { seat: m.seat, sig });
+    let out = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
+    supervisor::send_framed(
+        &m.transport,
+        &m.invite_snd,
+        &m.invite_wrap,
+        msg_id(&name, "founder", 2),
+        &out,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if !collect_genesis {
+        return Ok(JoinOutcome { pk, sealed: None }); // sim members stop here
+    }
+
+    // wait for the founder to distribute the complete sealed roster once every
+    // seat has signed — this is what lets us write our own workspace
     loop {
-        let delivery = match &mut cancel {
-            Some(c) => tokio::select! {
-                _ = c.recv() => return Err("ritual cancelled".to_string()),
-                d = rx.recv() => match d { Some(d) => d, None => return Err("queue closed".into()) },
-            },
-            None => match rx.recv().await {
-                Some(d) => d,
-                None => return Err("queue closed".to_string()),
-            },
-        };
-        let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
-            delivery.ack.ack();
-            continue;
-        };
-        let outcome = reasm.push(&plain);
-        delivery.ack.ack();
-        let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
-            continue;
-        };
-        let Ok(invite::RitualMsg::Seal { table }) = serde_json::from_slice(&bytes) else {
-            continue;
-        };
-        let table_bytes = hex::decode(&table).map_err(|e| e.to_string())?;
-        let sig = molt_storage::identity_sign(&sk, &table_bytes);
-        let signed = invite::RitualMsg::Signed(invite::SealSigned { seat: m.seat, sig });
-        let out = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
-        supervisor::send_framed(
-            &m.transport,
-            &m.invite_snd,
-            &m.invite_wrap,
-            msg_id(&name, "founder", 2),
-            &out,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        return Ok(pk); // the member's ritual work is done
+        if let invite::RitualMsg::Genesis { sealed } =
+            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
+        {
+            let sealed: molt_core::SealedRoster =
+                serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
+            return Ok(JoinOutcome { pk, sealed: Some(sealed) });
+        }
     }
 }
 
@@ -665,7 +791,9 @@ fn spawn_sim_member(material: InviteMaterial) -> Result<mpsc::Sender<()>, String
     let delay = 200 + 150 * (u64::from(material.seat) % 5);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-        if let Err(e) = run_ritual_member(material, name, phrase, Some(keep_rx)).await {
+        // a simulated member does not write a workspace, so it stops at its
+        // seal signature (collect_genesis = false)
+        if let Err(e) = run_ritual_member(material, name, phrase, false, Some(keep_rx)).await {
             tracing::debug!(error = %e, "simulated founding member ended");
         }
     });

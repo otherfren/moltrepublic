@@ -171,6 +171,33 @@ pub fn derive_workspace_key(seed: &[u8], id: &str) -> [u8; 32] {
     hkdf32(seed, "molt-ws-key", id.as_bytes())
 }
 
+/// The republic's shared id: a **neutral, content-derived** value every
+/// member computes identically from the sealed roster. It is the salt the
+/// roster table is signed over, and — stored in the `Founded` genesis — the
+/// anchor the attestations verify against. Unlike a [`derive_workspace_id`]
+/// it depends on **no member's seed**, so the founder is not privileged and
+/// every member's local workspace (its own seed, its own id) still verifies
+/// the same roster. `hex(SHA-256("molt-republic-id-v1\0" ‖ name ‖ 0 ‖ m ‖ n
+/// ‖ each sorted identity pk, 0-separated))`.
+pub fn republic_id(
+    name: &str,
+    rule_m: u8,
+    rule_n: u8,
+    identities: &[molt_core::MemberIdentity],
+) -> String {
+    use sha2::Digest;
+    let mut pks: Vec<&str> = identities.iter().map(|i| i.identity_pk.as_str()).collect();
+    pks.sort_unstable();
+    let mut h = Sha256::new_with_prefix(b"molt-republic-id-v1\0");
+    h.update(name.as_bytes());
+    h.update([0u8, rule_m, rule_n]);
+    for pk in pks {
+        h.update([0u8]);
+        h.update(pk.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
+
 /// The member's per-workspace **identity keypair** (transport concept
 /// §3.3): Ed25519, derived from the member's own recovery seed via the
 /// same HKDF hierarchy — per-workspace (keeps the fresh-per-group rule),
@@ -1521,6 +1548,7 @@ mod tests {
                 roster: vec!["mithra".to_string(), "anahita".to_string()],
                 identities: Vec::new(),
                 attestations: Vec::new(),
+                republic_id: String::new(),
             },
         }
     }
