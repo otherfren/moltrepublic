@@ -20,8 +20,8 @@ use molt_core::{Command, MemberId, MemberIdentity, RosterAttestation};
 use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::supervisor;
 use molt_net::{
-    invite, msg_id, Delivery, LoopbackHub, LoopbackTransport, NetError, PaddedBlock, QueuePair,
-    RcvQueue, SndQueueAddr, Transport, WrapKey,
+    invite, msg_id, Delivery, LoopbackHub, LoopbackTransport, NetError, PaddedBlock, QueueId,
+    QueuePair, RcvQueue, SndQueueAddr, Transport, WrapKey,
 };
 use molt_storage::SigningKey;
 use tokio::sync::mpsc;
@@ -233,6 +233,10 @@ impl State {
                 generation,
                 cmd_tx.clone(),
                 self.ritual_material_sink.clone(),
+                name.to_string(),
+                founder_name.to_string(),
+                rule_m,
+                rule_n,
             );
             (transport, Vec::new())
         } else {
@@ -369,12 +373,17 @@ fn spawn_founder_recv(
 /// and the full per-seat material is handed to the waiting instance once
 /// every queue is up. Manual mode only: a real founding invites real remote
 /// members, so there are no simulated joiners here.
+#[allow(clippy::too_many_arguments)]
 fn spawn_smp_provisioning(
     transport: RitualTransport,
     seat_setup: Vec<(u32, String, WrapKey)>,
     generation: u64,
     cmd_tx: mpsc::Sender<Envelope>,
     sink: Option<std::sync::mpsc::Sender<Vec<InviteMaterial>>>,
+    republic: String,
+    inviter: String,
+    rule_m: u8,
+    rule_n: u8,
 ) {
     tokio::spawn(async move {
         let mut materials = Vec::with_capacity(seat_setup.len());
@@ -394,6 +403,34 @@ fn spawn_smp_provisioning(
                 generation,
                 cmd_tx.clone(),
             );
+            // the real, joinable link: now that the queue exists, it carries
+            // the full transport handover. Report it so the founder's session
+            // (its GUI) shows a link a separate node can actually use.
+            let link = FoundingInvite {
+                info: molt_core::InviteInfo {
+                    republic: republic.clone(),
+                    threshold: rule_m,
+                    members: rule_n,
+                    inviter: inviter.clone(),
+                    ticket: ticket.clone(),
+                },
+                server: invite_q.snd.server.clone(),
+                queue_id: hex::encode(&invite_q.snd.id.0),
+                wrap: hex::encode(invite_wrap.to_bytes()),
+                seat,
+            }
+            .render();
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(Envelope {
+                    cmd: Command::NetRitualLinkReady {
+                        seat,
+                        link,
+                        generation: Some(generation),
+                    },
+                    reply,
+                })
+                .await;
             materials.push(InviteMaterial {
                 seat,
                 transport: transport.clone(),
@@ -428,6 +465,89 @@ pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
     pub invite_wrap: WrapKey,
     /// The single-use ticket.
     pub ticket: String,
+}
+
+/// A full founding-invite link: the [`molt_core::InviteInfo`] display preview
+/// plus the transport handover a *separate node* (a second moltd, the GUI
+/// join flow) needs to join a founding over SMP. Rendered as the preview link
+/// with one extra hex-wrapped segment, so `InviteInfo::parse` still reads the
+/// preview and a joining node reads the whole thing here.
+#[doc(hidden)]
+pub struct FoundingInvite {
+    /// The display preview (republic, m/n, inviter, ticket).
+    pub info: molt_core::InviteInfo,
+    /// The founder's SMP server (`smp://fingerprint@host`).
+    pub server: String,
+    /// The invite queue's send-side id (where the member sends its join), hex.
+    pub queue_id: String,
+    /// The invite queue's wrap key, hex.
+    pub wrap: String,
+    /// The seat this invite fills.
+    pub seat: u32,
+}
+
+impl FoundingInvite {
+    /// Render the full joinable link: the preview link plus one extra path
+    /// segment, `hex(server\nqueue_id\nwrap\nseat)`. Hex keeps the handover a
+    /// single URL-safe segment (the server url's `//`/`@`/`=` don't leak).
+    pub fn render(&self) -> String {
+        let payload = format!(
+            "{}\n{}\n{}\n{}",
+            self.server, self.queue_id, self.wrap, self.seat
+        );
+        format!("{}/{}", self.info.render(), hex::encode(payload))
+    }
+
+    /// Parse a full founding link; `None` if it lacks a valid handover.
+    pub fn parse(link: &str) -> Option<FoundingInvite> {
+        let info = molt_core::InviteInfo::parse(link)?;
+        let (_, blob) = link.trim().rsplit_once('/')?;
+        let payload = String::from_utf8(hex::decode(blob).ok()?).ok()?;
+        let mut fields = payload.split('\n');
+        let server = fields.next()?.to_string();
+        let queue_id = fields.next()?.to_string();
+        let wrap = fields.next()?.to_string();
+        let seat: u32 = fields.next()?.parse().ok()?;
+        Some(FoundingInvite {
+            info,
+            server,
+            queue_id,
+            wrap,
+            seat,
+        })
+    }
+}
+
+/// Join a founding from its real invite link **over SMP**: parse the
+/// handover, build our *own* [`SmpTransport`] for the founder's server, and
+/// run the member side. Returns our anchored identity pk. The reusable entry
+/// point for a separate node — a second moltd, the GUI join flow — to join
+/// over SMP from just the link the founder shared off-band.
+#[doc(hidden)]
+pub async fn join_founding_over_smp(
+    link: &str,
+    name: String,
+    phrase: String,
+) -> Result<String, String> {
+    let inv = FoundingInvite::parse(link).ok_or("not a founding invite link")?;
+    let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
+    let wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "bad wrap key length".to_string())?;
+    let queue_id = hex::decode(&inv.queue_id).map_err(|e| e.to_string())?;
+    let material = InviteMaterial {
+        seat: inv.seat,
+        // our OWN transport to the founder's server — not the founder's
+        transport: RitualTransport::Smp(SmpTransport::new(server.clone())),
+        invite_snd: SndQueueAddr {
+            server: server.render(),
+            id: QueueId::from_bytes(queue_id),
+        },
+        invite_wrap: WrapKey::from_bytes(wrap_bytes),
+        ticket: inv.info.ticket.clone(),
+    };
+    run_ritual_member(material, name, phrase, None).await
 }
 
 /// The member side of the founding ritual, as a standalone unit both the
@@ -581,6 +701,27 @@ mod ritual_ops {
     use super::*;
 
     impl State {
+        /// A founding seat's real invite link became available (its SMP
+        /// queue is now provisioned). Replace the seat's preview link with
+        /// the joinable one, so the founder's GUI shows a link a separate
+        /// node can use.
+        pub(crate) fn cmd_net_ritual_link_ready(
+            &mut self,
+            seat: u32,
+            link: String,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if !self.ritual_generation_current(generation) {
+                return Ok(molt_core::Reply::Ack);
+            }
+            let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            if let Some(view) = self.session.create.seats.get_mut(idx) {
+                view.link = link;
+            }
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
         /// A member activated their link. Verify the ticket MAC, anchor
         /// their identity, and — once every seat's key is in — send the
         /// canonical table to all members to sign. Verification failures

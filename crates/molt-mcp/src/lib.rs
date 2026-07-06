@@ -802,10 +802,11 @@ mod tests {
         // transport/ritual tasks speaking (exposing them would let an agent
         // forge network peers or ritual members); net_test_result is the
         // node's own SMP probe reporting back (net_test_server is the tool);
-        // reload_settings / config_notice are the config watcher's mirror
-        // path — an agent that wants a reload edits via save_settings
-        // (see documents/mcp-security.md)
-        const INTERNAL: [&str; 10] = [
+        // net_ritual_link_ready is the off-actor provisioning task reporting a
+        // seat's real link; reload_settings / config_notice are the config
+        // watcher's mirror path — an agent that wants a reload edits via
+        // save_settings (see documents/mcp-security.md)
+        const INTERNAL: [&str; 11] = [
             "restore_tick",
             "join_tick",
             "net_delivered",
@@ -814,6 +815,7 @@ mod tests {
             "net_join_requested",
             "net_seal_signed",
             "net_test_result",
+            "net_ritual_link_ready",
             "reload_settings",
             "config_notice",
         ];

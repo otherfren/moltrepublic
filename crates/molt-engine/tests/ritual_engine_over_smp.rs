@@ -21,8 +21,7 @@
 use std::time::Duration;
 
 use molt_core::{Command, Reply, SessionSettings, SessionView, WorkspaceEvent};
-use molt_engine::{InviteMaterial, RitualTransport, WalletHandle};
-use molt_net::smp::{SmpServer, SmpTransport};
+use molt_engine::{FoundingInvite, WalletHandle};
 
 const KONKIN: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io";
 
@@ -31,6 +30,40 @@ async fn read_session(w: &WalletHandle) -> Box<SessionView> {
         Reply::Session(s) => s,
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// The invite link carries the transport handover *and* still shows a
+/// preview — no network needed.
+#[test]
+fn founding_link_round_trips_and_stays_previewable() {
+    let inv = FoundingInvite {
+        info: molt_core::InviteInfo {
+            republic: "SMP Duet".into(),
+            threshold: 2,
+            members: 2,
+            inviter: "founder-a".into(),
+            ticket: "ab".repeat(32),
+        },
+        server: KONKIN.into(),
+        queue_id: "cd".repeat(12),
+        wrap: "ef".repeat(32),
+        seat: 0,
+    };
+    let link = inv.render();
+    // the preview still parses (the GUI shows republic / m-of-n / inviter)
+    let preview = molt_core::InviteInfo::parse(&link).expect("preview parses");
+    assert_eq!(preview.republic, "SMP Duet");
+    assert_eq!((preview.threshold, preview.members), (2, 2));
+    assert_eq!(preview.inviter, "founder-a");
+    // and the full handover round-trips
+    let back = FoundingInvite::parse(&link).expect("full link parses");
+    assert_eq!(back.server, KONKIN);
+    assert_eq!(back.queue_id, "cd".repeat(12));
+    assert_eq!(back.wrap, "ef".repeat(32));
+    assert_eq!(back.seat, 0);
+    assert_eq!(back.info.ticket, "ab".repeat(32));
+    // a bare preview link (no handover) is not a founding invite
+    assert!(FoundingInvite::parse(&inv.info.render()).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -51,7 +84,8 @@ async fn engine_founds_over_smp_across_two_instances() {
         },
         ..SessionView::default()
     };
-    let (a, material_rx) =
+    // keep the material sink alive (unused: B joins from the link instead)
+    let (a, _material_rx) =
         molt_engine::__spawn_manual_founding_over_smp(molt_core::GroupConfig::demo(), session_a);
 
     a.execute(Command::CreateStart {
@@ -65,33 +99,34 @@ async fn engine_founds_over_smp_across_two_instances() {
     .expect("create start");
 
     // A provisions its invite queue on the SMP server off the actor, then
-    // hands out the seat material — this now takes a network round-trip
-    let materials = tokio::task::spawn_blocking(move || {
-        material_rx
-            .recv_timeout(Duration::from_secs(20))
-            .expect("A provisions + hands out the invite material over SMP")
-    })
-    .await
-    .expect("join blocking");
-    assert_eq!(materials.len(), 1, "one seat for the one member");
-    let seat = materials.into_iter().next().expect("seat material");
-
-    // --- Instance B: its OWN SmpTransport and recovery phrase. It reuses
-    // only A's invite address / wrap / ticket; the transport is entirely
-    // B's own connection to the server.
-    let b_server = SmpServer::parse(KONKIN).expect("parse");
-    let b_material = InviteMaterial {
-        seat: seat.seat,
-        transport: RitualTransport::Smp(SmpTransport::new(b_server)),
-        invite_snd: seat.invite_snd.clone(),
-        invite_wrap: seat.invite_wrap.clone(),
-        ticket: seat.ticket.clone(),
+    // publishes the REAL joinable link into its session — exactly what its
+    // GUI would show. Poll for it (a network round-trip).
+    let link = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let s = read_session(&a).await;
+            if let Some(seat0) = s.create.seats.first() {
+                if FoundingInvite::parse(&seat0.link).is_some() {
+                    break seat0.link.clone();
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "A never published a real invite link"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     };
+
+    // --- Instance B: a genuinely separate node that has ONLY the link (as if
+    // it were pasted from an off-band message). It builds its own SmpTransport
+    // from the link's handover and joins over SMP with its own recovery phrase.
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let link_for_b = link.clone();
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(b_material, "member-b".to_string(), b_phrase, None)
+        molt_engine::join_founding_over_smp(&link_for_b, "member-b".to_string(), b_phrase)
             .await
-            .expect("B completes the member side over its own SMP transport")
+            .expect("B joins the founding from the link over SMP")
     });
     let b_pk = b_task.await.expect("B task");
 

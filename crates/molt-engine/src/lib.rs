@@ -38,7 +38,9 @@ use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
-pub use founding::{run_ritual_member, InviteMaterial, RitualTransport};
+pub use founding::{
+    join_founding_over_smp, run_ritual_member, FoundingInvite, InviteMaterial, RitualTransport,
+};
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
 use molt_core::{
@@ -470,6 +472,11 @@ impl State {
             } => self.cmd_net_seal_signed(seat, sig, generation),
             Command::NetTestServer { url } => self.cmd_net_test_server(url),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
+            Command::NetRitualLinkReady {
+                seat,
+                link,
+                generation,
+            } => self.cmd_net_ritual_link_ready(seat, link, generation),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinTick => self.cmd_join_tick(),
             Command::JoinCancel => self.cmd_join_cancel(),

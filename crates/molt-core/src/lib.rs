@@ -1103,9 +1103,8 @@ impl InviteInfo {
         let rule = parts.next()?;
         let inviter = parts.next()?.to_string();
         let ticket = parts.next()?.to_string();
-        if parts.next().is_some() {
-            return None;
-        }
+        // a real founding link appends a transport-handover segment after the
+        // ticket (see molt_engine::FoundingInvite); the preview ignores it
         let (m, n) = rule.split_once("of")?;
         let threshold: u8 = m.parse().ok()?;
         let members: u8 = n.parse().ok()?;
@@ -1654,6 +1653,19 @@ pub enum Command {
         /// `"ok"` or `"error: …"`; written verbatim into `settings.smp_test`.
         result: String,
     },
+    /// A founding seat's real, joinable invite link became available once its
+    /// queue was provisioned on the SMP server (engine-internal, from the
+    /// off-actor provisioning task). Carries the transport handover, so it is
+    /// never an MCP tool.
+    NetRitualLinkReady {
+        /// Which seat (0-based).
+        seat: u32,
+        /// The full `molt://invite/…` link (with the transport handover).
+        link: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
 
     // --- joining via invite (shared, co-equal) ---
     /// Begin the (mock) join run for an invite link; the engine ticks the
@@ -1960,7 +1972,14 @@ mod tests {
         };
         let link = inv.render();
         assert_eq!(link, "molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa");
-        assert_eq!(InviteInfo::parse(&link), Some(inv));
+        assert_eq!(InviteInfo::parse(&link), Some(inv.clone()));
+
+        // a real founding link appends a transport-handover segment after the
+        // ticket (molt_engine::FoundingInvite); the preview ignores it
+        assert_eq!(
+            InviteInfo::parse("molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa/deadbeef"),
+            Some(inv)
+        );
 
         for bad in [
             "",
@@ -1968,7 +1987,6 @@ mod tests {
             "smp://not-an-invite",
             "molt://invite/X/3of2/w/abcdefgh", // threshold > members
             "molt://invite/X/2of3/w/ab",       // ticket too short
-            "molt://invite/X/2of3/w/abcdefgh/x", // trailing segment
         ] {
             assert_eq!(InviteInfo::parse(bad), None, "should reject `{bad}`");
         }
