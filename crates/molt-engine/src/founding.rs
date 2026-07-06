@@ -105,10 +105,11 @@ pub(crate) struct RitualRuntime {
     founder_sk: SigningKey,
     seats: Vec<SeatRuntime>,
     generation: u64,
-    /// Simulated joiner tasks self-terminate after sealing; their
-    /// keepalive senders are held only so a cancelled ritual drops them.
+    /// Keepalives for the simulated members of the offline **test seam**
+    /// ([`crate::__spawn_sim_founding`]); dropping the runtime stops them.
+    /// Empty for a real (SMP) founding.
     _sim: Vec<mpsc::Sender<()>>,
-    /// The founder's own recv tasks live on the hub; kept alive by the hub.
+    /// The founder's own recv tasks live on the transport; kept alive by it.
     seq: std::sync::atomic::AtomicU64,
 }
 
@@ -237,12 +238,14 @@ impl State {
             });
         }
 
-        // A real founding over SMP is opt-in (manual mode + the flag set by
-        // __spawn_manual_founding_over_smp): the founder's queues live on the
-        // configured server and real remote members join over it. Everything
-        // else — the in-app demo — founds over the in-process loopback hub
-        // with simulated members.
-        let (transport, sim) = if manual && self.ritual_over_smp {
+        // A real founding runs over the configured SMP server: the in-app
+        // founding (no test sink, no sim flag) always does, and so does the
+        // manual-over-SMP dev seam. Real remote members join over it. Only the
+        // offline dev seams — loopback simulated members, or loopback manual —
+        // stay on the in-process hub.
+        let use_smp = self.ritual_over_smp || (!manual && !self.ritual_sim);
+        let mut sim = Vec::new();
+        let transport = if use_smp {
             let url = if self.session.settings.smp_server == "custom" {
                 self.session.settings.smp_url.clone()
             } else {
@@ -263,12 +266,13 @@ impl State {
                 rule_m,
                 rule_n,
             );
-            (transport, Vec::new())
+            transport
         } else {
-            // loopback: the hub creates queues synchronously right here
+            // loopback dev seams: the hub creates queues synchronously. The
+            // manual seam hands the per-seat material to the waiting
+            // instance(s); the sim seam spawns simulated members.
             let hub = LoopbackHub::calm();
             let transport = RitualTransport::Loopback(hub.transport());
-            let mut sim = Vec::with_capacity(seat_count);
             let mut materials = Vec::with_capacity(seat_count);
             for (seat_u32, ticket, invite_wrap) in &seat_setup {
                 let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
@@ -287,12 +291,10 @@ impl State {
                     invite_wrap: invite_wrap.clone(),
                     ticket: ticket.clone(),
                 };
-                if manual {
-                    materials.push(material);
-                } else {
-                    // the simulated member: its own seed → identity, real
-                    // JoinRequest + seal signature over real queues
+                if self.ritual_sim {
                     sim.push(spawn_sim_member(material)?);
+                } else {
+                    materials.push(material);
                 }
             }
             if let Some(sink) = &self.ritual_material_sink {
@@ -301,7 +303,7 @@ impl State {
             // `hub` drops here; `transport` (and its task clones) hold the
             // shared Arc, so every ritual queue stays alive until the runtime
             // is dropped
-            (transport, sim)
+            transport
         };
 
         self.net_ritual = Some(RitualRuntime {
@@ -789,9 +791,9 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     }
 }
 
-/// A simulated member: a real [`run_ritual_member`] with a canned name,
-/// its own fresh phrase, and a small human-like delay so the ritual log
-/// shows members trickling in. The keepalive channel is its stop signal —
+/// A simulated member (offline **test seam** only): a real
+/// [`run_ritual_member`] with a canned name, its own fresh phrase, and a
+/// small human-like delay. The keepalive channel is its stop signal —
 /// dropping it (ritual teardown) ends the member.
 fn spawn_sim_member(material: InviteMaterial) -> Result<mpsc::Sender<()>, String> {
     let phrase = molt_storage::generate_seed_phrase().map_err(|e| e.to_string())?;

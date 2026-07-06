@@ -331,10 +331,10 @@ impl State {
             .start_ritual(&name, &member, threshold, members, &seed)
             .map_err(MoltError::Create)?;
 
-        // normal path = the founder's node simulates the other members
-        // (no real network yet, T3); the manual/test path does not. Honesty
-        // rule: never pretend a real off-band exchange is happening.
-        let simulated = self.ritual_material_sink.is_none();
+        // the in-app founding is real over SMP — the founder shares the invite
+        // links off-band and waits for real members to join. Only the offline
+        // sim test seam simulates the other members.
+        let simulated = self.ritual_sim;
         let seats = links
             .into_iter()
             .map(|link| molt_core::RitualSeatView {

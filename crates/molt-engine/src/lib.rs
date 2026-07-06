@@ -125,8 +125,18 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false);
     (handle, rx)
+}
+
+/// Storage-backed engine whose founding runs in the offline **sim** seam:
+/// the founder's node simulates the other members over the loopback hub
+/// (fast, deterministic, no network) — for founder-side sealing tests. The
+/// product never uses this; the in-app founding is always real over SMP.
+#[doc(hidden)]
+pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true)
 }
 
 /// Like [`__spawn_manual_founding`], but the founding runs over the **real
@@ -141,7 +151,7 @@ pub fn __spawn_manual_founding_over_smp(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false);
     (handle, rx)
 }
 
@@ -169,6 +179,7 @@ pub fn spawn_with_config(
         None,
         None,
         false,
+        false,
     );
     Ok((handle, store))
 }
@@ -180,7 +191,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,12 +205,14 @@ fn spawn_actor(
     net: Option<net::NetRuntime>,
     ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
     ritual_over_smp: bool,
+    ritual_sim: bool,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
     let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
     state.ritual_material_sink = ritual_material_sink;
     state.ritual_over_smp = ritual_over_smp;
+    state.ritual_sim = ritual_sim;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -281,10 +294,15 @@ pub(crate) struct State {
     /// Only the two-instance dev test installs this.
     pub(crate) ritual_material_sink:
         Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
-    /// When set (with a material sink), a founding runs over the configured
-    /// **SMP** server instead of the loopback hub — the real-transport path.
-    /// Off by default so the in-app demo founds over loopback.
+    /// Forces the SMP transport for a founding in manual mode (the
+    /// manual-over-SMP dev seam). The in-app founding uses SMP regardless;
+    /// only the loopback dev seams leave this off.
     pub(crate) ritual_over_smp: bool,
+    /// Offline **test seam only** ([`__spawn_sim_founding`]): found over the
+    /// loopback hub with simulated members. The product never sets it — the
+    /// in-app founding is always real over SMP; this keeps the founder-side
+    /// sealing a fast, deterministic, offline test.
+    pub(crate) ritual_sim: bool,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -333,6 +351,7 @@ impl State {
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
             ritual_over_smp: false,
+            ritual_sim: false,
             net_generation: 0,
             persist,
             session,
@@ -571,7 +590,8 @@ mod tests {
                 },
                 ..SessionView::default()
             };
-            let w = spawn_with_storage(GroupConfig::demo(), session);
+            // offline sim seam, storage-backed (this test reopens from disk)
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
 
             // found a 2-of-3 republic
             w.execute(Command::CreateStart {
@@ -1090,7 +1110,10 @@ mod tests {
     #[test]
     fn create_lifecycle_founds_a_republic() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            // the offline sim seam (session-only): simulated members seal the
+            // ritual so the founder-side lifecycle can be tested without a
+            // network — the product founds over SMP instead
+            let w = __spawn_sim_founding(GroupConfig::demo(), SessionView::default(), false);
 
             // invalid configurations are rejected up front
             assert!(matches!(
