@@ -503,6 +503,22 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        ui.on_create_propose(move |name, agenda| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::CreatePropose {
+                    name: name.to_string(),
+                    agenda: agenda.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_join_start(move |invite, member| {
             issue(
                 &rt,
@@ -521,6 +537,14 @@ pub fn run_app(
         let weak = ui.as_weak();
         ui.on_join_cancel(move || {
             issue(&rt, &w, &weak, Command::JoinCancel);
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_join_confirm_charter(move || {
+            issue(&rt, &w, &weak, Command::JoinConfirmCharter);
         });
     }
     {
@@ -1202,6 +1226,10 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_cw_sealed(i32::try_from(sealed).unwrap_or(0));
     ui.set_cw_total(i32::try_from(seats.len()).unwrap_or(0));
     ui.set_cw_simulated(sv.create.simulated);
+    // the deliberation step: once every seat has joined, the founder proposes
+    // the final name + charter for the members to ratify (the agenda itself is
+    // a local editable draft in the wizard, like the name)
+    ui.set_cw_can_propose(sv.create.can_propose);
     sync_rows(&ui.get_cw_seats(), seats, |m| ui.set_cw_seats(m));
 
     // join
@@ -1214,6 +1242,11 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     // the joiner's own recovery phrase, generated + shown once (like the
     // founder's on the create screen)
     ui.set_jw_seed(sv.join.seed.clone().into());
+    // the ratification step: the founder's proposed charter, which the joiner
+    // must confirm before its signature is released and the workspace opens
+    ui.set_jw_awaiting_ratify(sv.join.awaiting_ratify);
+    ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
+    ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
 }
 
@@ -1824,6 +1857,15 @@ lexicon! {
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members over SMP arrive with T3.", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder über SMP kommen mit T3.";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
+    cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
+    cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
+    cw_charter_agenda_ph: "Agenda / charter — what this republic is for", "Agenda / Satzung — wofür diese Republik steht";
+    cw_charter_hint: "Every member has joined. Propose the final name and a charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage den endgültigen Namen und eine Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
+    cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
+    jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
+    jw_ratify_hint: "The founder proposed this name and charter. Confirm to add your signature and join; the workspace opens once every member has ratified.", "Der Gründer hat diesen Namen und diese Satzung vorgeschlagen. Bestätige, um deine Signatur beizusteuern und beizutreten; der Workspace geht auf, sobald jedes Mitglied ratifiziert hat.";
+    jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
+    jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";
     enter_republic: "Enter republic", "Republik betreten";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";

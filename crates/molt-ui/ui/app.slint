@@ -151,10 +151,16 @@ export component AppWindow inherits Window {
     callback create-start(string, string, int, int, string);
     callback create-cancel();
     callback create-finish();
+    // deliberation step: the founder proposes the final name + charter (agenda)
+    // once every member has joined; every member then ratifies it
+    callback create-propose(string, string);
     // join verbs (engine-backed; the real SMP join runs off the actor and
     // enters the republic on its own once the founder seals)
     callback join-start(string, string);
     callback join-cancel();
+    // the joiner ratifies the founder's proposed charter (releases its seal
+    // signature; the workspace opens only after this)
+    callback join-confirm-charter();
     // copy a text (seed / invite link) into the system clipboard, in Rust
     callback copy-text(string);
     // read the system clipboard (for the paste buttons), handled in Rust
@@ -211,6 +217,11 @@ export component AppWindow inherits Window {
     property <int> cw-tor-mode-index: 0;
     property <int> cw-tor-port: 9050;
     property <string> cw-name;
+    // the founder's editable charter draft, proposed once every seat is filled
+    property <string> cw-agenda;
+    // true once the founder has proposed — hides the propose form (the members
+    // are now ratifying; re-proposing a different charter would be a footgun)
+    property <bool> cw-proposed;
     property <string> cw-member;
     property <int> cw-threshold: 2;
     property <int> cw-members: 3;
@@ -232,6 +243,7 @@ export component AppWindow inherits Window {
     in property <[RitualSeat]> cw-seats;
     in property <int> cw-sealed;   // how many rows are green
     in property <int> cw-total;    // total rows (n)
+    in property <bool> cw-can-propose; // every seat joined → deliberation unlocked
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -257,6 +269,11 @@ export component AppWindow inherits Window {
     in property <string> jw-inviter;
     // the joiner's own recovery phrase, generated + shown once during the join
     in property <string> jw-seed;
+    // the ratification step: the founder's proposed charter, which the joiner
+    // must confirm before its signature is released and the workspace opens
+    in property <bool> jw-awaiting-ratify;
+    in property <string> jw-proposed-name;
+    in property <string> jw-proposed-agenda;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
     property <string> rw-seed;
@@ -497,6 +514,8 @@ export component AppWindow inherits Window {
     // Fresh founding form defaults.
     function reset-create() {
         root.cw-name = "";
+        root.cw-agenda = "";
+        root.cw-proposed = false;
         root.cw-member = "";
         root.cw-threshold = 2;
         root.cw-members = 3;
@@ -1283,9 +1302,44 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // ---- deliberation: propose the final name + charter ----
+                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: Strings.cw-charter-title;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            font-weight: 700;
+                        }
+                        AppField {
+                            text <=> root.cw-name;
+                            placeholder: Strings.cw-charter-name-ph;
+                        }
+                        AppField {
+                            text <=> root.cw-agenda;
+                            placeholder: Strings.cw-charter-agenda-ph;
+                        }
+                        Text {
+                            text: Strings.cw-charter-hint;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                    }
+
                     HorizontalLayout {
                         Rectangle {
                             horizontal-stretch: 1;
+                        }
+                        if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: AppButton {
+                            height: 38px;
+                            primary: true;
+                            label: Strings.cw-propose;
+                            enabled: root.cw-name != "";
+                            clicked => {
+                                root.cw-proposed = true;
+                                root.create-propose(root.cw-name, root.cw-agenda);
+                            }
                         }
                         AppButton {
                             height: 38px;
@@ -1937,6 +1991,60 @@ export component AppWindow inherits Window {
                         copy-requested => {
                             root.copy-text(root.jw-seed);
                             root.show-toast(Strings.toast-copied);
+                        }
+                    }
+                    // ---- ratification: confirm the founder's proposed charter
+                    if root.jw-awaiting-ratify: Rectangle {
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        background: Theme.panel;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            Text {
+                                text: Strings.jw-ratify-title;
+                                color: Theme.text;
+                                font-weight: 700;
+                                font-size: Theme.fs-body;
+                            }
+                            Text {
+                                text: root.jw-proposed-name;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                            }
+                            Text {
+                                text: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
+                                    : root.jw-proposed-agenda;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: Strings.jw-ratify-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle { horizontal-stretch: 1; }
+                                AppButton {
+                                    height: 34px;
+                                    label: Strings.nav-back;
+                                    clicked => {
+                                        root.join-cancel();
+                                    }
+                                }
+                                AppButton {
+                                    height: 34px;
+                                    primary: true;
+                                    label: Strings.jw-ratify-confirm;
+                                    clicked => {
+                                        root.join-confirm-charter();
+                                    }
+                                }
+                            }
                         }
                     }
                     RunView {
