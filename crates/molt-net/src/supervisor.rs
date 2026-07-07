@@ -176,6 +176,40 @@ pub struct PeerLink {
     pub wrap_in: WrapKey,
 }
 
+impl PeerLink {
+    /// Persist this link as a [`molt_core::MeshLink`] (hex-encoded) for
+    /// `transport.state`.
+    pub fn to_mesh(&self) -> molt_core::MeshLink {
+        molt_core::MeshLink {
+            member: self.member.clone(),
+            snd_server: self.snd.server.clone(),
+            snd_queue: hex::encode(&self.snd.id.0),
+            snd_wrap: hex::encode(self.wrap_out.to_bytes()),
+            rcv_queue: hex::encode(&self.rcv.id.0),
+            rcv_wrap: hex::encode(self.wrap_in.to_bytes()),
+        }
+    }
+
+    /// Rebuild a link from a persisted [`molt_core::MeshLink`]. `None` on any
+    /// malformed hex — a corrupt mesh entry drops that peer, never panics.
+    pub fn from_mesh(m: &molt_core::MeshLink) -> Option<PeerLink> {
+        let snd_wrap: [u8; 32] = hex::decode(&m.snd_wrap).ok()?.try_into().ok()?;
+        let rcv_wrap: [u8; 32] = hex::decode(&m.rcv_wrap).ok()?.try_into().ok()?;
+        Some(PeerLink {
+            member: m.member.clone(),
+            snd: SndQueueAddr {
+                server: m.snd_server.clone(),
+                id: crate::QueueId::from_bytes(hex::decode(&m.snd_queue).ok()?),
+            },
+            wrap_out: WrapKey::from_bytes(snd_wrap),
+            rcv: RcvQueue {
+                id: crate::QueueId::from_bytes(hex::decode(&m.rcv_queue).ok()?),
+            },
+            wrap_in: WrapKey::from_bytes(rcv_wrap),
+        })
+    }
+}
+
 /// Supervisor configuration for one node.
 #[derive(Debug, Clone)]
 pub struct NetConfig {
@@ -740,5 +774,49 @@ impl StateStore for MemStateStore {
         if let Ok(mut s) = self.state.lock() {
             *s = state;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_link_round_trips_through_a_mesh_handover() {
+        let link = PeerLink {
+            member: "bob".to_string(),
+            snd: SndQueueAddr {
+                server: "smp://fp@host".to_string(),
+                id: crate::QueueId::from_bytes(vec![1, 2, 3, 4]),
+            },
+            wrap_out: WrapKey::from_bytes([7u8; 32]),
+            rcv: crate::RcvQueue {
+                id: crate::QueueId::from_bytes(vec![9, 8, 7]),
+            },
+            wrap_in: WrapKey::from_bytes([3u8; 32]),
+        };
+        let mesh = link.to_mesh();
+        assert_eq!(mesh.member, "bob");
+        assert_eq!(mesh.snd_server, "smp://fp@host");
+        let back = PeerLink::from_mesh(&mesh).expect("round trips");
+        assert_eq!(back.member, link.member);
+        assert_eq!(back.snd.server, link.snd.server);
+        assert_eq!(back.snd.id.0, link.snd.id.0);
+        assert_eq!(back.wrap_out.to_bytes(), link.wrap_out.to_bytes());
+        assert_eq!(back.rcv.id.0, link.rcv.id.0);
+        assert_eq!(back.wrap_in.to_bytes(), link.wrap_in.to_bytes());
+    }
+
+    #[test]
+    fn a_corrupt_mesh_entry_is_dropped_not_panicked() {
+        let bad = molt_core::MeshLink {
+            member: "bob".to_string(),
+            snd_server: String::new(),
+            snd_queue: "nothex".to_string(),
+            snd_wrap: "zz".to_string(),
+            rcv_queue: String::new(),
+            rcv_wrap: String::new(),
+        };
+        assert!(PeerLink::from_mesh(&bad).is_none());
     }
 }

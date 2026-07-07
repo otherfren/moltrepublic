@@ -841,6 +841,32 @@ pub struct OutboundCursor {
     pub wire_seq: u64,
 }
 
+/// One peer's runtime **full-mesh handover** (concept §3.2/§3.3): the per-pair
+/// queues a node uses to reach and hear one peer. All fields are strings so
+/// `molt-core` keeps no transport dependency — `molt-net` parses them into a
+/// `PeerLink`. `snd_*` is the peer's inbound queue this node SENDS to; `rcv_*`
+/// is this node's own inbound queue it RECEIVES on from that peer (each party
+/// owns the queue it receives on). Persisted so a reopened workspace rebuilds
+/// its mesh without re-bootstrapping (real SMP queues live on their servers;
+/// the ephemeral loopback hub rebuilds fresh).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshLink {
+    /// The peer this link reaches.
+    pub member: MemberId,
+    /// The peer's inbound-queue server (`smp://fingerprint@host`; empty for the
+    /// loopback hub).
+    pub snd_server: String,
+    /// The peer's inbound-queue id (lowercase hex) this node sends to.
+    pub snd_queue: String,
+    /// The wrap key of the peer's inbound queue (lowercase hex).
+    pub snd_wrap: String,
+    /// This node's own inbound-queue id (lowercase hex) it receives on from the
+    /// peer.
+    pub rcv_queue: String,
+    /// The wrap key of this node's own inbound queue (lowercase hex).
+    pub rcv_wrap: String,
+}
+
 /// `transport.state` — node-local transport bookkeeping (concept §6):
 /// delivery cursors today; per-queue wrapping keys, MLS ratchets and the
 /// dedup windows join in later milestones. It must **not** live in the
@@ -866,6 +892,12 @@ pub struct TransportState {
     /// *is* forward secrecy. `None` before the ritual established a group.
     #[serde(default)]
     pub mls: Option<Vec<u8>>,
+    /// The runtime full-mesh handovers (one per peer), established after
+    /// founding by announcing per-pair queues in-band over MLS. Empty until the
+    /// mesh is bootstrapped; a reopened workspace rebuilds its supervisor from
+    /// these.
+    #[serde(default)]
+    pub mesh: Vec<MeshLink>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
