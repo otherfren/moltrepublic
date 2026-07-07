@@ -85,7 +85,7 @@ async fn founding_ritual_completes_across_two_instances() {
     let b_task = tokio::spawn(async move {
         // collect_genesis = false: this test checks the founder's genesis, not
         // the joiner's own workspace; ratify = None: sign as soon as verified
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, None, None)
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, false, None, None)
             .await
             .expect("B completes the member side")
             .pk
@@ -234,7 +234,7 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     };
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, Some(ratifier), None)
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, false, Some(ratifier), None)
             .await
             .expect("B completes the member side")
     });
@@ -356,7 +356,7 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     // return the raw Result — we expect an Err here
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, Some(ratifier), None).await
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, false, Some(ratifier), None).await
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -448,7 +448,7 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
     // the founder's Welcome and returns its own MLS snapshot
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, None, None)
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, false, None, None)
             .await
             .expect("B completes the member side")
     });
@@ -516,6 +516,143 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
         MlsIncoming::Application { from, plaintext } => {
             assert_eq!(from, "member-b", "authenticated sender");
             assert_eq!(plaintext, b"aye, seconded");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+}
+
+/// The founding ritual **bootstraps a live direct mesh** across the two
+/// instances (T2, the 2c-engine wiring). After sealing, the member
+/// (`bootstrap = true`) and the founder (`ritual_bootstrap`) exchange
+/// `MeshAnnounce`s over the founding star — the member announcing on the invite
+/// queue, the founder announcing + relaying on the reply queues — open their
+/// per-pair queues, and each assembles + persists its full-mesh handovers. This
+/// proves both post-founding sides: the two meshes MIRROR each other (each node
+/// sends to the very queue the other receives on) and the two MLS groups still
+/// interoperate *after* the announcement round advanced their ratchets — i.e.
+/// the bootstrap left the confidentiality layer in sync, ready for live chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_bootstraps_a_direct_mesh_across_two_instances() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+
+    // B runs the member side WITH the post-founding mesh bootstrap
+    // (collect_genesis = true, bootstrap = true): it joins the group, announces
+    // its per-pair queues, assembles its direct mesh, and returns it alongside
+    // its post-bootstrap MLS snapshot.
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    // once B has joined, the founder proposes the charter so the roster seals
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "hold the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    // the founder seals, then its off-actor bootstrap runs and logs the direct
+    // mesh — wait for that line (still on the founding log until CreateFinish)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let id = loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break s.active_workspace.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    assert_eq!(member_mesh.len(), 1, "one link, to the founder");
+    let m2f = &member_mesh[0];
+    assert_eq!(m2f.member, "founder-a");
+
+    // --- read the founder's persisted mesh + post-bootstrap group from disk ---
+    a.execute(Command::CreateFinish).await.expect("enter");
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root_a, &id).expect("dir");
+    let (ws, _loaded) = molt_storage::open_workspace(&dir).expect("open");
+    let ts = ws.read_transport_state();
+    assert_eq!(ts.mesh.len(), 1, "the founder persisted its direct mesh");
+    let f2m = &ts.mesh[0];
+    assert_eq!(f2m.member, "member-b");
+
+    // the two meshes MIRROR each other: each node sends to the queue the other
+    // receives on, and the wrap keys pair up the same way
+    assert_eq!(f2m.snd_queue, m2f.rcv_queue, "founder sends where member receives");
+    assert_eq!(f2m.rcv_queue, m2f.snd_queue, "founder receives where member sends");
+    assert_eq!(f2m.snd_wrap, m2f.rcv_wrap);
+    assert_eq!(f2m.rcv_wrap, m2f.snd_wrap);
+
+    // --- the post-bootstrap MLS groups still interoperate: the announcement
+    // round advanced both ratchets in lockstep, so a chat still decrypts -------
+    let a_blob = ts.mls.expect("the founder sealed its post-bootstrap group");
+    let mut a_mls = MlsMember::restore(&a_blob).expect("restore founder MLS");
+    let b_blob = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+    let mut b_mls = MlsMember::restore(&b_blob).expect("restore member MLS");
+
+    let ct = a_mls.encrypt(b"the republic stands").expect("A encrypts");
+    match b_mls.decrypt(&ct).expect("B decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "founder-a");
+            assert_eq!(plaintext, b"the republic stands");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+    let ct = b_mls.encrypt(b"and answers").expect("B encrypts");
+    match a_mls.decrypt(&ct).expect("A decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "member-b");
+            assert_eq!(plaintext, b"and answers");
         }
         other => panic!("expected an application message, got {other:?}"),
     }

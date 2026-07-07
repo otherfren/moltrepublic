@@ -832,7 +832,11 @@ mod tests {
         // task reporting back; reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
         // save_settings (see documents/mcp-security.md)
-        const INTERNAL: [&str; 15] = [
+        // net_mesh_announced is a member's post-founding mesh handover reaching
+        // the founder over the star; net_mesh_ready is the founder's off-actor
+        // bootstrap task reporting the assembled mesh — both are the node's own
+        // transport tasks speaking, not agent-forgeable.
+        const INTERNAL: [&str; 17] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -846,6 +850,8 @@ mod tests {
             "net_join_failed",
             "net_join_charter_proposed",
             "net_join_declined",
+            "net_mesh_announced",
+            "net_mesh_ready",
             "reload_settings",
             "config_notice",
         ];

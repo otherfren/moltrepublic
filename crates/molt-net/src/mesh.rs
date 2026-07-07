@@ -206,7 +206,13 @@ pub async fn bootstrap_over_mls<T: Transport>(
     });
 
     let links = bootstrap_mesh(me, peers, transport, ann_out, ann_in_rx).await;
-    enc.abort();
+    // DRAIN, don't abort, the encrypt task: `bootstrap_mesh` returns as soon as
+    // every *inbound* announcement is in, but our OWN announcement may still be
+    // sitting in `ann_out` un-encrypted. `bootstrap_mesh` has dropped `ann_out`,
+    // so the task ends by itself once it flushes that last item into `out_ct` —
+    // awaiting it guarantees our announcement reaches the wire before the caller
+    // tears down its send task (otherwise a peer waits for it forever).
+    let _ = enc.await;
     dec.abort();
     links
 }

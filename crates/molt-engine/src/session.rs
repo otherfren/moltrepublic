@@ -24,8 +24,13 @@ impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
         // leaving an in-flight founding abandons it (the session is in-memory):
         // its recv loops must not seal a workspace and hijack the session — and
-        // materialising it would even close the user's active workspace
-        if screen != Screen::Create && self.net_ritual.is_some() {
+        // materialising it would even close the user's active workspace. This
+        // also covers walking away while a post-seal mesh bootstrap is still
+        // running (net_ritual is already gone by then, so check the bootstrap
+        // too) — teardown_ritual reaps it.
+        if screen != Screen::Create
+            && (self.net_ritual.is_some() || self.founder_mesh_in.is_some())
+        {
             self.teardown_ritual();
             self.ritual_attestations.clear();
             self.session.create = molt_core::CreateState::default();
@@ -246,6 +251,13 @@ impl State {
         // are live before the first chat; persisted opens no-op — their
         // seats are real and empty until T2)
         self.teardown_net();
+        if !already_open {
+            // switching to a different workspace abandons any still-running
+            // founder mesh bootstrap for the one we're leaving (its ready would
+            // be dropped by the ws-id guard anyway; this reaps the task). A
+            // no-op reopen of the just-founded workspace keeps its bootstrap.
+            self.founder_mesh_in = None;
+        }
         self.session.active_workspace = id;
         self.ensure_demo_net();
         self.session.screen = Screen::Main;

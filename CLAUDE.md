@@ -50,10 +50,18 @@ same pattern as the tickers.
   `verify_seal_proposal`, the tests) together or signatures silently break.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
+- **Drain the outbound path, don't `abort()` it.** In the mesh/bootstrap async
+  plumbing a node finishes as soon as its *inbound* work is done, but its own
+  last outbound frame may still be in the `channel → encrypt task → send task →
+  wire` pipeline. Aborting those tasks on completion silently drops that frame
+  and the peer waits forever (an intermittent, load-dependent deadlock). Let the
+  upstream drop its sender so the task ends by itself, then `.await` it (only
+  `abort()` the inbound reader). See `bootstrap_over_mls` / `member_bootstrap` /
+  `founder_bootstrap`.
 
 ## The founding ritual is the security-critical core
 
-Read `docs/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
+Read `documents/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
 Load-bearing invariants — do not weaken them:
 
 - **Sign-what-you-see.** A member recomputes the canonical table from the

@@ -1916,6 +1916,33 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A member's post-founding **mesh announcement** reached the founder over
+    /// the founding star (engine-internal; raised by the founder's ritual recv
+    /// loop). The founder forwards the MLS ciphertext into its running mesh
+    /// bootstrap (and relays it to the other members). Never an MCP tool.
+    NetMeshAnnounced {
+        /// Which seat (0-based invite index) announced.
+        seat: u32,
+        /// Hex of the member's MLS-encrypted `molt_net::mesh::MeshAnnounce`.
+        ct: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The founder's post-founding **mesh bootstrap completed** (engine-internal;
+    /// raised by the off-actor bootstrap task). Carries the assembled direct-mesh
+    /// handovers and the founder's post-bootstrap MLS snapshot, which the actor
+    /// persists into the founded workspace's transport state. Never an MCP tool.
+    NetMeshReady {
+        /// The founder's assembled full-mesh peer handovers.
+        mesh: Vec<MeshLink>,
+        /// The founder's MLS group snapshot taken **after** the bootstrap
+        /// (its ratchet advanced through the announcements).
+        mls_snapshot: Vec<u8>,
+        /// Ritual incarnation (a superseded founding drops stale results).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Abandon the join (idle again) and return to the choice screen.
     JoinCancel,
 }

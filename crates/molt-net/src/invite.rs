@@ -144,6 +144,14 @@ pub enum RitualMsg {
         /// Which invite this answers (0-based seat index).
         seat: u32,
     },
+    /// Either direction, after sealing: a node's runtime-mesh handover
+    /// announcement, carried as **MLS ciphertext** (hex) over the founding star
+    /// (T2 mesh bootstrap). The founder relays members' announcements to the
+    /// other members; each node decrypts to the authenticated sender.
+    MeshAnnounce {
+        /// Hex of the MLS-encrypted `molt_net::mesh::MeshAnnounce`.
+        ct: String,
+    },
     /// founder → member: the complete sealed roster (JSON of the transport's
     /// `SealedRoster`), sent once every seat has signed, so the member writes
     /// its own genesis. Opaque here — this layer keeps no core types. Carries

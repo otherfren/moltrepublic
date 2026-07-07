@@ -24,6 +24,7 @@ use molt_net::{
     QueuePair, RcvQueue, SndQueueAddr, Transport, WrapKey,
 };
 use molt_storage::SigningKey;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::{Envelope, State};
@@ -220,6 +221,31 @@ impl RitualRuntime {
     pub(crate) fn founder_sk(&self) -> &SigningKey {
         &self.founder_sk
     }
+
+    /// A clone of the ritual transport — keeping it alive keeps the founding
+    /// star (and its queues) up for the post-founding mesh bootstrap.
+    pub(crate) fn transport(&self) -> RitualTransport {
+        self.transport.clone()
+    }
+
+    /// This ritual's incarnation (the bootstrap's late results are bound to it).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Each joined seat's reply queue `(seat index, send address, wrap key)` —
+    /// where the founder sends its own + relayed mesh announcements. A seat with
+    /// no reply queue (never joined) is skipped.
+    pub(crate) fn seat_replies(&self) -> Vec<(u32, SndQueueAddr, WrapKey)> {
+        self.seats
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let seat = u32::try_from(i).unwrap_or(u32::MAX);
+                Some((seat, s.reply_snd.clone()?, s.reply_wrap.clone()?))
+            })
+            .collect()
+    }
 }
 
 impl State {
@@ -374,9 +400,13 @@ impl State {
     }
 
     /// Tear the ritual down (cancel or completion): drops the hub, its
-    /// queues and the simulated members.
+    /// queues and the simulated members. Also reaps any in-flight founder mesh
+    /// bootstrap — dropping its `ct_tx` closes the task's inbound channel, which
+    /// cascades the whole bootstrap to shut down and release the founding star
+    /// (an abandoned founding must not leave a task blocked forever).
     pub(crate) fn teardown_ritual(&mut self) {
         self.net_ritual = None;
+        self.founder_mesh_in = None;
     }
 
     /// Whether a ritual command's incarnation is still current: the ritual
@@ -446,6 +476,13 @@ fn spawn_founder_recv(
                 },
                 invite::RitualMsg::Declined { .. } => Command::NetJoinDeclined {
                     seat,
+                    generation: Some(generation),
+                },
+                // a member's post-founding mesh handover — hand it to the
+                // founder's running bootstrap (the handler forwards + relays)
+                invite::RitualMsg::MeshAnnounce { ct } => Command::NetMeshAnnounced {
+                    seat,
+                    ct,
                     generation: Some(generation),
                 },
                 // founder→member only:
@@ -733,7 +770,11 @@ pub async fn ritual_join_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    let outcome = run_ritual_member(material, name.clone(), phrase, true, ratify, cancel).await?;
+    // bootstrap=false: the GUI/CLI join does not yet run the post-founding mesh
+    // bootstrap (that is the founder-engine wiring follow-up); the toolkit is
+    // exercised opt-in by the loopback test.
+    let outcome =
+        run_ritual_member(material, name.clone(), phrase, true, false, ratify, cancel).await?;
     let sealed = outcome
         .sealed
         .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
@@ -790,10 +831,15 @@ pub struct JoinOutcome {
     /// The complete sealed roster, present only when `collect_genesis` was
     /// set and the founder finished distributing it.
     pub sealed: Option<molt_core::SealedRoster>,
-    /// The member's own MLS group snapshot after processing the Welcome —
+    /// The member's own MLS group snapshot after processing the Welcome (and,
+    /// if `bootstrap` ran, advancing the ratchet through its announcements) —
     /// present only when `collect_genesis` was set and a Welcome arrived. The
     /// caller seals it into the member's `transport.state`.
     pub mls_snapshot: Option<Vec<u8>>,
+    /// The member's assembled runtime full-mesh handovers — present only when
+    /// `bootstrap` ran to completion. The caller seals them into
+    /// `transport.state.mesh` and builds the runtime supervisor.
+    pub mesh: Option<Vec<molt_core::MeshLink>>,
 }
 
 /// Receive the next complete [`invite::RitualMsg`] on the member's reply
@@ -854,12 +900,159 @@ pub struct Ratifier {
     pub confirm: mpsc::Receiver<bool>,
 }
 
+/// Run the member side of the post-founding **mesh bootstrap** over the star:
+/// carry [`molt_net::mesh::MeshAnnounce`]s as MLS ciphertext — outbound as
+/// `RitualMsg::MeshAnnounce` on the founder's invite queue, inbound on our reply
+/// queue — and return the assembled full-mesh handovers. Consumes `rx`/`reasm`
+/// (the reply-queue reader after the genesis message).
+#[allow(clippy::too_many_arguments)]
+async fn member_bootstrap<T: molt_net::Transport>(
+    name: &str,
+    peers: Vec<MemberId>,
+    transport: &T,
+    invite_snd: SndQueueAddr,
+    invite_wrap: WrapKey,
+    reply_wrap: WrapKey,
+    mut rx: mpsc::Receiver<Delivery>,
+    mut reasm: molt_net::Reassembler,
+    early: Vec<Vec<u8>>,
+    mls: Arc<Mutex<molt_net::MlsMember>>,
+) -> Result<Vec<molt_core::MeshLink>, String> {
+    let cap = peers.len() + 1 + early.len();
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(cap);
+    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(cap);
+    // any announcement that arrived before the genesis was processed goes in
+    // first, ahead of the live reply-queue reader
+    for ct in early {
+        let _ = in_tx.send(ct).await;
+    }
+    // outbound: MLS ciphertext → RitualMsg::MeshAnnounce on the invite queue
+    let t2 = transport.clone();
+    let nm = name.to_string();
+    let send_task = tokio::spawn(async move {
+        let mut n = 1000u64;
+        while let Some(ct) = out_rx.recv().await {
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            if let Ok(p) = serde_json::to_vec(&msg) {
+                let _ = supervisor::send_framed(&t2, &invite_snd, &invite_wrap, msg_id(&nm, "mesh", n), &p).await;
+                n += 1;
+            }
+        }
+    });
+    // inbound: read the reply queue for MeshAnnounce → the bootstrap's in channel
+    let recv_task = tokio::spawn(async move {
+        let mut never: Option<mpsc::Receiver<()>> = None;
+        loop {
+            match next_ritual_msg(&mut rx, &mut never, &reply_wrap, &mut reasm).await {
+                Ok(invite::RitualMsg::MeshAnnounce { ct }) => {
+                    if let Ok(bytes) = hex::decode(&ct) {
+                        if in_tx.send(bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+    let links = molt_net::mesh::bootstrap_over_mls(name, &peers, transport, mls, out_tx, in_rx).await;
+    // await (don't abort) the send task: bootstrap_over_mls has flushed our
+    // announcement into `out_ct` and dropped its sender, so the send task drains
+    // that last frame onto the invite queue and then ends — awaiting it ensures
+    // the founder actually receives our handover before we return
+    let _ = send_task.await;
+    recv_task.abort();
+    links.map(|ls| ls.iter().map(molt_net::PeerLink::to_mesh).collect())
+}
+
+/// Run the **founder** side of the post-founding mesh bootstrap over the star.
+/// The founder participates like any node (opens per-pair queues, announces its
+/// own, collects the members') AND is the star's temporary **relay**: each
+/// member's ciphertext arrives on `ct_in` as `(seat, hex)` (routed there by the
+/// founder's recv loop) — the founder forwards it into its own bootstrap and
+/// re-sends the *same* MLS ciphertext to every **other** member's reply queue,
+/// so members learn each other's queues before any direct link exists (any
+/// group member can decrypt it; the sender stays MLS-authenticated end to end).
+/// `seat_replies` is each joined seat's reply queue. Returns the founder's
+/// assembled full-mesh handovers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn founder_bootstrap(
+    founder_name: String,
+    peers: Vec<MemberId>,
+    transport: RitualTransport,
+    seat_replies: Vec<(u32, SndQueueAddr, WrapKey)>,
+    mls: Arc<Mutex<molt_net::MlsMember>>,
+    mut ct_in: mpsc::UnboundedReceiver<(u32, String)>,
+) -> Result<Vec<molt_core::MeshLink>, String> {
+    let cap = peers.len() + 1;
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(cap);
+    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(cap);
+
+    // outbound: the founder's own encrypted announcement → every member's reply queue
+    let replies = seat_replies.clone();
+    let t_out = transport.clone();
+    let send_task = tokio::spawn(async move {
+        let mut n = 5000u64;
+        while let Some(ct) = out_rx.recv().await {
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            let Ok(payload) = serde_json::to_vec(&msg) else {
+                continue;
+            };
+            for (seat, addr, wrap) in &replies {
+                let id = msg_id("founder", "mesh", n + u64::from(*seat));
+                let _ = supervisor::send_framed(&t_out, addr, wrap, id, &payload).await;
+            }
+            n += 1000;
+        }
+    });
+
+    // inbound + relay: a member's ciphertext feeds the founder's own bootstrap
+    // AND is relayed verbatim to every other member's reply queue
+    let replies2 = seat_replies.clone();
+    let t_relay = transport.clone();
+    let relay_task = tokio::spawn(async move {
+        let mut n = 90_000u64;
+        while let Some((seat, hexct)) = ct_in.recv().await {
+            let Ok(bytes) = hex::decode(&hexct) else {
+                continue;
+            };
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hexct };
+            if let Ok(payload) = serde_json::to_vec(&msg) {
+                for (s, addr, wrap) in &replies2 {
+                    if *s == seat {
+                        continue; // don't echo back to the announcer
+                    }
+                    let id = msg_id("founder", "relay", n);
+                    let _ = supervisor::send_framed(&t_relay, addr, wrap, id, &payload).await;
+                    n += 1;
+                }
+            }
+            if in_tx.send(bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let links =
+        molt_net::mesh::bootstrap_over_mls(&founder_name, &peers, &transport, mls, out_tx, in_rx)
+            .await;
+    // await (don't abort) the send task so the founder's own announcement is
+    // fully delivered to every member's reply queue before we return; the task
+    // ends on its own once bootstrap_over_mls drops the outbound sender
+    let _ = send_task.await;
+    relay_task.abort();
+    links.map(|ls| ls.iter().map(molt_net::PeerLink::to_mesh).collect())
+}
+
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ritual_member<T: molt_net::Transport>(
     m: InviteMaterial<T>,
     name: String,
     phrase: String,
     collect_genesis: bool,
+    bootstrap: bool,
     ratify: Option<Ratifier>,
     mut cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
@@ -974,32 +1167,77 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
             pk,
             sealed: None,
             mls_snapshot: None,
+            mesh: None,
         });
     }
 
     // wait for the founder to distribute the complete sealed roster + the MLS
     // Welcome once every seat has signed — this is what lets us write our own
-    // workspace and enter the group
+    // workspace and enter the group. A `MeshAnnounce` that races ahead of the
+    // genesis (the founder starts its bootstrap right after distributing) is
+    // *buffered* here, not dropped, so the member's own bootstrap still sees it.
+    let mut early_mesh: Vec<Vec<u8>> = Vec::new();
     loop {
-        if let invite::RitualMsg::Genesis { sealed, welcome } =
-            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
-        {
-            let sealed: molt_core::SealedRoster =
-                serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
-            // process the Welcome and snapshot our own group state; a founding
-            // without a Welcome (pre-MLS peer) leaves us with no snapshot
-            let mls_snapshot = if welcome.is_empty() {
-                None
-            } else {
+        match next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await? {
+            invite::RitualMsg::MeshAnnounce { ct } => {
+                if let Ok(b) = hex::decode(&ct) {
+                    early_mesh.push(b);
+                }
+            }
+            invite::RitualMsg::Genesis { sealed, welcome } => {
+                let sealed: molt_core::SealedRoster =
+                    serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
+                // a founding without a Welcome (pre-MLS peer) leaves us groupless
+                if welcome.is_empty() {
+                    return Ok(JoinOutcome {
+                        pk,
+                        sealed: Some(sealed),
+                        mls_snapshot: None,
+                        mesh: None,
+                    });
+                }
                 let bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
                 mls.join_from_welcome(&bytes).map_err(|e| e.to_string())?;
-                Some(mls.snapshot().map_err(|e| e.to_string())?)
-            };
-            return Ok(JoinOutcome {
-                pk,
-                sealed: Some(sealed),
-                mls_snapshot,
-            });
+                // opt-in: bootstrap the runtime mesh over the star, then snapshot
+                // the group AFTER (its ratchet advanced through the announcements)
+                if bootstrap {
+                    let peers: Vec<MemberId> =
+                        sealed.roster.iter().filter(|r| **r != name).cloned().collect();
+                    let mls_arc = Arc::new(Mutex::new(mls));
+                    let mesh = member_bootstrap(
+                        &name,
+                        peers,
+                        &m.transport,
+                        m.invite_snd.clone(),
+                        m.invite_wrap.clone(),
+                        reply_wrap.clone(),
+                        rx,
+                        reasm,
+                        early_mesh,
+                        mls_arc.clone(),
+                    )
+                    .await?;
+                    let snap = mls_arc
+                        .lock()
+                        .map_err(|_| "mls lock poisoned".to_string())?
+                        .snapshot()
+                        .map_err(|e| e.to_string())?;
+                    return Ok(JoinOutcome {
+                        pk,
+                        sealed: Some(sealed),
+                        mls_snapshot: Some(snap),
+                        mesh: Some(mesh),
+                    });
+                }
+                let snap = mls.snapshot().map_err(|e| e.to_string())?;
+                return Ok(JoinOutcome {
+                    pk,
+                    sealed: Some(sealed),
+                    mls_snapshot: Some(snap),
+                    mesh: None,
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -1022,7 +1260,9 @@ fn spawn_sim_member(material: InviteMaterial) -> Result<mpsc::Sender<()>, String
         // a simulated member does not write a workspace, so it stops at its
         // seal signature (collect_genesis = false) and ratifies automatically
         // (ratify = None) — the sim seam has no human to confirm
-        if let Err(e) = run_ritual_member(material, name, phrase, false, None, Some(keep_rx)).await {
+        if let Err(e) =
+            run_ritual_member(material, name, phrase, false, false, None, Some(keep_rx)).await
+        {
             tracing::debug!(error = %e, "simulated founding member ended");
         }
     });
@@ -1100,6 +1340,130 @@ mod ritual_ops {
                 .push(format!("✗ founding failed: {error}"));
             self.teardown_ritual();
             self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// Spawn the founder's post-founding **mesh bootstrap** off the actor:
+        /// keep the star's transport alive, exchange mesh announcements with the
+        /// members (relaying between them), and report the assembled mesh + the
+        /// post-bootstrap group back as [`Command::NetMeshReady`] for the actor
+        /// to persist. Members' ciphertext is routed in via `founder_mesh_in`.
+        pub(crate) fn spawn_founder_bootstrap(
+            &mut self,
+            ritual: &RitualRuntime,
+            mls: molt_net::MlsMember,
+            founder_name: String,
+            peers: Vec<MemberId>,
+        ) {
+            let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+                return;
+            };
+            // the just-materialized founded workspace the mesh will persist into
+            let Some(ws_id) = self.active.as_ref().map(|a| a.id.clone()) else {
+                return;
+            };
+            let generation = ritual.generation();
+            let transport = ritual.transport();
+            let seat_replies = ritual.seat_replies();
+            let (ct_tx, ct_rx) = mpsc::unbounded_channel::<(u32, String)>();
+            // members' NetMeshAnnounced ciphertext flows into this bootstrap
+            self.founder_mesh_in = Some((generation, ws_id, ct_tx));
+            let mls_arc = Arc::new(Mutex::new(mls));
+            tokio::spawn(async move {
+                match founder_bootstrap(
+                    founder_name,
+                    peers,
+                    transport,
+                    seat_replies,
+                    mls_arc.clone(),
+                    ct_rx,
+                )
+                .await
+                {
+                    Ok(mesh) => {
+                        // snapshot AFTER the announcements advanced the ratchet,
+                        // so a reopened supervisor is in sync with the members
+                        let snap = mls_arc.lock().ok().and_then(|m| m.snapshot().ok());
+                        let Some(mls_snapshot) = snap else {
+                            tracing::warn!("founder bootstrap: post-bootstrap snapshot failed");
+                            return;
+                        };
+                        let cmd = Command::NetMeshReady {
+                            mesh,
+                            mls_snapshot,
+                            generation: Some(generation),
+                        };
+                        let (reply, _rx) = tokio::sync::oneshot::channel();
+                        let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "founder mesh bootstrap failed"),
+                }
+            });
+        }
+
+        /// A member's post-founding mesh handover reached the founder over the
+        /// star. Forward the MLS ciphertext into the running bootstrap (which
+        /// relays it to the other members and assembles the founder's own mesh).
+        /// Dropped when no bootstrap is running or the incarnation is stale.
+        pub(crate) fn cmd_net_mesh_announced(
+            &mut self,
+            seat: u32,
+            ct: String,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if let Some((gen, _id, tx)) = &self.founder_mesh_in {
+                if generation.is_none() || generation == Some(*gen) {
+                    let _ = tx.send((seat, ct));
+                }
+            }
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// The founder's mesh bootstrap finished: persist the assembled direct
+        /// mesh + the post-bootstrap group into the founded workspace's transport
+        /// state, over the pre-bootstrap snapshot. Dropped if the workspace is no
+        /// longer the one we bootstrapped (a later context switch).
+        pub(crate) fn cmd_net_mesh_ready(
+            &mut self,
+            mesh: Vec<molt_core::MeshLink>,
+            mls_snapshot: Vec<u8>,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            // persist only when this is still the same bootstrap AND its founded
+            // workspace is still the active one — so a late bootstrap that
+            // finished after a context switch can never clobber another workspace
+            let same_ctx = match (&self.founder_mesh_in, &self.active) {
+                (Some((g, id, _)), Some(active)) => {
+                    Some(*g) == generation && *id == active.id
+                }
+                _ => false,
+            };
+            if !same_ctx {
+                return Ok(molt_core::Reply::Ack);
+            }
+            self.founder_mesh_in = None;
+            let peers = mesh.len();
+            if let Some(active) = &self.active {
+                // a full overwrite is safe here: this is the just-founded
+                // workspace and no runtime traffic has run yet, so the outbound/
+                // inbound cursors are still empty (nothing to preserve)
+                let ts = molt_core::TransportState {
+                    mls: Some(mls_snapshot),
+                    mesh,
+                    ..Default::default()
+                };
+                active.handle.save_transport_state(ts);
+            }
+            // surface it on the founding log (still present until CreateFinish) —
+            // the direct mesh is up, the star can be let go
+            if self.session.create.run.outcome == 1 {
+                self.session
+                    .create
+                    .run
+                    .log
+                    .push(format!("✓ direct mesh established · {peers} peer(s)"));
+                self.emit_session(molt_core::SessionScope::Create);
+            }
             Ok(molt_core::Reply::Ack)
         }
 

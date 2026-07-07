@@ -125,7 +125,23 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false);
+    (handle, rx)
+}
+
+/// Like [`__spawn_manual_founding`], but the founder also runs the post-founding
+/// **mesh bootstrap** ([`State::ritual_bootstrap`]) after sealing: it exchanges
+/// mesh announcements with the joined member(s) over the loopback star and
+/// persists the assembled direct mesh + post-bootstrap MLS into its workspace.
+/// The seam the two-instance bootstrap test uses to exercise the founder side.
+#[doc(hidden)]
+pub fn __spawn_manual_founding_bootstrap(
+    config: GroupConfig,
+    session: SessionView,
+) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true);
     (handle, rx)
 }
 
@@ -136,7 +152,7 @@ pub fn __spawn_manual_founding(
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false)
 }
 
 /// Like [`__spawn_manual_founding`], but the founding runs over the **real
@@ -151,7 +167,7 @@ pub fn __spawn_manual_founding_over_smp(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false);
     (handle, rx)
 }
 
@@ -180,6 +196,7 @@ pub fn spawn_with_config(
         None,
         false,
         false,
+        false,
     );
     Ok((handle, store))
 }
@@ -191,7 +208,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,6 +223,7 @@ fn spawn_actor(
     ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
     ritual_over_smp: bool,
     ritual_sim: bool,
+    ritual_bootstrap: bool,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
@@ -213,6 +231,7 @@ fn spawn_actor(
     state.ritual_material_sink = ritual_material_sink;
     state.ritual_over_smp = ritual_over_smp;
     state.ritual_sim = ritual_sim;
+    state.ritual_bootstrap = ritual_bootstrap;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -245,6 +264,11 @@ pub(crate) struct ReplicaState {
     /// (empty on pre-deliberation workspaces).
     pub(crate) agenda: String,
 }
+
+/// An in-flight founder mesh bootstrap: its ritual generation, the founded
+/// workspace id the assembled mesh persists into, and the channel carrying
+/// members' announcement ciphertext into the off-actor bootstrap task.
+type FounderMeshIn = (u64, molt_core::WorkspaceId, mpsc::UnboundedSender<(u32, String)>);
 
 /// The storage side of the open workspace: its id, directory, the engine's
 /// authoritative copy of the local prefs (the writer applies updates in
@@ -306,6 +330,19 @@ pub(crate) struct State {
     /// in-app founding is always real over SMP; this keeps the founder-side
     /// sealing a fast, deterministic, offline test.
     pub(crate) ritual_sim: bool,
+    /// Opt-in: after sealing, the founder runs the post-founding **mesh
+    /// bootstrap** over the star (exchanges [`molt_net::mesh::MeshAnnounce`]s
+    /// with the members, assembles the direct mesh, persists it). Off by
+    /// default so the existing seal-only paths are byte-for-byte unchanged; the
+    /// two-instance loopback test turns it on.
+    pub(crate) ritual_bootstrap: bool,
+    /// While a founder bootstrap is in flight: its ritual `generation`, the
+    /// **founded workspace id** it will persist the mesh into, and the channel
+    /// feeding members' [`Command::NetMeshAnnounced`] ciphertext into the
+    /// off-actor bootstrap task. The id binds the eventual persist to the exact
+    /// workspace, so a late bootstrap can never overwrite a workspace the
+    /// operator has since switched to. `None` outside a bootstrap.
+    pub(crate) founder_mesh_in: Option<FounderMeshIn>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -364,6 +401,8 @@ impl State {
             ritual_material_sink: None,
             ritual_over_smp: false,
             ritual_sim: false,
+            ritual_bootstrap: false,
+            founder_mesh_in: None,
             net_generation: 0,
             join_generation: 0,
             join_confirm: None,
@@ -544,6 +583,16 @@ impl State {
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }
+            Command::NetMeshAnnounced {
+                seat,
+                ct,
+                generation,
+            } => self.cmd_net_mesh_announced(seat, ct, generation),
+            Command::NetMeshReady {
+                mesh,
+                mls_snapshot,
+                generation,
+            } => self.cmd_net_mesh_ready(mesh, mls_snapshot, generation),
         }
     }
 }

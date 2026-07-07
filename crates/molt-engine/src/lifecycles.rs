@@ -500,11 +500,17 @@ impl State {
         } else {
             None
         };
-        // the founder's own group snapshot, sealed into its workspace atomically
-        // with the genesis (see materialize_workspace)
-        let founder_mls_blob = founder_mls
+        // split the founder's live group from the Welcome: the group is
+        // snapshotted (sealed into its workspace atomically with the genesis, see
+        // materialize_workspace) and — when the mesh bootstrap is on — kept alive
+        // to drive the post-founding announcement exchange before its final save
+        let (founder_mls_member, welcome) = match founder_mls {
+            Some((mls, welcome)) => (Some(mls), welcome),
+            None => (None, String::new()),
+        };
+        let founder_mls_blob = founder_mls_member
             .as_ref()
-            .map(|(mls, _)| mls.snapshot())
+            .map(|mls| mls.snapshot())
             .transpose()
             .map_err(|e| MoltError::Create(e.to_string()))?;
 
@@ -535,9 +541,18 @@ impl State {
         // only now distribute the sealed roster + the MLS Welcome to every
         // member so each writes its own workspace (own seed) and enters the
         // group from the same constitution
-        let welcome = founder_mls.map(|(_, w)| w).unwrap_or_default();
         if let Ok(json) = serde_json::to_string(&sealed) {
             ritual.distribute_genesis(json, welcome);
+        }
+
+        // opt-in: keep the founding star alive and run the founder's post-founding
+        // mesh bootstrap; on completion it persists the assembled direct mesh +
+        // the post-bootstrap group over the snapshot just written (NetMeshReady).
+        if self.persist && self.ritual_bootstrap {
+            if let Some(mls) = founder_mls_member {
+                let peers: Vec<MemberId> = roster.iter().skip(1).cloned().collect();
+                self.spawn_founder_bootstrap(&ritual, mls, c.member.clone(), peers);
+            }
         }
 
         let s3 = self.session.settings.s3_backup;
