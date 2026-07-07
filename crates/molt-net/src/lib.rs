@@ -36,6 +36,7 @@ pub mod block;
 pub mod chunk;
 pub mod invite;
 pub mod loopback;
+pub mod mesh;
 pub mod mls;
 pub mod smp;
 pub mod supervisor;
