@@ -113,7 +113,8 @@ export component SurfaceRow inherits Rectangle {
         border-width: Theme.win95 ? 1px : 0px;
         border-color: Theme.line;
         Image {
-            source: root.s.key == "organization" ? @image-url("assets/republic.svg")
+            source: root.s.key == "constitution" ? @image-url("assets/constitution.svg")
+                : root.s.key == "organization" ? @image-url("assets/republic.svg")
                 : root.s.key == "chat" ? @image-url("assets/chat.svg")
                 : root.s.key == "memory" ? @image-url("assets/memory.svg")
                 : root.s.key == "quests" ? @image-url("assets/board.svg")

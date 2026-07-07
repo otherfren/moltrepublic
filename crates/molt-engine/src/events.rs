@@ -80,8 +80,8 @@ impl State {
                 attestations: _,
                 republic_id: _,
                 // the ratified charter lives in the genesis frame (immutable);
-                // surfacing it in the running workspace UI is a follow-up
-                agenda: _,
+                // the ratified charter, surfaced by the Constitution surface
+                agenda,
             } => {
                 self.replica = Some(ReplicaState {
                     name: name.clone(),
@@ -89,6 +89,7 @@ impl State {
                     roster: roster.clone(),
                     rule_m: *rule_m,
                     identities: identities.clone(),
+                    agenda: agenda.clone(),
                 });
             }
             WorkspaceEvent::MemberJoined { member } => {
@@ -201,6 +202,7 @@ impl State {
             rule_m: replica.rule_m,
             roster: replica.roster,
             identities: replica.identities,
+            agenda: replica.agenda,
             chat: self.chat.clone(),
             applied: self
                 .applied
@@ -235,6 +237,7 @@ impl State {
             roster: dump.roster,
             rule_m: dump.rule_m,
             identities: dump.identities,
+            agenda: dump.agenda,
         });
         self.chat = dump.chat;
         self.applied.clear();

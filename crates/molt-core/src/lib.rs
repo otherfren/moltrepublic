@@ -30,12 +30,15 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
-/// The shared surfaces. [`Surface::Organization`] is a read-only info area
-/// and [`Surface::Chat`] is ungated; the other four change the shared state
-/// only through a threshold-approved proposal.
+/// The shared surfaces. [`Surface::Constitution`] and [`Surface::Organization`]
+/// are read-only info areas and [`Surface::Chat`] is ungated; the other four
+/// change the shared state only through a threshold-approved proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
+    /// The founding constitution: the ratified DAO name + charter and the sealed
+    /// roster — immutable, from the genesis. Read-only.
+    Constitution,
     /// Who this republic is: status, roster, statistics. Read-only.
     Organization,
     /// Free conversation. Ungated: a message changes no shared state.
@@ -52,7 +55,8 @@ pub enum Surface {
 
 impl Surface {
     /// Every surface, in display (= navigation) order.
-    pub const ALL: [Surface; 6] = [
+    pub const ALL: [Surface; 7] = [
+        Surface::Constitution,
         Surface::Organization,
         Surface::Chat,
         Surface::Memory,
@@ -64,6 +68,7 @@ impl Surface {
     /// Lowercase wire/display name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Surface::Constitution => "constitution",
             Surface::Organization => "organization",
             Surface::Chat => "chat",
             Surface::Memory => "memory",
@@ -74,9 +79,13 @@ impl Surface {
     }
 
     /// Whether changes to this surface require a threshold of approvals.
-    /// Chat is ungated; Organization is read-only (nothing to propose).
+    /// Chat is ungated; Constitution and Organization are read-only (nothing to
+    /// propose).
     pub fn is_gated(self) -> bool {
-        !matches!(self, Surface::Chat | Surface::Organization)
+        !matches!(
+            self,
+            Surface::Chat | Surface::Organization | Surface::Constitution
+        )
     }
 
     /// Parse a surface from its lowercase name.
@@ -89,6 +98,7 @@ impl Surface {
     /// nav and the `select_view` command validate against this same list.
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            Surface::Constitution => &[("charter", "Charter")],
             Surface::Organization => &[
                 ("status", "Status"),
                 ("members", "Members"),
@@ -342,6 +352,11 @@ pub struct WorkspaceInfo {
     pub net: String,
     /// Members and when each of them last synced.
     pub members: Vec<MemberInfo>,
+    /// The ratified founding charter (free-text agenda) from the genesis —
+    /// populated for the open workspace so the Constitution surface can show it.
+    /// Empty on unopened entries and pre-deliberation workspaces.
+    #[serde(default)]
+    pub agenda: String,
 }
 
 /// The human half of a workspace directory name: lowercase, runs of
@@ -454,6 +469,7 @@ impl WorkspaceInfo {
                 seed: seed.to_string(),
                 net: net.to_string(),
                 members,
+                agenda: String::new(),
             }
         }
         vec![
@@ -1133,6 +1149,10 @@ pub struct EngineStateDump {
     /// workspaces).
     #[serde(default)]
     pub identities: Vec<MemberIdentity>,
+    /// The ratified founding charter (free-text agenda), so a snapshot-restored
+    /// workspace keeps it (the genesis is before the snapshot and not replayed).
+    #[serde(default)]
+    pub agenda: String,
     /// The chat log.
     pub chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface (keyed by surface name).

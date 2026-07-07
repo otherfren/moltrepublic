@@ -337,6 +337,7 @@ impl State {
         };
         ws.name = replica.name;
         ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
+        ws.agenda = replica.agenda;
         // members are a projection of the replayed roster — always rebuilt,
         // so a roster grown by MemberJoined never leaves a stale list
         ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");

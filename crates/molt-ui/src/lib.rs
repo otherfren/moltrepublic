@@ -1085,6 +1085,9 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
         .unwrap_or((0, String::new()));
     ui.set_active_state(a_state);
     ui.set_active_status(a_status.into());
+    // the ratified founding charter for the Constitution surface (empty until a
+    // deliberated workspace is open)
+    ui.set_active_agenda(active.map(|w| w.agenda.as_str()).unwrap_or_default().into());
     let roster: Vec<MemberSync> = active
         .map(|w| {
             w.members
@@ -1444,6 +1447,7 @@ fn when_label_at(ts: u64, now: i64) -> String {
 /// surfaces (archive, proposals, status, …) deliberately share one glyph.
 fn view_icon(key: &str) -> &'static str {
     match key {
+        "charter" => "📜",
         "status" => "📡",
         "members" => "👥",
         "statistics" => "📊",
@@ -1667,6 +1671,7 @@ fn summarize(v: &serde_json::Value) -> String {
 
 fn surface_name(sf: Surface) -> &'static str {
     match sf {
+        Surface::Constitution => "Constitution",
         Surface::Organization => "Organization",
         Surface::Chat => "Chat",
         Surface::Memory => "Memory",
@@ -1683,7 +1688,8 @@ fn default_op(sf: Surface) -> &'static str {
         Surface::Quests => "add_quest",
         Surface::Vault => "seal_secret",
         Surface::Wallet => "transfer",
-        Surface::Chat | Surface::Organization => "note",
+        // read-only / ungated surfaces have nothing to propose
+        Surface::Chat | Surface::Organization | Surface::Constitution => "note",
     }
 }
 
@@ -1877,6 +1883,10 @@ lexicon! {
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
     jw_ratify_decline: "Decline", "Ablehnen";
     jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";
+    const_immutable: "Immutable · ratified by everyone at founding", "Unveränderlich · von allen bei der Gründung ratifiziert";
+    const_charter_title: "Charter", "Satzung";
+    const_no_agenda: "(founded without a written charter)", "(ohne schriftliche Satzung gegründet)";
+    const_signatories: "Founding members · ratified by all", "Gründungsmitglieder · von allen ratifiziert";
     enter_republic: "Enter republic", "Republik betreten";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";

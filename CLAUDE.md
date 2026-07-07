@@ -6,6 +6,17 @@ running small encrypted "republics"/DAOs over the SimpleX Messaging Protocol
 implementing the real thing behind the same contract — never fake behavior a
 user could mistake for real.
 
+## Working style
+
+- **Proceed on greenlit multi-step work — don't keep asking "weiter?".** Once a
+  task is agreed, carry it through; commit at meaningful checkpoints.
+- **But for a genuine fork or ambiguity, ask EARLY rather than guess.** The cost
+  of a wrong guess in the ritual/crypto/state-model is high; a quick question up
+  front is cheaper than building the wrong thing. Only stop for real
+  product/design decisions, not for choices with an obvious default.
+- Don't invent specs — fetch the real thing (e.g. exact OpenMLS/SMP APIs) and
+  lock it against the compiler before building on it.
+
 ## Architecture (read the workspace `Cargo.toml` header first)
 
 Strict crate layering: a lower crate never depends on a higher one, and there is

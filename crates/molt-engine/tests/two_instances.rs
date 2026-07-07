@@ -298,6 +298,19 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
         assert!(tokio::time::Instant::now() < deadline, "ritual did not seal after ratification");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    // the ratified charter is exposed on the now-active workspace — this is what
+    // the Constitution surface renders
+    let s = read_session(&a).await;
+    let ws = s
+        .workspaces
+        .iter()
+        .find(|w| w.id == s.active_workspace)
+        .expect("the founded workspace is in the list");
+    assert_eq!(
+        ws.agenda, "the pact: tend the commons, share the harvest",
+        "the workspace surfaces the ratified charter"
+    );
 }
 
 /// A **declined** charter aborts the member side and nothing seals — the other

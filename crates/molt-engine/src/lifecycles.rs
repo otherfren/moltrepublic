@@ -128,6 +128,7 @@ impl State {
         seed: String,
         net: String,
         s3: bool,
+        agenda: String,
     ) {
         if self.session.workspaces.iter().any(|w| w.id == *id) {
             return;
@@ -145,6 +146,7 @@ impl State {
             last_backup_min: if s3 { 0 } else { WorkspaceInfo::NEVER },
             seed,
             net,
+            agenda,
             members,
         });
     }
@@ -237,6 +239,7 @@ impl State {
             String::new(),
             "tor".to_string(),
             false,
+            String::new(), // restore rebuilds the charter at S4/S5
         );
         self.session.active_workspace = id;
         self.session.restore = RestoreState::default();
@@ -553,6 +556,7 @@ impl State {
             seed,
             c.net.clone(),
             s3,
+            c.agenda.clone(),
         );
         Ok(id)
     }
@@ -752,6 +756,7 @@ impl State {
             String::new(),
             "tor".to_string(),
             self.session.settings.s3_backup,
+            sealed.agenda.clone(),
         );
         self.session.active_workspace = id;
         self.session.screen = Screen::Main;

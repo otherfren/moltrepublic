@@ -107,6 +107,8 @@ export component AppWindow inherits Window {
     in property <[SurfaceTab]> surfaces;
     // the active workspace's roster (chat members strip: who is online)
     in property <[MemberSync]> active-members;
+    // the ratified founding charter (free-text agenda) for the Constitution surface
+    in property <string> active-agenda;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -2731,6 +2733,73 @@ export component AppWindow inherits Window {
                                 text: Strings.mv-later;
                                 color: Theme.faint;
                                 font-size: Theme.fs-body;
+                            }
+                        }
+
+                        // the founding constitution: the ratified DAO name +
+                        // charter and the sealed founding roster (read-only)
+                        if s.key == "constitution": Flickable {
+                            viewport-width: self.width;
+                            viewport-height: constbody.preferred-height;
+                            constbody := VerticalLayout {
+                                width: 100%;
+                                padding: 8px;
+                                spacing: 12px;
+                                alignment: start;
+                                Text {
+                                    text: root.active-workspace == "" ? "Republic" : root.active-workspace;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-h1;
+                                    font-weight: 700;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: Strings.const-immutable;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: Strings.const-charter-title;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                }
+                                Rectangle {
+                                    background: Theme.panel;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        Text {
+                                            text: root.active-agenda == "" ? Strings.const-no-agenda
+                                                : root.active-agenda;
+                                            color: root.active-agenda == "" ? Theme.faint : Theme.text;
+                                            font-size: Theme.fs-body;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: Strings.const-signatories;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                }
+                                for m in root.active-members: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "✓";
+                                        color: Theme.good;
+                                        font-size: Theme.fs-body;
+                                    }
+                                    Text {
+                                        text: m.name;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-body;
+                                    }
+                                }
                             }
                         }
 

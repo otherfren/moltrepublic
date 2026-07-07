@@ -1178,6 +1178,9 @@ impl ScanEntry {
             seed: String::new(),
             net: "tor".to_string(),
             members: Vec::new(),
+            // the charter is in the encrypted genesis — filled in on open
+            // (refresh_active_entry), like the roster
+            agenda: String::new(),
         }
     }
 }

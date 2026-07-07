@@ -241,6 +241,9 @@ pub(crate) struct ReplicaState {
     /// The anchored name → identity-key table from the genesis (empty on
     /// pre-ritual workspaces).
     pub(crate) identities: Vec<molt_core::MemberIdentity>,
+    /// The ratified founding charter (free-text agenda) from the genesis
+    /// (empty on pre-deliberation workspaces).
+    pub(crate) agenda: String,
 }
 
 /// The storage side of the open workspace: its id, directory, the engine's
