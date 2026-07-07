@@ -100,10 +100,10 @@ async fn two_nodes_bootstrap_a_mesh_and_chat_over_mls() {
     let ta = hub.transport();
     let tb = hub.transport();
     let alice_boot = tokio::spawn(async move {
-        bootstrap_mesh("alice", &["bob".to_string()], &ta, a_out, a_in_rx).await
+        bootstrap_mesh("alice", &["bob".to_string()], &ta, a_out, a_in_rx, std::time::Duration::from_secs(10)).await
     });
     let bob_boot = tokio::spawn(async move {
-        bootstrap_mesh("bob", &["alice".to_string()], &tb, b_out, b_in_rx).await
+        bootstrap_mesh("bob", &["alice".to_string()], &tb, b_out, b_in_rx, std::time::Duration::from_secs(10)).await
     });
     let alice_links: Vec<PeerLink> = alice_boot.await.expect("join").expect("alice mesh");
     let bob_links: Vec<PeerLink> = bob_boot.await.expect("join").expect("bob mesh");
@@ -299,10 +299,10 @@ async fn bootstrap_over_mls_carries_announcements_encrypted_then_chats() {
     let am = alice_mls.clone();
     let bm = bob_mls.clone();
     let alice_boot = tokio::spawn(async move {
-        bootstrap_over_mls("alice", &["bob".to_string()], &ta, am, a_out, a_in_rx).await
+        bootstrap_over_mls("alice", &["bob".to_string()], &ta, am, a_out, a_in_rx, std::time::Duration::from_secs(10)).await
     });
     let bob_boot = tokio::spawn(async move {
-        bootstrap_over_mls("bob", &["alice".to_string()], &tb, bm, b_out, b_in_rx).await
+        bootstrap_over_mls("bob", &["alice".to_string()], &tb, bm, b_out, b_in_rx, std::time::Duration::from_secs(10)).await
     });
     let alice_links: Vec<PeerLink> = alice_boot.await.expect("join").expect("alice mesh");
     let bob_links: Vec<PeerLink> = bob_boot.await.expect("join").expect("bob mesh");

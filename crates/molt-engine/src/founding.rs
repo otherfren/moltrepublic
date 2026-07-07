@@ -29,6 +29,12 @@ use tokio::sync::mpsc;
 
 use crate::{Envelope, State};
 
+/// How long a node waits for its peers' mesh announcements before giving up and
+/// entering without a direct mesh (best-effort bootstrap — see the join gating
+/// decision). Generous: at founding time every peer is present, so the exchange
+/// normally completes in well under a second; this only bounds a failed peer.
+const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// The transport a founding ritual runs over. The in-app demo founds over
 /// the in-process loopback hub (with simulated members); a real founding
 /// runs over the configured SMP server. One enum so the founder side — the
@@ -731,9 +737,13 @@ pub(crate) fn verify_seal_proposal(
 pub struct JoinResult {
     /// The verified sealed roster the founder distributed.
     pub sealed: molt_core::SealedRoster,
-    /// The joiner's MLS group snapshot (after processing the Welcome), or `None`
-    /// on a pre-MLS founding.
+    /// The joiner's MLS group snapshot (after processing the Welcome, and — if
+    /// the bootstrap ran — after the announcement exchange), or `None` on a
+    /// pre-MLS founding.
     pub mls_snapshot: Option<Vec<u8>>,
+    /// The joiner's assembled direct-mesh handovers, when the (best-effort)
+    /// post-founding bootstrap completed; empty otherwise.
+    pub mesh: Vec<molt_core::MeshLink>,
 }
 
 /// Run the member side of a founding **over SMP** from its real invite link,
@@ -749,6 +759,7 @@ pub async fn ritual_join_over_smp(
     link: &str,
     name: String,
     phrase: String,
+    bootstrap: bool,
     ratify: Option<Ratifier>,
     cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinResult, String> {
@@ -770,11 +781,10 @@ pub async fn ritual_join_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    // bootstrap=false: the GUI/CLI join does not yet run the post-founding mesh
-    // bootstrap (that is the founder-engine wiring follow-up); the toolkit is
-    // exercised opt-in by the loopback test.
+    // `bootstrap` runs the (best-effort) post-founding mesh bootstrap after the
+    // group is joined; the caller enables it for the real product flow.
     let outcome =
-        run_ritual_member(material, name.clone(), phrase, true, false, ratify, cancel).await?;
+        run_ritual_member(material, name.clone(), phrase, true, bootstrap, ratify, cancel).await?;
     let sealed = outcome
         .sealed
         .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
@@ -792,6 +802,7 @@ pub async fn ritual_join_over_smp(
     Ok(JoinResult {
         sealed,
         mls_snapshot: outcome.mls_snapshot,
+        mesh: outcome.mesh.unwrap_or_default(),
     })
 }
 
@@ -807,15 +818,18 @@ pub async fn join_founding_over_smp(
     phrase: String,
     root: &std::path::Path,
 ) -> Result<molt_core::WorkspaceId, String> {
-    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), None, None).await?;
+    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), true, None, None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
     let id = opened.manifest.workspace.id.clone();
-    // seal our own MLS group state into the new workspace's transport.state
-    if let Some(blob) = result.mls_snapshot {
+    // seal our own MLS group state + assembled mesh into transport.state
+    if result.mls_snapshot.is_some() || !result.mesh.is_empty() {
         let mut ts = opened.read_transport_state();
-        ts.mls = Some(blob);
+        if let Some(blob) = result.mls_snapshot {
+            ts.mls = Some(blob);
+        }
+        ts.mesh = result.mesh;
         opened.write_transport_state(&ts).map_err(|e| e.to_string())?;
     }
     Ok(id)
@@ -956,7 +970,16 @@ async fn member_bootstrap<T: molt_net::Transport>(
             }
         }
     });
-    let links = molt_net::mesh::bootstrap_over_mls(name, &peers, transport, mls, out_tx, in_rx).await;
+    let links = molt_net::mesh::bootstrap_over_mls(
+        name,
+        &peers,
+        transport,
+        mls,
+        out_tx,
+        in_rx,
+        MESH_BOOTSTRAP_TIMEOUT,
+    )
+    .await;
     // await (don't abort) the send task: bootstrap_over_mls has flushed our
     // announcement into `out_ct` and dropped its sender, so the send task drains
     // that last frame onto the invite queue and then ends — awaiting it ensures
@@ -1034,9 +1057,16 @@ pub(crate) async fn founder_bootstrap(
         }
     });
 
-    let links =
-        molt_net::mesh::bootstrap_over_mls(&founder_name, &peers, &transport, mls, out_tx, in_rx)
-            .await;
+    let links = molt_net::mesh::bootstrap_over_mls(
+        &founder_name,
+        &peers,
+        &transport,
+        mls,
+        out_tx,
+        in_rx,
+        MESH_BOOTSTRAP_TIMEOUT,
+    )
+    .await;
     // await (don't abort) the send task so the founder's own announcement is
     // fully delivered to every member's reply queue before we return; the task
     // ends on its own once bootstrap_over_mls drops the outbound sender
@@ -1204,7 +1234,10 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                     let peers: Vec<MemberId> =
                         sealed.roster.iter().filter(|r| **r != name).cloned().collect();
                     let mls_arc = Arc::new(Mutex::new(mls));
-                    let mesh = member_bootstrap(
+                    // best-effort: a bootstrap that times out or errors still lets
+                    // us enter, just without a direct mesh (the group is already
+                    // in hand; the mesh can be re-established later)
+                    let mesh = match member_bootstrap(
                         &name,
                         peers,
                         &m.transport,
@@ -1216,7 +1249,14 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                         early_mesh,
                         mls_arc.clone(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(mesh) => Some(mesh),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mesh bootstrap did not complete; entering without a direct mesh");
+                            None
+                        }
+                    };
                     let snap = mls_arc
                         .lock()
                         .map_err(|_| "mls lock poisoned".to_string())?
@@ -1226,7 +1266,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                         pk,
                         sealed: Some(sealed),
                         mls_snapshot: Some(snap),
-                        mesh: Some(mesh),
+                        mesh,
                     });
                 }
                 let snap = mls.snapshot().map_err(|e| e.to_string())?;

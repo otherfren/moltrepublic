@@ -1860,6 +1860,11 @@ pub enum Command {
         /// into the joiner's `transport.state`. Empty on a pre-MLS path.
         #[serde(default)]
         mls: String,
+        /// The joiner's assembled direct-mesh handovers from the (best-effort)
+        /// post-founding bootstrap; sealed into `transport.state.mesh`. Empty
+        /// when the bootstrap did not run or did not complete.
+        #[serde(default)]
+        mesh: Vec<MeshLink>,
         /// Join incarnation (a cancelled/restarted join drops stale results).
         #[serde(default)]
         generation: Option<u64>,

@@ -123,6 +123,7 @@ pub async fn bootstrap_mesh<T: Transport>(
     transport: &T,
     announce_out: tokio::sync::mpsc::Sender<MeshAnnounce>,
     mut announce_in: tokio::sync::mpsc::Receiver<(MemberId, MeshAnnounce)>,
+    timeout: std::time::Duration,
 ) -> Result<Vec<PeerLink>, String> {
     // one per-pair inbound queue per peer (per-pair = unlinkability)
     let mut my_inbound: BTreeMap<MemberId, (RcvQueue, WrapKey)> = BTreeMap::new();
@@ -134,18 +135,32 @@ pub async fn bootstrap_mesh<T: Transport>(
         queues.insert(p.clone(), QueueHandover::of(&pair.snd, &wrap));
         my_inbound.insert(p.clone(), (pair.rcv, wrap));
     }
-    // broadcast my handovers, then wait until every peer has announced theirs
+    // broadcast my handovers, then wait (up to `timeout` total) until every peer
+    // has announced theirs — the bootstrap is best-effort, so a peer that never
+    // shows up bounds the wait instead of hanging entry forever
     announce_out
         .send(MeshAnnounce { queues })
         .await
         .map_err(|_| "mesh announce channel closed".to_string())?;
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut announces: BTreeMap<MemberId, MeshAnnounce> = BTreeMap::new();
     while announces.len() < peers.len() {
-        let (from, a) = announce_in
-            .recv()
-            .await
-            .ok_or("mesh bootstrap channel closed before every peer announced")?;
-        announces.insert(from, a);
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, announce_in.recv()).await {
+            Ok(Some((from, a))) => {
+                announces.insert(from, a);
+            }
+            Ok(None) => {
+                return Err("mesh bootstrap channel closed before every peer announced".to_string())
+            }
+            Err(_) => {
+                return Err(format!(
+                    "mesh bootstrap timed out: {}/{} peers announced",
+                    announces.len(),
+                    peers.len()
+                ))
+            }
+        }
     }
     assemble_mesh(me, &my_inbound, &announces)
 }
@@ -164,6 +179,7 @@ pub async fn bootstrap_over_mls<T: Transport>(
     mls: Arc<Mutex<MlsMember>>,
     out_ct: mpsc::Sender<Vec<u8>>,
     mut in_ct: mpsc::Receiver<Vec<u8>>,
+    timeout: std::time::Duration,
 ) -> Result<Vec<PeerLink>, String> {
     let cap = peers.len().max(1);
     let (ann_out, mut ann_out_rx) = mpsc::channel::<MeshAnnounce>(cap);
@@ -205,7 +221,7 @@ pub async fn bootstrap_over_mls<T: Transport>(
         }
     });
 
-    let links = bootstrap_mesh(me, peers, transport, ann_out, ann_in_rx).await;
+    let links = bootstrap_mesh(me, peers, transport, ann_out, ann_in_rx, timeout).await;
     // DRAIN, don't abort, the encrypt task: `bootstrap_mesh` returns as soon as
     // every *inbound* announcement is in, but our OWN announcement may still be
     // sitting in `ann_out` un-encrypted. `bootstrap_mesh` has dropped `ann_out`,

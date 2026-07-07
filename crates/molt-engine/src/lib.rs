@@ -196,6 +196,9 @@ pub fn spawn_with_config(
         None,
         false,
         false,
+        // the post-founding mesh bootstrap is enabled in production only once the
+        // runtime supervisor reads the mesh (Part B); until then it stays off so
+        // real foundings don't run an exchange whose result nothing consumes
         false,
     );
     Ok((handle, store))
@@ -578,8 +581,9 @@ impl State {
             Command::NetJoinSealed {
                 sealed,
                 mls,
+                mesh,
                 generation,
-            } => self.cmd_net_join_sealed(sealed, mls, generation),
+            } => self.cmd_net_join_sealed(sealed, mls, mesh, generation),
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }
@@ -1436,7 +1440,7 @@ mod tests {
                 .await
                 .expect("start");
             let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-            w.execute(Command::NetJoinSealed { sealed, mls: String::new(), generation: Some(1) })
+            w.execute(Command::NetJoinSealed { sealed, mls: String::new(), mesh: Vec::new(), generation: Some(1) })
                 .await
                 .expect("sealed");
             match w.execute(Command::ReadSession).await.expect("read") {
@@ -1453,7 +1457,7 @@ mod tests {
             w2.execute(Command::JoinStart { invite: joinable_link(), member: "x".to_string() })
                 .await
                 .expect("start2");
-            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), mls: String::new(), generation: Some(1) })
+            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), mls: String::new(), mesh: Vec::new(), generation: Some(1) })
                 .await
                 .expect("bad");
             match w2.execute(Command::ReadSession).await.expect("read2") {

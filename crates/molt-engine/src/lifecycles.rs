@@ -60,6 +60,7 @@ impl State {
         republic_id: String,
         agenda: String,
         mls_snapshot: Option<Vec<u8>>,
+        mesh: Vec<molt_core::MeshLink>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -81,14 +82,16 @@ impl State {
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
-        // seal the node's own MLS group state into transport.state **durably and
-        // synchronously**, before the writer task takes over the file: the group
-        // was just born in the ritual and a fire-and-forget save could drop it
-        // (queue full / crash) leaving a workspace that can never decrypt. The
-        // dir is fresh, so a state carrying just the MLS blob is complete.
-        if let Some(blob) = mls_snapshot {
+        // seal the node's own MLS group state + assembled mesh into
+        // transport.state **durably and synchronously**, before the writer task
+        // takes over the file: the group was just born in the ritual and a
+        // fire-and-forget save could drop it (queue full / crash) leaving a
+        // workspace that can never decrypt. The dir is fresh, so a state carrying
+        // the MLS blob + mesh is complete.
+        if mls_snapshot.is_some() || !mesh.is_empty() {
             let ts = molt_core::TransportState {
-                mls: Some(blob),
+                mls: mls_snapshot,
+                mesh,
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
@@ -224,6 +227,7 @@ impl State {
                 String::new(), // restore rebuilds the republic id at S4/S5
                 String::new(), // …and the charter with it
                 None,          // …and the MLS group (S4/S5)
+                Vec::new(),    // …and the mesh (S4/S5)
                 MoltError::Restore,
             )?
         } else {
@@ -530,6 +534,9 @@ impl State {
                 republic_id.clone(),
                 c.agenda.clone(),
                 founder_mls_blob,
+                // the founder's mesh is not known until its bootstrap finishes;
+                // it is persisted then, via NetMeshReady
+                Vec::new(),
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
@@ -658,6 +665,9 @@ impl State {
             proposal: prop_tx,
             confirm: conf_rx,
         };
+        // enable the post-founding mesh bootstrap in the real product flow (the
+        // founder does too — see spawn_with_config); off for test seams
+        let bootstrap = self.ritual_bootstrap;
         let cmd_tx_fwd = cmd_tx.clone();
         tokio::spawn(async move {
             if let Some((name, agenda)) = prop_rx.recv().await {
@@ -675,11 +685,12 @@ impl State {
             }
         });
         tokio::spawn(async move {
-            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, Some(ratify), None).await {
+            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None).await {
                 Ok(result) => match serde_json::to_string(&result.sealed) {
                     Ok(json) => Command::NetJoinSealed {
                         sealed: json,
                         mls: result.mls_snapshot.map(hex::encode).unwrap_or_default(),
+                        mesh: result.mesh,
                         generation: Some(generation),
                     },
                     Err(e) => Command::NetJoinFailed {
@@ -704,6 +715,7 @@ impl State {
         &mut self,
         sealed: String,
         mls: String,
+        mesh: Vec<molt_core::MeshLink>,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted join bumped the generation — drop stale results
@@ -748,6 +760,7 @@ impl State {
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
                 mls_blob,
+                mesh,
                 MoltError::Join,
             ) {
                 Ok(id) => id,
