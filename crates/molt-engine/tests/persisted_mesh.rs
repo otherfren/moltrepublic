@@ -114,6 +114,7 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
         MemStateStore::new(),
         w_b.net_sink(),
         wake_b_rx,
+        None,
     );
 
     // --- node A: raw storage writer + supervisor (no engine needed to
@@ -131,6 +132,7 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
         FileStateStore::new(handle_a.clone()),
         NullSink,
         wake_a_rx,
+        None,
     );
 
     // ada writes history: the genesis (a non-chat event B must ignore
@@ -175,6 +177,7 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
         FileStateStore::new(handle_a2.clone()),
         NullSink,
         wake_a2_rx,
+        None,
     );
     assert!(handle_a2.append(chat_env(4, "back after the crash")));
     let _ = wake_a2.send(4);

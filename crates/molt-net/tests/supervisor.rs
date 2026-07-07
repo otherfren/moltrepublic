@@ -80,6 +80,7 @@ impl Node {
             self.store.clone(),
             self.sink.clone(),
             rx,
+            None,
         );
     }
 }
@@ -105,6 +106,7 @@ async fn mesh(hub: &LoopbackHub, members: &[&str], seed: u64) -> Vec<Node> {
             store.clone(),
             sink.clone(),
             rx,
+            None,
         );
         nodes.push(Node {
             member: me.clone(),

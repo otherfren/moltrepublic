@@ -52,7 +52,7 @@ pub use mls::{MlsError, MlsIncoming, MlsMember};
 pub use supervisor::send_framed;
 pub use loopback::{ChaosPolicy, LoopbackHub, LoopbackTransport};
 pub use supervisor::{
-    EngineSink, MemLog, MemStateStore, NetConfig, OutboxLog, PeerLink, StateStore,
+    EngineSink, MemLog, MemStateStore, MlsChannel, NetConfig, OutboxLog, PeerLink, StateStore,
     SupervisorHandle,
 };
 pub use wrap::{WrapKey, CHUNK_PLAIN_LEN};

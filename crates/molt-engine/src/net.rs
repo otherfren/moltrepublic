@@ -339,6 +339,7 @@ impl State {
                 generation: Some(self.net_generation),
             },
             wakeup_rx,
+            None, // the demo mesh's peers share no MLS group (plaintext path)
         );
 
         // the peer nodes
@@ -513,6 +514,7 @@ fn spawn_demo_peer(
             generation: Some(0),
         },
         wakeup_rx,
+        None, // demo peer: plaintext path (no MLS group)
     );
     let net = NetRuntime {
         feed,

@@ -56,16 +56,21 @@ Honest deltas, to be closed where noted:
   once the engine accepted the event (applied + queued to the writer);
   tightening to the §3.4 fsync rule is T3 work (the writer already exposes
   the hook point).
-* **The running post-founding traffic is still plaintext JSON inside the
-  per-queue wrap.** MLS now exists — a real group is born in the ritual and
-  persisted per node (transport.state.mls) — but the supervisor's outbox does
-  not yet encrypt application messages with it. Two things gate that (the last
-  open T2 piece): the per-peer outbox must encrypt **once** per group message
-  and fan the single ciphertext out (MLS advances the ratchet per
-  `create_message`, so n−1 independent encryptions would desync it), and a
-  **persistent runtime full-mesh** between real founded members must be
-  established (real workspaces get no peer mesh yet; the demo mesh is loopback
-  sim peers with no group).
+* **The supervisor now carries MLS ciphertext** (2026-07-07): when a node has a
+  group, the outbox encrypts a workspace event **once** per log seq (cached and
+  reused for the n−1 fan-out copies, so the ratchet advances a single time) and
+  the recv side decrypts to the authenticated sender + envelope (MLS itself
+  rejects replays, so the per-link reorder/dedup path is bypassed). Proven
+  end-to-end over loopback (`tests/mls_supervisor.rs`: one encrypt fans out to a
+  3-member group, all decrypt). The demo mesh (sim peers, no group) keeps the
+  plaintext WireFrame path unchanged.
+  **Open (the last T2 piece):** wire a **persistent runtime full-mesh** between
+  real founded members so this path actually runs in the product — after
+  founding, each node opens per-pair inbound queues and announces the
+  address+wrap-key handovers to the group in-band over MLS (user decisions
+  2026-07-07: post-founding MLS bootstrap + per-pair queues) — and make the
+  encrypt-once cache a **persistent, crash-safe** encrypted outbox in
+  `transport.state` (today it is in-memory; only the bounded test exercises it).
 
 The rest of this document is the design as specified; sections below are
 unchanged targets. Today the run lifecycles still fake handshakes and

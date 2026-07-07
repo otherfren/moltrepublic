@@ -34,8 +34,72 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinSet;
 
 use crate::chunk::{chunk_message, msg_id, PushOutcome, Reassembler};
+use crate::mls::{MlsIncoming, MlsMember};
 use crate::wrap::{unwrap_block, wrap, WrapKey};
 use crate::{AckToken, NetError, RcvQueue, SndQueueAddr, Transport};
+
+/// The node's MLS group at runtime (T2): the confidentiality layer whose
+/// ciphertext is the SMP payload. Shared by every per-peer outbox/recv task of a
+/// node. When present, a workspace event is **encrypted once** per log seq
+/// (`create_message` advances the ratchet exactly once) and the *same*
+/// ciphertext is fanned out to every peer — each per-queue-wrapped distinctly,
+/// so the copies stay byte-distinct (concept §3.2). Absent (`None`) keeps the
+/// plaintext-JSON-in-wrap path (the demo mesh, whose peers share no group).
+#[derive(Clone)]
+pub struct MlsChannel {
+    /// The node's group state; `encrypt`/`decrypt` mutate the ratchet, so all
+    /// tasks serialize on this one lock.
+    member: Arc<Mutex<MlsMember>>,
+    /// Ciphertext produced once per outbound log seq, reused by the n−1 fan-out
+    /// sends. In-memory for now: it grows with in-flight messages until the
+    /// persistent (crash-safe) encrypted outbox lands with the runtime mesh —
+    /// the current sole caller is a bounded test, so it never leaks in practice.
+    cache: Arc<Mutex<BTreeMap<u64, Vec<u8>>>>,
+}
+
+impl std::fmt::Debug for MlsChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MlsChannel")
+    }
+}
+
+impl MlsChannel {
+    /// Wrap a node's live MLS group for the supervisor.
+    pub fn new(member: MlsMember) -> MlsChannel {
+        MlsChannel {
+            member: Arc::new(Mutex::new(member)),
+            cache: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// The MLS ciphertext for one outbound envelope, encrypting exactly once per
+    /// `seq` (subsequent fan-out copies reuse the cached bytes — re-encrypting
+    /// would double-advance the ratchet). `None` on a local encode/crypto error.
+    fn ciphertext_for(&self, seq: u64, env: &EventEnvelope) -> Option<Vec<u8>> {
+        if let Some(c) = self.cache.lock().ok()?.get(&seq) {
+            return Some(c.clone());
+        }
+        let plaintext = serde_json::to_vec(env).ok()?;
+        let mut m = self.member.lock().ok()?;
+        let c = m.encrypt(&plaintext).ok()?;
+        self.cache.lock().ok()?.insert(seq, c.clone());
+        Some(c)
+    }
+
+    /// Decrypt one inbound MLS message into (authenticated sender, envelope).
+    /// Duplicates and non-application messages (commits/proposals) return `None`
+    /// — MLS itself rejects replays, so there is no separate dedup window here.
+    fn decode(&self, wire: &[u8]) -> Option<(MemberId, EventEnvelope)> {
+        let mut m = self.member.lock().ok()?;
+        match m.decrypt(wire) {
+            Ok(MlsIncoming::Application { from, plaintext }) => {
+                let env: EventEnvelope = serde_json::from_slice(&plaintext).ok()?;
+                Some((from, env))
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Out-of-order inbound messages buffered per peer before the incoming
 /// excess is dropped back onto the transport's redelivery.
@@ -186,6 +250,7 @@ pub fn spawn<T, L, S, K>(
     store: S,
     sink: K,
     wakeup: watch::Receiver<u64>,
+    mls: Option<MlsChannel>,
 ) -> SupervisorHandle
 where
     T: Transport,
@@ -212,6 +277,7 @@ where
                 state.clone(),
                 wakeup.clone(),
                 seed,
+                mls.clone(),
             ));
             match transport.subscribe(&peer.rcv).await {
                 Ok(rx) => {
@@ -221,6 +287,7 @@ where
                         store.clone(),
                         sink.clone(),
                         state.clone(),
+                        mls.clone(),
                     ));
                 }
                 Err(e) => {
@@ -249,6 +316,7 @@ async fn outbox_task<T, L, S, K>(
     state: Arc<Mutex<TransportState>>,
     mut wakeup: watch::Receiver<u64>,
     seed: u64,
+    mls: Option<MlsChannel>,
 ) where
     T: Transport,
     L: OutboxLog,
@@ -275,7 +343,7 @@ async fn outbox_task<T, L, S, K>(
                 // skipped envelope (encode/wrap failure) must not leave an
                 // unfillable hole that wedges the receiver's cursor
                 if env.by == cfg.member
-                    && send_one(&transport, &cfg, &peer, &sink, env, wire_seq + 1, &mut rng)
+                    && send_one(&transport, &cfg, &peer, &sink, env, wire_seq + 1, &mut rng, mls.as_ref())
                         .await
                         .is_ok()
                 {
@@ -300,6 +368,7 @@ async fn outbox_task<T, L, S, K>(
 /// `Err` means the envelope was skipped for a *local* reason (encode,
 /// chunk or wrap failure) — the caller must then not consume the wire
 /// seq. Transport failures never skip: they retry until accepted.
+#[allow(clippy::too_many_arguments)]
 async fn send_one<T, K>(
     transport: &T,
     cfg: &NetConfig,
@@ -308,17 +377,33 @@ async fn send_one<T, K>(
     env: EventEnvelope,
     wire_seq: u64,
     rng: &mut u64,
+    mls: Option<&MlsChannel>,
 ) -> Result<(), ()>
 where
     T: Transport,
     K: EngineSink,
 {
-    let frame = WireFrame { v: 1, seq: wire_seq, env };
-    let Ok(payload) = serde_json::to_vec(&frame) else {
-        tracing::error!("encoding a wire frame failed — skipping the envelope");
-        return Err(());
+    // MLS path: the payload is the group ciphertext, computed once per log seq
+    // and reused for every fan-out copy; the per-queue wrap below still makes
+    // the copies byte-distinct. Plaintext path: the versioned WireFrame, the
+    // receiver's per-link order/dedup key.
+    let (payload, id) = match mls {
+        Some(ch) => {
+            let Some(ct) = ch.ciphertext_for(env.seq, &env) else {
+                tracing::error!("MLS-encrypting an envelope failed — skipping it");
+                return Err(());
+            };
+            (ct, msg_id(&cfg.member, &peer.member, env.seq))
+        }
+        None => {
+            let frame = WireFrame { v: 1, seq: wire_seq, env };
+            let Ok(payload) = serde_json::to_vec(&frame) else {
+                tracing::error!("encoding a wire frame failed — skipping the envelope");
+                return Err(());
+            };
+            (payload, msg_id(&cfg.member, &peer.member, wire_seq))
+        }
     };
-    let id = msg_id(&cfg.member, &peer.member, wire_seq);
     let chunks = match chunk_message(id, &payload) {
         Ok(c) => c,
         Err(e) => {
@@ -407,12 +492,14 @@ const CHUNK_ACK_MAX: usize = 64;
 /// *attached* to wherever the original's acks are held and fire together
 /// on acceptance; only copies of already-accepted messages ack
 /// immediately.
+#[allow(clippy::too_many_arguments)]
 async fn recv_task<S, K>(
     peer: PeerLink,
     mut rx: tokio::sync::mpsc::Receiver<crate::Delivery>,
     store: S,
     sink: K,
     state: Arc<Mutex<TransportState>>,
+    mls: Option<MlsChannel>,
 ) where
     S: StateStore,
     K: EngineSink,
@@ -476,6 +563,25 @@ async fn recv_task<S, K>(
         };
         let mut acks = chunk_acks.remove(&id.0).unwrap_or_default();
         acks.push(delivery.ack);
+
+        // MLS path: the reassembled bytes are group ciphertext. Decrypt to the
+        // authenticated sender + envelope; MLS itself rejects replays, so a
+        // duplicate/undecryptable message is just acked away. Ordering is MLS's
+        // job, so the per-link reorder buffer below does not apply.
+        if let Some(ch) = &mls {
+            match ch.decode(&complete) {
+                Some((from, env)) => {
+                    sink.peer_seen(&peer.member).await;
+                    if sink.deliver(&from, env).await.is_err() {
+                        tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
+                        return;
+                    }
+                    ack_all(acks);
+                }
+                None => ack_all(acks), // replay / commit / undecryptable
+            }
+            continue;
+        }
 
         let frame: WireFrame = match serde_json::from_slice(&complete) {
             Ok(f) => f,
