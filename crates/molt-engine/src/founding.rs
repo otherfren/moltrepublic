@@ -648,13 +648,42 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     Ok(())
 }
 
-/// Run the member side of a founding **over SMP** from its real invite link,
-/// and return the verified sealed roster: parse the handover, build our *own*
-/// [`SmpTransport`] for the founder's server, run the ritual (`cancel` ends
-/// the wait early), wait for the founder to distribute the sealed roster, and
-/// verify it. Writing the workspace is the caller's job (the engine
-/// materialises it into its state; [`join_founding_over_smp`] writes it
-/// standalone). `cancel` lets the GUI abort a join that is waiting.
+/// Verify a `Seal` proposal before ratifying it, and return the exact canonical
+/// bytes to sign. The republic id must be the content-derived value (no forged
+/// salt), and our own `(name, key)` must be in the roster — otherwise a founder
+/// could have us ratify a constitution we are not part of. Recomputing the table
+/// here (rather than trusting an opaque blob) is what makes the signature a
+/// ratification of exactly the name + agenda + roster the member is shown.
+pub(crate) fn verify_seal_proposal(
+    proposal: &molt_core::SealedRoster,
+    name: &str,
+    pk: &str,
+) -> Result<Vec<u8>, String> {
+    let rid = molt_storage::republic_id(
+        &proposal.name,
+        proposal.rule_m,
+        proposal.rule_n,
+        &proposal.identities,
+    );
+    if rid != proposal.republic_id {
+        return Err("proposed republic id does not match its roster".to_string());
+    }
+    if !proposal
+        .identities
+        .iter()
+        .any(|i| i.member == name && i.identity_pk == pk)
+    {
+        return Err("the proposed roster does not anchor our own (name, key)".to_string());
+    }
+    Ok(molt_core::roster_canonical_bytes(
+        &proposal.republic_id,
+        proposal.rule_m,
+        proposal.rule_n,
+        &proposal.identities,
+        &proposal.agenda,
+    ))
+}
+
 /// The verified outcome of joining a founding: the sealed roster to write, and
 /// the joiner's own MLS group snapshot to seal into its `transport.state`.
 #[doc(hidden)]
@@ -666,6 +695,14 @@ pub struct JoinResult {
     pub mls_snapshot: Option<Vec<u8>>,
 }
 
+/// Run the member side of a founding **over SMP** from its real invite link,
+/// and return the verified sealed roster + own MLS snapshot: parse the handover,
+/// build our *own* [`SmpTransport`] for the founder's server, run the ritual
+/// (`cancel` ends the wait early), ratify the proposed charter (via `ratify`,
+/// or automatically when `None`), wait for the founder to distribute the sealed
+/// roster, and verify it. Writing the workspace is the caller's job (the engine
+/// materialises it into its state; [`join_founding_over_smp`] writes it
+/// standalone).
 #[doc(hidden)]
 pub async fn ritual_join_over_smp(
     link: &str,
@@ -872,31 +909,32 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // await the proposed charter on our reply queue; the table binds exactly
-    // this (name, agenda, roster)
+    // await the proposed constitution on our reply queue
     let mut reasm = molt_net::Reassembler::new();
-    let (charter_name, charter_agenda, table) = loop {
-        if let invite::RitualMsg::Seal {
-            name,
-            agenda,
-            table,
-        } = next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
+    let proposal_json = loop {
+        if let invite::RitualMsg::Seal { proposal } =
+            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
         {
-            break (name, agenda, table);
+            break proposal;
         }
     };
+    let proposal: molt_core::SealedRoster =
+        serde_json::from_str(&proposal_json).map_err(|e| e.to_string())?;
+    // verify what we are about to ratify BEFORE we sign, and recompute the exact
+    // bytes to sign from the shown proposal — so what we sign provably equals
+    // the name + agenda + roster we ratify
+    let table = verify_seal_proposal(&proposal, &name, &pk)?;
     // human ratification gate: surface the charter and wait for the confirm
     // before signing. The non-interactive paths (sim members, CLI) pass None
-    // and ratify as soon as they have the table.
+    // and ratify once the proposal verified.
     if let Some(mut r) = ratify {
-        let _ = r.proposal.send((charter_name, charter_agenda)).await;
+        let _ = r.proposal.send((proposal.name.clone(), proposal.agenda.clone())).await;
         match r.confirm.recv().await {
             Some(true) => {}
             _ => return Err("the charter was declined".to_string()),
         }
     }
-    let table_bytes = hex::decode(&table).map_err(|e| e.to_string())?;
-    let sig = molt_storage::identity_sign(&sk, &table_bytes);
+    let sig = molt_storage::identity_sign(&sk, &table);
     let signed = invite::RitualMsg::Signed(invite::SealSigned { seat: m.seat, sig });
     let out = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
     supervisor::send_framed(
@@ -1083,10 +1121,17 @@ mod ritual_ops {
                 tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
                 return Ok(molt_core::Reply::Ack);
             };
-            // the member's MLS KeyPackage is required — the founder must add it
-            // to the group at sealing, or the seat could never join the group
-            if key_package.is_empty() || hex::decode(&key_package).is_err() {
-                tracing::warn!(seat, %member, "founding join rejected: missing/invalid MLS key package");
+            // the member's MLS KeyPackage is required AND must be bound to the
+            // anchored identity: its credential must name this member and its
+            // signature key must be the MAC-bound identity key (one identity,
+            // two anchors). Otherwise a joiner could pass the ticket MAC for one
+            // handle yet authenticate inside the group as another.
+            let key_package_binds = hex::decode(&key_package)
+                .ok()
+                .and_then(|b| molt_net::mls::key_package_binding(&b).ok())
+                .is_some_and(|(id, sig)| id == member.as_bytes() && hex::encode(sig) == identity_pk);
+            if !key_package_binds {
+                tracing::warn!(seat, %member, "founding join rejected: MLS key package does not match the anchored identity");
                 return Ok(molt_core::Reply::Ack);
             }
             s.identity = Some(MemberIdentity {
@@ -1144,11 +1189,36 @@ mod ritual_ops {
                     "the republic needs a name".to_string(),
                 ));
             }
+            // bound the constitution: it is signed by everyone and stored in
+            // every member's genesis forever, so cap both fields (an empty
+            // agenda is allowed — a republic may found without a written charter)
+            const NAME_MAX: usize = 120;
+            const AGENDA_MAX: usize = 4096;
+            if name.chars().count() > NAME_MAX {
+                return Err(molt_core::MoltError::Create(format!(
+                    "the name is too long (max {NAME_MAX} characters)"
+                )));
+            }
+            if agenda.chars().count() > AGENDA_MAX {
+                return Err(molt_core::MoltError::Create(format!(
+                    "the agenda is too long (max {AGENDA_MAX} characters)"
+                )));
+            }
             let Some(ritual) = &mut self.net_ritual else {
                 return Err(molt_core::MoltError::Create(
                     "no founding is in progress".to_string(),
                 ));
             };
+            // one-shot: once the charter is proposed the members are ratifying a
+            // fixed table, and a second proposal with a different name/agenda
+            // would silently invalidate the signatures already collected (their
+            // seat stays green but genesis verification fails). To change the
+            // charter, cancel and re-mint the founding.
+            if ritual.charter_proposed {
+                return Err(molt_core::MoltError::Create(
+                    "the charter was already proposed — cancel the founding to change it".to_string(),
+                ));
+            }
             if ritual.seats.iter().any(|s| s.identity.is_none()) {
                 return Err(molt_core::MoltError::Create(
                     "every member must join before you propose the charter".to_string(),
@@ -1186,9 +1256,23 @@ mod ritual_ops {
             let Some(identities) = ritual.full_identities() else {
                 return; // still waiting on keys
             };
-            let table = ritual.canonical(&identities);
-            let table_hex = hex::encode(&table);
-            let (name, agenda) = (ritual.name.clone(), ritual.agenda.clone());
+            // the pre-attestation proposal: every field the member needs to
+            // recompute the canonical table itself and check its own membership,
+            // so it ratifies exactly what it verifies (not an opaque blob)
+            let proposal = molt_core::SealedRoster {
+                name: ritual.name.clone(),
+                republic_id: ritual.republic_id(&identities),
+                rule_m: ritual.rule_m,
+                rule_n: ritual.rule_n,
+                roster: identities.iter().map(|i| i.member.clone()).collect(),
+                identities: identities.clone(),
+                attestations: Vec::new(),
+                agenda: ritual.agenda.clone(),
+            };
+            let proposal_json = match serde_json::to_string(&proposal) {
+                Ok(j) => j,
+                Err(_) => return,
+            };
             self.session
                 .create
                 .run
@@ -1196,9 +1280,7 @@ mod ritual_ops {
                 .push("→ charter proposed · sealing the roster for ratification".to_string());
             // send RitualMsg::Seal (the charter to ratify) to each seat
             let msg = invite::RitualMsg::Seal {
-                name,
-                agenda,
-                table: table_hex,
+                proposal: proposal_json,
             };
             let payload = match serde_json::to_vec(&msg) {
                 Ok(p) => p,
@@ -1353,6 +1435,58 @@ mod tests {
         let first = if sig.starts_with('a') { 'b' } else { 'a' };
         sig.replace_range(0..1, &first.to_string());
         assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_tampered_agenda() {
+        // the signatures were made over the ratified charter; swapping the
+        // agenda in the genesis makes the recomputed table diverge and every
+        // attestation fails — the charter is tamper-evident
+        let mut s = valid_roster();
+        s.agenda = "a charter nobody ratified".to_string();
+        assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    // --- the joiner's pre-signature verification (sign-what-you-see) ---------
+
+    #[test]
+    fn verify_seal_proposal_accepts_and_recomputes_the_table() {
+        let p = valid_roster(); // acts as a proposal; attestations are ignored
+        let pk = &p.identities[1].identity_pk; // "member"
+        let table = verify_seal_proposal(&p, "member", pk).expect("a member ratifies");
+        // the returned bytes are exactly the canonical table over the charter,
+        // so a signature over them ratifies precisely this name + agenda + roster
+        let expect =
+            molt_core::roster_canonical_bytes(&p.republic_id, p.rule_m, p.rule_n, &p.identities, &p.agenda);
+        assert_eq!(table, expect);
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_a_forged_republic_id() {
+        let mut p = valid_roster();
+        p.republic_id = "deadbeef".to_string();
+        let pk = p.identities[1].identity_pk.clone();
+        assert!(verify_seal_proposal(&p, "member", &pk).is_err());
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_when_our_key_is_absent() {
+        let p = valid_roster();
+        // right name, wrong key → not us
+        assert!(verify_seal_proposal(&p, "member", &"00".repeat(32)).is_err());
+        // our key, but under a name not in the roster → not us
+        let pk = p.identities[1].identity_pk.clone();
+        assert!(verify_seal_proposal(&p, "impostor", &pk).is_err());
+    }
+
+    #[test]
+    fn verify_seal_proposal_binds_the_agenda() {
+        let mut p = valid_roster();
+        let pk = p.identities[1].identity_pk.clone();
+        let before = verify_seal_proposal(&p, "member", &pk).expect("ok");
+        p.agenda = "a different charter".to_string();
+        let after = verify_seal_proposal(&p, "member", &pk).expect("ok");
+        assert_ne!(before, after, "a changed agenda changes the bytes we sign");
     }
 
     fn sample_invite() -> FoundingInvite {

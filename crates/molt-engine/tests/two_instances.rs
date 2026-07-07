@@ -255,6 +255,20 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     .await
     .expect("founder proposes the charter");
 
+    // re-proposing after the charter is out is refused — a second, different
+    // charter would silently invalidate signatures already being collected
+    assert!(
+        matches!(
+            a.execute(Command::CreatePropose {
+                name: "Pact".to_string(),
+                agenda: "a sneaky replacement".to_string(),
+            })
+            .await,
+            Err(molt_core::MoltError::Create(_))
+        ),
+        "re-proposing the charter must be refused"
+    );
+
     // B surfaces the proposed charter for the human to review
     let (name, agenda) = prop_rx.recv().await.expect("charter surfaced to the joiner");
     assert_eq!(name, "Pact");
@@ -284,6 +298,82 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
         assert!(tokio::time::Instant::now() < deadline, "ritual did not seal after ratification");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A **declined** charter aborts the member side and nothing seals — the other
+/// half of the ratification gate (the confirm path is covered above).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declined_charter_aborts_the_member_without_sealing() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Nope".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+
+    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    let ratifier = molt_engine::Ratifier {
+        proposal: prop_tx,
+        confirm: conf_rx,
+    };
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    // return the raw Result — we expect an Err here
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, Some(ratifier), None).await
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Nope".to_string(),
+        agenda: "you will not agree to this".to_string(),
+    })
+    .await
+    .expect("propose");
+
+    // B surfaces the charter, the human DECLINES
+    let _ = prop_rx.recv().await.expect("charter surfaced");
+    conf_tx.send(false).await.expect("decline");
+
+    // the member side aborts with an error, and the founding never seals
+    let b_res = b_task.await.expect("b task joins");
+    assert!(b_res.is_err(), "a declined charter aborts the member side");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_session(&a).await.create.run.outcome,
+        0,
+        "nothing seals when a member declines"
+    );
 }
 
 /// The founding ritual **establishes a real MLS group** across the two

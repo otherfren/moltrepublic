@@ -125,18 +125,29 @@ async fn ritual(url: &str, label: &str) {
     let (reply_snd, reply_wrap) =
         reply_target(req.reply.as_ref().expect("member advertised a reply queue"));
 
-    // FOUNDER: build + sign the canonical roster, send the table to the
-    // member's reply queue
+    // FOUNDER: build the pre-attestation proposal (salted by the content-derived
+    // republic id, not the local ws id) and send it for the member to recompute
+    // and ratify
+    let _ = ws_id;
     let identities = vec![
         MemberIdentity { member: "founder".into(), identity_pk: founder_pk.clone() },
         MemberIdentity { member: req.name.clone(), identity_pk: req.identity_pk.clone() },
     ];
-    let table = roster_canonical_bytes(ws_id, 2, 2, &identities, "");
+    let republic_id = molt_storage::republic_id("SMP Duet", 2, 2, &identities);
+    let table = roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
     let founder_sig = molt_storage::identity_sign(&founder_sk, &table);
-    let seal = RitualMsg::Seal {
-        name: String::new(),
+    let proposal = molt_core::SealedRoster {
+        name: "SMP Duet".into(),
+        republic_id: republic_id.clone(),
+        rule_m: 2,
+        rule_n: 2,
+        roster: vec!["founder".into(), req.name.clone()],
+        identities: identities.clone(),
+        attestations: Vec::new(),
         agenda: String::new(),
-        table: hex::encode(&table),
+    };
+    let seal = RitualMsg::Seal {
+        proposal: serde_json::to_string(&proposal).expect("encode proposal"),
     };
     send_framed(
         &founder_t,

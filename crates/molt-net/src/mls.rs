@@ -29,10 +29,14 @@
 //! `transport.state`. This file must never accrete history: MLS deletes key
 //! material on purpose (that deletion *is* forward secrecy), so the snapshot is
 //! always the *current* state, atomically overwritten — never appended (concept
-//! §6). The **write-ahead** ordering (persist the advanced ratchet before a
-//! ciphertext leaves / before an inbound plaintext reaches the engine) is the
-//! caller's contract: `encrypt`/`decrypt` mutate, then the caller persists
-//! `snapshot()` before releasing the result.
+//! §6). Founding-time state is sealed durably and synchronously at genesis (the
+//! engine's `materialize_workspace`). The **write-ahead** ordering for the
+//! *running* traffic — persist the advanced ratchet before a ciphertext leaves /
+//! before an inbound plaintext reaches the engine — is the contract the future
+//! supervisor integration must honour (`encrypt`/`decrypt` mutate, then the
+//! caller persists `snapshot()` before releasing the result); it is **not yet
+//! wired**, because nothing encrypts the running traffic with the group yet
+//! (the last open T2 piece).
 
 use ed25519_dalek::SigningKey;
 use openmls::prelude::*;
@@ -365,6 +369,27 @@ impl MlsMember {
     }
 }
 
+/// The identity a wire `KeyPackage` commits to: its credential identity (the
+/// member handle bytes) and its signature public key. The founder uses this to
+/// enforce that a joiner's KeyPackage matches the exact `(name, key)` it
+/// anchored in the roster — otherwise a joiner could send a MAC-valid
+/// `JoinRequest` for one handle but a KeyPackage credentialed as another, and
+/// authenticate inside the group under a handle the roster does not bind
+/// ("one identity, two anchors", concept §3.3). Validates the KeyPackage
+/// itself (self-consistency, signature, lifetime) as a side effect.
+pub fn key_package_binding(kp_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+    let provider = OpenMlsRustCrypto::default();
+    let kp_in = KeyPackageIn::tls_deserialize_exact(kp_bytes)
+        .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
+    let leaf = kp.leaf_node();
+    let identity = leaf.credential().serialized_content().to_vec();
+    let sig_key = leaf.signature_key().as_slice().to_vec();
+    Ok((identity, sig_key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +484,38 @@ mod tests {
         founder.create_group().expect("create group");
         assert!(founder.has_group());
         assert_eq!(founder.add_members(&[]).expect("add none"), None);
+    }
+
+    /// A KeyPackage's binding is exactly the (handle, signature key) it was
+    /// built with — so the founder can hold a joiner to the identity it
+    /// anchored, and a mismatch (different handle or key) is detectable.
+    #[test]
+    fn key_package_binding_exposes_the_committed_identity() {
+        let sk = key(7);
+        let member = MlsMember::new(&sk, "bob").expect("member");
+        let (id, sig) = key_package_binding(&member.key_package().expect("kp")).expect("binding");
+        assert_eq!(id, b"bob");
+        assert_eq!(hex::encode(&sig), hex::encode(sk.verifying_key().to_bytes()));
+        // a different member commits to a different handle
+        let eve = MlsMember::new(&key(8), "eve").expect("m");
+        let (id2, _) = key_package_binding(&eve.key_package().expect("kp")).expect("binding");
+        assert_eq!(id2, b"eve");
+        // garbage is rejected, never panics
+        assert!(key_package_binding(&[0xde, 0xad]).is_err());
+    }
+
+    /// A garbage KeyPackage (well-formed bytes, but not an MLS KeyPackage) is
+    /// rejected before it touches the group — the founder cannot be tricked into
+    /// building the group around a bogus member — and a real add still works
+    /// afterwards (the group state was not left half-mutated).
+    #[test]
+    fn garbage_key_package_is_rejected() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        assert!(founder.add_members(&[vec![0xde, 0xad, 0xbe, 0xef]]).is_err());
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        assert!(founder
+            .add_members(&[bob.key_package().expect("kp")])
+            .is_ok());
     }
 }

@@ -59,6 +59,7 @@ impl State {
         attestations: Vec<molt_core::RosterAttestation>,
         republic_id: String,
         agenda: String,
+        mls_snapshot: Option<Vec<u8>>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -80,6 +81,18 @@ impl State {
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
+        // seal the node's own MLS group state into transport.state **durably and
+        // synchronously**, before the writer task takes over the file: the group
+        // was just born in the ritual and a fire-and-forget save could drop it
+        // (queue full / crash) leaving a workspace that can never decrypt. The
+        // dir is fresh, so a state carrying just the MLS blob is complete.
+        if let Some(blob) = mls_snapshot {
+            let ts = molt_core::TransportState {
+                mls: Some(blob),
+                ..Default::default()
+            };
+            opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
+        }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();
 
@@ -99,20 +112,6 @@ impl State {
             handle: molt_storage::start_writer(opened),
         });
         Ok(id)
-    }
-
-    /// Seal an MLS group snapshot into the active workspace's `transport.state`.
-    /// Founding/join-time only: the workspace is fresh, so a default state
-    /// carrying just the MLS blob is correct — delivery cursors accrue later via
-    /// the supervisor's load-modify-save, which preserves this field.
-    fn persist_mls_snapshot(&self, blob: Vec<u8>) {
-        if let Some(active) = &self.active {
-            let ts = molt_core::TransportState {
-                mls: Some(blob),
-                ..Default::default()
-            };
-            active.handle.save_transport_state(ts);
-        }
     }
 
     /// Add one freshly founded/joined/restored workspace to the session
@@ -222,6 +221,7 @@ impl State {
                 Vec::new(),
                 String::new(), // restore rebuilds the republic id at S4/S5
                 String::new(), // …and the charter with it
+                None,          // …and the MLS group (S4/S5)
                 MoltError::Restore,
             )?
         } else {
@@ -497,6 +497,13 @@ impl State {
         } else {
             None
         };
+        // the founder's own group snapshot, sealed into its workspace atomically
+        // with the genesis (see materialize_workspace)
+        let founder_mls_blob = founder_mls
+            .as_ref()
+            .map(|(mls, _)| mls.snapshot())
+            .transpose()
+            .map_err(|e| MoltError::Create(e.to_string()))?;
 
         // write the FOUNDER's own workspace first. If the disk fails, the
         // founding fails cleanly and no member is left committed to a
@@ -513,14 +520,10 @@ impl State {
                 attestations,
                 republic_id.clone(),
                 c.agenda.clone(),
+                founder_mls_blob,
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
-            // seal the founder's own MLS group state into transport.state
-            if let Some((mls, _)) = &founder_mls {
-                let blob = mls.snapshot().map_err(|e| MoltError::Create(e.to_string()))?;
-                self.persist_mls_snapshot(blob);
-            }
             id
         } else {
             demo_workspace_id(&c.name)
@@ -698,6 +701,18 @@ impl State {
         if let Err(e) = crate::founding::verify_sealed_roster(&sealed) {
             return self.cmd_net_join_failed(e, generation);
         }
+        // decode the joiner's own MLS snapshot up front and FAIL the join on a
+        // corrupt one — materialising a workspace whose group can never be
+        // rehydrated is worse than a clean failure (symmetric with the founder,
+        // which fails hard on a bad KeyPackage)
+        let mls_blob = if mls.is_empty() {
+            None
+        } else {
+            match hex::decode(&mls) {
+                Ok(blob) => Some(blob),
+                Err(e) => return self.cmd_net_join_failed(format!("decoding MLS snapshot: {e}"), generation),
+            }
+        };
         let j = self.session.join.clone();
         let id = if self.persist {
             // materialising can fail on disk; a bare `?` would drop the error
@@ -713,6 +728,7 @@ impl State {
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
+                mls_blob,
                 MoltError::Join,
             ) {
                 Ok(id) => id,
@@ -721,13 +737,6 @@ impl State {
         } else {
             demo_workspace_id(&sealed.name)
         };
-        // seal the joiner's own MLS group state into its fresh transport.state
-        if self.persist && !mls.is_empty() {
-            match hex::decode(&mls) {
-                Ok(blob) => self.persist_mls_snapshot(blob),
-                Err(e) => tracing::warn!(error = %e, "join: undecodable MLS snapshot — group not persisted"),
-            }
-        }
         // the join is done — advance the incarnation so a late result from the
         // (finished) join task can't retroactively touch the reset run
         self.join_generation += 1;

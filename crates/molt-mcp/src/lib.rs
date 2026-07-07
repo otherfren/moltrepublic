@@ -695,7 +695,7 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
-            description: "Begin the (mock) founding of a new republic. The engine ticks progress and a live log by itself; on success the session holds the recovery seed and one-time invite links for the other members (read_session shows all of it).",
+            description: "Begin founding a new republic over the configured transport (SMP). The engine derives the founder's identity, mints one-time invite links per member, and runs the real ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -753,7 +753,7 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_start",
             command: "join_start",
-            description: "Begin the (mock) join for an invite link. The engine ticks progress and a live log by itself; any non-empty invite is accepted for now (a well-formed molt://invite/… link contributes the republic's details).",
+            description: "Begin joining a republic from a real molt://invite/… link (must carry the SMP transport handover — a bare preview link is rejected). The engine shows the joiner's own recovery phrase, runs the real SMP join off the actor, and — when the founder proposes the charter — surfaces it for join_confirm_charter; on success it enters the republic on its own.",
             schema: || json!({
                 "type": "object",
                 "properties": {

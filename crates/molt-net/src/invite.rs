@@ -124,19 +124,16 @@ pub struct SealSigned {
 pub enum RitualMsg {
     /// member → founder: activate the invite link.
     Join(JoinRequest),
-    /// founder → member: the proposed charter to ratify. The member displays
-    /// the final DAO `name` and the free-text `agenda`, and — on the human's
-    /// confirm — signs `table` (the canonical bytes that bind exactly this
-    /// name + agenda + roster). Signing IS the ratification (concept §3.3).
+    /// founder → member: the proposed constitution to ratify — JSON of the
+    /// transport's pre-attestation `SealedRoster` (name, republic id, m/n,
+    /// roster, identities, agenda; attestations empty). The member **recomputes**
+    /// the canonical table from these fields (so what it signs provably matches
+    /// the name + agenda + roster it is shown), checks its own (name, key) is
+    /// present, and — on the human's confirm — signs. Signing IS the
+    /// ratification (concept §3.3). Opaque here — this layer keeps no core types.
     Seal {
-        /// The final DAO name, for the member to display and ratify.
-        #[serde(default)]
-        name: String,
-        /// The proposed free-text agenda/charter, for the member to display.
-        #[serde(default)]
-        agenda: String,
-        /// The canonical table bytes to sign, lowercase hex.
-        table: String,
+        /// JSON of the pre-attestation sealed roster (the proposal).
+        proposal: String,
     },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
@@ -180,9 +177,7 @@ mod tests {
                 key_package: "cc".repeat(20),
             }),
             RitualMsg::Seal {
-                name: "Guild".into(),
-                agenda: "fix the fence".into(),
-                table: "cc".repeat(40),
+                proposal: "{\"name\":\"Guild\"}".into(),
             },
             RitualMsg::Signed(SealSigned {
                 seat: 2,
