@@ -135,6 +135,16 @@ pub enum RitualMsg {
         /// JSON of the pre-attestation sealed roster (the proposal).
         proposal: String,
     },
+    /// founder → member: the founder **accepted** this activation — the ticket
+    /// verified, the identity + KeyPackage are anchored, the seat is filled. Sent
+    /// right after anchoring so the joiner gets immediate feedback ("you're in,
+    /// waiting for the deliberation") instead of a silent wait until the charter.
+    /// Advisory only: it carries no authority and the joiner still verifies the
+    /// eventual `Seal`/`Genesis`.
+    JoinAccepted {
+        /// Which invite this answers (0-based seat index).
+        seat: u32,
+    },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
     /// member → founder: the member explicitly **declined** the proposed

@@ -1909,6 +1909,15 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The founder **accepted** the join request (engine-internal; surfaced by
+    /// the off-actor join task on the founder's advisory `JoinAccepted` ack). The
+    /// joiner's wizard confirms the join landed while it waits for the
+    /// deliberation. Never an MCP tool.
+    NetJoinAccepted {
+        /// Join incarnation (a cancelled/restarted join drops stale results).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The join reached the ratification step: the founder proposed this final
     /// name + agenda for the joiner to review before signing (engine-internal;
     /// surfaced by the off-actor join task). Never an MCP tool.

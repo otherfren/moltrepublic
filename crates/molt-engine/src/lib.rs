@@ -353,6 +353,12 @@ pub(crate) struct State {
     /// SMP it is simply the founder's own server transport). Consumed when the
     /// real net is built (`NetMeshReady`); cleared on teardown.
     pub(crate) runtime_transport: Option<founding::RitualTransport>,
+    /// The **joiner's** equivalent: the off-actor join task hands its ritual
+    /// transport (which owns the bootstrap queues' receive credentials) back
+    /// through this slot just before it reports `NetJoinSealed`, so the runtime
+    /// supervisor reuses the same instance. A fresh per-join `Arc` (replaced in
+    /// `cmd_join_start`) isolates a stale task's late fill from a new join.
+    pub(crate) join_transport: std::sync::Arc<std::sync::Mutex<Option<founding::RitualTransport>>>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -414,6 +420,7 @@ impl State {
             ritual_bootstrap: false,
             founder_mesh_in: None,
             runtime_transport: None,
+            join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             net_generation: 0,
             join_generation: 0,
             join_confirm: None,
@@ -577,6 +584,7 @@ impl State {
             Command::NetJoinDeclined { seat, generation } => {
                 self.cmd_net_join_declined(seat, generation)
             }
+            Command::NetJoinAccepted { generation } => self.cmd_net_join_accepted(generation),
             Command::NetJoinCharterProposed {
                 name,
                 agenda,

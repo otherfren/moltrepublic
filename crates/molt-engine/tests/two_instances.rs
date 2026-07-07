@@ -141,7 +141,16 @@ async fn founding_ritual_completes_across_two_instances() {
     assert_eq!(s.create.seats.len(), 1);
     assert_eq!(s.create.seats[0].member, "member-b");
     assert_eq!(s.create.seats[0].state, 2, "sealed");
+    // the founder AUTO-ENTERS on seal (no manual "Enter republic") — aligned
+    // with the joiner, which auto-enters on its own seal
+    assert_eq!(
+        s.screen,
+        molt_core::Screen::Main,
+        "the founder auto-enters the workspace when the ritual seals"
+    );
+    assert_eq!(s.active_workspace, id, "the founded workspace is active");
 
+    // CreateFinish is now idempotent (already entered) — still accepted
     a.execute(Command::CreateFinish).await.expect("enter");
 
     // --- A's genesis anchors B's real key with a verifying attestation
@@ -233,9 +242,11 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
 
     // B runs the real member side behind a ratification gate; the test is the
     // human on the other end of the channels
+    let (acc_tx, mut acc_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
+        accepted: acc_tx,
         proposal: prop_tx,
         confirm: conf_rx,
     };
@@ -245,6 +256,13 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
             .await
             .expect("B completes the member side")
     });
+
+    // BEFORE any charter: the founder acks the join, and the joiner sees it land
+    // (early feedback instead of a silent wait)
+    tokio::time::timeout(Duration::from_secs(15), acc_rx.recv())
+        .await
+        .expect("the founder's join-accepted ack reaches the joiner")
+        .expect("the ack channel stayed open");
 
     // the founder proposes once B has joined
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -354,9 +372,11 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     .expect("join blocking");
     let seat = materials.into_iter().next().expect("seat material");
 
+    let (acc_tx, _acc_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
+        accepted: acc_tx,
         proposal: prop_tx,
         confirm: conf_rx,
     };

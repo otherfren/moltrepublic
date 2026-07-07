@@ -836,7 +836,7 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 17] = [
+        const INTERNAL: [&str; 18] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -848,6 +848,7 @@ mod tests {
             "net_ritual_failed",
             "net_join_sealed",
             "net_join_failed",
+            "net_join_accepted",
             "net_join_charter_proposed",
             "net_join_declined",
             "net_mesh_announced",

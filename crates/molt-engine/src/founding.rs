@@ -35,17 +35,6 @@ use crate::{Envelope, State};
 /// normally completes in well under a second; this only bounds a failed peer.
 const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// A fresh SMP transport that reaches a persisted mesh's queues — the joiner and
-/// reopen paths, where no ritual transport is held. SMP queues live on their
-/// server, addressable by id, so a new [`SmpTransport`] to that server reaches
-/// them. `None` for a loopback mesh (empty server), whose in-memory queues
-/// cannot be reconstructed from persisted state.
-pub(crate) fn smp_transport_from_mesh(mesh: &[molt_core::MeshLink]) -> Option<RitualTransport> {
-    let server = mesh.iter().map(|l| l.snd_server.trim()).find(|s| !s.is_empty())?;
-    let s = SmpServer::parse(server).ok()?;
-    Some(RitualTransport::Smp(SmpTransport::new(s)))
-}
-
 /// The transport a founding ritual runs over. The in-app demo founds over
 /// the in-process loopback hub (with simulated members); a real founding
 /// runs over the configured SMP server. One enum so the founder side — the
@@ -504,7 +493,9 @@ fn spawn_founder_recv(
                     generation: Some(generation),
                 },
                 // founder→member only:
-                invite::RitualMsg::Seal { .. } | invite::RitualMsg::Genesis { .. } => continue,
+                invite::RitualMsg::JoinAccepted { .. }
+                | invite::RitualMsg::Seal { .. }
+                | invite::RitualMsg::Genesis { .. } => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
             if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
@@ -756,6 +747,12 @@ pub struct JoinResult {
     /// The joiner's assembled direct-mesh handovers, when the (best-effort)
     /// post-founding bootstrap completed; empty otherwise.
     pub mesh: Vec<molt_core::MeshLink>,
+    /// The transport the joiner ran the ritual over, to REUSE for the runtime
+    /// supervisor. It shares the created queues' **receive credentials** (over
+    /// SMP the recipient keys live in a per-instance `Arc`, unreconstructable
+    /// from the mesh handover) — a fresh transport to the same server could send
+    /// but never subscribe to the joiner's own inbound queues.
+    pub transport: RitualTransport,
 }
 
 /// Run the member side of a founding **over SMP** from its real invite link,
@@ -782,10 +779,14 @@ pub async fn ritual_join_over_smp(
         .try_into()
         .map_err(|_| "bad wrap key length".to_string())?;
     let queue_id = hex::decode(&inv.queue_id).map_err(|e| e.to_string())?;
+    // our OWN transport to the founder's server — not the founder's. Keep a
+    // clone (SMP clones share the recipient-key store) to hand back for the
+    // runtime supervisor: it must reuse THIS instance to subscribe to the
+    // inbound queues the bootstrap created.
+    let transport = RitualTransport::Smp(SmpTransport::new(server.clone()));
     let material = InviteMaterial {
         seat: inv.seat,
-        // our OWN transport to the founder's server — not the founder's
-        transport: RitualTransport::Smp(SmpTransport::new(server.clone())),
+        transport: transport.clone(),
         invite_snd: SndQueueAddr {
             server: server.render(),
             id: QueueId::from_bytes(queue_id),
@@ -815,6 +816,7 @@ pub async fn ritual_join_over_smp(
         sealed,
         mls_snapshot: outcome.mls_snapshot,
         mesh: outcome.mesh.unwrap_or_default(),
+        transport,
     })
 }
 
@@ -923,6 +925,10 @@ async fn next_ritual_msg(
 /// standalone CLI join), which sign as soon as the table verifies.
 #[doc(hidden)]
 pub struct Ratifier {
+    /// Fires once when the founder acknowledges the join (`JoinAccepted`) — the
+    /// joiner's wizard shows "you're in, waiting for the deliberation" instead of
+    /// a silent wait. Best-effort (capacity 1; a resend is dropped).
+    pub accepted: mpsc::Sender<()>,
     /// The proposed `(final name, agenda)` surfaced for the human to review.
     pub proposal: mpsc::Sender<(String, String)>,
     /// The human's decision: `true` ratifies (sign); `false` or a closed
@@ -1152,13 +1158,18 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // await the proposed constitution on our reply queue
+    // await the proposed constitution on our reply queue; the founder's
+    // JoinAccepted ack arrives first and gives the wizard early feedback
     let mut reasm = molt_net::Reassembler::new();
     let proposal_json = loop {
-        if let invite::RitualMsg::Seal { proposal } =
-            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
-        {
-            break proposal;
+        match next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await? {
+            invite::RitualMsg::JoinAccepted { .. } => {
+                if let Some(r) = ratify.as_ref() {
+                    let _ = r.accepted.try_send(());
+                }
+            }
+            invite::RitualMsg::Seal { proposal } => break proposal,
+            _ => {}
         }
     };
     let proposal: molt_core::SealedRoster =
@@ -1586,6 +1597,8 @@ mod ritual_ops {
                 tracing::warn!(seat, %member, "founding join rejected: MLS key package does not match the anchored identity");
                 return Ok(molt_core::Reply::Ack);
             }
+            // keep a copy of the reply handover to ack the joiner below
+            let (ack_addr, ack_wrap) = (reply_snd.clone(), reply_wrap.clone());
             s.identity = Some(MemberIdentity {
                 member: member.clone(),
                 identity_pk,
@@ -1603,6 +1616,21 @@ mod ritual_ops {
                 .run
                 .log
                 .push(format!("→ {member} activated invite {} · key received", idx + 1));
+
+            // tell the joiner we accepted, so it gets immediate feedback instead
+            // of a silent wait until the charter (advisory — the joiner still
+            // verifies the eventual Seal/Genesis)
+            if let Some(ritual) = &self.net_ritual {
+                if let Ok(payload) = serde_json::to_vec(&invite::RitualMsg::JoinAccepted { seat }) {
+                    let transport = ritual.transport.clone();
+                    let id = ritual.next_msg_id(&format!("accepted-{idx}"));
+                    tokio::spawn(async move {
+                        let _ =
+                            supervisor::send_framed(&transport, &ack_addr, &ack_wrap, id, &payload)
+                                .await;
+                    });
+                }
+            }
 
             // once every seat has joined, unlock the deliberation step: the
             // founder proposes the final name + agenda, and only then does the
@@ -1846,7 +1874,9 @@ mod ritual_ops {
                 .push(format!("✓ {member} signed the roster · seat sealed"));
 
             self.maybe_finalize();
-            self.emit_session(molt_core::SessionScope::Create);
+            // maybe_finalize may have auto-entered the workspace (screen change),
+            // so mirror the FULL session, not just the create sub-state
+            self.emit_session(molt_core::SessionScope::Full);
             Ok(molt_core::Reply::Ack)
         }
     }

@@ -439,6 +439,12 @@ impl State {
                     .run
                     .log
                     .push("✓ roster sealed by everyone · workspace created".to_string());
+                // auto-enter the republic, exactly like the joiner does on its
+                // own seal (cmd_net_join_sealed) — no manual "Enter republic"
+                // step. The post-founding mesh comes up in the background; the
+                // `create` state is kept (not reset) so the wizard's final log
+                // lines (incl. "direct mesh established") still land.
+                self.session.screen = Screen::Main;
             }
             Err(e) => {
                 self.session.create.run.outcome = 2;
@@ -630,6 +636,10 @@ impl State {
         self.join_generation += 1;
         let generation = self.join_generation;
         let mut run = RunCore::started();
+        // the join advances the progress bar through its real stages (request →
+        // accepted → charter → sealed) so the wizard shows movement, not a
+        // frozen 0%
+        run.progress_pct = 15;
         run.log.push(
             "→ join request sent over SMP · waiting for every member to seal the roster".to_string(),
         );
@@ -658,16 +668,39 @@ impl State {
         // charter on `prop` and blocks on `conf` for the joiner's confirm
         // before signing. A forwarder turns the surfaced charter into an
         // internal command so the wizard can show it.
+        let (acc_tx, mut acc_rx) = tokio::sync::mpsc::channel::<()>(1);
         let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
         let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
         self.join_confirm = Some(conf_tx);
         let ratify = crate::founding::Ratifier {
+            accepted: acc_tx,
             proposal: prop_tx,
             confirm: conf_rx,
         };
+        // surface the founder's "join accepted" ack as an internal command so
+        // the wizard confirms the join landed (before the later charter step)
+        let cmd_tx_acc = cmd_tx.clone();
+        tokio::spawn(async move {
+            if acc_rx.recv().await.is_some() {
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx_acc
+                    .send(Envelope {
+                        cmd: Command::NetJoinAccepted {
+                            generation: Some(generation),
+                        },
+                        reply,
+                    })
+                    .await;
+            }
+        });
         // enable the post-founding mesh bootstrap in the real product flow (the
         // founder does too — see spawn_with_config); off for test seams
         let bootstrap = self.ritual_bootstrap;
+        // a fresh transport slot for this join: the task hands its ritual
+        // transport back through it (a late fill from a superseded join lands in
+        // that join's own, now-orphaned Arc, never this one)
+        self.join_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let transport_slot = self.join_transport.clone();
         let cmd_tx_fwd = cmd_tx.clone();
         tokio::spawn(async move {
             if let Some((name, agenda)) = prop_rx.recv().await {
@@ -687,12 +720,20 @@ impl State {
         tokio::spawn(async move {
             let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None).await {
                 Ok(result) => match serde_json::to_string(&result.sealed) {
-                    Ok(json) => Command::NetJoinSealed {
-                        sealed: json,
-                        mls: result.mls_snapshot.map(hex::encode).unwrap_or_default(),
-                        mesh: result.mesh,
-                        generation: Some(generation),
-                    },
+                    Ok(json) => {
+                        // hand the ritual transport back BEFORE reporting the
+                        // seal, so cmd_net_join_sealed can reuse it (its Arc owns
+                        // the bootstrap queues' receive credentials)
+                        if let Ok(mut slot) = transport_slot.lock() {
+                            *slot = Some(result.transport);
+                        }
+                        Command::NetJoinSealed {
+                            sealed: json,
+                            mls: result.mls_snapshot.map(hex::encode).unwrap_or_default(),
+                            mesh: result.mesh,
+                            generation: Some(generation),
+                        }
+                    }
                     Err(e) => Command::NetJoinFailed {
                         error: e.to_string(),
                         generation: Some(generation),
@@ -789,14 +830,15 @@ impl State {
             sealed.agenda.clone(),
         );
         self.session.active_workspace = id;
-        // stand the runtime supervisor up over the joiner's direct mesh (a fresh
-        // SMP transport to the mesh's server reaches the queues just created);
-        // best-effort — no mesh, or a loopback mesh, just means no live peer link
+        // stand the runtime supervisor up over the joiner's direct mesh, REUSING
+        // the transport the ritual ran over (its Arc owns the bootstrap queues'
+        // receive credentials — a fresh transport could send but never subscribe).
+        // best-effort — no mesh, no transport, or a loopback mesh just means no
+        // live peer link yet.
         let (mls_blob, mesh) = net_seed;
+        let reused = self.join_transport.lock().ok().and_then(|mut s| s.take());
         if self.persist && !mesh.is_empty() {
-            if let (Some(blob), Some(transport)) =
-                (mls_blob, crate::founding::smp_transport_from_mesh(&mesh))
-            {
+            if let (Some(blob), Some(transport)) = (mls_blob, reused) {
                 if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
                     self.teardown_net();
                     self.net = Some(net);
@@ -839,6 +881,27 @@ impl State {
     /// The off-actor join task reached the ratification step: surface the
     /// founder's proposed charter so the wizard can show it and the joiner can
     /// confirm or decline (internal — driven by the join task).
+    /// The founder acknowledged the join. Confirm it on the join wizard so the
+    /// joiner sees progress while it waits for the deliberation (advisory — the
+    /// join still proceeds through the charter + seal). No-op for a stale/idle
+    /// join, or once the wizard has already moved past the initial wait.
+    pub(crate) fn cmd_net_join_accepted(&mut self, generation: Option<u64>) -> Result<Reply, MoltError> {
+        if generation != Some(self.join_generation)
+            || self.session.join.run.outcome != 0
+            || self.session.join.awaiting_ratify
+        {
+            return Ok(Reply::Ack);
+        }
+        let line = "✓ the founder accepted your join · waiting for the deliberation".to_string();
+        if self.session.join.run.log.last() == Some(&line) {
+            return Ok(Reply::Ack); // idempotent (a resend must not stack lines)
+        }
+        self.session.join.run.progress_pct = 45;
+        self.session.join.run.log.push(line);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_net_join_charter_proposed(
         &mut self,
         name: String,
@@ -851,6 +914,7 @@ impl State {
         self.session.join.proposed_name = name.clone();
         self.session.join.proposed_agenda = agenda;
         self.session.join.awaiting_ratify = true;
+        self.session.join.run.progress_pct = 70;
         self.session
             .join
             .run
@@ -875,6 +939,7 @@ impl State {
             let _ = tx.try_send(true);
         }
         self.session.join.awaiting_ratify = false;
+        self.session.join.run.progress_pct = 88;
         self.session
             .join
             .run
