@@ -1,11 +1,18 @@
 # Concept: communication — SimpleX (SMP) over Tor
 
-Status: **T1 + founding ritual + T3 (real SMP) + MLS-in-ritual (part of T2)**
-(2026-07-07). MLS (OpenMLS 0.8, pure-Rust) is now **integrated into the
-founding ritual**: the group is established as the republic is constituted and
-each member persists its own group state — see the T2 milestone note below for
-exactly what is real vs. open. The running post-founding traffic is still
-plaintext-JSON-in-wrap (the last open T2 piece). T4–T6 open.
+Status: **T1 + founding ritual + T2 (MLS, incl. the live runtime mesh) + T3
+(real SMP)** (2026-07-08). MLS (OpenMLS 0.8, pure-Rust) is integrated into the
+founding ritual AND the **running post-founding traffic is now real MLS
+ciphertext over a live direct mesh**: after founding, members bootstrap a
+per-pair-queue full mesh in-band over MLS and chat peer-to-peer, encrypt-once
+fanned out; a clean close persists the advancing ratchet + the SMP queue
+credentials so a reopen **resumes** the mesh (concept §6, clean-close variant;
+per-drain write-ahead is the remaining crash-safety hardening). Fan-out privacy
+jitter is on. **Still open in T2: recovery rejoin + the recovery-invite/approval
+UI.** **T4 (Tor) is entirely open — SMP currently dials clearnet TCP directly,
+not through Tor.** T5–T6 open (queue rotation, arti/whonix, multi-server,
+ack-after-fsync, fuzz/CI tiers). See the milestone notes below for exact
+real-vs-open.
 What exists: `molt-net` (Transport trait, uniform-block framing with
 named-constant budget math, mandatory per-queue wrapping,
 chunker/reassembler with `(msg id, chunk idx)` dedup, `LoopbackTransport`
@@ -64,13 +71,21 @@ Honest deltas, to be closed where noted:
   end-to-end over loopback (`tests/mls_supervisor.rs`: one encrypt fans out to a
   3-member group, all decrypt). The demo mesh (sim peers, no group) keeps the
   plaintext WireFrame path unchanged.
-  **Open (the last T2 piece):** wire a **persistent runtime full-mesh** between
-  real founded members so this path actually runs in the product — after
+  **Done (2026-07-08):** the **runtime full-mesh is live in the product**. After
   founding, each node opens per-pair inbound queues and announces the
-  address+wrap-key handovers to the group in-band over MLS (user decisions
-  2026-07-07: post-founding MLS bootstrap + per-pair queues) — and make the
-  encrypt-once cache a **persistent, crash-safe** encrypted outbox in
-  `transport.state` (today it is in-memory; only the bounded test exercises it).
+  address+wrap-key handovers to the group in-band over MLS (post-founding MLS
+  bootstrap + per-pair queues), assembles its `PeerLink`s, and stands a real
+  supervisor up whose outbox is the encrypted workspace log — members chat
+  peer-to-peer over MLS with no founding star and no demo peers
+  (`two_instances::founding_chats_over_the_direct_mesh`). A **clean close**
+  snapshots the advanced ratchet + serializes the SMP queue credentials into
+  `transport.state` (a blocking storage merge that preserves the delivery cursors
+  and seals the state so a wind-down save cannot clobber it); on reopen the node
+  re-adopts the creds into a fresh transport and resumes the mesh.
+  **Open:** the ratchet persist is **clean-close only** — the §6 *write-ahead*
+  rule (fsync the ratchet before its ciphertext leaves) for full crash-safety is
+  the remaining hardening; a hard crash resumes from the last-persisted ratchet
+  (at most replay-rejection, never nonce reuse — MLS `reuse_guard`).
 
 The rest of this document is the design as specified; sections below are
 unchanged targets. Today the run lifecycles still fake handshakes and
@@ -543,11 +558,13 @@ without sockets, everything below tests without the engine.
    bytes so every member's seal signature ratifies it, and the joiner's node
    gates its signature on an explicit human confirm before the workspace
    opens; the charter is immutable in the `Founded` genesis.
-   **Open:** encrypt the running post-founding application traffic with the
-   group (the outbox encrypt-once-then-fan-out restructure + a persistent
-   runtime full-mesh between real members); recovery rejoin (Remove+Add,
-   `MemberRestored`) and the recovery-invite UI (mint / copy / re-issue) with
-   the manual approval surface.
+   **Done (2026-07-08):** the running post-founding traffic is encrypted with the
+   group over a **live direct mesh** (bootstrap over the founding star → per-pair
+   queues → real supervisor over the workspace log), and a clean close persists
+   the ratchet + queue creds so a reopen resumes it (see the delta note above).
+   **Open:** recovery rejoin (Remove+Add, `MemberRestored`) and the
+   recovery-invite UI (mint / copy / re-issue) with the manual approval surface;
+   the §6 write-ahead outbox (full crash-safety, currently clean-close only).
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak
