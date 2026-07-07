@@ -211,6 +211,64 @@ impl MlsMember {
         Ok(Some(bytes))
     }
 
+    /// Approver: **restore** a member's seat — remove its lost leaf (found by
+    /// the credential handle) and add the rejoiner's fresh KeyPackage in ONE
+    /// commit. Returns `(commit, welcome)`: the commit is broadcast to the OTHER
+    /// existing members (they merge it to advance the epoch and drop the old
+    /// leaf), the Welcome brings the rejoiner in. The rejoiner re-derives the
+    /// SAME identity from its phrase, so the new leaf's credential equals the
+    /// removed one — a re-key of the same seat, not a new member (concept §3.3).
+    pub fn restore_member(
+        &mut self,
+        member: &str,
+        new_key_package: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+        let kp_in = KeyPackageIn::tls_deserialize_exact(new_key_package)
+            .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
+        let validated = kp_in
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
+        let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
+        // the leaf whose credential handle is this member (its lost identity)
+        let old_leaf = group
+            .members()
+            .find(|m| m.credential.serialized_content() == member.as_bytes())
+            .map(|m| m.index)
+            .ok_or_else(|| MlsError::Mls(format!("no leaf anchors {member}")))?;
+        // remove + add as INLINE proposals in ONE commit (the commit-builder
+        // inlines them, so a recipient needs no prior proposal distribution)
+        let bundle = group
+            .commit_builder()
+            .propose_removals([old_leaf])
+            .propose_adds([validated])
+            .load_psks(self.provider.storage())
+            .map_err(|e| MlsError::Mls(format!("loading psks: {e:?}")))?
+            // ship the ratchet tree in the Welcome so the rejoiner needs nothing
+            // else (the group's join config may not carry the create-time flag)
+            .use_ratchet_tree_extension(true)
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &self.signer,
+                |_| true,
+            )
+            .map_err(|e| MlsError::Mls(format!("building restore commit: {e:?}")))?
+            .stage_commit(&self.provider)
+            .map_err(|e| MlsError::Mls(format!("staging restore commit: {e:?}")))?;
+        let (commit, welcome, _group_info) = bundle.into_messages();
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| MlsError::Mls(format!("merging restore commit: {e:?}")))?;
+        let commit_bytes = commit
+            .to_bytes()
+            .map_err(|e| MlsError::Wire(format!("serializing restore commit: {e}")))?;
+        let welcome_bytes = welcome
+            .ok_or_else(|| MlsError::Mls("restore produced no welcome".into()))?
+            .to_bytes()
+            .map_err(|e| MlsError::Wire(format!("serializing restore welcome: {e}")))?;
+        Ok((commit_bytes, welcome_bytes))
+    }
+
     /// Joiner: enter the group from the founder's Welcome bytes. The ratchet
     /// tree rides the Welcome (`use_ratchet_tree_extension`), so nothing else is
     /// needed.
@@ -439,6 +497,55 @@ mod tests {
         // a member → founder
         let ct = bob.encrypt(b"+1").expect("encrypt");
         assert_app(founder.decrypt(&ct).expect("decrypt"), "bob", b"+1");
+    }
+
+    /// Recovery (concept §3.3): an existing member removes a lost member's leaf
+    /// and adds its RE-DERIVED KeyPackage in one commit. The other members merge
+    /// the commit; the rejoiner joins from the welcome; the re-keyed seat chats;
+    /// and the old, removed leaf is locked out of the new epoch.
+    #[test]
+    fn restore_member_rekeys_the_seat_and_the_rejoiner_chats() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        let mut cara = cara;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        // bob lost its workspace; a fresh node re-derives the SAME identity (key 2)
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let bob2_kp = bob2.key_package().expect("bob2 kp");
+
+        // cara (an existing member, NOT the founder) approves: remove old bob + add bob2
+        let (commit, welcome2) = cara.restore_member("bob", &bob2_kp).expect("restore");
+
+        // every OTHER existing member merges the commit to advance the epoch
+        match founder.decrypt(&commit).expect("founder processes the restore commit") {
+            MlsIncoming::Commit => {}
+            other => panic!("expected a commit, got {other:?}"),
+        }
+        // the rejoiner joins from the welcome
+        let mut bob2 = bob2;
+        bob2.join_from_welcome(&welcome2).expect("bob2 joins");
+
+        // the re-keyed seat is live in both directions
+        let ct = bob2.encrypt(b"back from the dead").expect("enc");
+        assert_app(founder.decrypt(&ct).expect("dec"), "bob", b"back from the dead");
+        assert_app(cara.decrypt(&ct).expect("dec"), "bob", b"back from the dead");
+        let ct = founder.encrypt(b"welcome back bob").expect("enc");
+        assert_app(bob2.decrypt(&ct).expect("dec"), "founder", b"welcome back bob");
+
+        // the OLD bob leaf was removed — its stale state can't read the new epoch
+        assert!(bob.decrypt(&ct).is_err(), "the removed leaf is locked out");
     }
 
     /// A member snapshotted after founding rehydrates and still decrypts a
