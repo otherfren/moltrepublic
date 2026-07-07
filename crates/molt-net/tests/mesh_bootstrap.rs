@@ -17,6 +17,7 @@ use molt_net::mesh::{bootstrap_mesh, MeshAnnounce};
 use molt_net::mls::MlsMember;
 use molt_net::{
     EngineSink, LoopbackHub, MemLog, MemStateStore, MlsChannel, NetConfig, NetError, PeerLink,
+    Transport,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -151,6 +152,105 @@ async fn two_nodes_bootstrap_a_mesh_and_chat_over_mls() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the chat never reached bob over the bootstrapped mesh"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 2c core: a reopened workspace rebuilds a running MLS supervisor purely from
+/// persisted `transport.state` — the MLS group via `MlsMember::restore`, the
+/// mesh via `PeerLink::from_mesh` — and chats over it. (The engine open-path
+/// that reads transport.state and picks the transport is the plumbing above
+/// this; here the queues live on a shared loopback hub, as SMP queues would on
+/// their servers.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persisted_mesh_and_group_rebuild_a_running_mls_supervisor() {
+    // a group, then snapshot both members as transport.state would
+    let mut alice_mls = MlsMember::new(&key(1), "alice").expect("alice");
+    let bob = MlsMember::new(&key(2), "bob").expect("bob");
+    alice_mls.create_group().expect("group");
+    let welcome = alice_mls
+        .add_members(&[bob.key_package().expect("kp")])
+        .expect("add")
+        .expect("welcome");
+    let mut bob_mls = bob;
+    bob_mls.join_from_welcome(&welcome).expect("bob joins");
+    let alice_blob = alice_mls.snapshot().expect("alice snapshot");
+    let bob_blob = bob_mls.snapshot().expect("bob snapshot");
+    drop(alice_mls);
+    drop(bob_mls);
+
+    // the per-pair queues (as if created during the bootstrap; here on the hub)
+    let hub = LoopbackHub::calm();
+    let t = hub.transport();
+    let q_alice_in = t.create_queue().await.expect("alice inbound"); // bob → alice
+    let w_alice_in = molt_net::WrapKey::fresh().expect("w");
+    let q_bob_in = t.create_queue().await.expect("bob inbound"); // alice → bob
+    let w_bob_in = molt_net::WrapKey::fresh().expect("w");
+
+    // the persisted mesh handovers (transport.state.mesh)
+    let alice_link_to_bob = PeerLink {
+        member: "bob".to_string(),
+        snd: q_bob_in.snd.clone(),
+        wrap_out: w_bob_in.clone(),
+        rcv: q_alice_in.rcv.clone(),
+        wrap_in: w_alice_in.clone(),
+    }
+    .to_mesh();
+    let bob_link_to_alice = PeerLink {
+        member: "alice".to_string(),
+        snd: q_alice_in.snd.clone(),
+        wrap_out: w_alice_in.clone(),
+        rcv: q_bob_in.rcv.clone(),
+        wrap_in: w_bob_in.clone(),
+    }
+    .to_mesh();
+
+    // rebuild each node's runtime purely from (blob, mesh)
+    let alice_links = vec![PeerLink::from_mesh(&alice_link_to_bob).expect("alice link")];
+    let bob_links = vec![PeerLink::from_mesh(&bob_link_to_alice).expect("bob link")];
+    let alice_mls = MlsMember::restore(&alice_blob).expect("restore alice");
+    let bob_mls = MlsMember::restore(&bob_blob).expect("restore bob");
+
+    let alice_feed = MemLog::new();
+    let (alice_wake, alice_wake_rx) = watch::channel(0u64);
+    let _alice_sup = molt_net::supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("alice".to_string(), alice_links, 1),
+        alice_feed.clone(),
+        MemStateStore::new(),
+        TestSink::default(),
+        alice_wake_rx,
+        Some(MlsChannel::new(alice_mls)),
+    );
+    let bob_sink = TestSink::default();
+    let (_bw, bob_wake_rx) = watch::channel(0u64);
+    let _bob_sup = molt_net::supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("bob".to_string(), bob_links, 2),
+        MemLog::new(),
+        MemStateStore::new(),
+        bob_sink.clone(),
+        bob_wake_rx,
+        Some(MlsChannel::new(bob_mls)),
+    );
+
+    alice_feed.push(chat_env(2, "alice", "rebuilt from disk"));
+    let _ = alice_wake.send(2);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((from, env)) = bob_sink.delivered().first() {
+            assert_eq!(from, "alice");
+            let WorkspaceEvent::Chat(msg) = &env.body else {
+                panic!("not a chat");
+            };
+            assert_eq!(msg.body, "rebuilt from disk");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rebuilt supervisor never delivered the chat"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
