@@ -29,8 +29,10 @@ use molt_core::{
     fnv1a64, mockrand, Command, EventEnvelope, GroupConfig, MemberId, MoltError, Reply,
     SessionScope, SessionView, WorkspaceEvent, WorkspaceId,
 };
-use molt_net::supervisor::{self, EngineSink, MemLog, MemStateStore, NetConfig, PeerLink};
-use molt_net::{LoopbackHub, NetError, SupervisorHandle};
+use std::sync::{Arc, Mutex};
+
+use molt_net::supervisor::{self, EngineSink, MemLog, MemStateStore, MlsChannel, NetConfig, PeerLink};
+use molt_net::{LoopbackHub, NetError, SupervisorHandle, Transport};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{Envelope, State};
@@ -210,6 +212,14 @@ enum NetFeed {
     Real,
 }
 
+/// A real mesh's persistable crypto: the runtime transport (whose `Arc` owns the
+/// queue credentials) + the shared MLS group (whose ratchet the supervisor
+/// advances). Snapshotted into `transport.state` on a clean close.
+type RealCrypto = (crate::founding::RitualTransport, Arc<Mutex<molt_net::MlsMember>>);
+
+/// What a clean close persists: `(MLS snapshot, transport queue-credential bytes)`.
+type CloseCrypto = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// The engine's transport runtime: the outbox feed + wakeup on the engine
 /// side, the supervisor and (for the demo mesh) the peer nodes — each
 /// kept alive by holding its engine's command sender (the peer actor
@@ -231,6 +241,12 @@ pub(crate) struct NetRuntime {
     peer_names: Vec<MemberId>,
     /// This mesh incarnation; stale `Net*` commands are dropped by it.
     generation: u64,
+    /// A **real** mesh's persistable crypto: a clone of the runtime transport
+    /// (whose `Arc` owns the queues' receive/sender credentials) and the shared
+    /// MLS group (whose ratchet the supervisor advances). On a clean close the
+    /// engine snapshots both into `transport.state` so a reopen resumes the mesh.
+    /// `None` for the demo mesh (nothing to persist / resume).
+    real_crypto: Option<RealCrypto>,
 }
 
 impl NetRuntime {
@@ -247,6 +263,15 @@ impl NetRuntime {
     /// immediately in [`Self::publish`].
     pub(crate) fn is_real(&self) -> bool {
         matches!(self.feed, NetFeed::Real)
+    }
+
+    /// The persistable crypto of a real mesh — its current MLS snapshot and the
+    /// transport's queue credentials — for a clean-close write into
+    /// `transport.state` (so a reopen resumes). `None` for the demo mesh.
+    pub(crate) fn crypto_for_close(&self) -> Option<CloseCrypto> {
+        let (transport, mls) = self.real_crypto.as_ref()?;
+        let snapshot = mls.lock().ok().and_then(|m| m.snapshot().ok());
+        Some((snapshot, transport.export_creds()))
     }
 
     /// Publish one recorded envelope. The demo mesh mirrors it into its in-memory
@@ -277,6 +302,26 @@ impl State {
     /// next session-only chat lazily rebuilds it for the current roster.
     pub(crate) fn teardown_net(&mut self) {
         self.net = None;
+    }
+
+    /// Clean-close persist: snapshot a running REAL mesh's crypto (advanced MLS
+    /// ratchet + the transport's queue credentials) into the active workspace's
+    /// `transport.state`, durably, so a reopen resumes the mesh. No-op for the
+    /// demo mesh or a session-only context. Takes over `teardown_net`'s job for a
+    /// real net: capture the crypto, drop the supervisor (signal its tasks to
+    /// stop), then the blocking merge. A supervisor task winding down could still
+    /// enqueue one stale per-drain `save` AFTER the merge; the storage writer
+    /// **seals `transport.state` on the merge** and ignores any later save, so
+    /// the merge is authoritative regardless of that race.
+    pub(crate) fn persist_net_crypto_on_close(&mut self) {
+        let Some(net) = self.net.take() else {
+            return;
+        };
+        let crypto = net.crypto_for_close();
+        drop(net); // stop the supervisor before the durable merge
+        if let (Some(active), Some((mls, creds))) = (self.active.as_ref(), crypto) {
+            active.handle.persist_crypto_blocking(mls, creds);
+        }
     }
 
     /// Make sure the demo mesh matches the current context. It runs for a
@@ -399,6 +444,7 @@ impl State {
             context,
             peer_names: peers,
             generation: self.net_generation,
+            real_crypto: None,
         })
     }
 
@@ -423,6 +469,9 @@ impl State {
             return None;
         }
         let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
+        // share the group between the supervisor (advances the ratchet) and the
+        // engine (snapshots it on a clean close, so a reopen resumes it)
+        let mls_arc = Arc::new(Mutex::new(mls));
         let owner = self.member();
         let peer_names: Vec<MemberId> = links.iter().map(|l| l.member.clone()).collect();
         let feed = StorageLog::new(active.handle.clone());
@@ -434,12 +483,14 @@ impl State {
         let (wakeup, wakeup_rx) = watch::channel(0u64);
         let mut seed = [0u8; 8];
         let _ = getrandom::getrandom(&mut seed);
-        // NetConfig::fast = snappy delivery (0 fan-out jitter). The concept's
-        // ~2 s privacy jitter for traffic-analysis resistance is a tuning knob to
-        // reintroduce here once the mesh is exercised end to end.
+        // keep a transport clone (shares the credential Arc) to export on close
+        let transport_for_persist = transport.clone();
+        // the concept's defaults: ~2 s per-send fan-out jitter (traffic-analysis
+        // resistance) + 1 s→2 min retry backoff. Privacy over snappiness — the
+        // runtime is not a low-latency chat, it is an unlinkable mesh.
         let supervisor = supervisor::spawn(
             transport,
-            NetConfig::fast(owner.clone(), links, u64::from_le_bytes(seed)),
+            NetConfig::new(owner.clone(), links, u64::from_le_bytes(seed)),
             feed,
             store,
             CmdSink {
@@ -447,7 +498,7 @@ impl State {
                 generation: Some(generation),
             },
             wakeup_rx,
-            Some(molt_net::MlsChannel::new(mls)),
+            Some(MlsChannel::from_shared(mls_arc.clone())),
         );
         Some(NetRuntime {
             feed: NetFeed::Real,
@@ -457,6 +508,7 @@ impl State {
             context: (owner, self.session.active_workspace.clone()),
             peer_names,
             generation,
+            real_crypto: Some((transport_for_persist, mls_arc)),
         })
     }
 
@@ -621,6 +673,7 @@ fn spawn_demo_peer(
         context: (name.clone(), String::new()),
         peer_names: all.iter().filter(|m| *m != name).cloned().collect(),
         generation: 0,
+            real_crypto: None,
     };
     let config = GroupConfig {
         member: name.clone(),

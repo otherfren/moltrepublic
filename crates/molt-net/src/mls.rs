@@ -468,6 +468,45 @@ mod tests {
         assert_app(founder.decrypt(&ct).expect("decrypt"), "bob", b"back online");
     }
 
+    /// The reopen guarantee: a snapshot taken **mid-session** (after the ratchet
+    /// has advanced through real traffic) restores to the SAME advanced state, so
+    /// chat resumes without replay-rejection — this is what lets a reopened
+    /// workspace continue its mesh.
+    #[test]
+    fn snapshot_mid_session_resumes_the_advanced_ratchet() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("a welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        // advance BOTH ratchets through a few rounds of live traffic
+        for i in 0..3u8 {
+            let ct = founder.encrypt(&[b'f', i]).expect("f enc");
+            assert_app(bob.decrypt(&ct).expect("b dec"), "founder", &[b'f', i]);
+            let ct = bob.encrypt(&[b'b', i]).expect("b enc");
+            assert_app(founder.decrypt(&ct).expect("f dec"), "bob", &[b'b', i]);
+        }
+
+        // snapshot mid-session (as a clean close does), drop, restore both
+        let f_blob = founder.snapshot().expect("f snapshot");
+        let b_blob = bob.snapshot().expect("b snapshot");
+        drop(founder);
+        drop(bob);
+        let mut founder = MlsMember::restore(&f_blob).expect("restore founder");
+        let mut bob = MlsMember::restore(&b_blob).expect("restore bob");
+
+        // resume: the next message uses the NEXT generation, accepted (not a replay)
+        let ct = founder.encrypt(b"resumed after reopen").expect("enc");
+        assert_app(bob.decrypt(&ct).expect("dec"), "founder", b"resumed after reopen");
+        let ct = bob.encrypt(b"still here").expect("enc");
+        assert_app(founder.decrypt(&ct).expect("dec"), "bob", b"still here");
+    }
+
     /// A forged/garbage application message is rejected, never panics.
     #[test]
     fn garbage_ciphertext_is_rejected() {

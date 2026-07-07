@@ -1314,6 +1314,15 @@ enum WriterMsg {
     ReadFrom(u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
     /// Persist `transport.state` (atomic rewrite).
     SaveTransport(TransportState),
+    /// Merge the runtime crypto (MLS snapshot + queue creds) into the CURRENT
+    /// `transport.state` — read-modify-write on the writer thread, so it
+    /// preserves the outbox/inbound cursors the supervisor left. Acks when
+    /// durable (a blocking clean-close persist).
+    MergeCrypto {
+        mls: Option<Vec<u8>>,
+        smp_queues: Option<Vec<u8>>,
+        ack: mpsc::SyncSender<()>,
+    },
     /// Load `transport.state` (defaults when absent/damaged).
     LoadTransport(tokio::sync::oneshot::Sender<TransportState>),
     Close(mpsc::SyncSender<()>),
@@ -1393,6 +1402,28 @@ impl StorageHandle {
         }
     }
 
+    /// Merge the runtime crypto (MLS snapshot + queue creds) into the current
+    /// `transport.state`, preserving the delivery cursors, and BLOCK until it is
+    /// durable (fsync'd). The clean-close persist that lets a reopened node
+    /// resume the mesh. A gone writer is a silent no-op (nothing to resume into).
+    pub fn persist_crypto_blocking(&self, mls: Option<Vec<u8>>, smp_queues: Option<Vec<u8>>) {
+        if mls.is_none() && smp_queues.is_none() {
+            return;
+        }
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(WriterMsg::MergeCrypto {
+                mls,
+                smp_queues,
+                ack: ack_tx,
+            })
+            .is_ok()
+        {
+            let _ = ack_rx.recv();
+        }
+    }
+
     /// Load `transport.state` (defaults when absent, damaged, or the
     /// writer is gone).
     pub async fn load_transport_state(&self) -> TransportState {
@@ -1438,6 +1469,12 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
             let mut close_ack = None;
             // unsynced appends are pending an fsync deadline
             let mut dirty = false;
+            // once a clean-close crypto merge lands, this handle is terminal for
+            // transport.state: a `MergeCrypto` is always immediately followed by
+            // close/switch, so a LATER `SaveTransport` can only be a stale cursor
+            // update from a supervisor task still winding down — it must not
+            // clobber the merged MLS + queue creds (else reopen loses the mesh)
+            let mut crypto_sealed = false;
             loop {
                 // idle and clean: sleep until work arrives (no 50 ms wakeups
                 // on an idle workspace); dirty: wake at the commit deadline
@@ -1483,9 +1520,28 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         }
                     }
                     Ok(WriterMsg::SaveTransport(state)) => {
-                        if let Err(e) = ws.write_transport_state(&state) {
+                        // a stale cursor update from a supervisor task winding
+                        // down after the clean-close merge — dropping it protects
+                        // the merged crypto (the workspace is closing anyway)
+                        if crypto_sealed {
+                            tracing::debug!("ignoring a post-merge transport.state save");
+                        } else if let Err(e) = ws.write_transport_state(&state) {
                             fail(&failed_flag, "transport.state write", &e);
                         }
+                    }
+                    Ok(WriterMsg::MergeCrypto { mls, smp_queues, ack }) => {
+                        let mut ts = ws.read_transport_state();
+                        if mls.is_some() {
+                            ts.mls = mls;
+                        }
+                        if smp_queues.is_some() {
+                            ts.smp_queues = smp_queues;
+                        }
+                        if let Err(e) = ws.write_transport_state(&ts).and_then(|()| ws.sync()) {
+                            fail(&failed_flag, "crypto merge write", &e);
+                        }
+                        crypto_sealed = true;
+                        let _ = ack.send(());
                     }
                     Ok(WriterMsg::LoadTransport(reply)) => {
                         let _ = reply.send(ws.read_transport_state());
@@ -1920,6 +1976,62 @@ mod tests {
         assert_eq!(ws.next_seq, 7);
         assert_eq!(loaded.snapshot.expect("snap").at_seq, 6);
         assert!(loaded.tail.is_empty()); // everything is under the snapshot floor
+    }
+
+    /// The clean-close crypto merge (MLS snapshot + queue creds) must NOT clobber
+    /// the delivery cursors the supervisor left — else a reopen re-sends all
+    /// history and the peer re-applies it as duplicates.
+    #[test]
+    fn merge_crypto_preserves_delivery_cursors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+
+        // the supervisor persisted delivery cursors (with the stale load-time MLS)
+        let mut outbound = std::collections::BTreeMap::new();
+        outbound.insert(
+            "bob".to_string(),
+            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3 },
+        );
+        let mut inbound = std::collections::BTreeMap::new();
+        inbound.insert("bob".to_string(), 5u64);
+        handle.save_transport_state(TransportState {
+            outbound,
+            inbound,
+            ..TransportState::default()
+        });
+
+        // a clean close merges the advanced MLS + queue creds — cursors survive
+        handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"queue-creds".to_vec()));
+
+        // a supervisor task winding down enqueues one last stale save (its
+        // in-memory state still has the load-time MLS = None and no creds). The
+        // writer is SEALED by the merge and must ignore it — else reopen loses
+        // the mesh (the exact close-persist race).
+        handle.save_transport_state(TransportState::default());
+        handle.close(None);
+
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        let ts = ws.read_transport_state();
+        assert_eq!(
+            ts.mls.as_deref(),
+            Some(b"mls-blob".as_slice()),
+            "MLS merged and NOT clobbered by the late save"
+        );
+        assert_eq!(
+            ts.smp_queues.as_deref(),
+            Some(b"queue-creds".as_slice()),
+            "queue creds merged and NOT clobbered by the late save"
+        );
+        assert_eq!(
+            ts.outbound.get("bob").map(|c| (c.log_seq, c.wire_seq)),
+            Some((7, 3)),
+            "outbound cursor preserved through the merge"
+        );
+        assert_eq!(ts.inbound.get("bob").copied(), Some(5), "inbound cursor preserved");
     }
 
     /// A snapshot pointing past the surviving log (partial dir copy, old

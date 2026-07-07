@@ -250,9 +250,14 @@ impl State {
             self.emit_session(SessionScope::Full);
             return Ok(Reply::Ack);
         }
-        if self.persist {
-            self.open_stored_workspace(&id)?;
-        }
+        // clean close of the workspace we are leaving: persist its running mesh
+        // crypto so IT resumes if reopened later
+        self.persist_net_crypto_on_close();
+        let transport_state = if self.persist {
+            self.open_stored_workspace(&id)?
+        } else {
+            molt_core::TransportState::default()
+        };
         // the transport context changes with the workspace: tear the old mesh
         // down and abandon any still-running founder bootstrap for the workspace
         // we are leaving (its ready would be ws-id-rejected anyway; this reaps
@@ -261,13 +266,23 @@ impl State {
         self.founder_mesh_in = None;
         self.runtime_transport = None;
         self.session.active_workspace = id;
-        // NOTE: a reopened workspace does NOT yet rebuild its real mesh. The SMP
-        // queues' *receive* credentials and the advancing MLS ratchet are not in
-        // transport.state, so a fresh transport can neither subscribe to the
-        // bootstrap queues nor resume the ratchet without reuse (replay/nonce
-        // hazard). Cross-session mesh resume is the running-MLS+queue-persistence
-        // milestone; until then reopen gets the demo/sim mesh only.
-        self.ensure_demo_net();
+        // RESUME the real mesh from the clean-close snapshot: re-adopt the queue
+        // credentials into a fresh transport (recv keys + secured sender keys, so
+        // it can subscribe AND send) and load the advanced MLS ratchet. A
+        // workspace never cleanly closed (crash, or founded on another node) has
+        // no `smp_queues` → falls through to the demo/sim mesh.
+        let resumed = match (&transport_state.mls, &transport_state.smp_queues) {
+            (Some(mls), Some(creds)) if !transport_state.mesh.is_empty() => {
+                crate::founding::reopen_transport(&transport_state.mesh, creds)
+                    .and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
+            }
+            _ => None,
+        };
+        if let Some(net) = resumed {
+            self.net = Some(net);
+        } else {
+            self.ensure_demo_net();
+        }
         self.session.screen = Screen::Main;
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);
@@ -279,7 +294,7 @@ impl State {
     /// task. Every validation runs *before* the previously open workspace
     /// is torn down — any failure leaves it untouched (the freshly taken
     /// LOCK releases when `opened` drops on the error paths).
-    fn open_stored_workspace(&mut self, id: &str) -> Result<(), MoltError> {
+    fn open_stored_workspace(&mut self, id: &str) -> Result<molt_core::TransportState, MoltError> {
         let root = self.workspace_root();
         let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
             MoltError::Storage(format!(
@@ -324,6 +339,10 @@ impl State {
         }
         self.next_seq = opened.next_seq;
         let prefs = opened.prefs.clone();
+        // read the persisted transport state (MLS group + mesh + queue creds)
+        // NOW, while we still hold `opened` directly — after start_writer only
+        // the async load path remains, which the sync open handler can't await
+        let transport_state = opened.read_transport_state();
         self.active = Some(ActiveStorage {
             id: id.to_string(),
             dir,
@@ -334,7 +353,7 @@ impl State {
         // frame; re-decide thresholds that were already met
         self.recover_pending_applies();
         self.refresh_active_entry();
-        Ok(())
+        Ok(transport_state)
     }
 
     /// Mirror the replayed genesis identity into the session's list entry:
@@ -374,6 +393,8 @@ impl State {
     }
 
     pub(crate) fn cmd_close_workspace(&mut self) -> Result<Reply, MoltError> {
+        // clean close: persist the running mesh's crypto so a reopen resumes it
+        self.persist_net_crypto_on_close();
         self.teardown_net();
         self.close_active_storage();
         self.session.active_workspace = String::new();

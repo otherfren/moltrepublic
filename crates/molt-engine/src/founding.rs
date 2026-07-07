@@ -35,6 +35,21 @@ use crate::{Envelope, State};
 /// normally completes in well under a second; this only bounds a failed peer.
 const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// A fresh SMP transport for **resuming** a persisted mesh on reopen: build it
+/// for the mesh's server and re-adopt the persisted queue credentials (recv keys
+/// so it can subscribe to our inbound queues, secured sender keys so it can keep
+/// sending without a rejected re-SKEY). `None` for a loopback mesh (empty
+/// server — its in-memory queues cannot outlive the process) or bad creds.
+pub(crate) fn reopen_transport(
+    mesh: &[molt_core::MeshLink],
+    creds: &[u8],
+) -> Option<RitualTransport> {
+    let server = mesh.iter().map(|l| l.snd_server.trim()).find(|s| !s.is_empty())?;
+    let t = SmpTransport::new(SmpServer::parse(server).ok()?);
+    t.import_creds(creds);
+    Some(RitualTransport::Smp(t))
+}
+
 /// The transport a founding ritual runs over. The in-app demo founds over
 /// the in-process loopback hub (with simulated members); a real founding
 /// runs over the configured SMP server. One enum so the founder side — the
@@ -77,6 +92,20 @@ impl Transport for RitualTransport {
         match self {
             RitualTransport::Loopback(t) => t.delete_queue(q).await,
             RitualTransport::Smp(t) => t.delete_queue(q).await,
+        }
+    }
+
+    fn export_creds(&self) -> Option<Vec<u8>> {
+        match self {
+            RitualTransport::Loopback(t) => t.export_creds(),
+            RitualTransport::Smp(t) => t.export_creds(),
+        }
+    }
+
+    fn import_creds(&self, creds: &[u8]) {
+        match self {
+            RitualTransport::Loopback(t) => t.import_creds(creds),
+            RitualTransport::Smp(t) => t.import_creds(creds),
         }
     }
 }

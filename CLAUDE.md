@@ -96,6 +96,28 @@ that cost time to (re)discover:
   `MlsGroup::load(storage, &group_id)`; the signer round-trips via
   `SignatureKeyPair::read`.
 
+## Transport gotchas the loopback tests can't catch
+
+`LoopbackTransport` is **permissive** — its queues live in the shared hub, so any
+clone can subscribe to any queue. **SMP is not**: a queue's *receive* credential
+(recipient key) lives in the creating `SmpTransport`'s `Arc<Mutex<SmpState>>`, so
+only that instance (or a clone sharing the Arc) can `subscribe`. A *fresh*
+`SmpTransport::new(server)` can **send** to a queue by id but never receive on
+one it didn't create (`"subscribe to a queue this node did not create"`). So the
+runtime supervisor must **reuse the ritual transport** that created the mesh
+queues (founder: `runtime_transport`; joiner: the transport handed back through
+`join_transport`) — a fresh transport from the mesh handover is wrong, and
+loopback won't expose it. **Cross-session resume** works via a *clean-close
+persist*: on close, the engine writes the advanced MLS snapshot + the transport's
+serialized queue credentials (`Transport::export_creds`) into `transport.state`
+(`persist_crypto_blocking` — a read-modify-write that preserves the delivery
+cursors); on reopen, `reopen_transport` re-adopts the creds into a fresh
+`SmpTransport` and `cmd_open_workspace` rebuilds the real mesh. Only a CLEAN
+close persists — a hard crash resumes from the last-persisted ratchet, so a few
+in-flight messages may be replay-rejected by the peer (MLS's per-message
+`reuse_guard` prevents the worse nonce-reuse). Per-drain MLS persist (full
+crash-safety) is the remaining hardening.
+
 ## Build, test, run
 
 - `cargo build` builds the whole workspace including the Slint GUI (slow first

@@ -59,6 +59,73 @@ impl SmpTransport {
     }
 }
 
+/// The serializable form of one created queue's recipient credential.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedQueue {
+    recipient_id: Vec<u8>,
+    sender_id: Vec<u8>,
+    auth_sk: [u8; 32],
+    dh_secret: [u8; 32],
+    server_dh: [u8; 32],
+}
+
+/// The serializable form of a transport's whole credential set (`SmpState`):
+/// the queues we can receive on, and the sender keys we send peer queues with.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedCreds {
+    recv: Vec<PersistedQueue>,
+    send_keys: Vec<(Vec<u8>, [u8; 32])>,
+}
+
+impl SmpTransport {
+    /// Snapshot the credential set for `transport.state` (reopen re-adopts it).
+    fn creds_bytes(&self) -> Option<Vec<u8>> {
+        let s = self.state.lock().ok()?;
+        let recv = s
+            .recv
+            .values()
+            .map(|q| PersistedQueue {
+                recipient_id: q.recipient_id.clone(),
+                sender_id: q.sender_id.clone(),
+                auth_sk: q.auth_sk.to_bytes(),
+                dh_secret: q.dh_secret,
+                server_dh: q.server_dh,
+            })
+            .collect();
+        let send_keys = s
+            .send_keys
+            .iter()
+            .map(|(id, k)| (id.clone(), k.to_bytes()))
+            .collect();
+        bincode::serialize(&PersistedCreds { recv, send_keys }).ok()
+    }
+
+    /// Re-adopt a persisted credential set into this (fresh) transport.
+    fn adopt_creds(&self, bytes: &[u8]) {
+        let Ok(creds) = bincode::deserialize::<PersistedCreds>(bytes) else {
+            return;
+        };
+        let Ok(mut s) = self.state.lock() else {
+            return;
+        };
+        for q in creds.recv {
+            s.recv.insert(
+                q.recipient_id.clone(),
+                NewQueue {
+                    recipient_id: q.recipient_id,
+                    sender_id: q.sender_id,
+                    auth_sk: SigningKey::from_bytes(&q.auth_sk),
+                    dh_secret: q.dh_secret,
+                    server_dh: q.server_dh,
+                },
+            );
+        }
+        for (id, k) in creds.send_keys {
+            s.send_keys.insert(id, SigningKey::from_bytes(&k));
+        }
+    }
+}
+
 impl Transport for SmpTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
         let mut conn = SmpConn::connect(&self.server).await?;
@@ -145,5 +212,13 @@ impl Transport for SmpTransport {
             s.recv.remove(&q.id.0);
         }
         Ok(())
+    }
+
+    fn export_creds(&self) -> Option<Vec<u8>> {
+        self.creds_bytes()
+    }
+
+    fn import_creds(&self, creds: &[u8]) {
+        self.adopt_creds(creds);
     }
 }

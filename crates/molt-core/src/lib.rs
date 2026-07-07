@@ -898,6 +898,14 @@ pub struct TransportState {
     /// these.
     #[serde(default)]
     pub mesh: Vec<MeshLink>,
+    /// The transport's serialized queue **credentials** (opaque
+    /// `molt_net::Transport::export_creds` bytes: recipient keys of our mesh
+    /// queues + secured sender keys). Written on a clean close so a reopened
+    /// node re-adopts the same queues and resumes the mesh; `None` before the
+    /// first clean close (or for a credential-less transport). Sensitive — lives
+    /// only inside the already-encrypted `transport.state`.
+    #[serde(default)]
+    pub smp_queues: Option<Vec<u8>>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log

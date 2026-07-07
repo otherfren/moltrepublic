@@ -201,4 +201,18 @@ pub trait Transport: Send + Sync + Clone + 'static {
 
     /// Retire a queue (rotation / teardown).
     fn delete_queue(&self, q: &RcvQueue) -> impl Future<Output = Result<(), NetError>> + Send;
+
+    /// Serialize this transport's queue **credentials** — the recipient keys of
+    /// queues we created (to re-`subscribe`) and the sender keys we secured peer
+    /// queues with (to keep sending without a rejected re-`SKEY`) — so a reopened
+    /// node re-adopts the SAME queues. `None` for transports whose queues carry
+    /// no persistable credential (the loopback hub, whose queues live only in the
+    /// in-memory shared hub and cannot outlive the process).
+    fn export_creds(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Re-adopt credentials produced by [`Self::export_creds`] into a fresh
+    /// transport on reopen. A no-op for transports without persistable creds.
+    fn import_creds(&self, _creds: &[u8]) {}
 }
