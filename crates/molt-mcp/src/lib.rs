@@ -775,6 +775,13 @@ fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::JoinConfirmCharter),
         },
         ToolDef {
+            name: "join_decline_charter",
+            command: "join_decline_charter",
+            description: "Decline the founder's proposed charter at the ratification step (the other choice besides join_confirm_charter). Tells the founder the charter was declined (its seat shows declined so it can re-mint) and ends the join as failed.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::JoinDeclineCharter),
+        },
+        ToolDef {
             name: "join_cancel",
             command: "join_cancel",
             description: "Abandon the join run and return to the choice screen.",
@@ -825,7 +832,7 @@ mod tests {
         // task reporting back; reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
         // save_settings (see documents/mcp-security.md)
-        const INTERNAL: [&str; 14] = [
+        const INTERNAL: [&str; 15] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -838,6 +845,7 @@ mod tests {
             "net_join_sealed",
             "net_join_failed",
             "net_join_charter_proposed",
+            "net_join_declined",
             "reload_settings",
             "config_notice",
         ];

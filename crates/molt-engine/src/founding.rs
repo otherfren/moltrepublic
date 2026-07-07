@@ -444,6 +444,10 @@ fn spawn_founder_recv(
                     sig: s.sig,
                     generation: Some(generation),
                 },
+                invite::RitualMsg::Declined { .. } => Command::NetJoinDeclined {
+                    seat,
+                    generation: Some(generation),
+                },
                 // founder→member only:
                 invite::RitualMsg::Seal { .. } | invite::RitualMsg::Genesis { .. } => continue,
             };
@@ -931,7 +935,23 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
         let _ = r.proposal.send((proposal.name.clone(), proposal.agenda.clone())).await;
         match r.confirm.recv().await {
             Some(true) => {}
-            _ => return Err("the charter was declined".to_string()),
+            Some(false) => {
+                // explicit decline: tell the founder so its seat shows declined
+                // (a silent abandon — None below — the founder just sees stale)
+                let declined = invite::RitualMsg::Declined { seat: m.seat };
+                if let Ok(payload) = serde_json::to_vec(&declined) {
+                    let _ = supervisor::send_framed(
+                        &m.transport,
+                        &m.invite_snd,
+                        &m.invite_wrap,
+                        msg_id(&name, "founder", 3),
+                        &payload,
+                    )
+                    .await;
+                }
+                return Err("the charter was declined".to_string());
+            }
+            None => return Err("the ritual was cancelled".to_string()),
         }
     }
     let sig = molt_storage::identity_sign(&sk, &table);
@@ -1238,6 +1258,36 @@ mod ritual_ops {
                 .log
                 .push("→ charter proposed · awaiting every member's ratification".to_string());
             self.maybe_seal();
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// A member explicitly declined the proposed charter. Mark its seat as
+        /// declined (state 3) and log it — the founding can no longer seal (a
+        /// declined seat is never state 2), so the path forward is cancel +
+        /// re-mint. A stale/late decline is dropped.
+        pub(crate) fn cmd_net_join_declined(
+            &mut self,
+            seat: u32,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if !self.ritual_generation_current(generation) {
+                return Ok(molt_core::Reply::Ack);
+            }
+            let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            let who = self
+                .net_ritual
+                .as_ref()
+                .and_then(|r| r.seats.get(idx))
+                .and_then(|s| s.identity.as_ref())
+                .map(|i| i.member.clone())
+                .unwrap_or_else(|| format!("member {}", idx + 1));
+            if let Some(view) = self.session.create.seats.get_mut(idx) {
+                view.state = 3; // declined
+            }
+            self.session.create.run.log.push(format!(
+                "✗ {who} declined the charter · cancel and re-mint to change it"
+            ));
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }

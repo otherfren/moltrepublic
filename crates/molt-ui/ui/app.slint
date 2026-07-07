@@ -161,6 +161,8 @@ export component AppWindow inherits Window {
     // the joiner ratifies the founder's proposed charter (releases its seal
     // signature; the workspace opens only after this)
     callback join-confirm-charter();
+    // …or declines it (tells the founder, ends the join)
+    callback join-decline-charter();
     // copy a text (seed / invite link) into the system clipboard, in Rust
     callback copy-text(string);
     // read the system clipboard (for the paste buttons), handled in Rust
@@ -1185,20 +1187,22 @@ export component AppWindow inherits Window {
                                             border-radius: Theme.win95 ? 0px : 8px;
                                             background: Theme.panel;
                                             border-width: Theme.border-w;
-                                            border-color: seat.state == 2 ? Theme.good : Theme.line;
+                                            border-color: seat.state == 2 ? Theme.good
+                                                : (seat.state == 3 ? Theme.bad : Theme.line);
                                             HorizontalLayout {
                                                 padding-left: 12px;
                                                 padding-right: 6px;
                                                 spacing: 10px;
-                                                // status dot: gray waiting,
-                                                // amber key-in, green sealed
+                                                // status dot: gray waiting, amber
+                                                // key-in, green sealed, red declined
                                                 Rectangle {
                                                     width: 11px;
                                                     height: 11px;
                                                     border-radius: 5.5px;
                                                     y: (parent.height - self.height) / 2;
                                                     background: seat.state == 2 ? Theme.good
-                                                        : (seat.state == 1 ? Theme.warn : Theme.line);
+                                                        : (seat.state == 3 ? Theme.bad
+                                                        : (seat.state == 1 ? Theme.warn : Theme.line));
                                                 }
                                                 VerticalLayout {
                                                     alignment: center;
@@ -2031,9 +2035,9 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
                                 AppButton {
                                     height: 34px;
-                                    label: Strings.nav-back;
+                                    label: Strings.jw-ratify-decline;
                                     clicked => {
-                                        root.join-cancel();
+                                        root.join-decline-charter();
                                     }
                                 }
                                 AppButton {

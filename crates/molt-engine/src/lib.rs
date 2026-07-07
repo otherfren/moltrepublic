@@ -520,6 +520,10 @@ impl State {
             } => self.cmd_net_ritual_link_ready(seat, link, generation),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
+            Command::JoinDeclineCharter => self.cmd_join_decline_charter(),
+            Command::NetJoinDeclined { seat, generation } => {
+                self.cmd_net_join_declined(seat, generation)
+            }
             Command::NetJoinCharterProposed {
                 name,
                 agenda,

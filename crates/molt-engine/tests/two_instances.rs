@@ -368,12 +368,28 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     // the member side aborts with an error, and the founding never seals
     let b_res = b_task.await.expect("b task joins");
     assert!(b_res.is_err(), "a declined charter aborts the member side");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        read_session(&a).await.create.run.outcome,
-        0,
-        "nothing seals when a member declines"
-    );
+
+    // and the founder is TOLD: the seat turns declined (state 3) with a log line,
+    // so a silent member can no longer wedge the founding invisibly
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let s = read_session(&a).await;
+        if s.create.seats.first().is_some_and(|seat| seat.state == 3) {
+            assert!(
+                s.create.run.log.iter().any(|l| l.contains("declined")),
+                "the founder's log records the decline: {:?}",
+                s.create.run.log
+            );
+            break;
+        }
+        assert_eq!(s.create.run.outcome, 0, "nothing seals when a member declines");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder was never told about the decline; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The founding ritual **establishes a real MLS group** across the two

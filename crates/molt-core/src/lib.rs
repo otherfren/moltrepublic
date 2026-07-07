@@ -1838,6 +1838,20 @@ pub enum Command {
     /// joiner's confirmation — it releases the seal signature and the join
     /// proceeds to open the workspace. Co-equal: an operator or the GUI.
     JoinConfirmCharter,
+    /// Decline the founder's proposed charter (the other choice at the
+    /// ratification step). The joiner's node tells the founder it declined (so
+    /// the founder can re-mint) and the join ends as failed. Co-equal.
+    JoinDeclineCharter,
+    /// A member explicitly declined the proposed charter (engine-internal;
+    /// raised by the founder's ritual recv loop). The founder marks the seat and
+    /// logs it. Never an MCP tool.
+    NetJoinDeclined {
+        /// Which seat (0-based invite index) declined.
+        seat: u32,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The join reached the ratification step: the founder proposed this final
     /// name + agenda for the joiner to review before signing (engine-internal;
     /// surfaced by the off-actor join task). Never an MCP tool.

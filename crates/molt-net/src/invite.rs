@@ -137,6 +137,13 @@ pub enum RitualMsg {
     },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
+    /// member → founder: the member explicitly **declined** the proposed
+    /// charter (as opposed to silently going away). Lets the founder mark the
+    /// seat and decide (cancel + re-mint) instead of waiting forever.
+    Declined {
+        /// Which invite this answers (0-based seat index).
+        seat: u32,
+    },
     /// founder → member: the complete sealed roster (JSON of the transport's
     /// `SealedRoster`), sent once every seat has signed, so the member writes
     /// its own genesis. Opaque here — this layer keeps no core types. Carries

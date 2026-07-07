@@ -551,6 +551,14 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        ui.on_join_decline_charter(move || {
+            issue(&rt, &w, &weak, Command::JoinDeclineCharter);
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_select_surface(move |key| {
             let Some(surface) = Surface::parse(&key) else {
                 return;
@@ -1164,8 +1172,10 @@ fn strings_founder(lang: i32) -> &'static str {
 /// A ritual seat's status line once the member activated (state 1/2).
 fn seat_state_label(lang: i32, state: u8) -> String {
     match (lang, state) {
+        (1, 3) => "hat die Satzung abgelehnt",
         (1, 2) => "versiegelt",
         (1, _) => "Schlüssel erhalten · signiert…",
+        (_, 3) => "declined the charter",
         (_, 2) => "sealed",
         (_, _) => "key received · signing…",
     }
@@ -1865,6 +1875,7 @@ lexicon! {
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
     jw_ratify_hint: "The founder proposed this name and charter. Confirm to add your signature and join; the workspace opens once every member has ratified.", "Der Gründer hat diesen Namen und diese Satzung vorgeschlagen. Bestätige, um deine Signatur beizusteuern und beizutreten; der Workspace geht auf, sobald jedes Mitglied ratifiziert hat.";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
+    jw_ratify_decline: "Decline", "Ablehnen";
     jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";
     enter_republic: "Enter republic", "Republik betreten";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";

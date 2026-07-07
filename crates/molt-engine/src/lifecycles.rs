@@ -835,6 +835,29 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The joiner declines the proposed charter: release the gate with a `false`
+    /// so the ritual task tells the founder it declined (its seat shows declined
+    /// on the founder's side) and the join ends as failed. Co-equal. No-op unless
+    /// a join is actually paused awaiting ratification.
+    pub(crate) fn cmd_join_decline_charter(&mut self) -> Result<Reply, MoltError> {
+        if !self.session.join.awaiting_ratify {
+            return Err(MoltError::Join(
+                "no charter is awaiting your ratification".to_string(),
+            ));
+        }
+        if let Some(tx) = self.join_confirm.take() {
+            let _ = tx.try_send(false);
+        }
+        self.session.join.awaiting_ratify = false;
+        self.session
+            .join
+            .run
+            .log
+            .push("✗ you declined the charter".to_string());
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     // ---- the shared self-ticker ------------------------------------------
 
     /// Drive a mock run from the engine itself (co-equal: the run makes
