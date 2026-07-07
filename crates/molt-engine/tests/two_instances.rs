@@ -84,12 +84,33 @@ async fn founding_ritual_completes_across_two_instances() {
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
         // collect_genesis = false: this test checks the founder's genesis, not
-        // the joiner's own workspace
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, None)
+        // the joiner's own workspace; ratify = None: sign as soon as verified
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, None, None)
             .await
             .expect("B completes the member side")
             .pk
     });
+
+    // once B has joined, the founder proposes the charter (deliberation step);
+    // only then does the roster seal — propose BEFORE awaiting B (B returns
+    // after signing, which follows the seal)
+    let propose_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < propose_deadline,
+            "member-b never joined in time"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Duet".to_string(),
+        agenda: "hold the line".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
     let b_pk = b_task.await.expect("B task");
 
     // --- A seals and the workspace comes into being
@@ -127,12 +148,14 @@ async fn founding_ritual_completes_across_two_instances() {
         identities,
         attestations,
         republic_id,
+        agenda,
         ..
     } = &log[0].body
     else {
         panic!("first event is not Founded");
     };
     assert_eq!((*rule_m, *rule_n), (2, 2));
+    assert_eq!(agenda, "hold the line", "the ratified charter is in the genesis");
     assert_eq!(identities.len(), 2, "founder + member-b");
     assert_eq!(attestations.len(), 2, "both signed");
 
@@ -150,7 +173,8 @@ async fn founding_ritual_completes_across_two_instances() {
         "the republic id is the content-derived value"
     );
     // every attestation verifies against the anchored key over the table
-    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities);
+    let table =
+        molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda);
     for att in attestations {
         let identity = identities
             .iter()
@@ -161,6 +185,104 @@ async fn founding_ritual_completes_across_two_instances() {
             "attestation for {} does not verify",
             att.member
         );
+    }
+}
+
+/// The deliberation step **gates on the joiner's ratification** (concept
+/// §3.3): the founder proposes a charter, the joiner sees it and must confirm
+/// before its seal signature is released — until then nothing seals. Drives the
+/// real member side with a [`molt_engine::Ratifier`], acting as the human.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_gates_on_the_joiners_charter_ratification() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Pact".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+
+    // B runs the real member side behind a ratification gate; the test is the
+    // human on the other end of the channels
+    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    let ratifier = molt_engine::Ratifier {
+        proposal: prop_tx,
+        confirm: conf_rx,
+    };
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, Some(ratifier), None)
+            .await
+            .expect("B completes the member side")
+    });
+
+    // the founder proposes once B has joined
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Pact".to_string(),
+        agenda: "the pact: tend the commons, share the harvest".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    // B surfaces the proposed charter for the human to review
+    let (name, agenda) = prop_rx.recv().await.expect("charter surfaced to the joiner");
+    assert_eq!(name, "Pact");
+    assert_eq!(agenda, "the pact: tend the commons, share the harvest");
+
+    // the gate holds: with B not yet confirmed, the founding has not sealed
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_session(&a).await.create.run.outcome,
+        0,
+        "nothing seals until the joiner ratifies"
+    );
+
+    // the human confirms → B signs → the ritual seals
+    conf_tx.send(true).await.expect("confirm");
+    let b_out = b_task.await.expect("B task");
+    let sealed = b_out.sealed.expect("B received the sealed roster");
+    assert_eq!(sealed.agenda, "the pact: tend the commons, share the harvest");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let s = read_session(&a).await;
+        if s.create.run.outcome == 1 {
+            break;
+        }
+        assert_eq!(s.create.run.outcome, 0, "ritual must not fail: {:?}", s.create.run.log);
+        assert!(tokio::time::Instant::now() < deadline, "ritual did not seal after ratification");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -207,10 +329,29 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
     // the founder's Welcome and returns its own MLS snapshot
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, None)
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, None, None)
             .await
             .expect("B completes the member side")
     });
+
+    // once B has joined, the founder proposes the charter so the roster seals
+    let propose_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < propose_deadline,
+            "member-b never joined in time"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "keep the roads clear".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
 
     // A seals; the workspace comes into being and A distributes the Welcome
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

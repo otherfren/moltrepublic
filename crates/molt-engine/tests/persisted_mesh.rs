@@ -54,6 +54,7 @@ fn genesis(member: &str) -> EventEnvelope {
             identities: Vec::new(),
             attestations: Vec::new(),
             republic_id: String::new(),
+            agenda: String::new(),
         },
     }
 }

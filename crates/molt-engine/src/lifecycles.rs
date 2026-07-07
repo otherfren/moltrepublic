@@ -58,6 +58,7 @@ impl State {
         identities: Vec<molt_core::MemberIdentity>,
         attestations: Vec<molt_core::RosterAttestation>,
         republic_id: String,
+        agenda: String,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -73,6 +74,7 @@ impl State {
             roster,
             identities,
             attestations,
+            agenda,
         }
         .into_genesis(member, now_secs());
         let root = self.workspace_root();
@@ -219,6 +221,7 @@ impl State {
                 Vec::new(),
                 Vec::new(),
                 String::new(), // restore rebuilds the republic id at S4/S5
+                String::new(), // …and the charter with it
                 MoltError::Restore,
             )?
         } else {
@@ -358,6 +361,8 @@ impl State {
         self.session.create = CreateState {
             run: RunCore::started(),
             name: name.clone(),
+            agenda: String::new(),
+            can_propose: false,
             member: member.clone(),
             threshold,
             members,
@@ -454,8 +459,16 @@ impl State {
         // member computes identically; the founder signs the same canonical
         // bytes and its attestation leads the list
         let republic_id = ritual.republic_id(&identities);
-        let table =
-            molt_core::roster_canonical_bytes(&republic_id, c.threshold, c.members, &identities);
+        // the canonical bytes bind the ratified charter (agenda); the founder's
+        // name/agenda are already the final, proposed ones (cmd_create_propose
+        // set c.name/c.agenda and the ritual together)
+        let table = molt_core::roster_canonical_bytes(
+            &republic_id,
+            c.threshold,
+            c.members,
+            &identities,
+            &c.agenda,
+        );
         let founder_sig = molt_storage::identity_sign(ritual.founder_sk(), &table);
         let mut attestations = vec![molt_core::RosterAttestation {
             member: c.member.clone(),
@@ -472,6 +485,7 @@ impl State {
             roster: roster.clone(),
             identities: identities.clone(),
             attestations: attestations.clone(),
+            agenda: c.agenda.clone(),
         };
 
         // build the founder's MLS group from every seat's KeyPackage BEFORE
@@ -498,6 +512,7 @@ impl State {
                 identities.clone(),
                 attestations,
                 republic_id.clone(),
+                c.agenda.clone(),
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
@@ -598,6 +613,9 @@ impl State {
             rule_n: inv.info.members,
             inviter: inv.info.inviter.clone(),
             seed: seed.clone(),
+            proposed_name: String::new(),
+            proposed_agenda: String::new(),
+            awaiting_ratify: false,
         };
         self.session.screen = Screen::Join;
         self.emit_session(SessionScope::Full);
@@ -607,8 +625,35 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Join("engine stopped".to_string()));
         };
+        // the ratification gate: the join task surfaces the founder's proposed
+        // charter on `prop` and blocks on `conf` for the joiner's confirm
+        // before signing. A forwarder turns the surfaced charter into an
+        // internal command so the wizard can show it.
+        let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+        let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
+        self.join_confirm = Some(conf_tx);
+        let ratify = crate::founding::Ratifier {
+            proposal: prop_tx,
+            confirm: conf_rx,
+        };
+        let cmd_tx_fwd = cmd_tx.clone();
         tokio::spawn(async move {
-            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, None).await {
+            if let Some((name, agenda)) = prop_rx.recv().await {
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx_fwd
+                    .send(Envelope {
+                        cmd: Command::NetJoinCharterProposed {
+                            name,
+                            agenda,
+                            generation: Some(generation),
+                        },
+                        reply,
+                    })
+                    .await;
+            }
+        });
+        tokio::spawn(async move {
+            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, Some(ratify), None).await {
                 Ok(result) => match serde_json::to_string(&result.sealed) {
                     Ok(json) => Command::NetJoinSealed {
                         sealed: json,
@@ -667,6 +712,7 @@ impl State {
                 sealed.identities.clone(),
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
+                sealed.agenda.clone(),
                 MoltError::Join,
             ) {
                 Ok(id) => id,
@@ -685,6 +731,7 @@ impl State {
         // the join is done — advance the incarnation so a late result from the
         // (finished) join task can't retroactively touch the reset run
         self.join_generation += 1;
+        self.join_confirm = None;
         let members = roster_members(&sealed.roster, |_| true, "just now");
         self.session.join = JoinState::default();
         self.push_workspace_entry(
@@ -713,16 +760,68 @@ impl State {
             return Ok(Reply::Ack);
         }
         self.session.join.run.outcome = 2;
+        self.session.join.awaiting_ratify = false;
+        self.join_confirm = None;
         self.session.join.run.log.push(format!("✗ join failed: {error}"));
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
-        // invalidate any in-flight join task so its late result is dropped
+        // invalidate any in-flight join task so its late result is dropped;
+        // dropping join_confirm closes the gate → a paused ritual declines
         self.join_generation += 1;
+        self.join_confirm = None;
         self.session.join = JoinState::default();
         self.session.screen = Screen::Choice;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The off-actor join task reached the ratification step: surface the
+    /// founder's proposed charter so the wizard can show it and the joiner can
+    /// confirm or decline (internal — driven by the join task).
+    pub(crate) fn cmd_net_join_charter_proposed(
+        &mut self,
+        name: String,
+        agenda: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
+            return Ok(Reply::Ack);
+        }
+        self.session.join.proposed_name = name.clone();
+        self.session.join.proposed_agenda = agenda;
+        self.session.join.awaiting_ratify = true;
+        self.session
+            .join
+            .run
+            .log
+            .push(format!("→ charter proposed: “{name}” · review and confirm to join"));
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The joiner ratifies the proposed charter: release the seal signature so
+    /// the join proceeds (co-equal — an operator or the GUI). No-op unless a
+    /// join is actually paused awaiting ratification.
+    pub(crate) fn cmd_join_confirm_charter(&mut self) -> Result<Reply, MoltError> {
+        if !self.session.join.awaiting_ratify {
+            return Err(MoltError::Join(
+                "no charter is awaiting your ratification".to_string(),
+            ));
+        }
+        if let Some(tx) = self.join_confirm.take() {
+            // the paused ritual task is waiting on this; a full/closed channel
+            // just means it already moved on
+            let _ = tx.try_send(true);
+        }
+        self.session.join.awaiting_ratify = false;
+        self.session
+            .join
+            .run
+            .log
+            .push("✓ you ratified the charter · sealing your signature".to_string());
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

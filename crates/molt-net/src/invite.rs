@@ -124,10 +124,18 @@ pub struct SealSigned {
 pub enum RitualMsg {
     /// member → founder: activate the invite link.
     Join(JoinRequest),
-    /// founder → member: the final `roster_canonical_bytes` to sign
-    /// (hex).
+    /// founder → member: the proposed charter to ratify. The member displays
+    /// the final DAO `name` and the free-text `agenda`, and — on the human's
+    /// confirm — signs `table` (the canonical bytes that bind exactly this
+    /// name + agenda + roster). Signing IS the ratification (concept §3.3).
     Seal {
-        /// The canonical table bytes, lowercase hex.
+        /// The final DAO name, for the member to display and ratify.
+        #[serde(default)]
+        name: String,
+        /// The proposed free-text agenda/charter, for the member to display.
+        #[serde(default)]
+        agenda: String,
+        /// The canonical table bytes to sign, lowercase hex.
         table: String,
     },
     /// member → founder: the signature over the table.
@@ -172,6 +180,8 @@ mod tests {
                 key_package: "cc".repeat(20),
             }),
             RitualMsg::Seal {
+                name: "Guild".into(),
+                agenda: "fix the fence".into(),
                 table: "cc".repeat(40),
             },
             RitualMsg::Signed(SealSigned {

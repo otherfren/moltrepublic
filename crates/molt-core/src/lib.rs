@@ -909,6 +909,9 @@ pub struct SealedRoster {
     pub identities: Vec<MemberIdentity>,
     /// Every member's signature over the canonical table.
     pub attestations: Vec<RosterAttestation>,
+    /// The deliberated free-text charter every member ratified (concept §3.3).
+    #[serde(default)]
+    pub agenda: String,
 }
 
 impl SealedRoster {
@@ -931,6 +934,7 @@ impl SealedRoster {
                 identities: self.identities.clone(),
                 attestations: self.attestations.clone(),
                 republic_id: self.republic_id.clone(),
+                agenda: self.agenda.clone(),
             },
         }
     }
@@ -945,9 +949,10 @@ pub fn roster_canonical_bytes(
     rule_m: u8,
     rule_n: u8,
     members: &[MemberIdentity],
+    agenda: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-roster-v1\0");
+    out.extend_from_slice(b"molt-roster-v2\0");
     out.extend_from_slice(ws_id.as_bytes());
     out.push(rule_m);
     out.push(rule_n);
@@ -959,6 +964,12 @@ pub fn roster_canonical_bytes(
         out.extend_from_slice(&u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(pk);
     }
+    // the deliberated charter (DAO name is already folded into the republic id
+    // that salts ws_id; the free-text agenda is bound here) — every member's
+    // seal signature is its ratification of exactly these bytes
+    let ag = agenda.as_bytes();
+    out.extend_from_slice(&u32::try_from(ag.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(ag);
     out
 }
 
@@ -998,6 +1009,12 @@ pub enum WorkspaceEvent {
         /// pre-republic-id genesis frames.
         #[serde(default)]
         republic_id: String,
+        /// The deliberated charter: a free-text agenda the members agreed on
+        /// and every one ratified with their seal signature before the
+        /// workspace opened (transport concept §3.3). Immutable from birth,
+        /// like the roster. Empty on a genesis founded without deliberation.
+        #[serde(default)]
+        agenda: String,
     },
     /// A seat filled via invite.
     MemberJoined {
@@ -1281,8 +1298,17 @@ pub struct CreateState {
     /// the ritual's real events, progress is unused).
     #[serde(flatten)]
     pub run: RunCore,
-    /// The republic's name.
+    /// The republic's name (provisional until the founder proposes the final
+    /// charter in the deliberation step).
     pub name: String,
+    /// The deliberated free-text charter/agenda the founder proposes for the
+    /// members to ratify. Empty until proposed.
+    #[serde(default)]
+    pub agenda: String,
+    /// Whether every seat has joined and the founder may now propose the
+    /// charter (the deliberation step is unlocked). Set once, UI-driven.
+    #[serde(default)]
+    pub can_propose: bool,
     /// The founder's handle.
     pub member: String,
     /// The approval threshold (m).
@@ -1326,6 +1352,19 @@ pub struct JoinState {
     /// join (its identity + own workspace derive from it). Empty while idle.
     #[serde(default)]
     pub seed: String,
+    /// The founder's proposed final DAO name, surfaced when the ritual reaches
+    /// the ratification step (empty until then).
+    #[serde(default)]
+    pub proposed_name: String,
+    /// The founder's proposed free-text charter/agenda, for the joiner to read
+    /// before ratifying (empty until the ratification step).
+    #[serde(default)]
+    pub proposed_agenda: String,
+    /// Whether the join is paused awaiting the joiner's ratification of the
+    /// charter above — the wizard shows the charter + a confirm/decline choice,
+    /// and the workspace opens only once confirmed.
+    #[serde(default)]
+    pub awaiting_ratify: bool,
 }
 
 /// The (mock) restore lifecycle. Shared session state: any operator can start
@@ -1661,6 +1700,17 @@ pub enum Command {
         /// Transport: `"tor" | "nym" | "none"`.
         net: String,
     },
+    /// Propose the deliberated charter — the final DAO name and a free-text
+    /// agenda — once every seat has joined (`create.can_propose`). This seals
+    /// the roster for ratification: every member (founder included) signs the
+    /// canonical bytes that bind exactly this name + agenda, and only when all
+    /// have ratified does the workspace open. Co-equal: an operator or the GUI.
+    CreatePropose {
+        /// The final republic name.
+        name: String,
+        /// The free-text charter/agenda to ratify.
+        agenda: String,
+    },
     /// Abandon the founding ritual: distributed links become worthless,
     /// the disk stays untouched (unless the ritual already sealed — then
     /// the created workspace stays listed, just not entered).
@@ -1782,6 +1832,23 @@ pub enum Command {
         invite: String,
         /// The joiner's handle.
         member: String,
+    },
+    /// Ratify the founder's proposed charter (name + agenda), surfaced when the
+    /// join reaches the ratification step (`join.awaiting_ratify`). This is the
+    /// joiner's confirmation — it releases the seal signature and the join
+    /// proceeds to open the workspace. Co-equal: an operator or the GUI.
+    JoinConfirmCharter,
+    /// The join reached the ratification step: the founder proposed this final
+    /// name + agenda for the joiner to review before signing (engine-internal;
+    /// surfaced by the off-actor join task). Never an MCP tool.
+    NetJoinCharterProposed {
+        /// The proposed final DAO name.
+        name: String,
+        /// The proposed free-text charter/agenda.
+        agenda: String,
+        /// Join incarnation (a cancelled/restarted join drops stale results).
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// Abandon the join (idle again) and return to the choice screen.
     JoinCancel,
@@ -2104,12 +2171,15 @@ mod tests {
                 identity_pk: "bb".repeat(32),
             },
         ];
-        let a = roster_canonical_bytes("f00", 2, 3, &table);
-        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table));
+        let a = roster_canonical_bytes("f00", 2, 3, &table, "charter");
+        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter"));
         // any changed field changes the bytes
-        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table));
-        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table));
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1]));
+        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter"));
+        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter"));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter"));
+        // the ratified agenda is bound: a changed charter changes the bytes
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other"));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, ""));
         // length prefixes prevent name/pk boundary games
         let shifted = vec![MemberIdentity {
             member: "petraa".to_string(),
@@ -2120,8 +2190,8 @@ mod tests {
             identity_pk: format!("aa{}", "a".repeat(62)),
         }];
         assert_ne!(
-            roster_canonical_bytes("f00", 1, 1, &shifted),
-            roster_canonical_bytes("f00", 1, 1, &plain)
+            roster_canonical_bytes("f00", 1, 1, &shifted, ""),
+            roster_canonical_bytes("f00", 1, 1, &plain, "")
         );
     }
 

@@ -102,9 +102,18 @@ pub(crate) struct RitualRuntime {
     // keeps every ritual queue alive; dropping the runtime tears it down.
     // `maybe_seal` sends the canonical table over this.
     transport: RitualTransport,
-    /// The republic's display name — an input to the neutral
-    /// [`molt_storage::republic_id`] (the roster salt).
+    /// The republic's **final** display name — the founder's provisional name
+    /// until the deliberation step, then the ratified one. An input to the
+    /// neutral [`molt_storage::republic_id`] (the roster salt).
     name: String,
+    /// The deliberated free-text charter/agenda, set when the founder proposes
+    /// it; empty until then. Bound into every member's seal signature.
+    agenda: String,
+    /// Whether the founder has proposed the charter (final name + agenda). The
+    /// roster seals only once this is set AND every seat has joined — so the
+    /// members ratify a concrete charter, never an empty placeholder. The pure
+    /// sim seam pre-proposes (its founder does not deliberate).
+    charter_proposed: bool,
     rule_m: u8,
     rule_n: u8,
     founder: MemberIdentity,
@@ -137,10 +146,13 @@ impl RitualRuntime {
         molt_storage::republic_id(&self.name, self.rule_m, self.rule_n, identities)
     }
 
-    /// The canonical bytes every member signs once the table is complete.
+    /// The canonical bytes every member signs once the table is complete —
+    /// binding the roster AND the deliberated charter (name via the republic id,
+    /// agenda directly), so a signature is a ratification of exactly this
+    /// constitution.
     fn canonical(&self, identities: &[MemberIdentity]) -> Vec<u8> {
         let rid = self.republic_id(identities);
-        molt_core::roster_canonical_bytes(&rid, self.rule_m, self.rule_n, identities)
+        molt_core::roster_canonical_bytes(&rid, self.rule_m, self.rule_n, identities, &self.agenda)
     }
 
     fn next_msg_id(&self, tag: &str) -> molt_net::MsgId {
@@ -344,6 +356,11 @@ impl State {
         self.net_ritual = Some(RitualRuntime {
             transport,
             name: name.to_string(),
+            agenda: String::new(),
+            // the automated sim seam has no human founder to deliberate, so it
+            // pre-proposes and seals on all-joined (its name, empty agenda);
+            // every real founding waits for the founder's explicit charter
+            charter_proposed: self.ritual_sim,
             rule_m,
             rule_n,
             founder,
@@ -613,7 +630,11 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     if s.attestations.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
-    let table = molt_core::roster_canonical_bytes(&s.republic_id, s.rule_m, s.rule_n, &s.identities);
+    // recompute over the sealed charter too: if the founder put a different
+    // name/agenda in the genesis than the members ratified, their signatures
+    // (made over the Seal's table) fail here — the charter is tamper-evident
+    let table =
+        molt_core::roster_canonical_bytes(&s.republic_id, s.rule_m, s.rule_n, &s.identities, &s.agenda);
     for att in &s.attestations {
         let id = s
             .identities
@@ -650,6 +671,7 @@ pub async fn ritual_join_over_smp(
     link: &str,
     name: String,
     phrase: String,
+    ratify: Option<Ratifier>,
     cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinResult, String> {
     let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
@@ -670,7 +692,7 @@ pub async fn ritual_join_over_smp(
         invite_wrap: WrapKey::from_bytes(wrap_bytes),
         ticket: inv.info.ticket.clone(),
     };
-    let outcome = run_ritual_member(material, name.clone(), phrase, true, cancel).await?;
+    let outcome = run_ritual_member(material, name.clone(), phrase, true, ratify, cancel).await?;
     let sealed = outcome
         .sealed
         .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
@@ -703,7 +725,7 @@ pub async fn join_founding_over_smp(
     phrase: String,
     root: &std::path::Path,
 ) -> Result<molt_core::WorkspaceId, String> {
-    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), None).await?;
+    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), None, None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
@@ -777,12 +799,27 @@ async fn next_ritual_msg(
 ///
 /// `cancel` (if any) ends the wait early (ritual teardown). This is the exact
 /// code path a remote member's node runs over SMP.
+/// The joiner's human **ratification gate**: `run_ritual_member` surfaces the
+/// founder's proposed charter (final name, agenda) on `proposal` and blocks on
+/// `confirm` before signing — signing *is* the ratification (concept §3.3).
+/// `None` on the non-interactive paths (the founder's sim members, the
+/// standalone CLI join), which sign as soon as the table verifies.
+#[doc(hidden)]
+pub struct Ratifier {
+    /// The proposed `(final name, agenda)` surfaced for the human to review.
+    pub proposal: mpsc::Sender<(String, String)>,
+    /// The human's decision: `true` ratifies (sign); `false` or a closed
+    /// channel declines and aborts the join.
+    pub confirm: mpsc::Receiver<bool>,
+}
+
 #[doc(hidden)]
 pub async fn run_ritual_member<T: molt_net::Transport>(
     m: InviteMaterial<T>,
     name: String,
     phrase: String,
     collect_genesis: bool,
+    ratify: Option<Ratifier>,
     mut cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
@@ -835,15 +872,29 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // await the canonical table on our reply queue, sign it, send it back
+    // await the proposed charter on our reply queue; the table binds exactly
+    // this (name, agenda, roster)
     let mut reasm = molt_net::Reassembler::new();
-    let table = loop {
-        if let invite::RitualMsg::Seal { table } =
-            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
+    let (charter_name, charter_agenda, table) = loop {
+        if let invite::RitualMsg::Seal {
+            name,
+            agenda,
+            table,
+        } = next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
         {
-            break table;
+            break (name, agenda, table);
         }
     };
+    // human ratification gate: surface the charter and wait for the confirm
+    // before signing. The non-interactive paths (sim members, CLI) pass None
+    // and ratify as soon as they have the table.
+    if let Some(mut r) = ratify {
+        let _ = r.proposal.send((charter_name, charter_agenda)).await;
+        match r.confirm.recv().await {
+            Some(true) => {}
+            _ => return Err("the charter was declined".to_string()),
+        }
+    }
     let table_bytes = hex::decode(&table).map_err(|e| e.to_string())?;
     let sig = molt_storage::identity_sign(&sk, &table_bytes);
     let signed = invite::RitualMsg::Signed(invite::SealSigned { seat: m.seat, sig });
@@ -911,8 +962,9 @@ fn spawn_sim_member(material: InviteMaterial) -> Result<mpsc::Sender<()>, String
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         // a simulated member does not write a workspace, so it stops at its
-        // seal signature (collect_genesis = false)
-        if let Err(e) = run_ritual_member(material, name, phrase, false, Some(keep_rx)).await {
+        // seal signature (collect_genesis = false) and ratifies automatically
+        // (ratify = None) — the sim seam has no human to confirm
+        if let Err(e) = run_ritual_member(material, name, phrase, false, None, Some(keep_rx)).await {
             tracing::debug!(error = %e, "simulated founding member ended");
         }
     });
@@ -1055,30 +1107,99 @@ mod ritual_ops {
                 .log
                 .push(format!("→ {member} activated invite {} · key received", idx + 1));
 
-            // all keys in? send the canonical table to every member to sign
+            // once every seat has joined, unlock the deliberation step: the
+            // founder proposes the final name + agenda, and only then does the
+            // roster seal for ratification (concept §3.3)
+            let all_joined = self
+                .net_ritual
+                .as_ref()
+                .is_some_and(|r| r.seats.iter().all(|s| s.identity.is_some()));
+            if all_joined && !self.session.create.can_propose {
+                self.session.create.can_propose = true;
+                self.session
+                    .create
+                    .run
+                    .log
+                    .push("→ every member has joined · propose the charter to seal".to_string());
+            }
+            // seal now if the charter was already proposed (the sim seam
+            // pre-proposes; a founder may also propose before the last join)
             self.maybe_seal();
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }
 
-        /// If every seat's key is collected, freeze the canonical table and
-        /// send it to each member for signing (idempotent: only fires once).
+        /// The founder proposes the deliberated charter (final name + agenda).
+        /// Requires every seat joined; sets the final name/agenda on the ritual
+        /// and the session, then seals the roster for ratification. Co-equal —
+        /// an operator or the GUI issues it.
+        pub(crate) fn cmd_create_propose(
+            &mut self,
+            name: String,
+            agenda: String,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(molt_core::MoltError::Create(
+                    "the republic needs a name".to_string(),
+                ));
+            }
+            let Some(ritual) = &mut self.net_ritual else {
+                return Err(molt_core::MoltError::Create(
+                    "no founding is in progress".to_string(),
+                ));
+            };
+            if ritual.seats.iter().any(|s| s.identity.is_none()) {
+                return Err(molt_core::MoltError::Create(
+                    "every member must join before you propose the charter".to_string(),
+                ));
+            }
+            // the final, ratified name feeds the republic id + canonical bytes;
+            // keep the ritual and the session in lock-step so finalize (which
+            // reads the session's create state) signs exactly what was proposed
+            ritual.name = name.clone();
+            ritual.agenda = agenda.clone();
+            ritual.charter_proposed = true;
+            self.session.create.name = name;
+            self.session.create.agenda = agenda;
+            self.session
+                .create
+                .run
+                .log
+                .push("→ charter proposed · awaiting every member's ratification".to_string());
+            self.maybe_seal();
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// If every seat's key is collected AND the founder proposed the charter
+        /// (final name + agenda), freeze the canonical table and send it to each
+        /// member to ratify (idempotent: only fires once — a resend past the
+        /// first is harmless, the members' signatures are idempotent too).
         fn maybe_seal(&mut self) {
             let Some(ritual) = &self.net_ritual else {
                 return;
             };
+            if !ritual.charter_proposed {
+                return; // members ratify a concrete charter, not a placeholder
+            }
             let Some(identities) = ritual.full_identities() else {
                 return; // still waiting on keys
             };
             let table = ritual.canonical(&identities);
             let table_hex = hex::encode(&table);
+            let (name, agenda) = (ritual.name.clone(), ritual.agenda.clone());
             self.session
                 .create
                 .run
                 .log
-                .push("→ all keys collected · sealing the roster".to_string());
-            // send RitualMsg::Seal to each seat over its reply queue
-            let msg = invite::RitualMsg::Seal { table: table_hex };
+                .push("→ charter proposed · sealing the roster for ratification".to_string());
+            // send RitualMsg::Seal (the charter to ratify) to each seat
+            let msg = invite::RitualMsg::Seal {
+                name,
+                agenda,
+                table: table_hex,
+            };
             let payload = match serde_json::to_vec(&msg) {
                 Ok(p) => p,
                 Err(_) => return,
@@ -1181,7 +1302,7 @@ mod tests {
             MemberIdentity { member: "member".into(), identity_pk: pk_b },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter");
         let attestations = vec![
             RosterAttestation { member: "founder".into(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "member".into(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -1194,6 +1315,7 @@ mod tests {
             roster: vec!["founder".into(), "member".into()],
             identities,
             attestations,
+            agenda: "charter".into(),
         }
     }
 

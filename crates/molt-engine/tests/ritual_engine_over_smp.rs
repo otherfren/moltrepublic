@@ -45,6 +45,7 @@ struct FoundedView {
     identities: Vec<MemberIdentity>,
     attestations: Vec<RosterAttestation>,
     republic_id: String,
+    agenda: String,
 }
 
 fn read_founded(root: &Path, id: &str) -> FoundedView {
@@ -58,12 +59,13 @@ fn read_founded(root: &Path, id: &str) -> FoundedView {
         identities,
         attestations,
         republic_id,
+        agenda,
         ..
     } = log[0].body.clone()
     else {
         panic!("first event is not Founded");
     };
-    FoundedView { name, rule_m, rule_n, identities, attestations, republic_id }
+    FoundedView { name, rule_m, rule_n, identities, attestations, republic_id, agenda }
 }
 
 /// The invite link carries the transport handover *and* still shows a
@@ -160,6 +162,7 @@ async fn engine_founds_over_smp_across_two_instances() {
     let root_b = tmp.path().join("member-b");
     let root_b_arg = root_b.clone();
     let b_task = tokio::spawn(async move {
+        // the standalone join auto-ratifies the charter (no human gate)
         molt_engine::join_founding_over_smp(
             &link_for_b,
             "member-b".to_string(),
@@ -169,6 +172,30 @@ async fn engine_founds_over_smp_across_two_instances() {
         .await
         .expect("B joins from the link over SMP and writes its own workspace")
     });
+
+    // once B has joined, the deliberation step unlocks: the founder proposes
+    // the final name + charter, and only then does the roster seal. (Do this
+    // BEFORE awaiting B — B's join returns only after the seal.)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let s = read_session(&a).await;
+        if s.create.can_propose {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "member-b never joined in time; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "SMP Duet".to_string(),
+        agenda: "keep the commons in good repair".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
     // B's join returns only after the founder distributed the sealed roster,
     // so by here A has finalized
     let b_ws_id = b_task.await.expect("B task");
@@ -224,6 +251,7 @@ async fn engine_founds_over_smp_across_two_instances() {
         a_founded.rule_m,
         a_founded.rule_n,
         &a_founded.identities,
+        &a_founded.agenda,
     );
     for att in &a_founded.attestations {
         let id = a_founded
@@ -309,6 +337,44 @@ async fn engine_join_lifecycle_over_smp_enters_the_republic() {
     assert_eq!(joining.screen, Screen::Join);
     assert!(!joining.join.seed.is_empty(), "the joiner's phrase is shown");
 
+    // once B has joined, the founder proposes the deliberated charter
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never reached the founder");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Join Duet".to_string(),
+        agenda: "share the load".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    // B's wizard surfaces the charter for ratification; B confirms it, which
+    // releases its seal signature (the human gate the GUI join enforces)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let s = read_session(&b).await;
+        if s.join.awaiting_ratify {
+            assert_eq!(s.join.proposed_name, "Join Duet", "the joiner sees the final name");
+            assert_eq!(s.join.proposed_agenda, "share the load", "…and the agenda");
+            break;
+        }
+        assert_ne!(s.join.run.outcome, 2, "join must not fail: {:?}", s.join.run.log);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B never reached the ratification step: {:?}",
+            s.join.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    b.execute(Command::JoinConfirmCharter)
+        .await
+        .expect("B ratifies the charter");
+
     // B's join completes → it enters the republic with its own workspace
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let b_id = loop {
@@ -345,6 +411,7 @@ async fn engine_join_lifecycle_over_smp_enters_the_republic() {
         b_founded.rule_m,
         b_founded.rule_n,
         &b_founded.identities,
+        &b_founded.agenda,
     );
     for att in &b_founded.attestations {
         let id = b_founded

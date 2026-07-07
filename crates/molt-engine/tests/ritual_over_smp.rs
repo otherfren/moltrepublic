@@ -99,8 +99,15 @@ async fn ritual(url: &str, label: &str) {
     // collect_genesis = false: the founder side here is hand-rolled and does
     // not distribute a genesis, so the member stops at its seal signature
     let member_task = tokio::spawn(async move {
-        molt_engine::run_ritual_member(material, "remote-member".into(), member_phrase, false, None)
-            .await
+        molt_engine::run_ritual_member(
+            material,
+            "remote-member".into(),
+            member_phrase,
+            false,
+            None,
+            None,
+        )
+        .await
     });
 
     // FOUNDER: receive the JoinRequest, verify the ticket MAC, learn the
@@ -124,9 +131,13 @@ async fn ritual(url: &str, label: &str) {
         MemberIdentity { member: "founder".into(), identity_pk: founder_pk.clone() },
         MemberIdentity { member: req.name.clone(), identity_pk: req.identity_pk.clone() },
     ];
-    let table = roster_canonical_bytes(ws_id, 2, 2, &identities);
+    let table = roster_canonical_bytes(ws_id, 2, 2, &identities, "");
     let founder_sig = molt_storage::identity_sign(&founder_sk, &table);
-    let seal = RitualMsg::Seal { table: hex::encode(&table) };
+    let seal = RitualMsg::Seal {
+        name: String::new(),
+        agenda: String::new(),
+        table: hex::encode(&table),
+    };
     send_framed(
         &founder_t,
         &reply_snd,

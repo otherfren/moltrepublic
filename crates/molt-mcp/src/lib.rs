@@ -727,6 +727,23 @@ fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::CreateCancel),
         },
         ToolDef {
+            name: "create_propose",
+            command: "create_propose",
+            description: "Propose the deliberated charter — the final republic name and a free-text agenda — once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda with their signature, and only then does the workspace open.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "the final republic name to ratify" },
+                    "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" }
+                },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::CreatePropose {
+                name: str_arg(args, "name")?,
+                agenda: args.get("agenda").and_then(Value::as_str).unwrap_or_default().to_string(),
+            }),
+        },
+        ToolDef {
             name: "create_finish",
             command: "create_finish",
             description: "Finish a successful founding: the new republic joins the local list, becomes active, straight to the main screen.",
@@ -749,6 +766,13 @@ fn tools() -> Vec<ToolDef> {
                 invite: str_arg(args, "invite")?,
                 member: str_arg(args, "member")?,
             }),
+        },
+        ToolDef {
+            name: "join_confirm_charter",
+            command: "join_confirm_charter",
+            description: "Ratify the founder's proposed charter, surfaced when the join reaches the ratification step (read_session shows join.awaiting_ratify with proposed_name / proposed_agenda). This is the joiner's confirmation — it releases the seal signature and the workspace opens.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::JoinConfirmCharter),
         },
         ToolDef {
             name: "join_cancel",
@@ -801,7 +825,7 @@ mod tests {
         // task reporting back; reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
         // save_settings (see documents/mcp-security.md)
-        const INTERNAL: [&str; 13] = [
+        const INTERNAL: [&str; 14] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -813,6 +837,7 @@ mod tests {
             "net_ritual_failed",
             "net_join_sealed",
             "net_join_failed",
+            "net_join_charter_proposed",
             "reload_settings",
             "config_notice",
         ];

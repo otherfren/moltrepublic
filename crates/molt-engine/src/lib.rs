@@ -40,7 +40,7 @@ pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use founding::{
     join_founding_over_smp, ritual_join_over_smp, run_ritual_member, FoundingInvite, InviteMaterial,
-    RitualTransport,
+    Ratifier, RitualTransport,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
@@ -313,6 +313,10 @@ pub(crate) struct State {
     /// concurrent founding/mesh change can neither be mistaken for a stale
     /// join nor silently drop a live one.
     pub(crate) join_generation: u64,
+    /// The channel the off-actor join task waits on for the joiner's charter
+    /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
+    /// while a join is paused at the ratification step, else `None`.
+    pub(crate) join_confirm: Option<mpsc::Sender<bool>>,
     /// Whether workspaces persist to disk at all ([`spawn`] = false).
     pub(crate) persist: bool,
     /// The shared app/session state (screen, language, settings, …).
@@ -359,6 +363,7 @@ impl State {
             ritual_sim: false,
             net_generation: 0,
             join_generation: 0,
+            join_confirm: None,
             persist,
             session,
             store,
@@ -481,6 +486,7 @@ impl State {
                 members,
                 net,
             } => self.cmd_create_start(name, member, threshold, members, net),
+            Command::CreatePropose { name, agenda } => self.cmd_create_propose(name, agenda),
             Command::CreateCancel => self.cmd_create_cancel(),
             Command::CreateFinish => self.cmd_create_finish(),
             Command::NetJoinRequested {
@@ -513,6 +519,12 @@ impl State {
                 generation,
             } => self.cmd_net_ritual_link_ready(seat, link, generation),
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
+            Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
+            Command::NetJoinCharterProposed {
+                name,
+                agenda,
+                generation,
+            } => self.cmd_net_join_charter_proposed(name, agenda, generation),
             Command::JoinCancel => self.cmd_join_cancel(),
             Command::NetRitualFailed { error, generation } => {
                 self.cmd_net_ritual_failed(error, generation)
@@ -1314,7 +1326,7 @@ mod tests {
             MemberIdentity { member: "petra".to_string(), identity_pk: pk_b },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
         let attestations = vec![
             RosterAttestation { member: "founder".to_string(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "petra".to_string(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -1327,6 +1339,7 @@ mod tests {
             roster: vec!["founder".to_string(), "petra".to_string()],
             identities,
             attestations,
+            agenda: String::new(),
         }
     }
 
