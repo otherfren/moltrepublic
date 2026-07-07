@@ -37,3 +37,10 @@ x25519-dalek.workspace = true
 crypto_box.workspace = true
 ed448-goldilocks = "0.9"
 sha3 = "0.10"
+# MLS (T2): group encryption of the live traffic. See workspace manifest.
+openmls.workspace = true
+openmls_traits.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_basic_credential.workspace = true
+tls_codec.workspace = true
+bincode.workspace = true

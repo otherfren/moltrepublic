@@ -36,6 +36,7 @@ pub mod block;
 pub mod chunk;
 pub mod invite;
 pub mod loopback;
+pub mod mls;
 pub mod smp;
 pub mod supervisor;
 pub mod wrap;
@@ -47,6 +48,7 @@ pub use chunk::{msg_id, MsgId, Reassembler, CHUNK_PAYLOAD_BUDGET};
 pub use invite::{
     join_mac, mint_ticket, verify_join_mac, JoinRequest, ReplyHandover, RitualMsg, SealSigned,
 };
+pub use mls::{MlsError, MlsIncoming, MlsMember};
 pub use supervisor::send_framed;
 pub use loopback::{ChaosPolicy, LoopbackHub, LoopbackTransport};
 pub use supervisor::{

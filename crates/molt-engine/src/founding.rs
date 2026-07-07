@@ -87,6 +87,9 @@ struct SeatRuntime {
     reply_wrap: Option<WrapKey>,
     /// The member's identity, once their JoinRequest verified.
     identity: Option<MemberIdentity>,
+    /// The member's MLS KeyPackage (hex of the wire bytes), delivered with the
+    /// JoinRequest — the founder adds every seat's to the group at sealing.
+    key_package: Option<String>,
     /// Whether this seat's seal signature was already accepted — a second
     /// (distinct) `SealSigned` must not push a duplicate attestation.
     sealed: bool,
@@ -147,11 +150,38 @@ impl RitualRuntime {
         msg_id("founder", tag, n)
     }
 
-    /// Send the complete sealed roster to every member's reply queue, so each
-    /// writes its own genesis. Fire-and-forget (a member already gone just
-    /// misses it); every seat has a reply queue by the time this is called.
-    pub(crate) fn distribute_genesis(&self, sealed_json: String) {
-        let msg = invite::RitualMsg::Genesis { sealed: sealed_json };
+    /// Build the founder's MLS group at sealing: create the group with the
+    /// founder as sole leaf, then add every seat from its advertised KeyPackage
+    /// in one commit. Returns the founder's live [`MlsMember`] (to snapshot into
+    /// its own `transport.state`) and the single Welcome (hex) that covers all
+    /// added members — distributed with the genesis so each finishes the ritual
+    /// already inside the group (concept §3.3). Every joined seat has a
+    /// KeyPackage by sealing (the join is rejected without one).
+    pub(crate) fn build_founder_mls(&self) -> Result<(molt_net::MlsMember, String), String> {
+        let mut founder = molt_net::MlsMember::new(&self.founder_sk, &self.founder.member)
+            .map_err(|e| e.to_string())?;
+        founder.create_group().map_err(|e| e.to_string())?;
+        let mut kps = Vec::with_capacity(self.seats.len());
+        for (idx, s) in self.seats.iter().enumerate() {
+            let hex = s
+                .key_package
+                .as_ref()
+                .ok_or_else(|| format!("seat {} has no MLS key package", idx + 1))?;
+            kps.push(hex::decode(hex).map_err(|e| e.to_string())?);
+        }
+        let welcome = founder.add_members(&kps).map_err(|e| e.to_string())?;
+        Ok((founder, welcome.map(hex::encode).unwrap_or_default()))
+    }
+
+    /// Send the complete sealed roster + the MLS Welcome to every member's reply
+    /// queue, so each writes its own genesis and joins the group. Fire-and-forget
+    /// (a member already gone just misses it); every seat has a reply queue by
+    /// the time this is called.
+    pub(crate) fn distribute_genesis(&self, sealed_json: String, welcome: String) {
+        let msg = invite::RitualMsg::Genesis {
+            sealed: sealed_json,
+            welcome,
+        };
         let Ok(payload) = serde_json::to_vec(&msg) else {
             return;
         };
@@ -238,6 +268,7 @@ impl State {
                 reply_snd: None,
                 reply_wrap: None,
                 identity: None,
+                key_package: None,
                 sealed: false,
             });
         }
@@ -388,6 +419,7 @@ fn spawn_founder_recv(
                         .as_ref()
                         .and_then(|r| serde_json::to_string(r).ok())
                         .unwrap_or_default(),
+                    key_package: j.key_package,
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
@@ -602,13 +634,24 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
 /// verify it. Writing the workspace is the caller's job (the engine
 /// materialises it into its state; [`join_founding_over_smp`] writes it
 /// standalone). `cancel` lets the GUI abort a join that is waiting.
+/// The verified outcome of joining a founding: the sealed roster to write, and
+/// the joiner's own MLS group snapshot to seal into its `transport.state`.
+#[doc(hidden)]
+pub struct JoinResult {
+    /// The verified sealed roster the founder distributed.
+    pub sealed: molt_core::SealedRoster,
+    /// The joiner's MLS group snapshot (after processing the Welcome), or `None`
+    /// on a pre-MLS founding.
+    pub mls_snapshot: Option<Vec<u8>>,
+}
+
 #[doc(hidden)]
 pub async fn ritual_join_over_smp(
     link: &str,
     name: String,
     phrase: String,
     cancel: Option<mpsc::Receiver<()>>,
-) -> Result<molt_core::SealedRoster, String> {
+) -> Result<JoinResult, String> {
     let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
     let wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
@@ -642,7 +685,10 @@ pub async fn ritual_join_over_smp(
     {
         return Err("the sealed roster does not anchor our own (name, key)".to_string());
     }
-    Ok(sealed)
+    Ok(JoinResult {
+        sealed,
+        mls_snapshot: outcome.mls_snapshot,
+    })
 }
 
 /// Join a founding from its real link over SMP and write our **own** workspace
@@ -657,11 +703,18 @@ pub async fn join_founding_over_smp(
     phrase: String,
     root: &std::path::Path,
 ) -> Result<molt_core::WorkspaceId, String> {
-    let sealed = ritual_join_over_smp(link, name.clone(), phrase.clone(), None).await?;
+    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
-    let genesis = sealed.into_genesis(&name, molt_storage::now_secs());
+    let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
-    Ok(opened.manifest.workspace.id.clone())
+    let id = opened.manifest.workspace.id.clone();
+    // seal our own MLS group state into the new workspace's transport.state
+    if let Some(blob) = result.mls_snapshot {
+        let mut ts = opened.read_transport_state();
+        ts.mls = Some(blob);
+        opened.write_transport_state(&ts).map_err(|e| e.to_string())?;
+    }
+    Ok(id)
 }
 
 /// What the member side produced: its anchored identity pk, and — when it
@@ -674,6 +727,10 @@ pub struct JoinOutcome {
     /// The complete sealed roster, present only when `collect_genesis` was
     /// set and the founder finished distributing it.
     pub sealed: Option<molt_core::SealedRoster>,
+    /// The member's own MLS group snapshot after processing the Welcome —
+    /// present only when `collect_genesis` was set and a Welcome arrived. The
+    /// caller seals it into the member's `transport.state`.
+    pub mls_snapshot: Option<Vec<u8>>,
 }
 
 /// Receive the next complete [`invite::RitualMsg`] on the member's reply
@@ -734,6 +791,13 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     let member_id = molt_storage::derive_workspace_id(&entropy, "member");
     let (sk, pk) = molt_storage::derive_identity_key(&entropy, &member_id);
 
+    // the MLS member, built from the *same* identity key (concept §3.3: one
+    // identity anchors both the genesis table and the MLS credential). Its
+    // KeyPackage rides the JoinRequest; its provider must live until the
+    // Welcome is processed, then is snapshotted into transport.state.
+    let mut mls = molt_net::MlsMember::new(&sk, &name).map_err(|e| e.to_string())?;
+    let key_package = mls.key_package().map_err(|e| e.to_string())?;
+
     // create the reply queue we (the member) receive the canonical table
     // on, and subscribe *before* announcing it — so the founder's table can
     // never race ahead of our subscription. In SMP each party owns the
@@ -758,6 +822,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
             queue_id: hex::encode(&reply_q.snd.id.0),
             wrap: hex::encode(reply_wrap.to_bytes()),
         }),
+        key_package: hex::encode(&key_package),
     });
     let payload = serde_json::to_vec(&join).map_err(|e| e.to_string())?;
     supervisor::send_framed(
@@ -794,18 +859,38 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .map_err(|e| e.to_string())?;
 
     if !collect_genesis {
-        return Ok(JoinOutcome { pk, sealed: None }); // sim members stop here
+        // sim members stop at their seal signature; their KeyPackage still
+        // joined the founder's group, they just never process the Welcome
+        return Ok(JoinOutcome {
+            pk,
+            sealed: None,
+            mls_snapshot: None,
+        });
     }
 
-    // wait for the founder to distribute the complete sealed roster once every
-    // seat has signed — this is what lets us write our own workspace
+    // wait for the founder to distribute the complete sealed roster + the MLS
+    // Welcome once every seat has signed — this is what lets us write our own
+    // workspace and enter the group
     loop {
-        if let invite::RitualMsg::Genesis { sealed } =
+        if let invite::RitualMsg::Genesis { sealed, welcome } =
             next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
         {
             let sealed: molt_core::SealedRoster =
                 serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
-            return Ok(JoinOutcome { pk, sealed: Some(sealed) });
+            // process the Welcome and snapshot our own group state; a founding
+            // without a Welcome (pre-MLS peer) leaves us with no snapshot
+            let mls_snapshot = if welcome.is_empty() {
+                None
+            } else {
+                let bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
+                mls.join_from_welcome(&bytes).map_err(|e| e.to_string())?;
+                Some(mls.snapshot().map_err(|e| e.to_string())?)
+            };
+            return Ok(JoinOutcome {
+                pk,
+                sealed: Some(sealed),
+                mls_snapshot,
+            });
         }
     }
 }
@@ -912,6 +997,7 @@ mod ritual_ops {
         /// their identity, and — once every seat's key is in — send the
         /// canonical table to all members to sign. Verification failures
         /// are logged and dropped (a bad request must not wedge anything).
+        #[allow(clippy::too_many_arguments)]
         pub(crate) fn cmd_net_join_requested(
             &mut self,
             seat: u32,
@@ -919,6 +1005,7 @@ mod ritual_ops {
             identity_pk: String,
             proof: String,
             reply: String,
+            key_package: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
@@ -944,12 +1031,19 @@ mod ritual_ops {
                 tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
                 return Ok(molt_core::Reply::Ack);
             };
+            // the member's MLS KeyPackage is required — the founder must add it
+            // to the group at sealing, or the seat could never join the group
+            if key_package.is_empty() || hex::decode(&key_package).is_err() {
+                tracing::warn!(seat, %member, "founding join rejected: missing/invalid MLS key package");
+                return Ok(molt_core::Reply::Ack);
+            }
             s.identity = Some(MemberIdentity {
                 member: member.clone(),
                 identity_pk,
             });
             s.reply_snd = Some(reply_snd);
             s.reply_wrap = Some(reply_wrap);
+            s.key_package = Some(key_package);
             // reflect into the session seat + log
             if let Some(view) = self.session.create.seats.get_mut(idx) {
                 view.member = member.clone();

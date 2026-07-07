@@ -91,6 +91,18 @@ hex                = "0.4"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
+# MLS group encryption (molt-net, T2). Pure-Rust provider (RustCrypto +
+# hpke-rs/libcrux + ed25519-dalek/x25519-dalek + chacha20poly1305/aes-gcm) —
+# keeps the no-C-toolchain posture. The mandatory ciphersuite
+# MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 matches our Ed25519 identity
+# keys + X25519 exactly. Companion crates version independently of openmls.
+openmls                  = "0.8.1"
+openmls_traits           = "0.5.0"
+openmls_rust_crypto      = "0.5.1"
+openmls_basic_credential = "0.5.0"
+tls_codec                = "0.4.2"   # MLS wire (de)serialization
+bincode                  = "1"       # snapshot the provider's byte-keyed storage map (JSON can't)
+
 # GUI (molt-ui). FemtoVG (pure-Rust GPU renderer) is the default — it can
 # rasterize color-emoji fonts (Twemoji nav icons / reactions) and fixes the
 # software renderer's resize flicker; the software renderer stays in as the

@@ -99,6 +99,20 @@ impl State {
         Ok(id)
     }
 
+    /// Seal an MLS group snapshot into the active workspace's `transport.state`.
+    /// Founding/join-time only: the workspace is fresh, so a default state
+    /// carrying just the MLS blob is correct — delivery cursors accrue later via
+    /// the supervisor's load-modify-save, which preserves this field.
+    fn persist_mls_snapshot(&self, blob: Vec<u8>) {
+        if let Some(active) = &self.active {
+            let ts = molt_core::TransportState {
+                mls: Some(blob),
+                ..Default::default()
+            };
+            active.handle.save_transport_state(ts);
+        }
+    }
+
     /// Add one freshly founded/joined/restored workspace to the session
     /// list — the single construction the three finishes share, so the
     /// entry's shape cannot drift between the paths.
@@ -460,6 +474,16 @@ impl State {
             attestations: attestations.clone(),
         };
 
+        // build the founder's MLS group from every seat's KeyPackage BEFORE
+        // touching disk, so a missing/invalid package fails the founding
+        // cleanly (only for a persisted founding — the demo has no workspace to
+        // hold a group, and its sim members ignore the Welcome anyway).
+        let founder_mls = if self.persist {
+            Some(ritual.build_founder_mls().map_err(MoltError::Create)?)
+        } else {
+            None
+        };
+
         // write the FOUNDER's own workspace first. If the disk fails, the
         // founding fails cleanly and no member is left committed to a
         // constitution the founder never persisted (a retry re-mints a fresh
@@ -477,15 +501,22 @@ impl State {
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
+            // seal the founder's own MLS group state into transport.state
+            if let Some((mls, _)) = &founder_mls {
+                let blob = mls.snapshot().map_err(|e| MoltError::Create(e.to_string()))?;
+                self.persist_mls_snapshot(blob);
+            }
             id
         } else {
             demo_workspace_id(&c.name)
         };
 
-        // only now distribute the sealed roster to every member so each writes
-        // its own workspace (own seed) from the same constitution
+        // only now distribute the sealed roster + the MLS Welcome to every
+        // member so each writes its own workspace (own seed) and enters the
+        // group from the same constitution
+        let welcome = founder_mls.map(|(_, w)| w).unwrap_or_default();
         if let Ok(json) = serde_json::to_string(&sealed) {
-            ritual.distribute_genesis(json);
+            ritual.distribute_genesis(json, welcome);
         }
 
         let s3 = self.session.settings.s3_backup;
@@ -578,9 +609,10 @@ impl State {
         };
         tokio::spawn(async move {
             let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, None).await {
-                Ok(sealed) => match serde_json::to_string(&sealed) {
+                Ok(result) => match serde_json::to_string(&result.sealed) {
                     Ok(json) => Command::NetJoinSealed {
                         sealed: json,
+                        mls: result.mls_snapshot.map(hex::encode).unwrap_or_default(),
                         generation: Some(generation),
                     },
                     Err(e) => Command::NetJoinFailed {
@@ -604,6 +636,7 @@ impl State {
     pub(crate) fn cmd_net_join_sealed(
         &mut self,
         sealed: String,
+        mls: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted join bumped the generation — drop stale results
@@ -642,6 +675,13 @@ impl State {
         } else {
             demo_workspace_id(&sealed.name)
         };
+        // seal the joiner's own MLS group state into its fresh transport.state
+        if self.persist && !mls.is_empty() {
+            match hex::decode(&mls) {
+                Ok(blob) => self.persist_mls_snapshot(blob),
+                Err(e) => tracing::warn!(error = %e, "join: undecodable MLS snapshot — group not persisted"),
+            }
+        }
         // the join is done — advance the incarnation so a late result from the
         // (finished) join task can't retroactively touch the reset run
         self.join_generation += 1;

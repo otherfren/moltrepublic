@@ -100,6 +100,11 @@ pub struct JoinRequest {
     /// `None` only on the legacy path where the founder pre-created it.
     #[serde(default)]
     pub reply: Option<ReplyHandover>,
+    /// The member's MLS KeyPackage (hex of the wire bytes), so the founder can
+    /// add it to the group and the same identity anchors both the genesis table
+    /// and the MLS credential (concept §3.3). Empty on a pre-MLS path.
+    #[serde(default)]
+    pub key_package: String,
 }
 
 /// One member's seal signature over the final roster table.
@@ -129,11 +134,17 @@ pub enum RitualMsg {
     Signed(SealSigned),
     /// founder → member: the complete sealed roster (JSON of the transport's
     /// `SealedRoster`), sent once every seat has signed, so the member writes
-    /// its own genesis. Opaque here — this layer keeps no core types.
+    /// its own genesis. Opaque here — this layer keeps no core types. Carries
+    /// the MLS Welcome (hex) alongside it, so the member joins the group and
+    /// finishes the ritual already inside it (concept §3.3).
     Genesis {
         /// JSON of the sealed roster (identities + all attestations + the
         /// republic id).
         sealed: String,
+        /// The MLS Welcome for this founding (hex of the wire bytes). Empty on
+        /// a pre-MLS path.
+        #[serde(default)]
+        welcome: String,
     },
 }
 
@@ -158,6 +169,7 @@ mod tests {
                 identity_pk: "aa".repeat(32),
                 mac: "bb".repeat(32),
                 reply: None,
+                key_package: "cc".repeat(20),
             }),
             RitualMsg::Seal {
                 table: "cc".repeat(40),

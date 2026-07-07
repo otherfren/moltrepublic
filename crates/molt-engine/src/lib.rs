@@ -489,8 +489,17 @@ impl State {
                 identity_pk,
                 proof,
                 reply,
+                key_package,
                 generation,
-            } => self.cmd_net_join_requested(seat, member, identity_pk, proof, reply, generation),
+            } => self.cmd_net_join_requested(
+                seat,
+                member,
+                identity_pk,
+                proof,
+                reply,
+                key_package,
+                generation,
+            ),
             Command::NetSealSigned {
                 seat,
                 sig,
@@ -508,9 +517,11 @@ impl State {
             Command::NetRitualFailed { error, generation } => {
                 self.cmd_net_ritual_failed(error, generation)
             }
-            Command::NetJoinSealed { sealed, generation } => {
-                self.cmd_net_join_sealed(sealed, generation)
-            }
+            Command::NetJoinSealed {
+                sealed,
+                mls,
+                generation,
+            } => self.cmd_net_join_sealed(sealed, mls, generation),
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }
@@ -1356,7 +1367,7 @@ mod tests {
                 .await
                 .expect("start");
             let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-            w.execute(Command::NetJoinSealed { sealed, generation: Some(1) })
+            w.execute(Command::NetJoinSealed { sealed, mls: String::new(), generation: Some(1) })
                 .await
                 .expect("sealed");
             match w.execute(Command::ReadSession).await.expect("read") {
@@ -1373,7 +1384,7 @@ mod tests {
             w2.execute(Command::JoinStart { invite: joinable_link(), member: "x".to_string() })
                 .await
                 .expect("start2");
-            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), generation: Some(1) })
+            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), mls: String::new(), generation: Some(1) })
                 .await
                 .expect("bad");
             match w2.execute(Command::ReadSession).await.expect("read2") {

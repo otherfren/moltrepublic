@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use molt_core::{Command, Reply, SessionSettings, SessionView, WorkspaceEvent};
 use molt_engine::WalletHandle;
+use molt_net::{MlsIncoming, MlsMember};
 
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     match w.execute(Command::ReadSession).await.expect("read session") {
@@ -160,5 +161,102 @@ async fn founding_ritual_completes_across_two_instances() {
             "attestation for {} does not verify",
             att.member
         );
+    }
+}
+
+/// The founding ritual **establishes a real MLS group** across the two
+/// instances (T2): B's KeyPackage rides its JoinRequest, A builds the group at
+/// sealing and ships the Welcome with the genesis, B joins from it, and — after
+/// both persist their own group state — they exchange authenticated MLS
+/// application messages in both directions. The confidentiality layer whose
+/// ciphertext is the SMP payload is born with the republic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_establishes_a_real_mls_group_across_two_instances() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+
+    // B runs the real member side with collect_genesis = true, so it waits for
+    // the founder's Welcome and returns its own MLS snapshot
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, None)
+            .await
+            .expect("B completes the member side")
+    });
+
+    // A seals; the workspace comes into being and A distributes the Welcome
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let id = loop {
+        let s = read_session(&a).await;
+        if s.create.run.outcome == 1 {
+            break s.active_workspace.clone();
+        }
+        assert_eq!(s.create.run.outcome, 0, "ritual must not fail: {:?}", s.create.run.log);
+        assert!(tokio::time::Instant::now() < deadline, "ritual did not seal in time");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let b_outcome = b_task.await.expect("B task");
+
+    // --- restore the founder's MLS group from its persisted transport.state
+    a.execute(Command::CreateFinish).await.expect("enter");
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root_a, &id).expect("dir");
+    let (ws, _loaded) = molt_storage::open_workspace(&dir).expect("open");
+    let a_blob = ws
+        .read_transport_state()
+        .mls
+        .expect("the founder's MLS group is sealed into transport.state");
+    let mut a_mls = MlsMember::restore(&a_blob).expect("restore founder MLS");
+
+    // --- restore B's MLS group from the snapshot it returned
+    let b_blob = b_outcome
+        .mls_snapshot
+        .expect("the joiner processed the Welcome and produced a snapshot");
+    let mut b_mls = MlsMember::restore(&b_blob).expect("restore member MLS");
+
+    // --- the two groups interoperate: real MLS ciphertext, both directions
+    let ct = a_mls.encrypt(b"the charter is ratified").expect("A encrypts");
+    match b_mls.decrypt(&ct).expect("B decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "founder-a", "authenticated sender");
+            assert_eq!(plaintext, b"the charter is ratified");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+    let ct = b_mls.encrypt(b"aye, seconded").expect("B encrypts");
+    match a_mls.decrypt(&ct).expect("A decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "member-b", "authenticated sender");
+            assert_eq!(plaintext, b"aye, seconded");
+        }
+        other => panic!("expected an application message, got {other:?}"),
     }
 }

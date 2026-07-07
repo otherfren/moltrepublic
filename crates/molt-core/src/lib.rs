@@ -843,6 +843,13 @@ pub struct TransportState {
     /// lower or equal seq are duplicates).
     #[serde(default)]
     pub inbound: BTreeMap<MemberId, u64>,
+    /// The node's MLS group state (transport concept §6): an opaque
+    /// [`molt_net::MlsMember`] snapshot — ratchets, the secret tree, key
+    /// packages and the signer. Born in the founding ritual, overwritten (never
+    /// appended) on every ratchet advance, so its deletion of old key material
+    /// *is* forward secrecy. `None` before the ritual established a group.
+    #[serde(default)]
+    pub mls: Option<Vec<u8>>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
@@ -1683,6 +1690,10 @@ pub enum Command {
         /// the legacy path where the founder pre-created the reply queue.
         #[serde(default)]
         reply: String,
+        /// The member's MLS KeyPackage (hex of the wire bytes) so the founder
+        /// can add it to the group. Empty on a pre-MLS path.
+        #[serde(default)]
+        key_package: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -1742,6 +1753,11 @@ pub enum Command {
     NetJoinSealed {
         /// JSON of the verified `SealedRoster`.
         sealed: String,
+        /// The joiner's own MLS group snapshot (hex of the `MlsMember` blob),
+        /// produced by processing the founder's Welcome — node-local, sealed
+        /// into the joiner's `transport.state`. Empty on a pre-MLS path.
+        #[serde(default)]
+        mls: String,
         /// Join incarnation (a cancelled/restarted join drops stale results).
         #[serde(default)]
         generation: Option<u64>,
