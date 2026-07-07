@@ -39,9 +39,11 @@ Every participant — founder and members alike — holds **their own secret
 recovery phrase** and nothing else is shared a priori. From that phrase each
 node deterministically derives:
 
-- an **identity keypair** (Ed25519), used to sign the roster. It is
-  per-member and re-derivable from the phrase alone after total device loss —
-  never random, never persisted in the clear.
+- an **identity keypair** (Ed25519), used to sign the roster **and** as the
+  member's MLS credential key (one identity, two anchors: the genesis table and
+  the MLS `KeyPackage` carry the same key, and a verifier checks they match).
+  It is per-member and re-derivable from the phrase alone after total device
+  loss — never random, never persisted in the clear.
 - the keys and identifier for that member's **own local workspace** (§6).
 
 Crucially, a member's identity key is derived from *its own* phrase. The
@@ -89,29 +91,37 @@ off-band invite links) is shared.
     publish invite linkᵢ  ───────── off-band ─────────▶  (paste link)
 
                                                     ❷ derive own identity (pkᵢ)
+                                                       build MLS KeyPackage kpᵢ
                                                        open reply queue Qrepᵢ
-                          ◀──── JoinRequest{ name, pkᵢ,   ─────
+                          ◀──── JoinRequest{ name, pkᵢ, kpᵢ, ─────
                                 mac, reply=Qrepᵢ } on Qinv
 
   ❸ verify mac against ticketᵢ
-    anchor identity {name, pkᵢ}, seat green
+    anchor identity {name, pkᵢ}, keep kpᵢ, seat green
     …wait until every seat's key is in…
 
-  ❹ build roster table T = canonical(republicId, m, n, [identities])
-    T ──────────── Seal{ T } on each Qrepᵢ ───────────▶
-                                                    ❺ sign T with own key
+  ❹ DELIBERATE: propose final name + agenda (charter)
+    build table T = canonical(republicId(name), m, n, [identities], agenda)
+    T ──────── Seal{ name, agenda, T } on each Qrepᵢ ─────▶
+                                                    ❺ review name+agenda,
+                                                       HUMAN confirms, then
+                                                       sign T with own key
                           ◀──────── Signed{ sigᵢ } on Qinv ──
   ❻ verify sigᵢ against pkᵢ over T
-    …wait until every seat has signed…
+    …wait until every seat has ratified…
 
   ❼ sign T itself, assemble all n attestations
-    write OWN Founded genesis (own seed)
-    sealed = {name, republicId, m, n, roster, identities, attestations}
-    sealed ─────────── Genesis{ sealed } on each Qrepᵢ ──▶
+    build MLS group, add every kpᵢ → one Welcome W
+    write OWN Founded genesis (own seed) + persist own MLS state
+    sealed = {name, republicId, m, n, roster, identities, attestations, agenda}
+    sealed,W ─────── Genesis{ sealed, welcome=W } on each Qrepᵢ ▶
                                                     ❽ verify sealed:
                                                        · republicId = content
                                                        · n-of-n attestations ok
+                                                         (over name+agenda too)
                                                        · own (name,pkᵢ) present
+                                                       join MLS group from W,
+                                                       persist own MLS state,
                                                        write OWN Founded genesis
                                                        (own seed) → enter republic
 ```
@@ -122,34 +132,47 @@ on, and publishes an invite link per seat (the link carries `Qinv`'s address,
 its wrapping key, and the ticket). `F` shares each link off-band with the
 intended person.
 
-**❷ Activate.** `Mᵢ` derives its own identity `pkᵢ` from its own phrase, opens a
+**❷ Activate.** `Mᵢ` derives its own identity `pkᵢ` from its own phrase, builds
+an **MLS `KeyPackage`** from that same key (one identity, two anchors), opens a
 **reply queue** `Qrepᵢ` it will receive on, and sends a `JoinRequest` to `Qinv`
-carrying its chosen name, `pkᵢ`, the ticket MAC, and the address+key of `Qrepᵢ`
-(each party owns the queue it receives on — see §7).
+carrying its chosen name, `pkᵢ`, `kpᵢ`, the ticket MAC, and the address+key of
+`Qrepᵢ` (each party owns the queue it receives on — see §7).
 
 **❸ Anchor.** `F` verifies `mac = HMAC(KDF(ticketᵢ), name ‖ pkᵢ)` against the
-unspent ticket, spends the ticket, and anchors `{name, pkᵢ}` on the seat (which
-turns green). A bad or replayed MAC is dropped without a trace.
+unspent ticket, spends the ticket, anchors `{name, pkᵢ}` and keeps `kpᵢ` for the
+group. The seat turns green. A bad or replayed MAC — or a missing KeyPackage —
+is dropped without a trace.
 
-**❹ Seal round.** Once *every* seat's key is in, `F` freezes the **roster
-table** `T` — the one canonical serialization of `(republicId, m, n,
-identities)` — and sends `Seal{T}` to every member on its reply queue.
+**❹ Deliberate & seal round.** Once *every* seat's key is in, the ritual does
+**not** auto-seal. `F` proposes the **final DAO name** and a free-text
+**agenda/charter**; `F` then freezes the **roster table** `T` — the one
+canonical serialization of `(republicId(name), m, n, identities, agenda)` — and
+sends `Seal{name, agenda, T}` to every member on its reply queue. Because the
+agenda is inside `T`, a signature over `T` is a ratification of exactly this
+charter (the name is bound too, via the republic id that salts `T`).
 
-**❺–❻ Sign.** Each `Mᵢ` signs `T` with its identity key and returns the
-signature; `F` verifies each against the anchored `pkᵢ`. The seat handler is
-idempotent — a second, distinct signature for a seat is ignored, so one member
-cannot inflate the roster.
+**❺–❻ Ratify.** Each `Mᵢ` sees the proposed name+agenda and — on an **explicit
+human confirm** — signs `T` with its identity key and returns the signature; `F`
+verifies each against the anchored `pkᵢ`. Until a member confirms, nothing
+seals: the workspace opens only after *everyone* has ratified. The seat handler
+is idempotent — a second, distinct signature for a seat is ignored, so one
+member cannot inflate the roster.
 
-**❼ Finalize & distribute.** When every seat has signed, `F` adds its own
-signature, assembles all *n* attestations, **writes its own `Founded` genesis
-first** (so a founder disk failure cannot orphan members on a constitution the
-founder never persisted), and only then distributes the complete `sealed`
-roster to every member.
+**❼ Finalize & distribute.** When every seat has ratified, `F` adds its own
+signature, assembles all *n* attestations, **builds the MLS group** by adding
+every `kpᵢ` in one commit (producing a single `Welcome`), **writes its own
+`Founded` genesis first** and persists its own MLS state (so a founder disk
+failure cannot orphan members on a constitution the founder never persisted),
+and only then distributes the complete `sealed` roster **and the `Welcome`** to
+every member.
 
-**❽ Everyone seals.** Each `Mᵢ` **verifies** the distributed roster (§8) and
-writes its **own** `Founded` genesis from it — under its **own** seed — then
-enters the republic. Every member now holds the same constitution in its own
-encrypted workspace.
+**❽ Everyone seals.** Each `Mᵢ` **verifies** the distributed roster (§8 — the
+recomputed table now covers the charter, so a genesis whose name/agenda differs
+from what was ratified fails verification), **joins the MLS group from the
+`Welcome`** and persists its own group state, and writes its **own** `Founded`
+genesis from the roster — under its **own** seed — then enters the republic.
+Every member now holds the same constitution in its own encrypted workspace and
+is already inside the group.
 
 ---
 
@@ -228,9 +251,16 @@ When a member finishes, it has verified — not trusted — that:
 4. **It is actually a member.** Its own `(name, key)` pair appears in the sealed
    roster — a founder that excluded it, or anchored its key under a different
    name, is rejected and leaves it with no workspace.
+5. **The charter is the one it ratified.** The recomputed table binds the DAO
+   name and agenda, so a genesis whose charter differs from what the member
+   signed fails verification — the founder cannot swap in a different charter
+   after the fact.
 
 The founder gets the complementary guarantee: every seat is filled by a holder
-of a ticket it minted, and every member signed the identical roster.
+of a ticket it minted, and every member ratified the identical roster **and
+charter**. And because every member's `KeyPackage` was added to the MLS group
+before the `Welcome` went out, everyone ends the ritual sharing one group whose
+credential identities are exactly the anchored keys.
 
 ---
 
@@ -258,10 +288,10 @@ per-queue wrap; inside MLS ciphertext once MLS lands):
 
 | Message | Direction | Carries |
 |---|---|---|
-| `JoinRequest` | member → founder | seat, name, identity pk, ticket MAC, reply-queue handover |
-| `Seal{ table }` | founder → member | the canonical roster bytes to sign (hex) |
-| `Signed{ sig }` | member → founder | the member's signature over the table |
-| `Genesis{ sealed }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations) |
+| `JoinRequest` | member → founder | seat, name, identity pk, **MLS KeyPackage**, ticket MAC, reply-queue handover |
+| `Seal{ name, agenda, table }` | founder → member | the proposed charter (name + agenda) to review, and the canonical bytes to sign (hex) |
+| `Signed{ sig }` | member → founder | the member's signature over the table (its ratification) |
+| `Genesis{ sealed, welcome }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations, **agenda**) and the **MLS `Welcome`** |
 
 The invite link's transport handover carries `{ server, invite-queue id,
 wrapping key, seat }`; the member's reply-queue handover (inside `JoinRequest`)
@@ -290,13 +320,23 @@ fast test; the product never uses it.
   (`derive_identity_key`, `identity_sign`/`identity_verify`, `republic_id`) and
   `crates/molt-net/src/invite.rs` (ticket, `join_mac`, `RitualMsg`).
 - **Canonical roster + sealed-roster types** — `crates/molt-core/src/lib.rs`
-  (`roster_canonical_bytes`, `MemberIdentity`, `RosterAttestation`,
-  `SealedRoster`, the `Founded` event).
+  (`roster_canonical_bytes` binds the agenda, `MemberIdentity`,
+  `RosterAttestation`, `SealedRoster`, the `Founded` event with its `agenda`).
+- **Deliberation** — the founder's `CreatePropose{name, agenda}` and the
+  joiner's `JoinConfirmCharter` / `Ratifier` gate (co-equal on both surfaces),
+  in `founding.rs` / `lifecycles.rs`; the create + join wizard panels in
+  `crates/molt-ui/`.
+- **MLS group** — `crates/molt-net/src/mls.rs` (`MlsMember`: KeyPackage from the
+  identity key, founder group create, Add+Welcome, join-from-welcome, app-message
+  encrypt/decrypt, snapshot/restore into `transport.state.mls`).
 - **Transport** — `crates/molt-net/` (the `Transport` trait, `wrap`, `chunk`,
   and the SMP client under `src/smp/`).
 - **Proven end-to-end** — `crates/molt-engine/tests/ritual_engine_over_smp.rs`
   (two engine instances found and join over a real SMP server; both end with
-  their own workspace holding the same verified constitution).
+  their own workspace holding the same verified constitution) and
+  `crates/molt-engine/tests/two_instances.rs` (loopback: the MLS group
+  interoperates across instances, and the ratification gate holds until the
+  joiner confirms).
 
 The transport concept this realizes is `documents/concept-transport-simplex-tor.md`
 (§3.3).

@@ -1,6 +1,11 @@
 # Concept: communication — SimpleX (SMP) over Tor
 
-Status: **T1 implemented + founding ritual** (2026-07-05), T2–T6 open.
+Status: **T1 + founding ritual + T3 (real SMP) + MLS-in-ritual (part of T2)**
+(2026-07-07). MLS (OpenMLS 0.8, pure-Rust) is now **integrated into the
+founding ritual**: the group is established as the republic is constituted and
+each member persists its own group state — see the T2 milestone note below for
+exactly what is real vs. open. The running post-founding traffic is still
+plaintext-JSON-in-wrap (the last open T2 piece). T4–T6 open.
 What exists: `molt-net` (Transport trait, uniform-block framing with
 named-constant budget math, mandatory per-queue wrapping,
 chunker/reassembler with `(msg id, chunk idx)` dedup, `LoopbackTransport`
@@ -51,8 +56,16 @@ Honest deltas, to be closed where noted:
   once the engine accepted the event (applied + queued to the writer);
   tightening to the §3.4 fsync rule is T3 work (the writer already exposes
   the hook point).
-* **Wire frames are plaintext JSON inside the per-queue wrap** until MLS
-  (T2) supplies the real ciphertext payload.
+* **The running post-founding traffic is still plaintext JSON inside the
+  per-queue wrap.** MLS now exists — a real group is born in the ritual and
+  persisted per node (transport.state.mls) — but the supervisor's outbox does
+  not yet encrypt application messages with it. Two things gate that (the last
+  open T2 piece): the per-peer outbox must encrypt **once** per group message
+  and fan the single ciphertext out (MLS advances the ratchet per
+  `create_message`, so n−1 independent encryptions would desync it), and a
+  **persistent runtime full-mesh** between real founded members must be
+  established (real workspaces get no peer mesh yet; the demo mesh is loopback
+  sim peers with no group).
 
 The rest of this document is the design as specified; sections below are
 unchanged targets. Today the run lifecycles still fake handshakes and
@@ -512,14 +525,24 @@ without sockets, everything below tests without the engine.
    in-process peer nodes — own engine instance and transport endpoint —
    not scripted repliers.)* — **done 2026-07-05**, deltas in the status
    note at the top.
-2. **T2** MLS integration (OpenMLS) behind `MlsTask`, incl. the
-   `transport.state` write-ahead discipline; invite/join state machine real
-   over loopback: ticket MAC, single-use enforcement, and the inviter
-   approval surface; member identity keys with `MemberKey` anchoring,
-   roster sealing (`RosterAttested`) and seat-proof verification; invite
-   persistence (`transport.state` invite table) with the members-grid
-   invite UI (show / copy / re-issue), and the recovery rejoin through the
-   Social-peer-restore path.
+2. **T2** MLS integration (OpenMLS 0.8, pure-Rust `openmls_rust_crypto`).
+   **Done (2026-07-07):** the MLS group is **born in the founding ritual** —
+   the joiner's `KeyPackage` rides its `JoinRequest`, the founder builds the
+   group at sealing and ships the one `Welcome` with the genesis distribution,
+   and every node persists its own group state (`MlsMember` snapshot) into
+   `transport.state.mls`; the derived Ed25519 identity is the MLS credential
+   (one identity, two anchors). Proven interoperable across two independent
+   engine instances (loopback + real SMP). The **deliberation step** landed
+   with it (§3.3): after every seat joins, the founder proposes the final DAO
+   name + a free-text charter (agenda), which is bound into the canonical
+   bytes so every member's seal signature ratifies it, and the joiner's node
+   gates its signature on an explicit human confirm before the workspace
+   opens; the charter is immutable in the `Founded` genesis.
+   **Open:** encrypt the running post-founding application traffic with the
+   group (the outbox encrypt-once-then-fan-out restructure + a persistent
+   runtime full-mesh between real members); recovery rejoin (Remove+Add,
+   `MemberRestored`) and the recovery-invite UI (mint / copy / re-issue) with
+   the manual approval surface.
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak
