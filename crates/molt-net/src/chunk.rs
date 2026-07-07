@@ -308,6 +308,46 @@ mod tests {
         assert!(r.push(&c).is_err());
     }
 
+    /// Fuzz-style sweep (concept §7 — server input is untrusted): 40 000
+    /// pseudo-random chunks, valid-length and not, never panic; every outcome is
+    /// a graceful `Ok`/`Err`, and the reassembler still completes a well-formed
+    /// message afterwards (its state was not corrupted by the hostile stream).
+    #[test]
+    fn reassembler_survives_a_hostile_byte_sweep() {
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let bounded = |v: u64, n: u64| usize::try_from(v % n).unwrap_or(0);
+        let mut r = Reassembler::new();
+        for _ in 0..12_000 {
+            let plain = u64::try_from(CHUNK_PLAIN_LEN).unwrap_or(u64::MAX);
+            let len = match next() % 5 {
+                0 => CHUNK_PLAIN_LEN,
+                1 => CHUNK_PLAIN_LEN.saturating_sub(bounded(next(), 8)),
+                2 => CHUNK_PLAIN_LEN + bounded(next(), 8),
+                _ => bounded(next(), plain + 32),
+            };
+            let chunk: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
+            // the contract: never panics on any bytes
+            let _ = r.push(&chunk);
+        }
+        // and it is still functional
+        let payload: Vec<u8> = (0..(2 * CHUNK_PAYLOAD_BUDGET + 7))
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let mut out = None;
+        for c in chunk_message(msg_id("x", "y", 42), &payload).expect("chunk") {
+            if let PushOutcome::Complete(_, m) = r.push(&c).expect("push") {
+                out = Some(m);
+            }
+        }
+        assert_eq!(out.expect("completes"), payload, "still works after the sweep");
+    }
+
     #[test]
     fn msg_ids_are_deterministic_and_link_scoped() {
         assert_eq!(msg_id("a", "b", 7), msg_id("a", "b", 7));

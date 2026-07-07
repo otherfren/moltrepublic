@@ -575,3 +575,38 @@ fn read_corr(b: &[u8], p: &mut usize) -> Result<Vec<u8>, NetError> {
         other => Err(NetError::Framing(format!("bad corrId marker {other:#x}"))),
     }
 }
+
+#[cfg(test)]
+mod parse_fuzz {
+    use super::*;
+
+    /// Untrusted server input (concept §7): the SMP response + IDS parsers must
+    /// never panic on arbitrary bytes — every read is bounds-checked, this is the
+    /// regression guard. 30 000 pseudo-random inputs, incl. valid-prefix + garbage.
+    #[test]
+    fn response_and_ids_parsers_never_panic_on_hostile_bytes() {
+        let mut rng: u64 = 0xdead_beef_cafe_1234;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let byte = |v: u64| v.to_le_bytes()[0];
+        for _ in 0..30_000 {
+            let len = usize::try_from(next() % 320).unwrap_or(0);
+            let bytes: Vec<u8> = (0..len).map(|_| byte(next())).collect();
+            let _ = parse_first_response(&bytes);
+            let _ = parse_ids(&bytes);
+            // a well-formed command prefix with a garbage tail exercises the
+            // deeper field readers, not just the leading length guard
+            for prefix in [b"IDS ".as_slice(), b"MSG ".as_slice(), b"ERR ".as_slice()] {
+                let mut framed = prefix.to_vec();
+                let tail = next() % 96;
+                framed.extend((0..tail).map(|_| byte(next())));
+                let _ = parse_ids(&framed);
+                let _ = parse_first_response(&framed);
+            }
+        }
+    }
+}
