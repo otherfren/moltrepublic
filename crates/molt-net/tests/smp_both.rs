@@ -9,7 +9,7 @@ const SMP8: &str = "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@smp8.simp
 
 async fn full_stack(url: &str, label: &str) {
     let s = SmpServer::parse(url).expect("parse");
-    let mut conn = SmpConn::connect(&s).await.expect("handshake");
+    let mut conn = SmpConn::connect(&molt_net::smp::tls::Dialer::Direct, &s).await.expect("handshake");
     conn.ping().await.expect("PING/PONG");
     let q = conn.new_queue(false).await.expect("NEW→IDS");
     assert!((16..=24).contains(&q.recipient_id.len()));

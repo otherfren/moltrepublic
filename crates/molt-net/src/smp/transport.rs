@@ -34,6 +34,7 @@ use crate::{
 #[derive(Clone)]
 pub struct SmpTransport {
     server: SmpServer,
+    dialer: crate::smp::tls::Dialer,
     state: Arc<Mutex<SmpState>>,
 }
 
@@ -46,10 +47,18 @@ struct SmpState {
 }
 
 impl SmpTransport {
-    /// A transport that creates its queues on, and sends through, `server`.
+    /// A transport that creates its queues on, and sends through, `server`,
+    /// dialing directly (clearnet/loopback).
     pub fn new(server: SmpServer) -> SmpTransport {
+        SmpTransport::with_dialer(server, crate::smp::tls::Dialer::Direct)
+    }
+
+    /// Like [`new`](SmpTransport::new) but routes every connection through
+    /// `dialer` — e.g. a SOCKS5h Tor proxy (concept §4).
+    pub fn with_dialer(server: SmpServer, dialer: crate::smp::tls::Dialer) -> SmpTransport {
         SmpTransport {
             server,
+            dialer,
             state: Arc::new(Mutex::new(SmpState::default())),
         }
     }
@@ -128,7 +137,7 @@ impl SmpTransport {
 
 impl Transport for SmpTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
-        let mut conn = SmpConn::connect(&self.server).await?;
+        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         let q = conn.new_queue(false).await?;
         let rcv = RcvQueue {
             id: QueueId::from_bytes(q.recipient_id.clone()),
@@ -146,7 +155,7 @@ impl Transport for SmpTransport {
     async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {
         let sender_id = &addr.id.0;
         let existing = self.state.lock().ok().and_then(|s| s.send_keys.get(sender_id).cloned());
-        let mut conn = SmpConn::connect(&self.server).await?;
+        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         let key = match existing {
             Some(k) => k,
             None => {
@@ -169,7 +178,7 @@ impl Transport for SmpTransport {
         let queue = self
             .recv_queue(&q.id.0)
             .ok_or_else(|| NetError::Framing("subscribe to a queue this node did not create".into()))?;
-        let mut conn = SmpConn::connect(&self.server).await?;
+        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
         tokio::spawn(async move {
@@ -206,7 +215,7 @@ impl Transport for SmpTransport {
         let Some(queue) = self.recv_queue(&q.id.0) else {
             return Ok(());
         };
-        let mut conn = SmpConn::connect(&self.server).await?;
+        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         conn.delete(&queue.recipient_id, &queue.auth_sk).await?;
         if let Ok(mut s) = self.state.lock() {
             s.recv.remove(&q.id.0);

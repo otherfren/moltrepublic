@@ -83,8 +83,8 @@ pub struct SmpConn {
 
 impl SmpConn {
     /// Dial, TLS-pin, and run the SMP handshake with `server`.
-    pub async fn connect(server: &SmpServer) -> Result<SmpConn, NetError> {
-        let tls = tls::connect_tls(server).await?;
+    pub async fn connect(dialer: &tls::Dialer, server: &SmpServer) -> Result<SmpConn, NetError> {
+        let tls = tls::connect_tls(dialer, server).await?;
         let mut conn = SmpConn {
             tls,
             key_hash: server.fingerprint_raw(),

@@ -227,15 +227,64 @@ fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
     Ok(config)
 }
 
-/// Dial `server` over TCP+TLS 1.3, verifying the pinned fingerprint and
-/// negotiating ALPN `smp/1`. Returns the established TLS stream. (Tor
-/// dialing via SOCKS is milestone T4; this connects directly for now.)
-pub async fn connect_tls(server: &SmpServer) -> Result<TlsStream<TcpStream>, NetError> {
+/// How to reach an SMP server's TCP socket. `Direct` is clearnet/loopback;
+/// `Socks5` routes through a SOCKS5h proxy (Tor `local`/`whonix`), one circuit
+/// per server host (stream isolation, concept §4). Default is `Direct` so the
+/// clearnet path is unchanged until Tor is explicitly configured.
+#[derive(Clone, Debug, Default)]
+pub enum Dialer {
+    /// Direct TCP — no Tor.
+    #[default]
+    Direct,
+    /// SOCKS5h through `proxy` (e.g. `127.0.0.1:9050`).
+    Socks5 {
+        /// The proxy's `host:port` (a Tor SOCKS listener).
+        proxy: String,
+    },
+}
+
+impl Dialer {
+    /// Map the transport config to a dialer: `local` → SOCKS5h at
+    /// `127.0.0.1:<tor_port>`, `whonix` → the gateway's SOCKS listener,
+    /// everything else (`off`/`direct`/`embedded`-arti-later/unknown) → direct.
+    /// This is the one place that decides whether SMP goes through Tor; wiring
+    /// it into the engine's `SmpTransport` construction is the enable step.
+    pub fn from_config(tor_mode: &str, tor_port: u16) -> Dialer {
+        match tor_mode {
+            "local" => Dialer::Socks5 {
+                proxy: format!("127.0.0.1:{tor_port}"),
+            },
+            "whonix" => Dialer::Socks5 {
+                proxy: "10.152.152.10:9050".to_string(),
+            },
+            _ => Dialer::Direct,
+        }
+    }
+
+    /// Open the raw TCP socket to `server` per this dialer.
+    pub async fn dial(&self, server: &SmpServer) -> Result<TcpStream, NetError> {
+        match self {
+            Dialer::Direct => TcpStream::connect(server.addr())
+                .await
+                .map_err(|e| NetError::Unreachable(format!("tcp {}: {e}", server.addr()))),
+            Dialer::Socks5 { proxy } => {
+                // one Tor circuit per server host: the isolation token is the host
+                let isolation = format!("molt-{}", server.host);
+                crate::socks5::socks5h_connect(proxy, &server.host, server.port, &isolation).await
+            }
+        }
+    }
+}
+
+/// Dial `server` over TCP+TLS 1.3 (through `dialer`), verifying the pinned
+/// fingerprint and negotiating ALPN `smp/1`. Returns the established TLS stream.
+pub async fn connect_tls(
+    dialer: &Dialer,
+    server: &SmpServer,
+) -> Result<TlsStream<TcpStream>, NetError> {
     let config = pinned_config(server)?;
     let connector = TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect(server.addr())
-        .await
-        .map_err(|e| NetError::Unreachable(format!("tcp {}: {e}", server.addr())))?;
+    let tcp = dialer.dial(server).await?;
     // the SNI name is the host; cert verification ignores it (we pin), but
     // rustls requires a valid ServerName
     let sni = ServerName::try_from(server.host.clone())
@@ -258,6 +307,7 @@ pub async fn connect_tls(server: &SmpServer) -> Result<TlsStream<TcpStream>, Net
 /// button: dial, pin, ALPN — report success or the concrete reason. Does
 /// not run any SMP commands.
 pub async fn test_connection(server: &SmpServer) -> Result<(), NetError> {
-    let _tls = connect_tls(server).await?;
+    // the settings probe dials directly; testing over Tor is a later toggle
+    let _tls = connect_tls(&Dialer::Direct, server).await?;
     Ok(())
 }

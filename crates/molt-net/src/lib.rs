@@ -39,6 +39,7 @@ pub mod loopback;
 pub mod mesh;
 pub mod mls;
 pub mod smp;
+pub mod socks5;
 pub mod supervisor;
 pub mod wrap;
 

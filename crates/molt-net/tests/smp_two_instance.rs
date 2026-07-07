@@ -12,11 +12,11 @@ const SMP8: &str = "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@smp8.simp
 async fn round_trip(url: &str, label: &str) {
     let s = SmpServer::parse(url).expect("parse");
     // Instance R: create + subscribe a queue
-    let mut r = SmpConn::connect(&s).await.expect("R connect");
+    let mut r = SmpConn::connect(&molt_net::smp::tls::Dialer::Direct, &s).await.expect("R connect");
     let q = r.new_queue(true).await.expect("NEW+SUB");
     // Instance S: an independent connection, secure the queue then send
     // three messages to its sender id
-    let mut sender = SmpConn::connect(&s).await.expect("S connect");
+    let mut sender = SmpConn::connect(&molt_net::smp::tls::Dialer::Direct, &s).await.expect("S connect");
     let key = sender.secure_as_sender(&q.sender_id).await.expect("SKEY");
     for i in 0..3u8 {
         let payload = format!("molt ritual message {i} from instance S");
