@@ -568,7 +568,14 @@ without sockets, everything below tests without the engine.
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak
-   egress test.
+   egress test. **In progress (2026-07-08):** a fully unit-tested SOCKS5h
+   dialer (`molt_net::socks5` + `smp::tls::Dialer`) with per-server-host stream
+   isolation is implemented and wired into `SmpTransport` opt-in
+   (`with_dialer`); `Dialer::from_config` maps `tor_mode`. **Not auto-enabled**
+   — the engine still dials direct so live testing is unbroken; flipping the
+   `SmpTransport` construction to `Dialer::from_config` (+ the "tor unreachable"
+   health pill) is the enable step, to do with a real Tor. The no-leak egress
+   test needs the dockerized/tor CI tier.
 5. **T5** `embedded` (arti) and `whonix` modes; header pills wired to real
    transport health.
 6. **T6** queue rotation (incl. drain grace), passive-presence polish,
