@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use molt_core::{ChatMessage, EventEnvelope, MemberId, WorkspaceEvent};
-use molt_net::mesh::{bootstrap_mesh, MeshAnnounce};
+use molt_net::mesh::{bootstrap_mesh, bootstrap_over_mls, MeshAnnounce};
 use molt_net::mls::MlsMember;
 use molt_net::{
     EngineSink, LoopbackHub, MemLog, MemStateStore, MlsChannel, NetConfig, NetError, PeerLink,
@@ -251,6 +251,102 @@ async fn a_persisted_mesh_and_group_rebuild_a_running_mls_supervisor() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the rebuilt supervisor never delivered the chat"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Relay raw ciphertext from one node to the other (the star seed).
+fn relay_ct(mut out: mpsc::Receiver<Vec<u8>>, to: mpsc::Sender<Vec<u8>>) {
+    tokio::spawn(async move {
+        while let Some(ct) = out.recv().await {
+            if to.send(ct).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// 2c bridge: the bootstrap announcements travel as MLS ciphertext over the
+/// star (here relayed channels), the group is shared between the bootstrap and
+/// the runtime supervisor, and the two nodes chat over MLS afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bootstrap_over_mls_carries_announcements_encrypted_then_chats() {
+    let mut alice_mls = MlsMember::new(&key(1), "alice").expect("alice");
+    let bob = MlsMember::new(&key(2), "bob").expect("bob");
+    alice_mls.create_group().expect("group");
+    let welcome = alice_mls
+        .add_members(&[bob.key_package().expect("kp")])
+        .expect("add")
+        .expect("welcome");
+    let mut bob_mls = bob;
+    bob_mls.join_from_welcome(&welcome).expect("bob joins");
+    let alice_mls = std::sync::Arc::new(std::sync::Mutex::new(alice_mls));
+    let bob_mls = std::sync::Arc::new(std::sync::Mutex::new(bob_mls));
+
+    let hub = LoopbackHub::calm();
+
+    // ciphertext channels over the "star": alice's out reaches bob's in, etc.
+    let (a_out, a_out_rx) = mpsc::channel::<Vec<u8>>(4);
+    let (b_out, b_out_rx) = mpsc::channel::<Vec<u8>>(4);
+    let (a_in_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(4);
+    let (b_in_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(4);
+    relay_ct(a_out_rx, b_in_tx);
+    relay_ct(b_out_rx, a_in_tx);
+
+    let ta = hub.transport();
+    let tb = hub.transport();
+    let am = alice_mls.clone();
+    let bm = bob_mls.clone();
+    let alice_boot = tokio::spawn(async move {
+        bootstrap_over_mls("alice", &["bob".to_string()], &ta, am, a_out, a_in_rx).await
+    });
+    let bob_boot = tokio::spawn(async move {
+        bootstrap_over_mls("bob", &["alice".to_string()], &tb, bm, b_out, b_in_rx).await
+    });
+    let alice_links: Vec<PeerLink> = alice_boot.await.expect("join").expect("alice mesh");
+    let bob_links: Vec<PeerLink> = bob_boot.await.expect("join").expect("bob mesh");
+
+    // the runtime supervisors share the SAME group (post-bootstrap ratchet)
+    let alice_feed = MemLog::new();
+    let (alice_wake, alice_wake_rx) = watch::channel(0u64);
+    let _alice_sup = molt_net::supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("alice".to_string(), alice_links, 1),
+        alice_feed.clone(),
+        MemStateStore::new(),
+        TestSink::default(),
+        alice_wake_rx,
+        Some(MlsChannel::from_shared(alice_mls)),
+    );
+    let bob_sink = TestSink::default();
+    let (_bw, bob_wake_rx) = watch::channel(0u64);
+    let _bob_sup = molt_net::supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("bob".to_string(), bob_links, 2),
+        MemLog::new(),
+        MemStateStore::new(),
+        bob_sink.clone(),
+        bob_wake_rx,
+        Some(MlsChannel::from_shared(bob_mls)),
+    );
+
+    alice_feed.push(chat_env(2, "alice", "announced over mls"));
+    let _ = alice_wake.send(2);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((from, env)) = bob_sink.delivered().first() {
+            assert_eq!(from, "alice");
+            let WorkspaceEvent::Chat(msg) = &env.body else {
+                panic!("not a chat");
+            };
+            assert_eq!(msg.body, "announced over mls");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "chat never arrived after an MLS-carried bootstrap"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

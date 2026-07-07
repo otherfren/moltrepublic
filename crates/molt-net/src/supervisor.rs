@@ -66,8 +66,15 @@ impl std::fmt::Debug for MlsChannel {
 impl MlsChannel {
     /// Wrap a node's live MLS group for the supervisor.
     pub fn new(member: MlsMember) -> MlsChannel {
+        MlsChannel::from_shared(Arc::new(Mutex::new(member)))
+    }
+
+    /// Wrap an already-shared group — so the bootstrap (which uses the same
+    /// `MlsMember` to encrypt/decrypt its announcements) and the runtime
+    /// supervisor share one ratchet, in sequence.
+    pub fn from_shared(member: Arc<Mutex<MlsMember>>) -> MlsChannel {
         MlsChannel {
-            member: Arc::new(Mutex::new(member)),
+            member,
             cache: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }

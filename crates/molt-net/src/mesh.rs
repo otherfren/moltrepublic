@@ -16,10 +16,13 @@
 //! open-path that persists/rebuilds the mesh live above it.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use molt_core::MemberId;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
+use crate::mls::{MlsIncoming, MlsMember};
 use crate::supervisor::PeerLink;
 use crate::wrap::WrapKey;
 use crate::{QueueId, RcvQueue, SndQueueAddr, Transport};
@@ -145,6 +148,67 @@ pub async fn bootstrap_mesh<T: Transport>(
         announces.insert(from, a);
     }
     assemble_mesh(me, &my_inbound, &announces)
+}
+
+/// Bootstrap the mesh with the announcements carried as **MLS ciphertext** over
+/// a raw-ciphertext channel (the founding star, founder-relayed). Wraps
+/// [`bootstrap_mesh`]: our [`MeshAnnounce`] is MLS-encrypted before it leaves
+/// on `out_ct`; each ciphertext arriving on `in_ct` is MLS-decrypted to its
+/// **authenticated** sender + announcement. Shares the group `mls` with the
+/// runtime supervisor (same ratchet, used in sequence). The caller wires
+/// `out_ct`/`in_ct` to the actual star queues.
+pub async fn bootstrap_over_mls<T: Transport>(
+    me: &str,
+    peers: &[MemberId],
+    transport: &T,
+    mls: Arc<Mutex<MlsMember>>,
+    out_ct: mpsc::Sender<Vec<u8>>,
+    mut in_ct: mpsc::Receiver<Vec<u8>>,
+) -> Result<Vec<PeerLink>, String> {
+    let cap = peers.len().max(1);
+    let (ann_out, mut ann_out_rx) = mpsc::channel::<MeshAnnounce>(cap);
+    let (ann_in_tx, ann_in_rx) = mpsc::channel::<(MemberId, MeshAnnounce)>(cap);
+
+    // encrypt our outgoing announcement(s)
+    let enc_mls = mls.clone();
+    let enc = tokio::spawn(async move {
+        while let Some(a) = ann_out_rx.recv().await {
+            let Ok(bytes) = serde_json::to_vec(&a) else {
+                continue;
+            };
+            let ct = enc_mls.lock().ok().and_then(|mut m| m.encrypt(&bytes).ok());
+            if let Some(ct) = ct {
+                if out_ct.send(ct).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // decrypt incoming announcements — the sender is MLS-authenticated
+    let dec_mls = mls.clone();
+    let dec = tokio::spawn(async move {
+        while let Some(ct) = in_ct.recv().await {
+            let got = dec_mls.lock().ok().and_then(|mut m| match m.decrypt(&ct) {
+                Ok(MlsIncoming::Application { from, plaintext }) => {
+                    serde_json::from_slice::<MeshAnnounce>(&plaintext)
+                        .ok()
+                        .map(|a| (from, a))
+                }
+                _ => None,
+            });
+            if let Some(pair) = got {
+                if ann_in_tx.send(pair).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let links = bootstrap_mesh(me, peers, transport, ann_out, ann_in_rx).await;
+    enc.abort();
+    dec.abort();
+    links
 }
 
 #[cfg(test)]
