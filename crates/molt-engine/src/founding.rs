@@ -35,6 +35,17 @@ use crate::{Envelope, State};
 /// normally completes in well under a second; this only bounds a failed peer.
 const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// A fresh SMP transport that reaches a persisted mesh's queues — the joiner and
+/// reopen paths, where no ritual transport is held. SMP queues live on their
+/// server, addressable by id, so a new [`SmpTransport`] to that server reaches
+/// them. `None` for a loopback mesh (empty server), whose in-memory queues
+/// cannot be reconstructed from persisted state.
+pub(crate) fn smp_transport_from_mesh(mesh: &[molt_core::MeshLink]) -> Option<RitualTransport> {
+    let server = mesh.iter().map(|l| l.snd_server.trim()).find(|s| !s.is_empty())?;
+    let s = SmpServer::parse(server).ok()?;
+    Some(RitualTransport::Smp(SmpTransport::new(s)))
+}
+
 /// The transport a founding ritual runs over. The in-app demo founds over
 /// the in-process loopback hub (with simulated members); a real founding
 /// runs over the configured SMP server. One enum so the founder side — the
@@ -413,6 +424,7 @@ impl State {
     pub(crate) fn teardown_ritual(&mut self) {
         self.net_ritual = None;
         self.founder_mesh_in = None;
+        self.runtime_transport = None;
     }
 
     /// Whether a ritual command's incarnation is still current: the ritual
@@ -818,7 +830,11 @@ pub async fn join_founding_over_smp(
     phrase: String,
     root: &std::path::Path,
 ) -> Result<molt_core::WorkspaceId, String> {
-    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), true, None, None).await?;
+    // bootstrap=false: this standalone one-shot writes a workspace and returns
+    // (no running engine to host a runtime supervisor); the live product join is
+    // cmd_join_start, which bootstraps. A future CLI that keeps a node running
+    // would pass true and persist the mesh (the plumbing below already handles it).
+    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
@@ -1408,6 +1424,9 @@ mod ritual_ops {
             let (ct_tx, ct_rx) = mpsc::unbounded_channel::<(u32, String)>();
             // members' NetMeshAnnounced ciphertext flows into this bootstrap
             self.founder_mesh_in = Some((generation, ws_id, ct_tx));
+            // keep the transport for the runtime supervisor (built once the mesh
+            // is assembled — on loopback its queues can't be rebuilt from state)
+            self.runtime_transport = Some(ritual.transport());
             let mls_arc = Arc::new(Mutex::new(mls));
             tokio::spawn(async move {
                 match founder_bootstrap(
@@ -1488,11 +1507,20 @@ mod ritual_ops {
                 // workspace and no runtime traffic has run yet, so the outbound/
                 // inbound cursors are still empty (nothing to preserve)
                 let ts = molt_core::TransportState {
-                    mls: Some(mls_snapshot),
-                    mesh,
+                    mls: Some(mls_snapshot.clone()),
+                    mesh: mesh.clone(),
                     ..Default::default()
                 };
                 active.handle.save_transport_state(ts);
+            }
+            // stand the runtime supervisor up over the direct mesh, reusing the
+            // ritual transport (the loopback hub / the founder's SMP server), so
+            // the founder can chat peer-to-peer the moment the mesh is assembled
+            if let Some(transport) = self.runtime_transport.take() {
+                if let Some(net) = self.build_real_net(transport, &mesh, &mls_snapshot) {
+                    self.teardown_net();
+                    self.net = Some(net);
+                }
             }
             // surface it on the founding log (still present until CreateFinish) —
             // the direct mesh is up, the star can be let go

@@ -19,11 +19,18 @@
 //! transport, and A's on-disk genesis anchors B's real key with an
 //! attestation that verifies.
 
+mod common;
+
 use std::time::Duration;
 
-use molt_core::{Command, Reply, SessionSettings, SessionView, WorkspaceEvent};
+use molt_core::{
+    ChatMessage, Command, EventEnvelope, MemberId, Reply, SessionSettings, SessionView,
+    WorkspaceEvent,
+};
 use molt_engine::WalletHandle;
-use molt_net::{MlsIncoming, MlsMember};
+use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
+use molt_net::{EngineSink, MlsChannel, MlsIncoming, MlsMember, NetError, PeerLink};
+use tokio::sync::watch;
 
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     match w.execute(Command::ReadSession).await.expect("read session") {
@@ -656,4 +663,175 @@ async fn founding_bootstraps_a_direct_mesh_across_two_instances() {
         }
         other => panic!("expected an application message, got {other:?}"),
     }
+}
+
+/// A test-only sink that records what a manually-built member supervisor
+/// delivers (a persisted-log outbox has no wire-scope gate — the real receiver
+/// filters — so this may include the genesis alongside the chat).
+#[derive(Clone, Default)]
+struct RecordSink {
+    got: std::sync::Arc<std::sync::Mutex<Vec<(MemberId, EventEnvelope)>>>,
+}
+impl RecordSink {
+    fn messages(&self) -> Vec<(MemberId, EventEnvelope)> {
+        self.got.lock().expect("lock").clone()
+    }
+}
+impl EngineSink for RecordSink {
+    async fn deliver(&self, from: &MemberId, env: EventEnvelope) -> Result<(), NetError> {
+        self.got.lock().expect("lock").push((from.clone(), env));
+        Ok(())
+    }
+    async fn peer_seen(&self, _m: &MemberId) {}
+    async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+}
+
+fn member_chat(seq: u64, body: &str) -> EventEnvelope {
+    EventEnvelope {
+        seq,
+        ts: 1_751_000_000 + seq,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Chat(ChatMessage::text("member-b", body, 1_751_000_000 + seq)),
+    }
+}
+
+/// Part B — after founding, the founder engine stands a **real runtime
+/// supervisor** up from its persisted mesh + MLS group (no founding star, no
+/// demo mesh) and chats peer-to-peer over MLS with the joined member, both
+/// directions. The still-alive loopback hub stands in for the members' SMP
+/// server (its queues can't be rebuilt from state, so the runtime reuses it —
+/// exactly what a fresh SmpTransport does over a real server).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_chats_over_the_direct_mesh() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    // the shared founding hub — the member's runtime supervisor rides it too
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "chat over the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    // wait until the founder's real supervisor is up (the "direct mesh
+    // established" line is logged right after it is built)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+
+    // enter the republic — the real net keeps running across CreateFinish
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // --- build the MEMBER's runtime supervisor on the shared hub ---
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    assert_eq!(links.len(), 1, "one link, to the founder");
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 7),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // --- founder → member: the founder engine chats; it reaches the member,
+    // MLS-decrypted, over the direct mesh (no star, no demo peers) ---
+    a.execute(Command::Chat {
+        body: "the mesh carries us".to_string(),
+        quote: None,
+    })
+    .await
+    .expect("founder chat");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let got = member_sink.messages();
+        if got.iter().any(|(from, env)| {
+            from == "founder-a"
+                && matches!(&env.body, WorkspaceEvent::Chat(m) if m.body == "the mesh carries us")
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder's chat never reached the member over the direct mesh; got {:?}",
+            got.iter().map(|(f, _)| f).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // --- member → founder: the member chats; the founder engine records it
+    // into its real chat log through the same direct mesh ---
+    member_feed.push(member_chat(2, "aye, received"));
+    let _ = member_wake.send(2);
+    let chat = common::await_chat_len(&a, 2, 15).await;
+    assert!(
+        chat.iter().any(|m| m["body"] == serde_json::json!("aye, received")
+            && m["from"] == serde_json::json!("member-b")),
+        "the member's chat reached the founder engine over the direct mesh: {chat:?}"
+    );
 }

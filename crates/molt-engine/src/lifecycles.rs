@@ -745,6 +745,8 @@ impl State {
             }
         };
         let j = self.session.join.clone();
+        // keep copies to stand the runtime supervisor up after materialising
+        let net_seed = (mls_blob.clone(), mesh.clone());
         let id = if self.persist {
             // materialising can fail on disk; a bare `?` would drop the error
             // into the (already discarded) reply channel and hang the join at
@@ -787,6 +789,20 @@ impl State {
             sealed.agenda.clone(),
         );
         self.session.active_workspace = id;
+        // stand the runtime supervisor up over the joiner's direct mesh (a fresh
+        // SMP transport to the mesh's server reaches the queues just created);
+        // best-effort — no mesh, or a loopback mesh, just means no live peer link
+        let (mls_blob, mesh) = net_seed;
+        if self.persist && !mesh.is_empty() {
+            if let (Some(blob), Some(transport)) =
+                (mls_blob, crate::founding::smp_transport_from_mesh(&mesh))
+            {
+                if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
+                    self.teardown_net();
+                    self.net = Some(net);
+                }
+            }
+        }
         self.session.screen = Screen::Main;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

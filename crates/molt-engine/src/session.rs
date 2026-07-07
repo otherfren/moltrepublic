@@ -241,25 +241,44 @@ impl State {
             return Err(MoltError::UnknownWorkspace(id));
         }
         // reopening the already-open workspace is a navigation no-op — a
-        // second open would collide with our own flock and report Busy
-        let already_open = self.active.as_ref().is_some_and(|a| a.id == id);
-        if self.persist && !already_open {
-            self.open_stored_workspace(&id)?;
+        // second open would collide with our own flock and report Busy, and a
+        // running mesh (real or demo) must not be torn down under it
+        if self.active.as_ref().is_some_and(|a| a.id == id) {
+            self.session.active_workspace = id;
+            self.session.screen = Screen::Main;
+            self.session.notice = String::new();
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
         }
-        // the transport context changes with the workspace: tear the old
-        // mesh down and stand the new one up right away (presence pills
-        // are live before the first chat; persisted opens no-op — their
-        // seats are real and empty until T2)
+        let transport_state = if self.persist {
+            self.open_stored_workspace(&id)?
+        } else {
+            molt_core::TransportState::default()
+        };
+        // the transport context changes with the workspace: tear the old mesh
+        // down, abandon any still-running founder bootstrap for the workspace we
+        // are leaving (its ready would be ws-id-rejected anyway; this reaps the
+        // task), and stand the new context's mesh up
         self.teardown_net();
-        if !already_open {
-            // switching to a different workspace abandons any still-running
-            // founder mesh bootstrap for the one we're leaving (its ready would
-            // be dropped by the ws-id guard anyway; this reaps the task). A
-            // no-op reopen of the just-founded workspace keeps its bootstrap.
-            self.founder_mesh_in = None;
-        }
+        self.founder_mesh_in = None;
+        self.runtime_transport = None;
         self.session.active_workspace = id;
-        self.ensure_demo_net();
+        // a workspace carrying a persisted MLS group + mesh stands its REAL
+        // supervisor up over a fresh SMP transport to the mesh's server; others
+        // (session-only / simulated) get the demo mesh (presence pills live
+        // before the first chat)
+        let real = match transport_state.mls {
+            Some(blob) if !transport_state.mesh.is_empty() => {
+                crate::founding::smp_transport_from_mesh(&transport_state.mesh)
+                    .and_then(|t| self.build_real_net(t, &transport_state.mesh, &blob))
+            }
+            _ => None,
+        };
+        if let Some(net) = real {
+            self.net = Some(net);
+        } else {
+            self.ensure_demo_net();
+        }
         self.session.screen = Screen::Main;
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);
@@ -271,7 +290,7 @@ impl State {
     /// task. Every validation runs *before* the previously open workspace
     /// is torn down — any failure leaves it untouched (the freshly taken
     /// LOCK releases when `opened` drops on the error paths).
-    fn open_stored_workspace(&mut self, id: &str) -> Result<(), MoltError> {
+    fn open_stored_workspace(&mut self, id: &str) -> Result<molt_core::TransportState, MoltError> {
         let root = self.workspace_root();
         let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
             MoltError::Storage(format!(
@@ -316,6 +335,10 @@ impl State {
         }
         self.next_seq = opened.next_seq;
         let prefs = opened.prefs.clone();
+        // read the persisted transport state (MLS group + mesh) NOW, while we
+        // still hold `opened` directly — after start_writer only the async
+        // load path remains, which the sync open handler can't await
+        let transport_state = opened.read_transport_state();
         self.active = Some(ActiveStorage {
             id: id.to_string(),
             dir,
@@ -326,7 +349,7 @@ impl State {
         // frame; re-decide thresholds that were already met
         self.recover_pending_applies();
         self.refresh_active_entry();
-        Ok(())
+        Ok(transport_state)
     }
 
     /// Mirror the replayed genesis identity into the session's list entry:

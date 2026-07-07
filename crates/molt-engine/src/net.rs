@@ -200,12 +200,22 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
     matches!(event, WorkspaceEvent::Chat(_))
 }
 
+/// Where a running mesh's outbox reads from. The **demo** mesh has no storage,
+/// so the local member's own events are mirrored into an in-memory [`MemLog`]
+/// its peers read; a **real** (T2) workspace's outbox IS the encrypted workspace
+/// log ([`StorageLog`], wired at build), so publishing only has to wake the
+/// supervisor — after the storage append has been enqueued (see [`State::record`]).
+enum NetFeed {
+    Demo(MemLog),
+    Real,
+}
+
 /// The engine's transport runtime: the outbox feed + wakeup on the engine
 /// side, the supervisor and (for the demo mesh) the peer nodes — each
 /// kept alive by holding its engine's command sender (the peer actor
 /// stops once every sender is gone; its supervisor holds only a weak one).
 pub(crate) struct NetRuntime {
-    feed: MemLog,
+    feed: NetFeed,
     wakeup: watch::Sender<u64>,
     _supervisor: SupervisorHandle,
     _peer_keepalives: Vec<mpsc::Sender<Envelope>>,
@@ -224,17 +234,41 @@ pub(crate) struct NetRuntime {
 }
 
 impl NetRuntime {
-    /// Publish one recorded envelope to the outbox feed and wake the
-    /// supervisor (never blocks — the watch coalesces). Gated: only
-    /// self-authored events inside the wire scope enter the feed — relayed
-    /// peer events must not echo, and node-local kinds must not burn
-    /// blocks only to be dropped at the far end.
+    /// Whether this envelope should cross the wire on this mesh: only
+    /// self-authored events inside the wire scope — relayed peer events must not
+    /// echo, and node-local kinds must not burn blocks only to be dropped at the
+    /// far end.
+    fn wants(&self, env: &EventEnvelope) -> bool {
+        env.by == self.context.0 && crosses_wire(&env.body)
+    }
+
+    /// A real (storage-backed) mesh — its outbox is the workspace log, so it
+    /// wakes *after* the append; a demo mesh mirrors into its own feed and wakes
+    /// immediately in [`Self::publish`].
+    pub(crate) fn is_real(&self) -> bool {
+        matches!(self.feed, NetFeed::Real)
+    }
+
+    /// Publish one recorded envelope. The demo mesh mirrors it into its in-memory
+    /// feed and wakes the supervisor now; a real mesh does nothing here — its
+    /// outbox already read the storage log, so [`State::record`] wakes it after
+    /// the append (never blocks — the watch coalesces).
     pub(crate) fn publish(&self, env: &EventEnvelope) {
-        if env.by != self.context.0 || !crosses_wire(&env.body) {
+        if !self.wants(env) {
             return;
         }
-        self.feed.push(env.clone());
-        let _ = self.wakeup.send(env.seq);
+        if let NetFeed::Demo(feed) = &self.feed {
+            feed.push(env.clone());
+            let _ = self.wakeup.send(env.seq);
+        }
+    }
+
+    /// Wake a real mesh's supervisor for a just-appended envelope (called after
+    /// the storage append so the log-backed outbox read sees it).
+    pub(crate) fn wake_appended(&self, env: &EventEnvelope) {
+        if self.wants(env) {
+            let _ = self.wakeup.send(env.seq);
+        }
     }
 }
 
@@ -251,6 +285,11 @@ impl State {
     /// network exists — `prefs.simulated_members`). A persisted workspace
     /// with real members gets no fakes.
     pub(crate) fn ensure_demo_net(&mut self) {
+        // a real (T2) mesh is managed by the founding/join/open paths, not here —
+        // never tear it down to stand up (or clear) the demo mesh
+        if self.net.as_ref().is_some_and(NetRuntime::is_real) {
+            return;
+        }
         if !self.wants_demo_mesh() {
             self.net = None;
             return;
@@ -353,13 +392,71 @@ impl State {
             .collect::<Result<_, _>>()?;
 
         Ok(NetRuntime {
-            feed,
+            feed: NetFeed::Demo(feed),
             wakeup,
             _supervisor: supervisor,
             _peer_keepalives: peer_keepalives,
             context,
             peer_names: peers,
             generation: self.net_generation,
+        })
+    }
+
+    /// Build the **real** T2 runtime for the open workspace from its persisted
+    /// `transport.state`: restore the MLS group, rebuild the full-mesh
+    /// [`PeerLink`]s, and spawn a supervisor whose outbox is the encrypted
+    /// workspace log ([`StorageLog`]) and whose cursors live in the state file
+    /// ([`FileStateStore`]). `transport` must reach the mesh queues — a fresh
+    /// [`SmpTransport`] to their server (reopen path), or the still-alive ritual
+    /// transport (right after founding, and the only option on the loopback hub,
+    /// whose queues can't be reconstructed). Returns `None` when there is no
+    /// mesh/group to run (nothing to build) or the group can't be restored.
+    pub(crate) fn build_real_net(
+        &mut self,
+        transport: crate::founding::RitualTransport,
+        mesh: &[molt_core::MeshLink],
+        mls_blob: &[u8],
+    ) -> Option<NetRuntime> {
+        let active = self.active.as_ref()?;
+        let links: Vec<PeerLink> = mesh.iter().filter_map(PeerLink::from_mesh).collect();
+        if links.is_empty() {
+            return None;
+        }
+        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
+        let owner = self.member();
+        let peer_names: Vec<MemberId> = links.iter().map(|l| l.member.clone()).collect();
+        let feed = StorageLog::new(active.handle.clone());
+        let store = FileStateStore::new(active.handle.clone());
+        // a fresh incarnation: any stale demo delivery queued behind the switch
+        // dies at this bump (net_generation_current)
+        self.net_generation += 1;
+        let generation = self.net_generation;
+        let (wakeup, wakeup_rx) = watch::channel(0u64);
+        let mut seed = [0u8; 8];
+        let _ = getrandom::getrandom(&mut seed);
+        // NetConfig::fast = snappy delivery (0 fan-out jitter). The concept's
+        // ~2 s privacy jitter for traffic-analysis resistance is a tuning knob to
+        // reintroduce here once the mesh is exercised end to end.
+        let supervisor = supervisor::spawn(
+            transport,
+            NetConfig::fast(owner.clone(), links, u64::from_le_bytes(seed)),
+            feed,
+            store,
+            CmdSink {
+                tx: self.cmd_tx.clone(),
+                generation: Some(generation),
+            },
+            wakeup_rx,
+            Some(molt_net::MlsChannel::new(mls)),
+        );
+        Some(NetRuntime {
+            feed: NetFeed::Real,
+            wakeup,
+            _supervisor: supervisor,
+            _peer_keepalives: Vec::new(),
+            context: (owner, self.session.active_workspace.clone()),
+            peer_names,
+            generation,
         })
     }
 
@@ -517,7 +614,7 @@ fn spawn_demo_peer(
         None, // demo peer: plaintext path (no MLS group)
     );
     let net = NetRuntime {
-        feed,
+        feed: NetFeed::Demo(feed),
         wakeup,
         _supervisor: supervisor,
         _peer_keepalives: Vec::new(),

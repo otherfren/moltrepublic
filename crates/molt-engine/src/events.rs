@@ -43,6 +43,9 @@ impl State {
     /// session notice.
     pub(crate) fn record(&mut self, env: EventEnvelope) {
         self.apply(&env);
+        // the demo mesh mirrors + wakes now; a real mesh's outbox is the storage
+        // log, so it must be woken AFTER the append below (else its log read
+        // could race ahead of the write and miss this event)
         if let Some(net) = &self.net {
             net.publish(&env);
         }
@@ -50,8 +53,14 @@ impl State {
             return;
         };
         let seq = env.seq;
+        let wake_real = self.net.as_ref().is_some_and(|n| n.is_real());
+        // keep a copy to wake the real mesh with after the append consumes `env`
+        let wake_env = wake_real.then(|| env.clone());
         if !active.handle.append(env) {
             self.session.notice = "storage-lagging".to_string();
+        }
+        if let (Some(net), Some(env)) = (&self.net, &wake_env) {
+            net.wake_appended(env);
         }
         if active.handle.failed() {
             self.session.notice = "storage-failed".to_string();

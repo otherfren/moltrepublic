@@ -196,10 +196,11 @@ pub fn spawn_with_config(
         None,
         false,
         false,
-        // the post-founding mesh bootstrap is enabled in production only once the
-        // runtime supervisor reads the mesh (Part B); until then it stays off so
-        // real foundings don't run an exchange whose result nothing consumes
-        false,
+        // the real product runs the post-founding mesh bootstrap: the founder
+        // (here) and the joiner (cmd_join_start) exchange announcements, then
+        // each stands its runtime supervisor up over the direct mesh — live
+        // peer-to-peer MLS chat the moment the republic is founded
+        true,
     );
     Ok((handle, store))
 }
@@ -346,6 +347,12 @@ pub(crate) struct State {
     /// workspace, so a late bootstrap can never overwrite a workspace the
     /// operator has since switched to. `None` outside a bootstrap.
     pub(crate) founder_mesh_in: Option<FounderMeshIn>,
+    /// The founder keeps a clone of the ritual transport across its mesh
+    /// bootstrap so the runtime supervisor can reuse it once the mesh is
+    /// assembled (on the loopback hub the queues can't be reconstructed; over
+    /// SMP it is simply the founder's own server transport). Consumed when the
+    /// real net is built (`NetMeshReady`); cleared on teardown.
+    pub(crate) runtime_transport: Option<founding::RitualTransport>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -406,6 +413,7 @@ impl State {
             ritual_sim: false,
             ritual_bootstrap: false,
             founder_mesh_in: None,
+            runtime_transport: None,
             net_generation: 0,
             join_generation: 0,
             join_confirm: None,
