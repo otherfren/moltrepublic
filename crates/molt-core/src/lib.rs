@@ -1182,6 +1182,20 @@ pub enum WorkspaceEvent {
         /// The first height the requester is missing (its `head + 1`).
         from_height: u64,
     },
+    /// A membership change (a re-admission or an added seat) was put forward for
+    /// threshold approval — the gossip that lets every member sign the SAME
+    /// change. Transport-only, like `Committed` (`apply` is a no-op); the
+    /// committed result is a `Membership` chain block, not this announcement.
+    MembershipProposed {
+        /// The proposal id (per-node, matched to its approvals).
+        id: ProposalId,
+        /// Add a seat, or re-key (restore) an existing one.
+        op: chain::MembershipOp,
+        /// The affected member handle.
+        member: MemberId,
+        /// The member's anchored identity pk the change carries.
+        identity_pk: String,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on
@@ -1856,6 +1870,30 @@ pub enum Command {
         #[serde(default)]
         key_package: String,
         /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A returning member's **recovery request** arrived on the coordinator's
+    /// recovery queue (engine-internal — the recovery-ritual transport speaks to
+    /// the engine; a member must not be able to forge one). The coordinator
+    /// verifies the seat proof against the anchored roster key and proposes the
+    /// threshold `Membership{Restored}` re-admission.
+    NetRecoverRequested {
+        /// The seat's member handle.
+        member: MemberId,
+        /// The member's re-derived identity pk (must equal the anchored one).
+        identity_pk: String,
+        /// The member's fresh MLS KeyPackage (hex) to re-key its leaf.
+        key_package: String,
+        /// The recovery ticket the seat proof is bound to.
+        ticket: String,
+        /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id)`.
+        seat_proof: String,
+        /// The member's reply-queue handover, for the coordinator to send the
+        /// Welcome back once re-admission commits. Opaque here.
+        #[serde(default)]
+        reply: String,
+        /// Ritual incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
     },

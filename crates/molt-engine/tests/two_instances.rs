@@ -1021,3 +1021,154 @@ async fn founding_governs_over_the_direct_mesh() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// **Recovery step ❸ over the mesh.** A returning member proves its seat (a seat
+/// proof signed by its re-derived identity key); the coordinator engine verifies
+/// it against the anchored roster key and proposes the threshold
+/// `Membership{Restored}` re-admission, gossiping it over the mesh. Here the
+/// `RecoverRequest` is injected (the recovery-ritual transport delivers it in
+/// production); the assertion is that the coordinator proposes re-admission and
+/// the member sees the proposal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_request_makes_the_coordinator_propose_re_admission() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_phrase_for_sig = b_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "recover over the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+    let sealed = b_outcome.sealed.expect("member collected the sealed roster");
+
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (_member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 11),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // member-b lost its device; it proves its seat with its RE-DERIVED key
+    let b_pk = sealed
+        .identities
+        .iter()
+        .find(|i| i.member == "member-b")
+        .expect("member-b anchored")
+        .identity_pk
+        .clone();
+    let b_entropy = molt_storage::seed_entropy(&b_phrase_for_sig).expect("b entropy");
+    let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
+    let (b_sk, _) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
+    let ticket = "recovery-ticket";
+    let kp_hex = "abcd"; // an opaque fresh key package for this test
+    let seat_proof = molt_engine::make_seat_proof(&b_sk, ticket, kp_hex, &sealed.republic_id);
+
+    // the recovery request reaches the coordinator (injected; the recovery-ritual
+    // transport delivers it in production)
+    a.execute(Command::NetRecoverRequested {
+        member: "member-b".to_string(),
+        identity_pk: b_pk,
+        key_package: kp_hex.to_string(),
+        ticket: ticket.to_string(),
+        seat_proof,
+        reply: String::new(),
+        generation: None,
+    })
+    .await
+    .expect("recover request");
+
+    // the coordinator verified the seat proof and proposed re-admission — the
+    // MembershipProposed{Restored} reaches the member over the direct mesh
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let got = member_sink.messages();
+        if got.iter().any(|(_, env)| {
+            matches!(&env.body,
+                WorkspaceEvent::MembershipProposed { member, op, .. }
+                    if member == "member-b" && *op == molt_core::MembershipOp::Restored)
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the coordinator never proposed re-admission over the mesh; saw {:?}",
+            got.iter().map(|(_, e)| std::mem::discriminant(&e.body)).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

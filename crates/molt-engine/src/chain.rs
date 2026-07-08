@@ -39,6 +39,18 @@ pub(crate) struct PendingApproval {
     pub sigs: Vec<RosterAttestation>,
 }
 
+/// A recovery in flight on the coordinator: the returning member's fresh MLS
+/// KeyPackage + reply-queue handover, kept keyed by the re-admission proposal id
+/// until its `Restored` block commits — then the coordinator re-keys the group
+/// (`restore_member`) and sends the Welcome back to `reply`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields consumed by the MLS re-key increment (restore_member + Welcome)
+pub(crate) struct PendingRecovery {
+    pub member: String,
+    pub key_package: String,
+    pub reply: String,
+}
+
 /// The verified head of a chain plus the roster it establishes: everything a
 /// caller needs to check the *next* block or to trust a synced chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,10 +354,6 @@ impl State {
     /// and co-sign it — the producer for `Membership` blocks (recovery step ❹).
     /// Further approvals arrive from the other members; a block seals at m-of-n.
     /// Returns the proposal id.
-    // Wired by the recovery-ritual coordinator flow (a seat-proof-verified
-    // RecoverRequest triggers it) — the transport handshake is the next
-    // increment; today only the producer + its threshold test exist.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn propose_membership(
         &mut self,
         op: MembershipOp,
@@ -362,6 +370,19 @@ impl State {
                 identity_pk: identity_pk.to_string(),
             },
         );
+        // announce the proposal over the mesh so every member registers + signs
+        // the SAME change (the membership twin of a gated `Proposed`)
+        let me = self.member();
+        let env = self.make_env(
+            me,
+            WorkspaceEvent::MembershipProposed {
+                id: ProposalId(id),
+                op,
+                member: member.to_string(),
+                identity_pk: identity_pk.to_string(),
+            },
+        );
+        self.record(env);
         if self.config.self_cosign {
             self.chain_sign_and_gossip_approval(id);
         }
@@ -370,7 +391,6 @@ impl State {
 
     /// Register a membership proposal another member put forward, so this node
     /// signs the SAME change (its bytes) when it approves.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn receive_membership_proposal(
         &mut self,
         id: u64,
@@ -391,9 +411,6 @@ impl State {
     /// the threshold `Membership{Restored}` block. Recovery re-derives the same
     /// identity, so the requested key must equal the anchored one (it re-keys the
     /// MLS leaf, not the roster). Returns the proposal id, or the refusal reason.
-    // Wired by the coordinator's `NetRecoverRequested` handler (the transport
-    // handshake increment); today the decision + its test exist.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn verify_and_propose_restore(
         &mut self,
         member: &str,

@@ -347,6 +347,10 @@ pub(crate) struct State {
     /// The height a catch-up request is currently outstanding for (dedups the
     /// request while a gap persists; cleared when the head reaches it).
     pub(crate) catchup_from: Option<u64>,
+    /// Recoveries this node is coordinating, keyed by the re-admission proposal
+    /// id: the returning member's fresh KeyPackage + reply queue, kept until the
+    /// Restored block commits and the coordinator re-keys + sends the Welcome.
+    pub(crate) pending_recovery: HashMap<u64, chain::PendingRecovery>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -458,6 +462,7 @@ impl State {
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
+            pending_recovery: HashMap::new(),
             active: None,
             net,
             net_ritual: None,
@@ -628,6 +633,23 @@ impl State {
                 sig,
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, generation),
+            Command::NetRecoverRequested {
+                member,
+                identity_pk,
+                key_package,
+                ticket,
+                seat_proof,
+                reply,
+                generation,
+            } => self.cmd_net_recover_requested(
+                member,
+                identity_pk,
+                key_package,
+                ticket,
+                seat_proof,
+                reply,
+                generation,
+            ),
             Command::NetTestServer { url } => self.cmd_net_test_server(url),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::NetRitualLinkReady {

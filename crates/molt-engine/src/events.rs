@@ -200,11 +200,14 @@ impl State {
                 // presence is runtime state owned by the transport; the
                 // variant exists so checkpoints have a schema slot
             }
-            WorkspaceEvent::Committed(_) | WorkspaceEvent::ChainRequest { .. } => {
-                // chain transport frames (a broadcast block, a catch-up request)
-                // ride the log only to reach the outbox; the chain lives in
-                // chain.state and is NOT rebuilt from the log, so apply/replay
-                // is a deliberate no-op
+            WorkspaceEvent::Committed(_)
+            | WorkspaceEvent::ChainRequest { .. }
+            | WorkspaceEvent::MembershipProposed { .. } => {
+                // chain transport/coordination frames (a broadcast block, a
+                // catch-up request, a membership-proposal announcement) ride the
+                // log only to reach the outbox; the chain lives in chain.state
+                // and is NOT rebuilt from the log, so apply/replay is a
+                // deliberate no-op (the proposal registers in the net handler)
             }
         }
     }
@@ -282,6 +285,7 @@ impl State {
         self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;
+        self.pending_recovery.clear();
         self.chat.clear();
         self.applied.clear();
         for s in Surface::ALL {

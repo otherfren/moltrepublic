@@ -208,6 +208,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::Approved { .. }
             | WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
+            | WorkspaceEvent::MembershipProposed { .. }
     )
 }
 
@@ -592,8 +593,53 @@ impl State {
             WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
                 self.serve_chain_from(from_height);
             }
+            WorkspaceEvent::MembershipProposed {
+                id,
+                op,
+                member,
+                identity_pk,
+            } if self.is_chain_governed() => {
+                self.receive_membership_proposal(id.0, op, &member, &identity_pk);
+            }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
+            }
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// A returning member's recovery request reached this coordinator (recovery
+    /// step ❸): verify the seat proof against the anchored roster identity and
+    /// propose the threshold re-admission, remembering the fresh KeyPackage +
+    /// reply queue for the MLS re-key once the `Restored` block commits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_net_recover_requested(
+        &mut self,
+        member: MemberId,
+        identity_pk: String,
+        key_package: String,
+        ticket: String,
+        seat_proof: String,
+        reply: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_generation_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        match self.verify_and_propose_restore(&member, &identity_pk, &key_package, &ticket, &seat_proof) {
+            Ok(id) => {
+                self.pending_recovery.insert(
+                    id,
+                    crate::chain::PendingRecovery {
+                        member: member.clone(),
+                        key_package,
+                        reply,
+                    },
+                );
+                tracing::info!(%member, "recovery seat proof verified — proposing re-admission");
+            }
+            Err(e) => {
+                tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
             }
         }
         Ok(Reply::Ack)
