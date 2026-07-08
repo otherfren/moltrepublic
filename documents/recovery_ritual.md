@@ -193,6 +193,13 @@ The group gets the complementary guarantees:
   distributes it, exactly as the founder builds the group once at founding —
   never two members re-keying the same seat concurrently (that forks the group).
 
+**MLS distribution — decided (2026-07-08): a recovery-ritual transport.** `S`
+distributes `restore_member`'s commit to the survivors and the Welcome to `R`
+over **dedicated recovery queues that mirror the founding star** (reusing the
+founding invite / `send_framed` machinery), *not* over the runtime mesh. Recovery
+is the founding's twin: one coordinator builds + fans out the single membership
+commit, and every survivor applies it — the same shape that born the group.
+
 ---
 
 ## 7. Real vs. simulated
