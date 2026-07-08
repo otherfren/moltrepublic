@@ -521,10 +521,12 @@ fn spawn_founder_recv(
                     ct,
                     generation: Some(generation),
                 },
-                // founder→member only:
+                // founder→member only, or not a founding-queue message
+                // (Recover belongs on the coordinator's recovery queue):
                 invite::RitualMsg::JoinAccepted { .. }
                 | invite::RitualMsg::Seal { .. }
-                | invite::RitualMsg::Genesis { .. } => continue,
+                | invite::RitualMsg::Genesis { .. }
+                | invite::RitualMsg::Recover(_) => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
             if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {

@@ -107,6 +107,26 @@ pub struct JoinRequest {
     pub key_package: String,
 }
 
+/// A total-loss member's activation of a recovery link (recovery_ritual.md §4):
+/// it proves its seat with a signature by its RE-DERIVED identity key (the seat
+/// proof), so a leaked link alone cannot answer the challenge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverRequest {
+    /// The seat's member handle.
+    pub member: String,
+    /// The member's re-derived identity pk (must equal the anchored one), hex.
+    pub identity_pk: String,
+    /// The member's fresh MLS KeyPackage (hex of the wire bytes) to re-key its leaf.
+    pub key_package: String,
+    /// The single-use recovery ticket the seat proof is bound to.
+    pub ticket: String,
+    /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id)`, hex.
+    pub seat_proof: String,
+    /// The member's reply queue, so the coordinator can send the Welcome back.
+    #[serde(default)]
+    pub reply: Option<ReplyHandover>,
+}
+
 /// One member's seal signature over the final roster table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealSigned {
@@ -124,6 +144,9 @@ pub struct SealSigned {
 pub enum RitualMsg {
     /// member → founder: activate the invite link.
     Join(JoinRequest),
+    /// returning member → coordinator: activate a recovery link (prove the seat
+    /// with a re-derived-identity signature — recovery_ritual.md §4).
+    Recover(RecoverRequest),
     /// founder → member: the proposed constitution to ratify — JSON of the
     /// transport's pre-attestation `SealedRoster` (name, republic id, m/n,
     /// roster, identities, agenda; attestations empty). The member **recomputes**
@@ -181,6 +204,28 @@ pub enum RitualMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recover_request_round_trips_tagged() {
+        let msg = RitualMsg::Recover(RecoverRequest {
+            member: "walter".to_string(),
+            identity_pk: "aa".to_string(),
+            key_package: "bb".to_string(),
+            ticket: "cc".to_string(),
+            seat_proof: "dd".to_string(),
+            reply: Some(ReplyHandover {
+                server: "smp://f@h".to_string(),
+                queue_id: "ee".to_string(),
+                wrap: "ff".to_string(),
+            }),
+        });
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("\"kind\":\"recover\""), "tagged as recover: {json}");
+        assert_eq!(
+            serde_json::from_str::<RitualMsg>(&json).expect("deserialize"),
+            msg
+        );
+    }
 
     #[test]
     fn tickets_are_fresh_and_hex() {
