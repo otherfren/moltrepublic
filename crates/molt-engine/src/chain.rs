@@ -579,22 +579,58 @@ impl State {
     /// emit, clear its collected signatures, and re-base every other pending
     /// proposal onto the new head (their old-height signatures are now stale).
     fn after_block_applied(&mut self, block: &ChainBlock) {
-        if let ChainChange::Applied {
-            proposal_id,
-            surface,
-            ..
-        } = &block.change
-        {
-            if let Some(p) = self.proposals.get_mut(proposal_id) {
-                p.state = ProposalState::Applied;
+        match &block.change {
+            ChainChange::Applied {
+                proposal_id,
+                surface,
+                ..
+            } => {
+                if let Some(p) = self.proposals.get_mut(proposal_id) {
+                    p.state = ProposalState::Applied;
+                }
+                self.pending_sigs.remove(proposal_id);
+                self.emit(Event::Applied {
+                    id: ProposalId(*proposal_id),
+                    surface: *surface,
+                });
             }
-            self.pending_sigs.remove(proposal_id);
-            self.emit(Event::Applied {
-                id: ProposalId(*proposal_id),
-                surface: *surface,
-            });
+            // a re-admission committed: if THIS node coordinated it (holds the
+            // returning member's fresh KeyPackage), drive the MLS re-key
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member,
+                ..
+            } if self.pending_recovery.contains_key(member) => {
+                let member = member.clone();
+                self.coordinator_rekey(&member);
+            }
+            _ => {}
         }
         self.rebase_pending_approvals();
+    }
+
+    /// The coordinator's MLS re-key once a `Restored` block committed: run
+    /// `restore_member` on the runtime group with the returning member's fresh
+    /// KeyPackage → `(commit, welcome)`, to be distributed over the recovery
+    /// transport (that distribution is the next increment). Consumes the pending
+    /// recovery. A node with no runtime group logs and does nothing.
+    fn coordinator_rekey(&mut self, member: &str) {
+        let Some(pending) = self.pending_recovery.remove(member) else {
+            return;
+        };
+        let Ok(kp) = hex::decode(&pending.key_package) else {
+            tracing::warn!(%member, "recovery KeyPackage is not valid hex");
+            return;
+        };
+        match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
+            Some(Ok((_commit, _welcome))) => {
+                // TODO(recovery transport): fan `_commit` out to the survivors +
+                // send `_welcome` to `pending.reply` over the recovery star
+                tracing::info!(%member, "re-keyed the MLS group for the returning member");
+            }
+            Some(Err(e)) => tracing::warn!(%member, error = %e, "MLS re-key failed"),
+            None => tracing::warn!(%member, "no runtime MLS group to re-key (state-only)"),
+        }
     }
 
     /// Re-sign this node's standing approvals at the new head+1: an approval
@@ -1240,6 +1276,41 @@ mod tests {
         assert!(coord
             .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good)
             .is_err());
+    }
+
+    /// When a `Restored` block commits, the coordinator (the node holding the
+    /// pending recovery for that member) consumes it to drive the MLS re-key;
+    /// a node without a pending recovery for that member does nothing. Here
+    /// there is no runtime group, so the re-key is a logged no-op — but the
+    /// trigger CONDITION (consume the pending recovery on commit) is exercised.
+    #[test]
+    fn a_restored_commit_triggers_the_coordinators_rekey() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let walter_pk = b.pk("walter");
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        coord.pending_recovery.insert(
+            "walter".to_string(),
+            PendingRecovery {
+                member: "walter".to_string(),
+                key_package: "beef".to_string(),
+                reply: String::new(),
+            },
+        );
+
+        // build a Restored block for walter and hand it to the coordinator
+        let change = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "walter".to_string(),
+            identity_pk: walter_pk,
+        };
+        let block = b.seal(1, change, &["petra", "walter"]);
+        coord.receive_block(block);
+
+        assert_eq!(coord.chain_head.as_ref().expect("head").height, 1);
+        assert!(
+            !coord.pending_recovery.contains_key("walter"),
+            "the coordinator consumed the pending recovery on the Restored commit"
+        );
     }
 
     /// A rejoiner that lost everything (no chain, no head) bootstraps from the

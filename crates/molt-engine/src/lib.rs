@@ -347,10 +347,11 @@ pub(crate) struct State {
     /// The height a catch-up request is currently outstanding for (dedups the
     /// request while a gap persists; cleared when the head reaches it).
     pub(crate) catchup_from: Option<u64>,
-    /// Recoveries this node is coordinating, keyed by the re-admission proposal
-    /// id: the returning member's fresh KeyPackage + reply queue, kept until the
-    /// Restored block commits and the coordinator re-keys + sends the Welcome.
-    pub(crate) pending_recovery: HashMap<u64, chain::PendingRecovery>,
+    /// Recoveries this node is coordinating, keyed by the returning **member**
+    /// (so the trigger fires whether this node commits the Restored block or
+    /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
+    /// block commits and the coordinator re-keys the group + sends the Welcome.
+    pub(crate) pending_recovery: HashMap<String, chain::PendingRecovery>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,

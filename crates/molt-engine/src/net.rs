@@ -227,6 +227,10 @@ enum NetFeed {
 /// advances). Snapshotted into `transport.state` on a clean close.
 type RealCrypto = (crate::founding::RitualTransport, Arc<Mutex<molt_net::MlsMember>>);
 
+/// The MLS re-key a coordinator produces on recovery: `(commit, welcome)` or a
+/// failure reason (`None` from the caller means there was no runtime group).
+type MlsRekey = Result<(Vec<u8>, Vec<u8>), String>;
+
 /// What a clean close persists: `(MLS snapshot, transport queue-credential bytes)`.
 type CloseCrypto = (Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -282,6 +286,20 @@ impl NetRuntime {
         let (transport, mls) = self.real_crypto.as_ref()?;
         let snapshot = mls.lock().ok().and_then(|m| m.snapshot().ok());
         Some((snapshot, transport.export_creds()))
+    }
+
+    /// Coordinator side of recovery: run `restore_member` on the runtime MLS
+    /// group — remove the returning member's stale leaf + add its fresh
+    /// KeyPackage in one commit → `(commit, welcome)`. `None` when this runtime
+    /// has no real MLS group (a demo/state-only node).
+    pub(crate) fn restore_member_on_group(
+        &self,
+        member: &str,
+        key_package: &[u8],
+    ) -> Option<MlsRekey> {
+        let (_transport, mls) = self.real_crypto.as_ref()?;
+        let mut group = mls.lock().ok()?;
+        Some(group.restore_member(member, key_package).map_err(|e| e.to_string()))
     }
 
     /// Publish one recorded envelope. The demo mesh mirrors it into its in-memory
@@ -627,9 +645,9 @@ impl State {
             return Ok(Reply::Ack);
         }
         match self.verify_and_propose_restore(&member, &identity_pk, &key_package, &ticket, &seat_proof) {
-            Ok(id) => {
+            Ok(_id) => {
                 self.pending_recovery.insert(
-                    id,
+                    member.clone(),
                     crate::chain::PendingRecovery {
                         member: member.clone(),
                         key_package,
