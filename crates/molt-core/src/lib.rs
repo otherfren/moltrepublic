@@ -37,16 +37,14 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
-/// The shared surfaces. [`Surface::Constitution`] and [`Surface::Organization`]
-/// are read-only info areas and [`Surface::Chat`] is ungated; the other four
-/// change the shared state only through a threshold-approved proposal.
+/// The shared surfaces. [`Surface::Organization`] is a read-only info area (it
+/// carries the ratified charter + roster) and [`Surface::Chat`] is ungated; the
+/// other four change the shared state only through a threshold-approved proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
-    /// The founding constitution: the ratified DAO name + charter and the sealed
-    /// roster — immutable, from the genesis. Read-only.
-    Constitution,
-    /// Who this republic is: status, roster, statistics. Read-only.
+    /// Who this republic is: status (with the ratified charter), roster,
+    /// statistics. Read-only.
     Organization,
     /// Free conversation. Ungated: a message changes no shared state.
     Chat,
@@ -62,8 +60,7 @@ pub enum Surface {
 
 impl Surface {
     /// Every surface, in display (= navigation) order.
-    pub const ALL: [Surface; 7] = [
-        Surface::Constitution,
+    pub const ALL: [Surface; 6] = [
         Surface::Organization,
         Surface::Chat,
         Surface::Memory,
@@ -75,7 +72,6 @@ impl Surface {
     /// Lowercase wire/display name.
     pub fn as_str(self) -> &'static str {
         match self {
-            Surface::Constitution => "constitution",
             Surface::Organization => "organization",
             Surface::Chat => "chat",
             Surface::Memory => "memory",
@@ -86,12 +82,11 @@ impl Surface {
     }
 
     /// Whether changes to this surface require a threshold of approvals.
-    /// Chat is ungated; Constitution and Organization are read-only (nothing to
-    /// propose).
+    /// Chat is ungated; Organization is read-only (nothing to propose).
     pub fn is_gated(self) -> bool {
         !matches!(
             self,
-            Surface::Chat | Surface::Organization | Surface::Constitution
+            Surface::Chat | Surface::Organization
         )
     }
 
@@ -105,9 +100,6 @@ impl Surface {
     /// nav and the `select_view` command validate against this same list.
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            // the charter now lives in Organization → Status; Constitution keeps
-            // no sub-view of its own (its body still renders on selection)
-            Surface::Constitution => &[],
             Surface::Organization => &[
                 ("status", "Status"),
                 ("members", "Members"),

@@ -1679,7 +1679,6 @@ fn summarize(v: &serde_json::Value) -> String {
 
 fn surface_name(sf: Surface) -> &'static str {
     match sf {
-        Surface::Constitution => "Constitution",
         Surface::Organization => "Organization",
         Surface::Chat => "Chat",
         Surface::Memory => "Memory",
@@ -1697,7 +1696,7 @@ fn default_op(sf: Surface) -> &'static str {
         Surface::Vault => "seal_secret",
         Surface::Wallet => "transfer",
         // read-only / ungated surfaces have nothing to propose
-        Surface::Chat | Surface::Organization | Surface::Constitution => "note",
+        Surface::Chat | Surface::Organization => "note",
     }
 }
 
