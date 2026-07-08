@@ -8,6 +8,18 @@ use std::time::Duration;
 use molt_core::{Command, Reply, Surface};
 use molt_engine::WalletHandle;
 
+/// Read a surface's applied log.
+pub async fn read_applied(w: &WalletHandle, surface: Surface) -> Vec<serde_json::Value> {
+    match w
+        .execute(Command::ReadState { surface })
+        .await
+        .expect("read state")
+    {
+        Reply::State(s) => s.applied,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Read the chat surface's applied log.
 pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
     match w

@@ -37,14 +37,30 @@ impl State {
         );
         self.record(env);
         self.emit(Event::Proposed { id, surface });
-        if self.config.self_cosign {
-            // the proposer's own approval is an event too — replay must not
-            // depend on the config flag
-            let env = self.make_env(me.clone(), WorkspaceEvent::Approved { id, by: me });
-            self.record(env);
+        if self.is_chain_governed() {
+            // real threshold: the proposer co-signs their own proposal; the
+            // other members' signatures arrive over the mesh
+            if self.config.self_cosign {
+                self.chain_sign_and_gossip_approval(id.0);
+            }
+        } else {
+            if self.config.self_cosign {
+                // legacy counted simulation — the proposer's own approval is an
+                // event too, so replay must not depend on the config flag
+                let env = self.make_env(
+                    me.clone(),
+                    WorkspaceEvent::Approved {
+                        id,
+                        by: me,
+                        height: 0,
+                        sig: String::new(),
+                    },
+                );
+                self.record(env);
+            }
+            // A self-cosign may already satisfy a threshold of 1.
+            self.try_apply(id);
         }
-        // A self-cosign may already satisfy a threshold of 1.
-        self.try_apply(id);
         Ok(Reply::Proposed { id })
     }
 
@@ -58,22 +74,36 @@ impl State {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
         }
-        let me = self.member();
-        let env = self.make_env(
-            me.clone(),
-            WorkspaceEvent::Approved {
+        if self.is_chain_governed() {
+            // real threshold: sign + gossip; a block seals once m distinct
+            // members have signed (here or over the mesh)
+            self.chain_sign_and_gossip_approval(proposal.0);
+            let have = self.chain_approval_count(proposal.0);
+            self.emit(Event::Approved {
                 id: proposal,
-                by: me,
-            },
-        );
-        self.record(env);
-        let have = self.proposals.get(&proposal.0).map(|p| p.approvals).unwrap_or(0);
-        self.emit(Event::Approved {
-            id: proposal,
-            have,
-            need: self.threshold(),
-        });
-        self.try_apply(proposal);
+                have,
+                need: self.threshold(),
+            });
+        } else {
+            let me = self.member();
+            let env = self.make_env(
+                me.clone(),
+                WorkspaceEvent::Approved {
+                    id: proposal,
+                    by: me,
+                    height: 0,
+                    sig: String::new(),
+                },
+            );
+            self.record(env);
+            let have = self.proposals.get(&proposal.0).map(|p| p.approvals).unwrap_or(0);
+            self.emit(Event::Approved {
+                id: proposal,
+                have,
+                need: self.threshold(),
+            });
+            self.try_apply(proposal);
+        }
         Ok(Reply::Ack)
     }
 
@@ -123,7 +153,14 @@ impl State {
     /// Re-decide thresholds after a replay: a crash between an `Approved`
     /// frame and its `Applied` frame must not leave a proposal stuck at
     /// `have >= need` forever. Called once per open, after the tail applied.
+    ///
+    /// Legacy path only: a chain-governed workspace never applies by counting —
+    /// the replayed `Approved` frames are real signatures the chain already
+    /// consumed (or not), so re-counting them here would double-apply.
     pub(crate) fn recover_pending_applies(&mut self) {
+        if self.is_chain_governed() {
+            return;
+        }
         let ready: Vec<u64> = self
             .proposals
             .iter()
@@ -136,11 +173,18 @@ impl State {
     }
 
     pub(crate) fn view(&self, id: u64, p: &ProposalRecord) -> ProposalView {
+        // a chain-governed proposal's real progress is the count of distinct
+        // collected signatures, not the legacy counter
+        let approvals = if self.is_chain_governed() {
+            self.chain_approval_count(id)
+        } else {
+            p.approvals
+        };
         ProposalView {
             id: ProposalId(id),
             surface: p.surface,
             payload: p.payload.clone(),
-            approvals: p.approvals,
+            approvals,
             threshold: self.threshold(),
             state: p.state,
         }

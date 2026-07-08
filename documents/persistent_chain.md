@@ -8,13 +8,14 @@ checks — then points at the code.
 It is the state-model companion to `founding_ritual.md`: the founding produces
 the chain's first block, and everything the republic later ratifies extends it.
 
-> **Status (2026-07-08).** Phase 1 is implemented: the block format, its
-> canonical bytes, and full hard-reject verification (`molt_core::chain`,
-> `molt_storage::content_hash`, `molt_engine::chain::verify_chain`, unit-tested).
-> Phases 2–4 (wiring the real threshold, single-branch serialization, catch-up
-> sync, recovery) are designed here but not yet wired into the running engine —
-> today's running governance is still the single-operator simulation. §10 tracks
-> the split.
+> **Status (2026-07-08).** Phases 1–2 are implemented. Phase 1: the block
+> format, its canonical bytes, and full hard-reject verification. Phase 2: the
+> chain is persisted + verify-loaded, and **real threshold governance runs over
+> the mesh** — a chain-governed republic signs approvals, gossips them, seals a
+> block at m distinct signatures, broadcasts it, and every member converges
+> (proven end-to-end over the direct MLS mesh in
+> `two_instances.rs::founding_governs_over_the_direct_mesh`). Phases 3–4
+> (catch-up sync, recovery) are still designed-not-wired. §10 tracks the split.
 
 ---
 
@@ -177,11 +178,23 @@ Having verified a chain, a member knows — not trusts — that:
   hard-reject checks (`molt-engine`), unit-tested for build/verify and for
   tamper rejection (bad sig, broken link, height gap, below-threshold, repeated
   signer, double-apply, forged genesis id, roster growth).
-- **Planned.** Phase 2: gossip an `Approved` with a real signature, commit a
-  block at *m* signatures, broadcast it, verify-on-receive, apply, and serialize
-  the single branch (re-base). Phase 3: catch-up sync of a chain suffix. Phase 4:
-  recovery as catch-up + MLS re-key. Until then, the running engine's governance
-  is the single-operator simulation.
+- **Real (Phase 2).** The founding roots + persists block 0 (`chain.state`,
+  sealed like `transport.state`), and a reopen verify-loads it and restores the
+  signing key. `cmd_approve` on a chain-governed republic signs the change at
+  the head's next height and gossips the signature over the mesh
+  (`crosses_wire`); the engine collects distinct valid signatures and, at *m*,
+  deterministically seals a block (the m lowest-named signers, so concurrent
+  committers seal the byte-identical block), broadcasts it, and re-projects the
+  gated surfaces from the chain. A peer verifies + adopts the broadcast block.
+  The legacy counted simulation is disabled for chain republics. Proven E2E over
+  the direct MLS mesh; a `receive_block` unit test covers the follower path.
+  Single-branch re-base (new height → re-sign) and a tip tie-break by min-hash
+  are wired; deep reorg + concurrent-race stress are light until Phase 3.
+- **Planned.** Phase 3: catch-up sync of a chain suffix (a lagging or rejoining
+  member fetches + verifies + applies), plus concurrent-race hardening. Phase 4:
+  recovery as catch-up-from-genesis + MLS re-key (a `Membership{Restored}`
+  block). Deliberation still rides the local log as transport (truly
+  out-of-band ephemeral gossip is a later refinement).
 
 ## 11. Implementation map
 

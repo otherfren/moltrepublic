@@ -24,7 +24,7 @@ mod common;
 use std::time::Duration;
 
 use molt_core::{
-    ChatMessage, Command, EventEnvelope, MemberId, Reply, SessionSettings, SessionView,
+    ChatMessage, Command, EventEnvelope, MemberId, Reply, SessionSettings, SessionView, Surface,
     WorkspaceEvent,
 };
 use molt_engine::WalletHandle;
@@ -854,4 +854,170 @@ async fn founding_chats_over_the_direct_mesh() {
             && m["from"] == serde_json::json!("member-b")),
         "the member's chat reached the founder engine over the direct mesh: {chat:?}"
     );
+}
+
+/// **Real threshold governance over the direct mesh.** The founder engine
+/// (chain-governed from its founding) proposes a gated change and co-signs it —
+/// one of two, so it stays pending. The member then co-signs the exact change
+/// with its **own** identity key and sends that signature over the MLS mesh;
+/// the founder collects the second signature, seals a commit block, and the
+/// change materializes on the Memory surface. This is the whole 2b/2c path:
+/// sign → gossip → collect → commit, driven end-to-end over the transport.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_governs_over_the_direct_mesh() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_phrase_for_sig = b_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "govern over the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+    let sealed = b_outcome.sealed.expect("member collected the sealed roster");
+
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // --- build the MEMBER's runtime supervisor on the shared hub ---
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 9),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // --- the founder proposes a gated Memory change and co-signs it (1 of 2) ---
+    let payload = serde_json::json!({"op": "add_note", "title": "minutes"});
+    let pid = match a
+        .execute(Command::Propose {
+            surface: Surface::Memory,
+            payload: payload.clone(),
+        })
+        .await
+        .expect("propose")
+    {
+        Reply::Proposed { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+    // one signature is not enough — a 2-of-2 change stays pending
+    assert!(
+        common::read_applied(&a, Surface::Memory).await.is_empty(),
+        "the founder's own signature alone must not commit a 2-of-2 change"
+    );
+
+    // --- the member co-signs the SAME change with its own key, over the mesh ---
+    // derive member-b's identity EXACTLY as run_ritual_member did (its own
+    // workspace id salts the identity), so the signature verifies against the
+    // key the founder anchored in the roster
+    let b_entropy = molt_storage::seed_entropy(&b_phrase_for_sig).expect("b entropy");
+    let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
+    let (b_sk, _b_pk) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
+    let change = molt_core::ChainChange::Applied {
+        proposal_id: pid.0,
+        surface: Surface::Memory,
+        payload: payload.clone(),
+    };
+    // the first post-genesis block is height 1
+    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
+    let approval = EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_200,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Approved {
+            id: pid,
+            by: "member-b".to_string(),
+            height: 1,
+            sig: b_sig,
+        },
+    };
+    member_feed.push(approval);
+    let _ = member_wake.send(2);
+
+    // --- the founder collects the second signature, seals a block, and the
+    // change materializes on the Memory surface ---
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let applied = common::read_applied(&a, Surface::Memory).await;
+        if applied.iter().any(|v| v["title"] == serde_json::json!("minutes")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the mesh-approved change never committed; applied: {applied:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

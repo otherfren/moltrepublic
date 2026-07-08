@@ -109,8 +109,17 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   rule): an unknown variant must stop a reader from extending the chain.
 - **Additive, not an `EventEnvelope` change.** The chain is a *separate*
   structure; the local ephemeral event log (chat + materialized blocks) is
-  untouched. Phases 2–4 (real threshold wiring, catch-up, recovery) are still
-  open — today's running governance is the single-operator simulation.
+  untouched. Phase 2 is wired: a chain-governed republic runs **real threshold
+  governance over the mesh** (`cmd_approve` signs; the engine collects distinct
+  signatures and seals a block at *m*, deterministically — the m lowest-named
+  signers — then broadcasts it; `crosses_wire` carries `Proposed`/`Approved`/
+  `Committed`). The legacy counted simulation is OFF for chain workspaces (guard
+  on `is_chain_governed`), and `self.chain_applied` is a *separate* projection
+  from the legacy `self.applied` so the two never collide (reads concat them).
+  The identity signing key must reach `materialize_workspace` from the ritual
+  (`ritual.founder_sk()` / `founding::member_identity`) — re-deriving it from the
+  member handle gives the WRONG key (the ritual salts identity with a
+  workspace-id string). Phases 3–4 (catch-up sync, recovery) are still open.
 
 ## MLS / OpenMLS reference (crates/molt-net/src/mls.rs)
 

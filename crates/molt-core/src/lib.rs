@@ -1130,12 +1130,23 @@ pub enum WorkspaceEvent {
         /// The surface-specific transition.
         payload: Value,
     },
-    /// One member's approval landed on a pending proposal.
+    /// One member's approval landed on a pending proposal. On a chain-governed
+    /// republic it also carries the member's **signature** over the committed
+    /// change at a target chain `height` (the real threshold co-signature the
+    /// committer bundles into the block); both default empty on the legacy
+    /// counted-simulation path.
     Approved {
         /// The proposal.
         id: ProposalId,
         /// The approving member.
         by: MemberId,
+        /// The chain height the signature is bound to (0 on the legacy path).
+        #[serde(default)]
+        height: u64,
+        /// The member's Ed25519 signature (hex) over
+        /// [`crate::approval_bytes`] at `height` — empty on the legacy path.
+        #[serde(default)]
+        sig: String,
     },
     /// A pending proposal was declined.
     Declined {
@@ -1156,6 +1167,12 @@ pub enum WorkspaceEvent {
         /// When (unix seconds).
         ts: u64,
     },
+    /// A threshold-committed block was broadcast to the mesh (chain-governed
+    /// republics). It rides the log purely as **transport** — the block is
+    /// applied into the recipient's `chain.state`, not replayed from the log
+    /// (`apply` treats it as a no-op). The committer authors it so the outbox
+    /// fans it out; peers verify-and-append it on receipt.
+    Committed(ChainBlock),
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on

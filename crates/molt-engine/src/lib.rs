@@ -332,6 +332,10 @@ pub(crate) struct State {
     /// threshold-committed governance lands here. Reads combine both. Re-folded
     /// wholesale on every chain change, so a re-base is free.
     pub(crate) chain_applied: HashMap<Surface, Vec<Value>>,
+    /// Ephemeral per-proposal signature collection for chain governance
+    /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
+    /// proposal gathers m distinct signatures the committer seals a block.
+    pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -439,6 +443,7 @@ impl State {
             chain: Vec::new(),
             chain_head: None,
             chain_applied: HashMap::new(),
+            pending_sigs: HashMap::new(),
             active: None,
             net,
             net_ritual: None,

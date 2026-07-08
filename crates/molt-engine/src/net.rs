@@ -192,14 +192,22 @@ impl supervisor::StateStore for FileStateStore {
 // The engine-side net runtime
 // ---------------------------------------------------------------------------
 
-/// The T1 wire scope, in ONE place: which workspace events cross the
-/// transport at all. Chat only — index-referencing events (reactions,
-/// deletions, file removals) stay node-local until stable message ids
-/// land with T2, and everything else awaits MLS. Consulted by the outbox
-/// feed gate; the receiving side's match in `cmd_net_delivered` is the
-/// defense-in-depth twin (a persisted log's outbox has no feed gate).
+/// The wire scope, in ONE place: which workspace events cross the transport.
+/// Chat (the ephemeral conversation) and the chain-governance traffic —
+/// `Proposed`/`Approved` gossip and a broadcast `Committed` block. Everything
+/// else (index-referencing reactions/deletions, presence) stays node-local.
+/// Consulted by the outbox feed gate; the receiving side's match in
+/// `cmd_net_delivered` is the defense-in-depth twin (a persisted log's outbox
+/// has no feed gate), and it drops the governance variants for a non-chain
+/// workspace.
 pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
-    matches!(event, WorkspaceEvent::Chat(_))
+    matches!(
+        event,
+        WorkspaceEvent::Chat(_)
+            | WorkspaceEvent::Proposed { .. }
+            | WorkspaceEvent::Approved { .. }
+            | WorkspaceEvent::Committed(_)
+    )
 }
 
 /// Where a running mesh's outbox reads from. The **demo** mesh has no storage,
@@ -563,8 +571,25 @@ impl State {
                 self.record(env);
                 self.emit(molt_core::Event::Chat { from, body });
             }
+            // chain governance gossip + block broadcast — only a chain-governed
+            // workspace acts on it (the transport carries it; the chain decides)
+            WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
+                self.receive_proposed(id.0, surface, payload);
+                self.emit(molt_core::Event::Proposed { id, surface });
+            }
+            WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
+                self.receive_approval(id.0, &by, height, &sig);
+                self.emit(molt_core::Event::Approved {
+                    id,
+                    have: self.chain_approval_count(id.0),
+                    need: self.threshold(),
+                });
+            }
+            WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
+                self.receive_block(block);
+            }
             other => {
-                tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "non-chat event over the wire — ignored until T2");
+                tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
             }
         }
         Ok(Reply::Ack)

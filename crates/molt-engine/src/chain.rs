@@ -20,11 +20,24 @@
 use std::collections::BTreeSet;
 
 use molt_core::{
-    approval_bytes, block_link_bytes, ChainBlock, ChainChange, MemberIdentity, MembershipOp,
-    RosterAttestation, SealedRoster, Surface, GENESIS_PREV,
+    approval_bytes, block_link_bytes, ChainBlock, ChainChange, Event, MemberIdentity, MembershipOp,
+    ProposalId, ProposalState, RosterAttestation, SealedRoster, Surface, WorkspaceEvent,
+    GENESIS_PREV,
 };
 
 use crate::State;
+
+/// The **ephemeral** signature collection for one pending proposal on a
+/// chain-governed republic (never persisted; rebuilt from gossip). The
+/// committer bundles these into a block once `sigs` reaches the threshold. A
+/// re-base (the head advanced past `height`) clears it and re-signs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingApproval {
+    /// The chain height every signature here is bound to.
+    pub height: u64,
+    /// One signature per distinct member (latest wins).
+    pub sigs: Vec<RosterAttestation>,
+}
 
 /// The verified head of a chain plus the roster it establishes: everything a
 /// caller needs to check the *next* block or to trust a synced chain.
@@ -301,6 +314,308 @@ impl State {
     }
 }
 
+// ---- runtime chain governance (real threshold over the mesh) ---------------
+
+impl State {
+    /// A workspace whose governance runs through the chain (real m-of-n
+    /// signatures) rather than the legacy counted simulation.
+    pub(crate) fn is_chain_governed(&self) -> bool {
+        self.chain_head.is_some()
+    }
+
+    /// The committed change a pending proposal would enact.
+    fn proposal_change(&self, id: u64) -> Option<ChainChange> {
+        let p = self.proposals.get(&id)?;
+        Some(ChainChange::Applied {
+            proposal_id: id,
+            surface: p.surface,
+            payload: p.payload.clone(),
+        })
+    }
+
+    /// Distinct collected approvals for a proposal (for the UI progress).
+    pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
+        self.pending_sigs.get(&id).map(|p| p.sigs.len()).unwrap_or(0)
+    }
+
+    /// Sign this node's approval of a proposal at the current head+1 and
+    /// record + gossip it (the outbox fans the self-authored `Approved`
+    /// envelope out over the mesh). Then try to seal. The proposer's own
+    /// co-signature and every explicit approve funnel through here.
+    pub(crate) fn chain_sign_and_gossip_approval(&mut self, id: u64) {
+        let (Some(sk), Some(head)) = (self.identity_sk.as_ref(), self.chain_head.as_ref()) else {
+            return;
+        };
+        let height = head.height + 1;
+        let Some(change) = self.proposal_change(id) else {
+            return;
+        };
+        let bytes = approval_bytes(&self.republic_id(), height, &change);
+        let sig = molt_storage::identity_sign(sk, &bytes);
+        let me = self.member();
+        self.collect_sig(id, height, &me, &sig);
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::Approved {
+                id: ProposalId(id),
+                by: me,
+                height,
+                sig,
+            },
+        );
+        self.record(env);
+        self.try_commit(id);
+    }
+
+    /// Collect one signature into a proposal's pending set: dedup by member
+    /// (latest wins), and rebase the set to a newer `height` (dropping stale
+    /// signatures) — a signature for an already-superseded height is ignored.
+    fn collect_sig(&mut self, id: u64, height: u64, member: &str, sig: &str) {
+        let entry = self.pending_sigs.entry(id).or_default();
+        if height > entry.height {
+            entry.height = height;
+            entry.sigs.clear();
+        } else if height < entry.height {
+            return;
+        }
+        entry.sigs.retain(|a| a.member != member);
+        entry.sigs.push(RosterAttestation {
+            member: member.to_string(),
+            sig: sig.to_string(),
+        });
+    }
+
+    /// Try to seal a block for a proposal that has gathered the threshold of
+    /// valid, distinct signatures at the current head+1. Deterministic: the m
+    /// lowest-named valid signers are chosen, so two nodes that both reach the
+    /// threshold seal the byte-identical block (it self-dedups on receipt).
+    pub(crate) fn try_commit(&mut self, id: u64) {
+        let Some(head) = self.chain_head.clone() else {
+            return;
+        };
+        // already committed?
+        if matches!(self.proposals.get(&id), Some(p) if p.state != ProposalState::Proposed) {
+            return;
+        }
+        let target = head.height + 1;
+        let Some(change) = self.proposal_change(id) else {
+            return;
+        };
+        let bytes = approval_bytes(&self.republic_id(), target, &change);
+        let Some(pending) = self.pending_sigs.get(&id) else {
+            return;
+        };
+        if pending.height != target {
+            return; // stale set awaiting a re-base
+        }
+        let mut valid: Vec<RosterAttestation> = pending
+            .sigs
+            .iter()
+            .filter(|a| {
+                head.identities.iter().any(|i| {
+                    i.member == a.member && molt_storage::identity_verify(&i.identity_pk, &bytes, &a.sig)
+                })
+            })
+            .cloned()
+            .collect();
+        valid.sort_by(|a, b| a.member.cmp(&b.member));
+        valid.dedup_by(|a, b| a.member == b.member);
+        if valid.len() < usize::from(head.rule_m) {
+            return;
+        }
+        valid.truncate(usize::from(head.rule_m));
+        let block = ChainBlock {
+            height: target,
+            prev: head.hash.clone(),
+            change,
+            sigs: valid,
+        };
+        self.adopt_committed_block(block, id);
+    }
+
+    /// Append a block we sealed ourselves: adopt it, then broadcast it to the
+    /// mesh (record a self-authored `Committed` envelope the outbox fans out).
+    fn adopt_committed_block(&mut self, block: ChainBlock, proposal_id: u64) {
+        if !self.append_committed_block(block.clone()) {
+            return;
+        }
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
+        self.record(env);
+        self.after_block_applied(&block);
+        tracing::debug!(height = block.height, %proposal_id, "sealed and broadcast a chain block");
+    }
+
+    /// Verify a block against the current chain, append + persist it, and
+    /// re-project state. Returns whether it was accepted (a block that fails
+    /// full-chain verification is refused and rolled back).
+    fn append_committed_block(&mut self, block: ChainBlock) -> bool {
+        self.chain.push(block);
+        match verify_chain(&self.chain) {
+            Ok(head) => {
+                self.chain_head = Some(head);
+                self.apply_chain_to_state();
+                let chain = self.chain.clone();
+                if let Some(active) = &self.active {
+                    active.handle.persist_chain_blocking(chain);
+                }
+                true
+            }
+            Err(e) => {
+                self.chain.pop();
+                tracing::error!(error = %e, "refused a block that fails chain verification");
+                false
+            }
+        }
+    }
+
+    /// After a block is applied (by us or a peer): mark its proposal committed,
+    /// emit, clear its collected signatures, and re-base every other pending
+    /// proposal onto the new head (their old-height signatures are now stale).
+    fn after_block_applied(&mut self, block: &ChainBlock) {
+        if let ChainChange::Applied {
+            proposal_id,
+            surface,
+            ..
+        } = &block.change
+        {
+            if let Some(p) = self.proposals.get_mut(proposal_id) {
+                p.state = ProposalState::Applied;
+            }
+            self.pending_sigs.remove(proposal_id);
+            self.emit(Event::Applied {
+                id: ProposalId(*proposal_id),
+                surface: *surface,
+            });
+        }
+        self.rebase_pending_approvals();
+    }
+
+    /// Re-sign this node's standing approvals at the new head+1: an approval
+    /// this node already gave (its signature is in the stale set) is a decision
+    /// that still stands, only its position moved — so re-express it (the human
+    /// is not asked again). Proposals this node did not approve are just cleared.
+    fn rebase_pending_approvals(&mut self) {
+        let Some(head) = self.chain_head.as_ref() else {
+            return;
+        };
+        let target = head.height + 1;
+        let me = self.member();
+        let stale: Vec<u64> = self
+            .pending_sigs
+            .iter()
+            .filter(|(_, p)| p.height < target)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            let mine = self
+                .pending_sigs
+                .get(&id)
+                .is_some_and(|p| p.sigs.iter().any(|a| a.member == me));
+            self.pending_sigs.remove(&id);
+            // only re-sign for proposals still pending that this node approved
+            if mine && matches!(self.proposals.get(&id), Some(p) if p.state == ProposalState::Proposed)
+            {
+                self.chain_sign_and_gossip_approval(id);
+            }
+        }
+    }
+
+    /// Inbound: a peer proposed something (gossip). Record it as pending so it
+    /// shows up and can be approved here.
+    pub(crate) fn receive_proposed(&mut self, id: u64, surface: Surface, payload: serde_json::Value) {
+        self.proposals
+            .entry(id)
+            .or_insert_with(|| molt_core::ProposalRecord {
+                surface,
+                payload,
+                approvals: 0,
+                state: ProposalState::Proposed,
+            });
+        self.next_id = self.next_id.max(id + 1);
+    }
+
+    /// Inbound: a peer's signed approval (gossip). Collect + try to seal.
+    pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) {
+        if sig.is_empty() {
+            return;
+        }
+        self.collect_sig(id, height, by, sig);
+        self.try_commit(id);
+    }
+
+    /// Inbound: a peer broadcast a committed block. Verify against our head and
+    /// adopt it (extending the single branch), or tie-break a contended slot.
+    pub(crate) fn receive_block(&mut self, block: ChainBlock) {
+        let Some(head) = self.chain_head.clone() else {
+            return;
+        };
+        if block.height == head.height + 1 {
+            let mut probe = self.chain.clone();
+            probe.push(block.clone());
+            if verify_chain(&probe).is_ok() {
+                if self.append_committed_block(block.clone()) {
+                    self.after_block_applied(&block);
+                }
+            } else {
+                tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
+            }
+        } else if block.height <= head.height {
+            self.tie_break(block);
+        } else {
+            // a gap: we are behind. Catch-up sync is Phase 3.
+            tracing::warn!(have = head.height, got = block.height, "inbound block is ahead — catch-up not yet wired");
+        }
+    }
+
+    /// Resolve a competing block at a slot we already filled: identical block →
+    /// a duplicate broadcast, ignore; a different block at the tip with a
+    /// smaller hash wins the single branch, so adopt it and re-base the
+    /// displaced proposal. A deeper conflict is logged (deep reorg is Phase 3).
+    fn tie_break(&mut self, block: ChainBlock) {
+        let Some(existing) = self.chain.iter().find(|b| b.height == block.height) else {
+            return;
+        };
+        if existing == &block {
+            return; // duplicate broadcast of the block we already hold
+        }
+        let rid = self.republic_id();
+        let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
+        let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
+        let is_tip = self.chain.last().is_some_and(|b| b.height == block.height);
+        if is_tip && incoming < current {
+            // the incoming block wins the tip; swap it in and re-verify
+            let displaced = self.chain.pop();
+            self.chain.push(block.clone());
+            if verify_chain(&self.chain).is_ok() {
+                if let Ok(head) = verify_chain(&self.chain) {
+                    self.chain_head = Some(head);
+                }
+                self.apply_chain_to_state();
+                let chain = self.chain.clone();
+                if let Some(active) = &self.active {
+                    active.handle.persist_chain_blocking(chain);
+                }
+                // the displaced proposal returns to pending and re-bases
+                if let Some(ChainChange::Applied { proposal_id, .. }) =
+                    displaced.as_ref().map(|b| &b.change)
+                {
+                    if let Some(p) = self.proposals.get_mut(proposal_id) {
+                        p.state = ProposalState::Proposed;
+                    }
+                }
+                self.after_block_applied(&block);
+            } else {
+                // revert — should not happen for a verified block
+                self.chain.pop();
+                if let Some(b) = displaced {
+                    self.chain.push(b);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +809,63 @@ mod tests {
         let head = verify_chain(&b.blocks).expect("newcomer approval counts");
         assert_eq!(head.identities.len(), 3);
         assert_eq!(head.height, 2);
+    }
+
+    /// A member that only holds the genesis receives a peer's broadcast commit
+    /// block, verifies + adopts it, and its persistent state converges (the
+    /// `receive_block` path that a non-committer follows).
+    #[test]
+    fn a_peer_adopts_a_broadcast_block_and_converges() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        // a block committed elsewhere: an Applied change signed by both members
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Memory,
+            payload: json!({ "op": "add_note", "title": "minutes" }),
+        };
+        let block = b.seal(1, change, &["petra", "walter"]);
+
+        // walter holds only the genesis, then the block arrives over the mesh
+        let mut peer = crate::tests::plain_state();
+        peer.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "walter".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(), // adopt_chain fills these from the verified head
+            agenda: "play chess".to_string(),
+            republic_id: b.republic_id.clone(),
+        });
+        peer.adopt_chain(genesis);
+        assert!(peer.is_chain_governed());
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 0);
+
+        peer.receive_block(block);
+        assert_eq!(peer.chain.len(), 2, "the peer adopted the broadcast block");
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+        let applied = peer
+            .chain_applied
+            .get(&Surface::Memory)
+            .expect("memory projection");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0]["title"], json!("minutes"));
+
+        // an invalid block (tampered payload, sigs no longer match) is rejected
+        let mut forged = b.seal(
+            2,
+            ChainChange::Applied {
+                proposal_id: 2,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": "real" }),
+            },
+            &["petra", "walter"],
+        );
+        forged.prev = peer.chain_head.as_ref().expect("head").hash.clone();
+        if let ChainChange::Applied { payload, .. } = &mut forged.change {
+            *payload = json!({ "op": "add_note", "title": "forged" });
+        }
+        peer.receive_block(forged);
+        assert_eq!(peer.chain.len(), 2, "a tampered block is hard-rejected");
     }
 }

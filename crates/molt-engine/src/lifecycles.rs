@@ -59,6 +59,11 @@ impl State {
         attestations: Vec<molt_core::RosterAttestation>,
         republic_id: String,
         agenda: String,
+        // this node's ALREADY-derived identity signing key (the ritual anchors
+        // it under a workspace-id-derived string, so re-deriving from the member
+        // handle here would NOT match the roster — it must be passed in). `None`
+        // for paths without a real founding (restore/demo), which have no chain.
+        signing_key: Option<molt_storage::SigningKey>,
         mls_snapshot: Option<Vec<u8>>,
         mesh: Vec<molt_core::MeshLink>,
         err: fn(String) -> MoltError,
@@ -79,16 +84,14 @@ impl State {
             agenda,
         };
         let genesis = sealed.into_genesis(member, now_secs());
-        // This node's identity signing key (same key that anchors the roster and
-        // the MLS credential) — kept so the open workspace can sign governance
-        // approvals for the persistent chain, and persisted (sealed) so a reopen
-        // resumes signing without the phrase.
-        let (identity_sk, _pk) = molt_storage::derive_identity_key(&entropy, member);
         // Block 0 of the persistent chain IS the founding: the sealed roster as a
         // Genesis change, signed by the founding attestations. Only a *real*
         // founding (content republic id + full attestations) roots a chain; a
-        // pre-ritual/demo materialize leaves the chain empty.
+        // pre-ritual/demo materialize leaves the chain empty. The signing key
+        // (anchored in the roster) is kept + sealed so the open workspace can
+        // co-sign governance and a reopen resumes without the phrase.
         let chain = self.genesis_chain(&sealed);
+        let sk_bytes = signing_key.as_ref().map(|sk| sk.to_bytes().to_vec());
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
@@ -102,7 +105,7 @@ impl State {
             let ts = molt_core::TransportState {
                 mls: mls_snapshot,
                 mesh,
-                identity_sk: (!chain.is_empty()).then(|| identity_sk.to_bytes().to_vec()),
+                identity_sk: if chain.is_empty() { None } else { sk_bytes },
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
@@ -125,7 +128,7 @@ impl State {
         self.next_seq = 2;
         // adopt the chain + the runtime signing key (reset cleared them above)
         if !chain.is_empty() {
-            self.identity_sk = Some(identity_sk);
+            self.identity_sk = signing_key;
             self.adopt_chain(chain);
             self.note_governance_readiness();
         }
@@ -248,6 +251,7 @@ impl State {
                 Vec::new(),
                 String::new(), // restore rebuilds the republic id at S4/S5
                 String::new(), // …and the charter with it
+                None,          // no chain yet → no signing key (S4/S5)
                 None,          // …and the MLS group (S4/S5)
                 Vec::new(),    // …and the mesh (S4/S5)
                 MoltError::Restore,
@@ -561,6 +565,8 @@ impl State {
                 attestations,
                 republic_id.clone(),
                 c.agenda.clone(),
+                // the founder's identity key, exactly as anchored in the roster
+                Some(ritual.founder_sk().clone()),
                 founder_mls_blob,
                 // the founder's mesh is not known until its bootstrap finishes;
                 // it is persisted then, via NetMeshReady
@@ -814,6 +820,11 @@ impl State {
             // materialising can fail on disk; a bare `?` would drop the error
             // into the (already discarded) reply channel and hang the join at
             // "in progress" — surface it into the run instead
+            // the joiner's identity key, derived exactly as the ritual anchored
+            // it (shared helper), so the chain signing key matches the roster
+            let joiner_sk = crate::founding::member_identity(&j.seed)
+                .ok()
+                .map(|(sk, _)| sk);
             match self.materialize_workspace(
                 &sealed.name,
                 &j.member,
@@ -824,6 +835,7 @@ impl State {
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
+                joiner_sk,
                 mls_blob,
                 mesh,
                 MoltError::Join,

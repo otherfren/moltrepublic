@@ -1181,6 +1181,24 @@ pub(crate) async fn founder_bootstrap(
     links.map(|ls| ls.iter().map(molt_net::PeerLink::to_mesh).collect())
 }
 
+/// The member's per-workspace identity keypair, derived deterministically from
+/// its own recovery phrase — the ONE derivation both the ritual (which anchors
+/// the public key in the roster) and the join finish (which needs the private
+/// key to sign chain governance) must agree on. Returns `(signing key, pk hex)`.
+pub(crate) fn member_identity(
+    phrase: &str,
+) -> Result<(molt_storage::SigningKey, String), String> {
+    let entropy = molt_storage::seed_entropy(phrase).map_err(|e| e.to_string())?;
+    let member_id = molt_storage::derive_workspace_id(&entropy, "member");
+    Ok(molt_storage::derive_identity_key(&entropy, &member_id))
+}
+
+/// Run the **member side** of the founding ritual against the founder's
+/// transport: derive the member's own identity, build its MLS `KeyPackage`,
+/// activate the seat (ticket MAC), ratify the charter, and — when
+/// `collect_genesis` is set — receive and verify the sealed roster + Welcome
+/// (optionally bootstrapping the post-founding mesh). Returns the member's
+/// [`JoinOutcome`]. The code path a genuinely separate node runs.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_ritual_member<T: molt_net::Transport>(
@@ -1192,11 +1210,12 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     ratify: Option<Ratifier>,
     mut cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
-    let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     // per-workspace identity, deterministic from the member's own phrase —
-    // a real, verifiable key the founder anchors on activation
-    let member_id = molt_storage::derive_workspace_id(&entropy, "member");
-    let (sk, pk) = molt_storage::derive_identity_key(&entropy, &member_id);
+    // a real, verifiable key the founder anchors on activation. The SAME
+    // derivation must be reproducible when the join finish materializes the
+    // workspace (so the chain signing key matches the anchored roster key) —
+    // hence the shared [`member_identity`] helper.
+    let (sk, pk) = member_identity(&phrase)?;
 
     // the MLS member, built from the *same* identity key (concept §3.3: one
     // identity anchors both the genesis table and the MLS credential). Its

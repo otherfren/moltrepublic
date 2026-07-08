@@ -351,12 +351,11 @@ impl State {
             prefs,
             handle: molt_storage::start_writer(opened),
         });
-        // a crash may have separated an Approved frame from its Applied
-        // frame; re-decide thresholds that were already met
-        self.recover_pending_applies();
         // adopt + verify the persistent chain (re-projects the gated surfaces
         // from it) and restore the runtime identity signing key so this node
-        // can keep signing governance approvals after a reopen
+        // can keep signing governance approvals after a reopen. This runs
+        // BEFORE recover_pending_applies so the legacy threshold recovery knows
+        // it is a chain workspace and stays out of the way.
         if !chain.is_empty() {
             self.adopt_chain(chain);
         }
@@ -365,6 +364,9 @@ impl State {
             .as_deref()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
             .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
+        // a crash may have separated an Approved frame from its Applied frame;
+        // re-decide thresholds that were already met (legacy path only)
+        self.recover_pending_applies();
         self.note_governance_readiness();
         self.refresh_active_entry();
         Ok(transport_state)

@@ -200,6 +200,11 @@ impl State {
                 // presence is runtime state owned by the transport; the
                 // variant exists so checkpoints have a schema slot
             }
+            WorkspaceEvent::Committed(_) => {
+                // a committed block rides the log only as transport (outbox
+                // fan-out); the chain lives in chain.state and is NOT rebuilt
+                // from the log, so replay/apply is a deliberate no-op
+            }
         }
     }
 
@@ -272,6 +277,7 @@ impl State {
         self.chain.clear();
         self.chain_head = None;
         self.chain_applied.clear();
+        self.pending_sigs.clear();
         self.chat.clear();
         self.applied.clear();
         for s in Surface::ALL {
@@ -349,6 +355,8 @@ mod tests {
                 WorkspaceEvent::Approved {
                     id: ProposalId(1),
                     by: "petra".to_string(),
+                    height: 0,
+                    sig: String::new(),
                 },
             ),
             e(
@@ -357,6 +365,8 @@ mod tests {
                 WorkspaceEvent::Approved {
                     id: ProposalId(1),
                     by: "walter".to_string(),
+                    height: 0,
+                    sig: String::new(),
                 },
             ),
             e(7, "walter", WorkspaceEvent::Applied { id: ProposalId(1) }),
