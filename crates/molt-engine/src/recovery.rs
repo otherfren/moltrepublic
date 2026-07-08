@@ -96,9 +96,44 @@ impl RecoveryInvite {
     }
 }
 
+/// Reconstruct the sealed founding roster from the genesis chain block — what a
+/// rejoiner does after catching up: block 0's `Genesis` change carries the whole
+/// constitution and its `sigs` are the founding attestations, so the rejoiner
+/// materializes its local workspace from the verified chain (no live founder).
+/// `None` if the block is not a genesis.
+#[cfg_attr(not(test), allow(dead_code))] // wired by the rejoiner materialize increment
+pub(crate) fn sealed_roster_from_genesis(
+    block: &molt_core::ChainBlock,
+) -> Option<molt_core::SealedRoster> {
+    let molt_core::ChainChange::Genesis {
+        name,
+        republic_id,
+        rule_m,
+        rule_n,
+        identities,
+        agenda,
+    } = &block.change
+    else {
+        return None;
+    };
+    Some(molt_core::SealedRoster {
+        name: name.clone(),
+        republic_id: republic_id.clone(),
+        rule_m: *rule_m,
+        rule_n: *rule_n,
+        roster: identities.iter().map(|i| i.member.clone()).collect(),
+        identities: identities.clone(),
+        attestations: block.sigs.clone(),
+        agenda: agenda.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use molt_core::{
+        ChainBlock, ChainChange, MemberIdentity, RosterAttestation, GENESIS_PREV,
+    };
 
     fn sample() -> RecoveryInvite {
         RecoveryInvite {
@@ -134,5 +169,62 @@ mod tests {
     fn a_malformed_link_is_rejected() {
         assert!(RecoveryInvite::parse("molt://invite/Chess-Club/2of3/walter/tick").is_none());
         assert!(RecoveryInvite::parse("not a link").is_none());
+    }
+
+    #[test]
+    fn a_sealed_roster_reconstructs_from_the_genesis_block() {
+        let ids = vec![
+            MemberIdentity {
+                member: "petra".to_string(),
+                identity_pk: "aa".to_string(),
+            },
+            MemberIdentity {
+                member: "walter".to_string(),
+                identity_pk: "bb".to_string(),
+            },
+        ];
+        let genesis = ChainBlock {
+            height: 0,
+            prev: GENESIS_PREV.to_string(),
+            change: ChainChange::Genesis {
+                name: "Chess Club".to_string(),
+                republic_id: "f00".to_string(),
+                rule_m: 2,
+                rule_n: 2,
+                identities: ids.clone(),
+                agenda: "play chess".to_string(),
+            },
+            sigs: vec![
+                RosterAttestation {
+                    member: "petra".to_string(),
+                    sig: "11".to_string(),
+                },
+                RosterAttestation {
+                    member: "walter".to_string(),
+                    sig: "22".to_string(),
+                },
+            ],
+        };
+        let sealed = sealed_roster_from_genesis(&genesis).expect("genesis reconstructs");
+        assert_eq!(sealed.name, "Chess Club");
+        assert_eq!(sealed.republic_id, "f00");
+        assert_eq!((sealed.rule_m, sealed.rule_n), (2, 2));
+        assert_eq!(sealed.roster, vec!["petra", "walter"]);
+        assert_eq!(sealed.identities, ids);
+        assert_eq!(sealed.attestations.len(), 2, "the block's sigs ARE the attestations");
+        assert_eq!(sealed.agenda, "play chess");
+
+        // a non-genesis block has no roster to reconstruct
+        let applied = ChainBlock {
+            height: 1,
+            prev: "ab".to_string(),
+            change: ChainChange::Applied {
+                proposal_id: 1,
+                surface: molt_core::Surface::Memory,
+                payload: serde_json::json!({}),
+            },
+            sigs: Vec::new(),
+        };
+        assert!(sealed_roster_from_genesis(&applied).is_none());
     }
 }
