@@ -207,6 +207,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::Proposed { .. }
             | WorkspaceEvent::Approved { .. }
             | WorkspaceEvent::Committed(_)
+            | WorkspaceEvent::ChainRequest { .. }
     )
 }
 
@@ -587,6 +588,9 @@ impl State {
             }
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
                 self.receive_block(block);
+            }
+            WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
+                self.serve_chain_from(from_height);
             }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");

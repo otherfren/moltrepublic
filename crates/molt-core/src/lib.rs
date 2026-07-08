@@ -1173,6 +1173,15 @@ pub enum WorkspaceEvent {
     /// (`apply` treats it as a no-op). The committer authors it so the outbox
     /// fans it out; peers verify-and-append it on receipt.
     Committed(ChainBlock),
+    /// A member asks the mesh for every persistent-chain block from `from_height`
+    /// onward — the catch-up request a lagging or reconnecting node broadcasts.
+    /// Any peer that is further ahead re-serves those blocks (as `Committed`) from
+    /// its own `chain.state`, so a single survivor with the full chain suffices.
+    /// Transport-only, like `Committed` (`apply` is a no-op).
+    ChainRequest {
+        /// The first height the requester is missing (its `head + 1`).
+        from_height: u64,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on

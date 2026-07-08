@@ -544,27 +544,95 @@ impl State {
         self.try_commit(id);
     }
 
-    /// Inbound: a peer broadcast a committed block. Verify against our head and
-    /// adopt it (extending the single branch), or tie-break a contended slot.
+    /// Inbound: a peer broadcast (or re-served) a committed block. Extend the
+    /// single branch when it is the next height, tie-break a contended slot we
+    /// already filled, or — when it is ahead of us — buffer it and request the
+    /// missing suffix (catch-up).
     pub(crate) fn receive_block(&mut self, block: ChainBlock) {
         let Some(head) = self.chain_head.clone() else {
             return;
         };
         if block.height == head.height + 1 {
-            let mut probe = self.chain.clone();
-            probe.push(block.clone());
-            if verify_chain(&probe).is_ok() {
-                if self.append_committed_block(block.clone()) {
-                    self.after_block_applied(&block);
-                }
-            } else {
-                tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
+            if self.apply_next_block(block) {
+                self.drain_buffered_blocks();
             }
         } else if block.height <= head.height {
             self.tie_break(block);
         } else {
-            // a gap: we are behind. Catch-up sync is Phase 3.
-            tracing::warn!(have = head.height, got = block.height, "inbound block is ahead — catch-up not yet wired");
+            // a gap: we are behind. Buffer this block and ask the mesh for the
+            // blocks we are missing (any survivor re-serves them).
+            self.pending_blocks.insert(block.height, block);
+            self.request_catchup(head.height + 1);
+        }
+    }
+
+    /// Verify a block against the current head, append + apply it, and run the
+    /// post-apply bookkeeping. Returns whether it was accepted.
+    fn apply_next_block(&mut self, block: ChainBlock) -> bool {
+        let mut probe = self.chain.clone();
+        probe.push(block.clone());
+        if verify_chain(&probe).is_err() {
+            tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
+            return false;
+        }
+        if self.append_committed_block(block.clone()) {
+            self.after_block_applied(&block);
+            // the head advanced — a catch-up request that reached this height is done
+            if self.catchup_from.is_some_and(|f| f <= block.height) {
+                self.catchup_from = None;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Apply buffered catch-up blocks while the next height is available, then
+    /// drop any stale buffered blocks at or below the head.
+    fn drain_buffered_blocks(&mut self) {
+        while let Some(head) = self.chain_head.clone() {
+            let next = head.height + 1;
+            let Some(block) = self.pending_blocks.remove(&next) else {
+                break;
+            };
+            if !self.apply_next_block(block) {
+                break;
+            }
+        }
+        let head_h = self.chain_head.as_ref().map_or(0, |h| h.height);
+        self.pending_blocks.retain(|h, _| *h > head_h);
+    }
+
+    /// Broadcast a catch-up request for every block from `from` onward (deduped
+    /// while the same gap is outstanding). No-op if we cannot be behind.
+    pub(crate) fn request_catchup(&mut self, from: u64) {
+        if self.chain_head.is_none() || self.catchup_from == Some(from) {
+            return;
+        }
+        self.catchup_from = Some(from);
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from });
+        self.record(env);
+    }
+
+    /// Serve a peer's catch-up request from our OWN chain: re-broadcast every
+    /// block we hold from `from` onward (as `Committed`, re-authored so the
+    /// outbox fans it out). A single survivor thus reconstitutes the chain for
+    /// everyone — independent of who originally committed each block.
+    pub(crate) fn serve_chain_from(&mut self, from: u64) {
+        let blocks: Vec<ChainBlock> = self
+            .chain
+            .iter()
+            .filter(|b| b.height >= from)
+            .cloned()
+            .collect();
+        if blocks.is_empty() {
+            return;
+        }
+        let me = self.member();
+        for block in blocks {
+            let env = self.make_env(me.clone(), WorkspaceEvent::Committed(block));
+            self.record(env);
         }
     }
 
@@ -867,5 +935,76 @@ mod tests {
         }
         peer.receive_block(forged);
         assert_eq!(peer.chain.len(), 2, "a tampered block is hard-rejected");
+    }
+
+    /// A 2-member chain-governed peer holding only the genesis `b` roots.
+    fn chain_peer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+        let mut peer = crate::tests::plain_state();
+        peer.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: member.to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: "play chess".to_string(),
+            republic_id: b.republic_id.clone(),
+        });
+        peer.adopt_chain(chain);
+        peer
+    }
+
+    /// A block arriving ahead of our head is buffered, then applied once the
+    /// gap fills — catch-up converges regardless of arrival order.
+    #[test]
+    fn out_of_order_blocks_buffer_and_converge() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let block1 = b.blocks[1].clone();
+        let block2 = b.blocks[2].clone();
+
+        let mut peer = chain_peer("walter", &b, genesis);
+        // the height-2 block arrives first — a gap, so it is buffered
+        peer.receive_block(block2);
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            0,
+            "a gap block is buffered, not applied"
+        );
+        assert_eq!(peer.pending_blocks.len(), 1);
+        // the height-1 block fills the gap; the buffered height-2 drains behind it
+        peer.receive_block(block1);
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 2);
+        assert!(peer.pending_blocks.is_empty(), "the buffer drained");
+    }
+
+    /// One survivor holding the full chain re-serves a lagging member the whole
+    /// missing suffix — the resilience property (any survivor suffices), and the
+    /// suffix applies even delivered out of order.
+    #[test]
+    fn a_survivor_serves_a_lagging_member_the_full_suffix() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let full = b.blocks.clone();
+
+        let mut peer = chain_peer("walter", &b, genesis);
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 0);
+
+        // the survivor serves every block from the peer's head+1 (=1) onward,
+        // straight out of its own chain — exactly what serve_chain_from does
+        let served: Vec<ChainBlock> = full.iter().filter(|bl| bl.height >= 1).cloned().collect();
+        assert_eq!(served.len(), 2, "survivor serves b1 + b2 from its chain");
+        for bl in served.into_iter().rev() {
+            peer.receive_block(bl); // delivered newest-first to exercise buffering
+        }
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            2,
+            "the lagging member caught up to the survivor"
+        );
+        assert!(peer.pending_blocks.is_empty());
     }
 }

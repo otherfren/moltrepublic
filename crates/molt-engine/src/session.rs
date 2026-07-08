@@ -368,6 +368,12 @@ impl State {
         // re-decide thresholds that were already met (legacy path only)
         self.recover_pending_applies();
         self.note_governance_readiness();
+        // pull any blocks committed while we were away — a broadcast request the
+        // outbox delivers once the resumed mesh connects; any survivor re-serves
+        // its chain suffix (no-op when we are already current)
+        if let Some(height) = self.chain_head.as_ref().map(|h| h.height) {
+            self.request_catchup(height + 1);
+        }
         self.refresh_active_entry();
         Ok(transport_state)
     }

@@ -14,8 +14,9 @@ the chain's first block, and everything the republic later ratifies extends it.
 > the mesh** — a chain-governed republic signs approvals, gossips them, seals a
 > block at m distinct signatures, broadcasts it, and every member converges
 > (proven end-to-end over the direct MLS mesh in
-> `two_instances.rs::founding_governs_over_the_direct_mesh`). Phases 3–4
-> (catch-up sync, recovery) are still designed-not-wired. §10 tracks the split.
+> `two_instances.rs::founding_governs_over_the_direct_mesh`). Phase 3 (catch-up
+> sync) is wired too — out-of-order buffering + a survivor-serves-the-suffix
+> request/response. Phase 4 (recovery) remains. §10 tracks the split.
 
 ---
 
@@ -190,11 +191,19 @@ Having verified a chain, a member knows — not trusts — that:
   the direct MLS mesh; a `receive_block` unit test covers the follower path.
   Single-branch re-base (new height → re-sign) and a tip tie-break by min-hash
   are wired; deep reorg + concurrent-race stress are light until Phase 3.
-- **Planned.** Phase 3: catch-up sync of a chain suffix (a lagging or rejoining
-  member fetches + verifies + applies), plus concurrent-race hardening. Phase 4:
-  recovery as catch-up-from-genesis + MLS re-key (a `Membership{Restored}`
-  block). Deliberation still rides the local log as transport (truly
-  out-of-band ephemeral gossip is a later refinement).
+- **Real (Phase 3).** Catch-up sync: a block that arrives ahead of the head is
+  buffered (`pending_blocks`) and applied once the gap fills, so a suffix
+  converges regardless of arrival order. A lagging or reconnecting member
+  broadcasts `ChainRequest{from_height}` (also on reopen); any peer that is
+  further ahead re-serves those blocks straight from its own `chain.state` (as
+  `Committed`), so **a single survivor with the full chain reconstitutes it for
+  everyone**, independent of who originally committed each block. Trade-off: the
+  server re-serves through the log (the outbox), so serving grows its log — the
+  chain compaction the model already anticipates addresses this.
+- **Planned.** Phase 4: recovery as catch-up-from-genesis + MLS re-key (a
+  `Membership{Restored}` block). Also open: concurrent-race hardening (deep
+  reorg beyond a tip tie-break) and moving deliberation truly out-of-band
+  (today it rides the local log as transport).
 
 ## 11. Implementation map
 

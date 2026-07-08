@@ -336,6 +336,12 @@ pub(crate) struct State {
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
     pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
+    /// Out-of-order catch-up buffer: blocks received ahead of our head (keyed
+    /// by height), applied as the head advances to meet them. Ephemeral.
+    pub(crate) pending_blocks: std::collections::BTreeMap<u64, molt_core::ChainBlock>,
+    /// The height a catch-up request is currently outstanding for (dedups the
+    /// request while a gap persists; cleared when the head reaches it).
+    pub(crate) catchup_from: Option<u64>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -444,6 +450,8 @@ impl State {
             chain_head: None,
             chain_applied: HashMap::new(),
             pending_sigs: HashMap::new(),
+            pending_blocks: std::collections::BTreeMap::new(),
+            catchup_from: None,
             active: None,
             net,
             net_ritual: None,
