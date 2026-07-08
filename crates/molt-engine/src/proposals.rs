@@ -155,7 +155,14 @@ impl State {
                 .map(|m| serde_json::to_value(m).unwrap_or_default())
                 .collect()
         } else {
-            self.applied.get(&surface).cloned().unwrap_or_default()
+            // the surface's applied log is the legacy (counted-simulation)
+            // projection plus the chain (real threshold) projection — one of the
+            // two is always empty for a given workspace, so this is a concat
+            let mut v = self.applied.get(&surface).cloned().unwrap_or_default();
+            if let Some(chain) = self.chain_applied.get(&surface) {
+                v.extend(chain.iter().cloned());
+            }
+            v
         }
     }
 
@@ -187,6 +194,7 @@ impl State {
                     self.chat.len()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
+                        + self.chain_applied.get(&s).map(|v| v.len()).unwrap_or(0)
                 };
                 SurfaceStat {
                     surface: s,

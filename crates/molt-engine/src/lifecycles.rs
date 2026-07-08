@@ -68,7 +68,7 @@ impl State {
         // one place builds the `Founded` body (SealedRoster::into_genesis) so a
         // new genesis field can't be forgotten between the founder, GUI-join
         // and standalone-join paths
-        let genesis = molt_core::SealedRoster {
+        let sealed = molt_core::SealedRoster {
             name: name.to_string(),
             republic_id,
             rule_m,
@@ -77,8 +77,18 @@ impl State {
             identities,
             attestations,
             agenda,
-        }
-        .into_genesis(member, now_secs());
+        };
+        let genesis = sealed.into_genesis(member, now_secs());
+        // This node's identity signing key (same key that anchors the roster and
+        // the MLS credential) — kept so the open workspace can sign governance
+        // approvals for the persistent chain, and persisted (sealed) so a reopen
+        // resumes signing without the phrase.
+        let (identity_sk, _pk) = molt_storage::derive_identity_key(&entropy, member);
+        // Block 0 of the persistent chain IS the founding: the sealed roster as a
+        // Genesis change, signed by the founding attestations. Only a *real*
+        // founding (content republic id + full attestations) roots a chain; a
+        // pre-ritual/demo materialize leaves the chain empty.
+        let chain = self.genesis_chain(&sealed);
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
@@ -88,13 +98,19 @@ impl State {
         // fire-and-forget save could drop it (queue full / crash) leaving a
         // workspace that can never decrypt. The dir is fresh, so a state carrying
         // the MLS blob + mesh is complete.
-        if mls_snapshot.is_some() || !mesh.is_empty() {
+        if mls_snapshot.is_some() || !mesh.is_empty() || !chain.is_empty() {
             let ts = molt_core::TransportState {
                 mls: mls_snapshot,
                 mesh,
+                identity_sk: (!chain.is_empty()).then(|| identity_sk.to_bytes().to_vec()),
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
+        }
+        // the genesis chain block goes to its own file, durably, before the
+        // writer takes over — same reasoning as the MLS blob above
+        if !chain.is_empty() {
+            opened.write_chain(&chain).map_err(|e| err(e.to_string()))?;
         }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();
@@ -107,6 +123,12 @@ impl State {
         self.reset_workspace_state();
         self.apply(&genesis);
         self.next_seq = 2;
+        // adopt the chain + the runtime signing key (reset cleared them above)
+        if !chain.is_empty() {
+            self.identity_sk = Some(identity_sk);
+            self.adopt_chain(chain);
+            self.note_governance_readiness();
+        }
         let prefs = opened.prefs.clone();
         self.active = Some(ActiveStorage {
             id: id.clone(),

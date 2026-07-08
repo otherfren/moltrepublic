@@ -71,6 +71,9 @@ const FRAME_HEADER_LEN: usize = 8;
 const SNAPSHOT_SEGMENT: u64 = u64::MAX;
 /// AAD segment number that marks the `transport.state` frame.
 const TRANSPORT_SEGMENT: u64 = u64::MAX - 1;
+/// AAD segment number that marks the `chain.state` frame (the persistent
+/// commit-block chain — `documents/persistent_chain.md`).
+const CHAIN_SEGMENT: u64 = u64::MAX - 2;
 /// Group-commit window: fsync at most this often under sustained load.
 const GROUP_COMMIT: Duration = Duration::from_millis(50);
 /// Bound of the writer queue; a full queue means the disk is falling behind.
@@ -735,6 +738,11 @@ impl OpenedWorkspace {
         hkdf32(&self.key, "molt-transport-state", &self.id)
     }
 
+    /// The `chain.state` sub-key (distinct HKDF tag from the transport key).
+    fn chain_key(&self) -> [u8; 32] {
+        hkdf32(&self.key, "molt-chain-state", &self.id)
+    }
+
     /// Read `transport.state` (transport concept §6): node-local encrypted
     /// transport bookkeeping. Absent, damaged or newer-versioned files fall
     /// back to defaults — losing this file costs resends (the peers' dedup
@@ -795,6 +803,60 @@ impl OpenedWorkspace {
         let frame =
             encode_frame(&self.transport_key(), &self.id, TRANSPORT_SEGMENT, 0, &plaintext)?;
         write_atomic(&self.dir, "transport.state", &frame, true)
+    }
+
+    /// Read `chain.state`: the republic's persistent commit-block chain
+    /// (`documents/persistent_chain.md`). Absent → empty (a pre-chain or
+    /// freshly-founded-before-write workspace). A damaged file returns empty
+    /// with a loud warning — unlike `transport.state`, the chain is shared
+    /// history the caller must then treat as missing (its `verify_chain` will
+    /// reject an empty chain for a republic that should have a genesis).
+    pub fn read_chain(&self) -> Vec<molt_core::ChainBlock> {
+        let path = self.dir.join("chain.state");
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading chain.state failed — no chain loaded");
+                return Vec::new();
+            }
+        };
+        let (frames, torn) = split_frames(&data);
+        if frames.len() != 1 || torn.is_some() {
+            tracing::warn!("chain.state framing is damaged — no chain loaded");
+            return Vec::new();
+        }
+        let plaintext = match decrypt_frame(
+            &self.chain_key(),
+            &self.id,
+            CHAIN_SEGMENT,
+            0,
+            frames[0].nonce,
+            frames[0].ciphertext,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "chain.state does not authenticate — no chain loaded");
+                return Vec::new();
+            }
+        };
+        match serde_json::from_slice::<Vec<molt_core::ChainBlock>>(&plaintext) {
+            Ok(chain) => chain,
+            Err(e) => {
+                tracing::warn!(error = %e, "chain.state decode failed — no chain loaded");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Rewrite `chain.state` atomically (via `tmp/`, mode 0600). The chain is
+    /// append-only in meaning but written whole each time (it is small — one
+    /// block per committed governance change, not per message).
+    pub fn write_chain(&self, chain: &[molt_core::ChainBlock]) -> Result<(), StorageError> {
+        let plaintext = serde_json::to_vec(chain)
+            .map_err(|e| StorageError::Corrupt(format!("encoding chain.state: {e}")))?;
+        let frame = encode_frame(&self.chain_key(), &self.id, CHAIN_SEGMENT, 0, &plaintext)?;
+        write_atomic(&self.dir, "chain.state", &frame, true)
     }
 
     /// Read every envelope with `seq >= from_seq` from the log — the
@@ -1334,6 +1396,13 @@ enum WriterMsg {
     },
     /// Load `transport.state` (defaults when absent/damaged).
     LoadTransport(tokio::sync::oneshot::Sender<TransportState>),
+    /// Persist the whole persistent commit-block chain (`chain.state`), acking
+    /// when durable — a governance commit must not be lost, so it uses the same
+    /// blocking-ack shape as `MergeCrypto`.
+    PersistChain {
+        blocks: Vec<molt_core::ChainBlock>,
+        ack: mpsc::SyncSender<()>,
+    },
     Close(mpsc::SyncSender<()>),
 }
 
@@ -1425,6 +1494,23 @@ impl StorageHandle {
             .send(WriterMsg::MergeCrypto {
                 mls,
                 smp_queues,
+                ack: ack_tx,
+            })
+            .is_ok()
+        {
+            let _ = ack_rx.recv();
+        }
+    }
+
+    /// Persist the whole persistent commit-block chain and BLOCK until it is
+    /// durable (fsync'd) — a governance commit must survive a crash the instant
+    /// it is broadcast. A gone writer is a silent no-op.
+    pub fn persist_chain_blocking(&self, blocks: Vec<molt_core::ChainBlock>) {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(WriterMsg::PersistChain {
+                blocks,
                 ack: ack_tx,
             })
             .is_ok()
@@ -1554,6 +1640,12 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     }
                     Ok(WriterMsg::LoadTransport(reply)) => {
                         let _ = reply.send(ws.read_transport_state());
+                    }
+                    Ok(WriterMsg::PersistChain { blocks, ack }) => {
+                        if let Err(e) = ws.write_chain(&blocks).and_then(|()| ws.sync()) {
+                            fail(&failed_flag, "chain.state write", &e);
+                        }
+                        let _ = ack.send(());
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
                         if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {

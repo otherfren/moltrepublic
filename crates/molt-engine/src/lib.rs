@@ -270,6 +270,10 @@ pub(crate) struct ReplicaState {
     /// The ratified founding charter (free-text agenda) from the genesis
     /// (empty on pre-deliberation workspaces).
     pub(crate) agenda: String,
+    /// The neutral, content-derived republic id from the genesis — kept so the
+    /// persistent chain can compute `approval_bytes` at runtime (empty on a
+    /// pre-republic genesis).
+    pub(crate) republic_id: String,
 }
 
 /// An in-flight founder mesh bootstrap: its ritual generation, the founded
@@ -310,6 +314,24 @@ pub(crate) struct State {
     /// Identity of the open workspace, from its genesis event (None = no
     /// workspace open; the demo `GroupConfig` fills in).
     pub(crate) replica: Option<ReplicaState>,
+    /// This node's identity signing key for the open workspace, loaded from the
+    /// sealed `transport.state` (set at founding/join). Signs governance
+    /// approvals for the persistent chain; `None` when no chain-aware workspace
+    /// is open (or a pre-chain workspace).
+    pub(crate) identity_sk: Option<molt_storage::SigningKey>,
+    /// The republic's persistent commit-block chain — the converged, verified
+    /// governance record (`documents/persistent_chain.md`). Block 0 is the
+    /// founding; empty when no chain-aware workspace is open.
+    pub(crate) chain: Vec<molt_core::ChainBlock>,
+    /// The verified head of [`State::chain`] (`None` = empty chain).
+    pub(crate) chain_head: Option<chain::ChainHead>,
+    /// The gated surfaces' applied logs **derived from the chain** — a separate
+    /// projection from the legacy log-driven [`State::applied`] so the two never
+    /// collide: a solo/simulation workspace keeps its counted governance in
+    /// `applied` (chain genesis-only → this stays empty), while real
+    /// threshold-committed governance lands here. Reads combine both. Re-folded
+    /// wholesale on every chain change, so a re-base is free.
+    pub(crate) chain_applied: HashMap<Surface, Vec<Value>>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -413,6 +435,10 @@ impl State {
             next_id: 1,
             next_seq: 1,
             replica: None,
+            identity_sk: None,
+            chain: Vec::new(),
+            chain_head: None,
+            chain_applied: HashMap::new(),
             active: None,
             net,
             net_ritual: None,
@@ -448,6 +474,15 @@ impl State {
             .as_ref()
             .map(|r| r.roster.clone())
             .unwrap_or_else(|| self.config.members.clone())
+    }
+
+    /// The open workspace's content-derived republic id (empty when no
+    /// chain-aware workspace is open) — the salt `approval_bytes` needs.
+    pub(crate) fn republic_id(&self) -> String {
+        self.replica
+            .as_ref()
+            .map(|r| r.republic_id.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn emit(&self, ev: Event) {

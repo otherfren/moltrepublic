@@ -340,9 +340,11 @@ impl State {
         self.next_seq = opened.next_seq;
         let prefs = opened.prefs.clone();
         // read the persisted transport state (MLS group + mesh + queue creds)
-        // NOW, while we still hold `opened` directly — after start_writer only
-        // the async load path remains, which the sync open handler can't await
+        // and the persistent commit-block chain NOW, while we still hold
+        // `opened` directly — after start_writer only the async load path
+        // remains, which the sync open handler can't await
         let transport_state = opened.read_transport_state();
+        let chain = opened.read_chain();
         self.active = Some(ActiveStorage {
             id: id.to_string(),
             dir,
@@ -352,6 +354,18 @@ impl State {
         // a crash may have separated an Approved frame from its Applied
         // frame; re-decide thresholds that were already met
         self.recover_pending_applies();
+        // adopt + verify the persistent chain (re-projects the gated surfaces
+        // from it) and restore the runtime identity signing key so this node
+        // can keep signing governance approvals after a reopen
+        if !chain.is_empty() {
+            self.adopt_chain(chain);
+        }
+        self.identity_sk = transport_state
+            .identity_sk
+            .as_deref()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
+        self.note_governance_readiness();
         self.refresh_active_entry();
         Ok(transport_state)
     }

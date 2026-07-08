@@ -833,8 +833,9 @@ impl Default for WorkspacePrefs {
 }
 
 /// Format marker of `transport.state` (the node-local encrypted transport
-/// bookkeeping file — concept-transport-simplex-tor.md §6).
-pub const TRANSPORT_STATE_VERSION: u32 = 1;
+/// bookkeeping file — concept-transport-simplex-tor.md §6). v2 added the
+/// `identity_sk` field (additive; a v1 file loads with it defaulting to `None`).
+pub const TRANSPORT_STATE_VERSION: u32 = 2;
 
 /// The outbound half of one delivery cursor: how far this node's log has
 /// been fanned out to one peer.
@@ -913,6 +914,16 @@ pub struct TransportState {
     /// only inside the already-encrypted `transport.state`.
     #[serde(default)]
     pub smp_queues: Option<Vec<u8>>,
+    /// This node's own **identity signing seed** (32-byte Ed25519 seed, what
+    /// `ed25519_dalek::SigningKey::to_bytes()` returns), derived from the
+    /// member's recovery phrase at founding/join and kept here so a reopened
+    /// workspace can sign its governance approvals for the persistent chain
+    /// without re-entering the phrase. Sensitive — lives only inside the
+    /// already-encrypted `transport.state`; the same key also backs the
+    /// persisted MLS signer (one identity, two anchors). `None` before a
+    /// chain-aware founding.
+    #[serde(default)]
+    pub identity_sk: Option<Vec<u8>>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
@@ -1200,6 +1211,13 @@ pub struct EngineStateDump {
     /// workspace keeps it (the genesis is before the snapshot and not replayed).
     #[serde(default)]
     pub agenda: String,
+    /// The neutral, content-derived republic id (the genesis' value). Kept at
+    /// runtime so the persistent-chain path can recompute `approval_bytes`
+    /// without re-deriving it; a snapshot-restored open keeps it too (the
+    /// genesis is before the snapshot and not replayed). Empty on a pre-republic
+    /// genesis.
+    #[serde(default)]
+    pub republic_id: String,
     /// The chat log.
     pub chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface (keyed by surface name).

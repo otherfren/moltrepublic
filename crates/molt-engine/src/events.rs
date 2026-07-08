@@ -87,7 +87,7 @@ impl State {
                 roster,
                 identities,
                 attestations: _,
-                republic_id: _,
+                republic_id,
                 // the ratified charter lives in the genesis frame (immutable);
                 // the ratified charter, surfaced by the Constitution surface
                 agenda,
@@ -99,6 +99,7 @@ impl State {
                     rule_m: *rule_m,
                     identities: identities.clone(),
                     agenda: agenda.clone(),
+                    republic_id: republic_id.clone(),
                 });
             }
             WorkspaceEvent::MemberJoined { member } => {
@@ -212,6 +213,7 @@ impl State {
             roster: replica.roster,
             identities: replica.identities,
             agenda: replica.agenda,
+            republic_id: replica.republic_id,
             chat: self.chat.clone(),
             applied: self
                 .applied
@@ -247,6 +249,7 @@ impl State {
             rule_m: dump.rule_m,
             identities: dump.identities,
             agenda: dump.agenda,
+            republic_id: dump.republic_id,
         });
         self.chat = dump.chat;
         self.applied.clear();
@@ -265,6 +268,10 @@ impl State {
     /// Drop all workspace state (close path). The next open starts clean.
     pub(crate) fn reset_workspace_state(&mut self) {
         self.replica = None;
+        self.identity_sk = None;
+        self.chain.clear();
+        self.chain_head = None;
+        self.chain_applied.clear();
         self.chat.clear();
         self.applied.clear();
         for s in Surface::ALL {

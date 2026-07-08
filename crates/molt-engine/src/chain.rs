@@ -21,8 +21,10 @@ use std::collections::BTreeSet;
 
 use molt_core::{
     approval_bytes, block_link_bytes, ChainBlock, ChainChange, MemberIdentity, MembershipOp,
-    RosterAttestation, GENESIS_PREV,
+    RosterAttestation, SealedRoster, Surface, GENESIS_PREV,
 };
+
+use crate::State;
 
 /// The verified head of a chain plus the roster it establishes: everything a
 /// caller needs to check the *next* block or to trust a synced chain.
@@ -208,6 +210,95 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
         head = verify_next(&head, block, &mut seen)?;
     }
     Ok(head)
+}
+
+impl State {
+    /// Build block 0 of the persistent chain from a sealed roster — but only
+    /// for a **real** founding (a content-derived republic id and one
+    /// attestation per member). A pre-ritual/demo materialize gets no chain
+    /// (empty), so the running single-operator simulation is untouched.
+    pub(crate) fn genesis_chain(&self, sealed: &SealedRoster) -> Vec<ChainBlock> {
+        if sealed.republic_id.is_empty()
+            || sealed.identities.is_empty()
+            || sealed.attestations.len() != sealed.identities.len()
+        {
+            return Vec::new();
+        }
+        vec![ChainBlock {
+            height: 0,
+            prev: GENESIS_PREV.to_string(),
+            change: ChainChange::Genesis {
+                name: sealed.name.clone(),
+                republic_id: sealed.republic_id.clone(),
+                rule_m: sealed.rule_m,
+                rule_n: sealed.rule_n,
+                identities: sealed.identities.clone(),
+                agenda: sealed.agenda.clone(),
+            },
+            sigs: sealed.attestations.clone(),
+        }]
+    }
+
+    /// Verify a freshly-loaded or freshly-built chain and adopt it as the open
+    /// workspace's chain + head, then re-project the persistent state from it.
+    /// A chain that fails verification is **hard-rejected**: the head stays
+    /// `None` and nothing is projected (a partially-trusted chain could fork
+    /// state — `documents/persistent_chain.md`).
+    pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
+        match verify_chain(&chain) {
+            Ok(head) => {
+                self.chain = chain;
+                self.chain_head = Some(head);
+                self.apply_chain_to_state();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "rejecting an unverifiable chain");
+                self.chain.clear();
+                self.chain_head = None;
+            }
+        }
+    }
+
+    /// Re-project the persistent state from the whole chain: the gated
+    /// surfaces' applied logs (into the chain-owned [`State::chain_applied`], a
+    /// full clear-and-refold so a re-base is free) and the roster/identities
+    /// (taken from the already-verified head, which evolved them across the
+    /// membership blocks). Chat, [`State::applied`] and pending proposals are
+    /// left untouched — they are ephemeral or legacy-owned.
+    pub(crate) fn apply_chain_to_state(&mut self) {
+        let mut projected: std::collections::HashMap<Surface, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        for block in &self.chain {
+            if let ChainChange::Applied {
+                surface, payload, ..
+            } = &block.change
+            {
+                projected.entry(*surface).or_default().push(payload.clone());
+            }
+        }
+        self.chain_applied = projected;
+        // the verified head carries the roster after every membership block —
+        // adopt it so the newcomers/rekeys show up in the roster + approvals
+        if let Some(head) = &self.chain_head {
+            if let Some(r) = &mut self.replica {
+                r.identities = head.identities.clone();
+                r.roster = head.identities.iter().map(|i| i.member.clone()).collect();
+            }
+        }
+    }
+
+    /// Surface a chain workspace that opened without its local signing key: it
+    /// can still verify and follow the chain, but cannot itself co-sign
+    /// governance approvals (a reopen that lost `transport.state`'s
+    /// `identity_sk`, or a pre-chain workspace). Cheap invariant check, logged.
+    pub(crate) fn note_governance_readiness(&self) {
+        if self.chain_head.is_some() && self.identity_sk.is_none() {
+            tracing::warn!(
+                republic = %self.republic_id(),
+                "chain workspace has no local signing key — it can follow governance but not co-sign it"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
