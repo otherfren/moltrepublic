@@ -32,6 +32,7 @@ mod founding;
 mod lifecycles;
 mod net;
 mod proposals;
+mod recovery;
 mod session;
 
 use std::collections::HashMap;
@@ -40,6 +41,8 @@ use std::path::PathBuf;
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use chain::{verify_chain, ChainHead};
+#[doc(hidden)]
+pub use recovery::RecoveryInvite;
 #[doc(hidden)]
 pub use founding::{
     join_founding_over_smp, make_seat_proof, ritual_join_over_smp, run_ritual_member,
