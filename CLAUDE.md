@@ -8,6 +8,13 @@ user could mistake for real.
 
 ## Working style
 
+- **Plan first, then act.** For anything non-trivial, lay out the plan (and for
+  a security-critical flow, the design doc) before writing code — don't code your
+  way into the design.
+- **Test-first (TDD).** Write the failing test(s) that pin the behavior, watch
+  them fail for the right reason, then implement until they pass. New behavior
+  starts as a test, not as code-then-a-test-after. (Applies especially to the
+  ritual/crypto/chain — the invariants belong in a red test first.)
 - **Proceed on greenlit multi-step work — don't keep asking "weiter?".** Once a
   task is agreed, carry it through; commit at meaningful checkpoints.
 - **But for a genuine fork or ambiguity, ask EARLY rather than guess.** The cost
