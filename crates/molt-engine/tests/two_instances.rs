@@ -1385,3 +1385,142 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
         other => panic!("expected an application message, got {other:?}"),
     }
 }
+
+/// Build a recovery invite with a fixed republic + loopback server, for tests.
+fn recovery_invite(
+    member: &str,
+    ticket: String,
+    queue_id: String,
+    wrap: String,
+    republic_id: &str,
+) -> molt_engine::RecoveryInvite {
+    molt_engine::RecoveryInvite {
+        republic: "Guild".to_string(),
+        member: member.to_string(),
+        ticket,
+        server: "loopback".to_string(),
+        queue_id,
+        wrap,
+        republic_id: republic_id.to_string(),
+    }
+}
+
+/// Drive `run_rejoin` over a fresh loopback hub, capture the single
+/// `RecoverRequest` it emits on the coordinator's recovery queue, then abort the
+/// driver (these authentication tests never send a Welcome, so it would otherwise
+/// wait forever). The invite is built here so its queue id matches the
+/// hub-created recovery queue.
+async fn capture_recover_request(
+    member: &str,
+    ticket: String,
+    republic_id: &str,
+    phrase: String,
+) -> invite::RecoverRequest {
+    let hub = LoopbackHub::calm();
+    let q = hub.create_queue_blocking().expect("recovery queue");
+    let recover_wrap = WrapKey::fresh().expect("recovery wrap");
+    let inv = recovery_invite(
+        member,
+        ticket,
+        hex::encode(&q.snd.id.0),
+        hex::encode(recover_wrap.to_bytes()),
+        republic_id,
+    );
+    let t = hub.transport();
+    let mut rx = t.subscribe(&q.rcv).await.expect("subscribe recovery queue");
+    let rejoiner = tokio::spawn(async move {
+        let _ = molt_engine::run_rejoin(hub.transport(), inv, &phrase).await;
+    });
+
+    let mut reasm = Reassembler::new();
+    let req = loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a recover request in time")
+            .expect("recovery queue open");
+        let Ok(plain) = molt_net::wrap::unwrap_block(&recover_wrap, &delivery.block) else {
+            delivery.ack.ack();
+            continue;
+        };
+        let outcome = reasm.push(&plain);
+        delivery.ack.ack();
+        if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
+            if let Ok(invite::RitualMsg::Recover(r)) =
+                serde_json::from_slice::<invite::RitualMsg>(&bytes)
+            {
+                break r;
+            }
+        }
+    };
+    rejoiner.abort(); // no Welcome will come; end the driver
+    req
+}
+
+/// **Security: a leaked link without the phrase cannot rejoin.** Only the seat's
+/// phrase re-derives its identity key. A rejoiner running the real driver with
+/// the WRONG phrase produces a request whose identity does not match the anchored
+/// key and whose seat proof fails to verify against it — the coordinator drops it
+/// (recovery_ritual.md §4 ❸, §6). This is the seat-ownership guarantee.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoiner_with_the_wrong_phrase_is_rejected() {
+    let real_phrase = molt_storage::generate_seed_phrase().expect("real phrase");
+    let wrong_phrase = molt_storage::generate_seed_phrase().expect("wrong phrase");
+    let (_, anchored_pk) = member_identity(&real_phrase); // what the roster anchors
+    let republic_id = "content-derived-republic-id";
+    let ticket = molt_net::invite::mint_ticket().expect("ticket");
+
+    let req = capture_recover_request("bob", ticket, republic_id, wrong_phrase).await;
+
+    // the wrong-phrase rejoiner presents a DIFFERENT identity than the anchored
+    // one, and its seat proof does not verify against the anchored key
+    assert_ne!(req.identity_pk, anchored_pk, "wrong phrase = wrong identity");
+    assert!(
+        !molt_engine::verify_seat_proof(
+            &anchored_pk,
+            &req.ticket,
+            &req.key_package,
+            republic_id,
+            &req.seat_proof,
+        ),
+        "a wrong-phrase seat proof must NOT verify against the anchored key"
+    );
+}
+
+/// **Security: a doctored link is caught.** The recovery link carries the
+/// republic id (a total-loss rejoiner cannot derive it), and the seat proof binds
+/// it. A tampered link with a wrong id makes the rejoiner sign over that wrong id;
+/// the coordinator verifies against its OWN (real) id, so the proof fails —
+/// exactly the guard recovery_ritual.md §3 relies on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_doctored_recovery_link_id_is_rejected() {
+    let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+    let (_, anchored_pk) = member_identity(&phrase);
+    let real_republic_id = "the-real-content-derived-id";
+    let doctored_republic_id = "an-attackers-substituted-id";
+    let ticket = molt_net::invite::mint_ticket().expect("ticket");
+
+    // the link the rejoiner receives carries the DOCTORED id, so its seat proof
+    // is signed over that id
+    let req = capture_recover_request("bob", ticket, doctored_republic_id, phrase).await;
+
+    assert_eq!(req.identity_pk, anchored_pk, "the phrase is correct here");
+    assert!(
+        !molt_engine::verify_seat_proof(
+            &anchored_pk,
+            &req.ticket,
+            &req.key_package,
+            real_republic_id,
+            &req.seat_proof,
+        ),
+        "a proof signed over a doctored republic id must NOT verify against the real id"
+    );
+    // sanity: it DOES verify against the doctored id it was actually signed over,
+    // so the failure above is the id-binding at work, not an unrelated mismatch
+    assert!(molt_engine::verify_seat_proof(
+        &anchored_pk,
+        &req.ticket,
+        &req.key_package,
+        doctored_republic_id,
+        &req.seat_proof,
+    ));
+}
