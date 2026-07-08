@@ -31,12 +31,21 @@ pub struct RecoveryInvite {
     pub queue_id: String,
     /// The per-queue wrap key (lowercase hex, 32 bytes).
     pub wrap: String,
+    /// The republic's content-derived id. A total-loss rejoiner cannot derive
+    /// it (it has no roster), yet the seat proof must bind it — so the
+    /// coordinator carries it in the link. The rejoiner re-verifies the real id
+    /// from the genesis once it catches up, and the coordinator checks the proof
+    /// against its OWN id, so a doctored link's id simply fails to verify.
+    pub republic_id: String,
 }
 
 impl RecoveryInvite {
     /// Render the link (preview + hex transport handover).
     pub fn render(&self) -> String {
-        let handover = format!("{}\n{}\n{}", self.server, self.queue_id, self.wrap);
+        let handover = format!(
+            "{}\n{}\n{}\n{}",
+            self.server, self.queue_id, self.wrap, self.republic_id
+        );
         format!(
             "molt://recover/{}/{}/{}/{}",
             self.republic.replace(' ', "-"),
@@ -66,7 +75,13 @@ impl RecoveryInvite {
         let server = fields.next()?.to_string();
         let queue_id = fields.next()?.to_string();
         let wrap = fields.next()?.to_string();
-        if fields.next().is_some() || server.is_empty() || queue_id.is_empty() || wrap.is_empty() {
+        let republic_id = fields.next()?.to_string();
+        if fields.next().is_some()
+            || server.is_empty()
+            || queue_id.is_empty()
+            || wrap.is_empty()
+            || republic_id.is_empty()
+        {
             return None;
         }
         Some(RecoveryInvite {
@@ -76,6 +91,7 @@ impl RecoveryInvite {
             server,
             queue_id,
             wrap,
+            republic_id,
         })
     }
 }
@@ -92,6 +108,7 @@ mod tests {
             server: "smp://fingerprint@host".to_string(),
             queue_id: "deadbeef".to_string(),
             wrap: "00112233".to_string(),
+            republic_id: "f00dbabe".to_string(),
         }
     }
 
