@@ -29,7 +29,10 @@ use molt_core::{
 };
 use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
-use molt_net::{invite, msg_id, EngineSink, MlsChannel, MlsIncoming, MlsMember, NetError, PeerLink};
+use molt_net::{
+    invite, msg_id, EngineSink, LoopbackHub, MlsChannel, MlsIncoming, MlsMember, NetError, PeerLink,
+    QueueId, Reassembler, SndQueueAddr, Transport, WrapKey,
+};
 use tokio::sync::watch;
 
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
@@ -1206,5 +1209,179 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
             got.iter().map(|(_, e)| std::mem::discriminant(&e.body)).collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The `member_identity` derivation (`entropy → workspace-id "member" → key`),
+/// reproduced here because the engine keeps it `pub(crate)`. The rejoiner
+/// (`run_rejoin`) derives its key this way internally; the test derives the same
+/// key to check the seat proof, exactly as a coordinator reads the anchored key.
+fn member_identity(phrase: &str) -> (molt_storage::SigningKey, String) {
+    let entropy = molt_storage::seed_entropy(phrase).expect("entropy");
+    let ws = molt_storage::derive_workspace_id(&entropy, "member");
+    molt_storage::derive_identity_key(&entropy, &ws)
+}
+
+/// **Recovery step ❶–❻: the rejoiner re-enters the encrypted group.** A member
+/// that lost its device drives `run_rejoin` against a coordinator over the
+/// loopback hub: it re-derives its identity, builds a fresh KeyPackage, and sends
+/// a `RecoverRequest` on the coordinator's recovery queue. The coordinator
+/// verifies the seat proof against the anchored key (a genuine authentication —
+/// only the phrase-holder can produce it), re-keys the seat with a REAL
+/// `restore_member`, and sends the resulting Welcome back. The rejoiner processes
+/// the Welcome and is back inside the group — proven by decrypting a message the
+/// coordinator encrypts AFTER the re-key (real epoch consistency, not a stub).
+///
+/// This pins the crypto/ritual core of the rejoiner side. The full production
+/// path (the coordinator's real threshold commit driving the Welcome, plus the
+/// rejoiner's follow-on mesh catch-up + materialize) is the next increment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
+    // a real 2-member MLS group: the coordinator + bob, born like a founding
+    let coord_phrase = molt_storage::generate_seed_phrase().expect("coord phrase");
+    let bob_phrase = molt_storage::generate_seed_phrase().expect("bob phrase");
+    let (coord_sk, _coord_pk) = member_identity(&coord_phrase);
+    let (_bob_sk, bob_pk) = member_identity(&bob_phrase);
+
+    let mut coord = MlsMember::new(&coord_sk, "coordinator").expect("coord mls");
+    coord.create_group().expect("coord creates the group");
+    {
+        // bob's original leaf joins the group, then bob "loses its device"
+        let (bob_orig_sk, _) = member_identity(&bob_phrase);
+        let mut bob_orig = MlsMember::new(&bob_orig_sk, "bob").expect("bob mls");
+        let bob_kp = bob_orig.key_package().expect("bob kp");
+        let welcome0 = coord
+            .add_members(&[bob_kp])
+            .expect("add bob")
+            .expect("a welcome for bob");
+        bob_orig.join_from_welcome(&welcome0).expect("bob joins");
+        // bob_orig is dropped here — the device is gone
+    }
+
+    // the coordinator mints a recovery queue + link (the mint plumbing is proven
+    // elsewhere; here we drive `run_rejoin` against a real re-key)
+    let hub = LoopbackHub::calm();
+    let t = hub.transport();
+    let recover_q = hub.create_queue_blocking().expect("recovery queue");
+    let recover_wrap = WrapKey::fresh().expect("recovery wrap");
+    let republic_id = "content-derived-republic-id";
+    let inv = molt_engine::RecoveryInvite {
+        republic: "Guild".to_string(),
+        member: "bob".to_string(),
+        ticket: molt_net::invite::mint_ticket().expect("ticket"),
+        server: "loopback".to_string(),
+        queue_id: hex::encode(&recover_q.snd.id.0),
+        wrap: hex::encode(recover_wrap.to_bytes()),
+        republic_id: republic_id.to_string(),
+    };
+    // exercise the link render→parse roundtrip on the way in
+    let link = inv.render();
+    let parsed = molt_engine::RecoveryInvite::parse(&link).expect("actionable link");
+
+    // the rejoiner runs the real driver over its own transport clone
+    let rejoiner = tokio::spawn(async move {
+        molt_engine::run_rejoin(hub.transport(), parsed, &bob_phrase).await
+    });
+
+    // --- the coordinator side of the handshake (played by the test) ---
+    // receive the RecoverRequest on the recovery queue
+    let mut rx = t.subscribe(&recover_q.rcv).await.expect("subscribe recovery queue");
+    let mut reasm = Reassembler::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let req = loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("recover request in time")
+            .expect("recovery queue open");
+        let Ok(plain) = molt_net::wrap::unwrap_block(&recover_wrap, &delivery.block) else {
+            delivery.ack.ack();
+            continue;
+        };
+        let outcome = reasm.push(&plain);
+        delivery.ack.ack();
+        if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
+            if let Ok(invite::RitualMsg::Recover(r)) =
+                serde_json::from_slice::<invite::RitualMsg>(&bytes)
+            {
+                break r;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no recover request arrived");
+    };
+
+    // authenticate: the seat proof must verify against bob's ANCHORED key, and it
+    // must bind this exact ticket + fresh KeyPackage + republic id — the security
+    // core of the ritual (a leaked link without the phrase cannot forge it)
+    assert_eq!(req.member, "bob");
+    assert_eq!(req.identity_pk, bob_pk, "the rejoiner re-derived its anchored key");
+    assert!(
+        molt_engine::verify_seat_proof(
+            &bob_pk,
+            &req.ticket,
+            &req.key_package,
+            republic_id,
+            &req.seat_proof,
+        ),
+        "the seat proof verifies against the anchored key"
+    );
+    assert_eq!(req.ticket, inv.ticket, "the seat proof is bound to the minted ticket");
+
+    // re-key the seat with a REAL MLS commit and send the Welcome back
+    let new_kp = hex::decode(&req.key_package).expect("kp hex");
+    let (_commit, welcome) = coord.restore_member("bob", &new_kp).expect("re-key bob");
+    let reply = req.reply.expect("the request advertises a reply queue");
+    let reply_snd = SndQueueAddr {
+        server: reply.server.clone(),
+        id: QueueId::from_bytes(hex::decode(&reply.queue_id).expect("reply queue hex")),
+    };
+    let reply_wrap_bytes: [u8; 32] = hex::decode(&reply.wrap)
+        .expect("reply wrap hex")
+        .try_into()
+        .expect("reply wrap length");
+    let reply_wrap = WrapKey::from_bytes(reply_wrap_bytes);
+    let welcome_msg = invite::RitualMsg::Welcome {
+        welcome: hex::encode(&welcome),
+    };
+    supervisor::send_framed(
+        &t,
+        &reply_snd,
+        &reply_wrap,
+        msg_id("coordinator", "bob", 1),
+        &serde_json::to_vec(&welcome_msg).expect("encode welcome"),
+    )
+    .await
+    .expect("send the welcome");
+
+    // the rejoiner finished: back inside the group with its re-derived identity
+    let outcome = tokio::time::timeout(Duration::from_secs(10), rejoiner)
+        .await
+        .expect("rejoin completes in time")
+        .expect("rejoin task")
+        .expect("rejoin succeeds");
+    assert_eq!(outcome.member, "bob");
+    assert_eq!(outcome.pk, bob_pk);
+    assert_eq!(outcome.republic_id, republic_id);
+
+    // PROVE the re-key was real and consistent: restore bob's group from the
+    // returned snapshot; a message the coordinator encrypts AFTER the re-key
+    // decrypts cleanly on bob's side (same epoch, authenticated sender). A stubbed
+    // or stale Welcome would fail here.
+    let mut bob_back = MlsMember::restore(&outcome.mls_snapshot).expect("restore bob's group");
+    let ct = coord.encrypt(b"welcome back, bob").expect("coord encrypts post re-key");
+    match bob_back.decrypt(&ct).expect("bob decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "coordinator");
+            assert_eq!(plaintext, b"welcome back, bob");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+    // and the reverse direction, so bob is a full participant again
+    let ct2 = bob_back.encrypt(b"thanks, i'm back").expect("bob encrypts");
+    match coord.decrypt(&ct2).expect("coord decrypts") {
+        MlsIncoming::Application { from, plaintext } => {
+            assert_eq!(from, "bob");
+            assert_eq!(plaintext, b"thanks, i'm back");
+        }
+        other => panic!("expected an application message, got {other:?}"),
     }
 }

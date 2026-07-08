@@ -13,7 +13,8 @@
 use crate::founding::RitualTransport;
 use crate::Envelope;
 use molt_core::Command;
-use molt_net::{SndQueueAddr, Transport, WrapKey};
+use molt_net::smp::{SmpServer, SmpTransport};
+use molt_net::{invite, msg_id, supervisor, QueueId, SndQueueAddr, Transport, WrapKey};
 use tokio::sync::mpsc;
 
 /// A recovery link — `molt://recover/<republic>/<member>/<ticket>/<handover>` —
@@ -231,6 +232,143 @@ pub(crate) fn spawn_recovery_provisioning(
             });
         }
     });
+}
+
+/// The rejoiner's finished state after the recovery ritual's re-key: it is back
+/// inside the encrypted group, holding its re-derived identity and the fresh
+/// group snapshot. What remains (the next increment) is to re-establish the
+/// runtime mesh, catch the chain up from any survivor, and materialize the local
+/// workspace from the verified chain (`recovery_ritual.md` §4 ❼–❽).
+#[derive(Debug, Clone)]
+pub struct RejoinOutcome {
+    /// The recovered seat's member handle (from the link).
+    pub member: String,
+    /// The re-derived identity pk — equals the anchored roster key (the
+    /// coordinator verified the seat proof against it), hex.
+    pub pk: String,
+    /// The republic's content-derived id (carried in the link; the rejoiner
+    /// re-verifies it from the genesis once it catches up).
+    pub republic_id: String,
+    /// The MLS group snapshot after processing the Welcome — the rejoiner can
+    /// decrypt live group traffic again.
+    pub mls_snapshot: Vec<u8>,
+}
+
+/// Drive the **returning member's side** of the recovery ritual over `transport`
+/// (`recovery_ritual.md` §4 ❶,❷,❻), the twin of [`crate::run_ritual_member`]:
+///
+/// 1. re-derive the seat's identity from the phrase (same `pk` as always) and
+///    build a *fresh* MLS `KeyPackage` (a new leaf, same credential handle);
+/// 2. open a reply queue and send a `RecoverRequest` — the seat proof binds the
+///    link's single-use ticket, the fresh KeyPackage, and the republic id — to
+///    the coordinator's recovery queue;
+/// 3. await the coordinator's `Welcome` on the reply queue and rejoin the group.
+///
+/// The generic core a genuinely separate node runs; [`rejoin_over_smp`] wraps it
+/// with the transport parsed from a `molt://recover/…` link. It does **not**
+/// catch up or materialize — that is the caller's next step, over the mesh.
+pub async fn run_rejoin<T: Transport>(
+    transport: T,
+    inv: RecoveryInvite,
+    phrase: &str,
+) -> Result<RejoinOutcome, String> {
+    // per-seat identity, deterministic from the phrase — the SAME key the
+    // genesis roster anchors, so the coordinator's seat-proof check passes and
+    // the re-keyed leaf keeps the seat's identity (recovery re-keys the leaf,
+    // never the roster identity).
+    let (sk, pk) = crate::founding::member_identity(phrase)?;
+    // a fresh MLS member from that identity; its credential is the seat handle,
+    // so `restore_member` finds and re-keys THIS leaf.
+    let mut mls = molt_net::MlsMember::new(&sk, &inv.member).map_err(|e| e.to_string())?;
+    let key_package = mls.key_package().map_err(|e| e.to_string())?;
+    let kp_hex = hex::encode(&key_package);
+
+    // the reply queue we receive the Welcome on — subscribe before advertising
+    // it, so the coordinator's Welcome cannot race ahead of our subscription
+    let reply_q = transport.create_queue().await.map_err(|e| e.to_string())?;
+    let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
+    let mut rx = transport.subscribe(&reply_q.rcv).await.map_err(|e| e.to_string())?;
+
+    // the coordinator's recovery queue + wrap, from the link
+    let queue_id = hex::decode(&inv.queue_id).map_err(|e| e.to_string())?;
+    let recover_snd = SndQueueAddr {
+        server: inv.server.clone(),
+        id: QueueId::from_bytes(queue_id),
+    };
+    let recover_wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "bad recovery wrap key length".to_string())?;
+    let recover_wrap = WrapKey::from_bytes(recover_wrap_bytes);
+
+    // the seat proof: only the phrase-holder can sign it, and it binds this exact
+    // fresh KeyPackage + the republic id carried in the link
+    let seat_proof = crate::founding::make_seat_proof(&sk, &inv.ticket, &kp_hex, &inv.republic_id);
+    let request = invite::RitualMsg::Recover(invite::RecoverRequest {
+        member: inv.member.clone(),
+        identity_pk: pk.clone(),
+        key_package: kp_hex,
+        ticket: inv.ticket.clone(),
+        seat_proof,
+        reply: Some(invite::ReplyHandover {
+            server: reply_q.snd.server.clone(),
+            queue_id: hex::encode(&reply_q.snd.id.0),
+            wrap: hex::encode(reply_wrap.to_bytes()),
+        }),
+    });
+    let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+    supervisor::send_framed(
+        &transport,
+        &recover_snd,
+        &recover_wrap,
+        msg_id(&inv.member, "coordinator", 1),
+        &payload,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // await the coordinator's Welcome, then rejoin the group. Anything else on
+    // the reply queue is ignored (only the Welcome finishes the rejoin).
+    let mut reasm = molt_net::Reassembler::new();
+    loop {
+        let Some(delivery) = rx.recv().await else {
+            return Err("recovery reply queue closed before the welcome arrived".to_string());
+        };
+        let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
+            delivery.ack.ack();
+            continue;
+        };
+        let outcome = reasm.push(&plain);
+        delivery.ack.ack();
+        let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
+            continue;
+        };
+        if let Ok(invite::RitualMsg::Welcome { welcome }) =
+            serde_json::from_slice::<invite::RitualMsg>(&bytes)
+        {
+            let welcome_bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
+            mls.join_from_welcome(&welcome_bytes).map_err(|e| e.to_string())?;
+            let snap = mls.snapshot().map_err(|e| e.to_string())?;
+            return Ok(RejoinOutcome {
+                member: inv.member,
+                pk,
+                republic_id: inv.republic_id,
+                mls_snapshot: snap,
+            });
+        }
+    }
+}
+
+/// Rejoin a republic from a `molt://recover/…` link over the real SMP server the
+/// link points at — the total-loss member's entry point (a fresh device with
+/// only the recovery phrase). Builds this node's OWN transport to the
+/// coordinator's server (SMP clones share the recipient-key store, so the caller
+/// can reuse it for the follow-on catch-up mesh) and drives [`run_rejoin`].
+pub async fn rejoin_over_smp(link: &str, phrase: &str) -> Result<RejoinOutcome, String> {
+    let inv = RecoveryInvite::parse(link).ok_or("not an actionable recovery link")?;
+    let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
+    let transport = RitualTransport::Smp(SmpTransport::new(server));
+    run_rejoin(transport, inv, phrase).await
 }
 
 #[cfg(test)]

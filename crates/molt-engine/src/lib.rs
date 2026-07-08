@@ -44,6 +44,8 @@ pub use chain::{verify_chain, ChainHead};
 #[doc(hidden)]
 pub use recovery::RecoveryInvite;
 #[doc(hidden)]
+pub use recovery::{rejoin_over_smp, run_rejoin, RejoinOutcome};
+#[doc(hidden)]
 pub use founding::{
     join_founding_over_smp, make_seat_proof, ritual_join_over_smp, run_ritual_member,
     verify_seat_proof, FoundingInvite, InviteMaterial, Ratifier, RitualTransport,
