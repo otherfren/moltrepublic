@@ -109,6 +109,9 @@ export component AppWindow inherits Window {
     in property <[MemberSync]> active-members;
     // the ratified founding charter (free-text agenda) for the Constitution surface
     in property <string> active-agenda;
+    // Organization → Status/Members: reachable count derived from the roster
+    in property <int> org-online;
+    in property <int> org-total;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -2724,15 +2727,212 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // chat / Archive and the Organization views: content
-                        // arrives with the systematic per-view pass
-                        if (s.key == "chat" && root.selected-view != "today") || s.key == "organization": VerticalLayout {
+                        // chat / Archive: content arrives with a later per-view pass
+                        if s.key == "chat" && root.selected-view != "today": VerticalLayout {
                             alignment: start;
                             padding: 8px;
                             Text {
                                 text: Strings.mv-later;
                                 color: Theme.faint;
                                 font-size: Theme.fs-body;
+                            }
+                        }
+
+                        // Organization → Status: the republic's identity, the
+                        // ratified charter, and the live per-surface counts
+                        if s.key == "organization" && root.selected-view == "status": Flickable {
+                            viewport-width: self.width;
+                            viewport-height: os-col.preferred-height;
+                            os-col := VerticalLayout {
+                                width: 100%;
+                                padding: 8px;
+                                spacing: 10px;
+                                alignment: start;
+                                Rectangle {
+                                    background: Theme.panel;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    HorizontalLayout {
+                                        padding: 14px;
+                                        spacing: 12px;
+                                        Rectangle {
+                                            width: 56px;
+                                            height: 56px;
+                                            y: (parent.height - self.height) / 2;
+                                            border-radius: Theme.win95 ? 0px : 8px;
+                                            background: Theme.accent-soft;
+                                            border-width: 1px;
+                                            border-color: Theme.accent;
+                                            Image {
+                                                source: @image-url("assets/republic.svg");
+                                                colorize: Theme.accent;
+                                                width: 30px;
+                                                height: 30px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 6px;
+                                            alignment: center;
+                                            Text {
+                                                text: root.active-workspace == "" ? "Republic" : root.active-workspace;
+                                                color: Theme.text;
+                                                font-size: Theme.fs-h1;
+                                                font-weight: 700;
+                                                wrap: word-wrap;
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                alignment: start;
+                                                StatusPill {
+                                                    label: root.threshold-badge;
+                                                    tone: Theme.accent;
+                                                }
+                                                StatusPill {
+                                                    label: "\{root.org-online} / \{root.org-total} \{Strings.org-reachable}";
+                                                    tone: root.org-online == root.org-total ? Theme.good : (root.org-online == 0 ? Theme.faint : Theme.warn);
+                                                }
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                                DetailGroup {
+                                    title: Strings.const-charter-title;
+                                    Text {
+                                        text: root.active-agenda == "" ? Strings.const-no-agenda : root.active-agenda;
+                                        color: root.active-agenda == "" ? Theme.faint : Theme.text;
+                                        font-size: Theme.fs-body;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                DetailGroup {
+                                    title: Strings.org-surfaces;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: "";
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: Strings.mv-applied;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                            width: 64px;
+                                            horizontal-alignment: right;
+                                        }
+                                        Text {
+                                            text: Strings.mv-pending;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                            width: 64px;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Theme.line;
+                                    }
+                                    for st in root.surfaces: HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: st.name;
+                                            color: st.gated ? Theme.accent : Theme.text;
+                                            font-size: Theme.fs-body;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: "\{st.applied-count}";
+                                            color: Theme.text;
+                                            font-size: Theme.fs-body;
+                                            width: 64px;
+                                            horizontal-alignment: right;
+                                        }
+                                        Text {
+                                            text: "\{st.pending-count}";
+                                            color: st.pending-count > 0 ? Theme.warn : Theme.dim;
+                                            font-size: Theme.fs-body;
+                                            font-weight: st.pending-count > 0 ? 700 : 400;
+                                            width: 64px;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Organization → Members: the live roster with presence
+                        if s.key == "organization" && root.selected-view == "members": VerticalLayout {
+                            padding: 8px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                StatusPill {
+                                    label: "\{root.org-online} / \{root.org-total} \{Strings.org-reachable}";
+                                    tone: root.org-online == root.org-total ? Theme.good : (root.org-online == 0 ? Theme.faint : Theme.warn);
+                                }
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                clip: true;
+                                om-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: om-list.preferred-height + 8px;
+                                    om-list := VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 4px;
+                                        alignment: start;
+                                        for m in root.active-members: Rectangle {
+                                            height: 40px;
+                                            border-radius: Theme.win95 ? 0px : 6px;
+                                            background: Theme.panel-2;
+                                            border-width: 1px;
+                                            border-color: Theme.line;
+                                            HorizontalLayout {
+                                                padding-left: 12px;
+                                                padding-right: 12px;
+                                                spacing: 10px;
+                                                Rectangle {
+                                                    width: 9px;
+                                                    height: 9px;
+                                                    border-radius: 4.5px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    background: m.state == 0 ? Theme.good : (m.state == 1 ? Theme.warn : Theme.faint);
+                                                }
+                                                Text {
+                                                    text: m.name;
+                                                    color: m.name == root.node-member ? Theme.accent : Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                    vertical-alignment: center;
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                                Text {
+                                                    text: m.last;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: om-fl.height;
+                                    content-h: om-fl.viewport-height;
+                                    scroll-y: om-fl.viewport-y;
+                                }
                             }
                         }
 

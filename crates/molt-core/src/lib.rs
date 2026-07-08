@@ -105,7 +105,9 @@ impl Surface {
     /// nav and the `select_view` command validate against this same list.
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Surface::Constitution => &[("charter", "Charter")],
+            // the charter now lives in Organization → Status; Constitution keeps
+            // no sub-view of its own (its body still renders on selection)
+            Surface::Constitution => &[],
             Surface::Organization => &[
                 ("status", "Status"),
                 ("members", "Members"),
@@ -143,9 +145,10 @@ impl Surface {
         }
     }
 
-    /// The view a surface opens on (the first of [`Surface::views`]).
+    /// The view a surface opens on (the first of [`Surface::views`], or `""`
+    /// for a surface with no sub-views — e.g. Constitution).
     pub fn default_view(self) -> &'static str {
-        self.views()[0].0
+        self.views().first().map(|v| v.0).unwrap_or("")
     }
 }
 

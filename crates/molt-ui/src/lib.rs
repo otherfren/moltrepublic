@@ -1103,6 +1103,14 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     sync_rows(&ui.get_active_members(), roster, |m| {
         ui.set_active_members(m)
     });
+    // Organization → Status/Members: reachable count from the roster (a member
+    // is reachable unless offline, state 2)
+    let total = active.map(|w| w.members.len()).unwrap_or(0);
+    let online = active
+        .map(|w| w.members.iter().filter(|m| m.state != 2).count())
+        .unwrap_or(0);
+    ui.set_org_online(i32::try_from(online).unwrap_or(0));
+    ui.set_org_total(i32::try_from(total).unwrap_or(0));
 
     // the create wizard's folder preview roots at the configured
     // workspace dir (shown raw, as configured — `~` and all)
@@ -1888,6 +1896,8 @@ lexicon! {
     const_no_agenda: "(founded without a written charter)", "(ohne schriftliche Satzung gegründet)";
     const_signatories: "Founding members · ratified by all", "Gründungsmitglieder · von allen ratifiziert";
     enter_republic: "Enter republic", "Republik betreten";
+    org_reachable: "reachable", "erreichbar";
+    org_surfaces: "Surfaces", "Bereiche";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
     ow_change_folder: "Change folder", "Ordner wechseln";
