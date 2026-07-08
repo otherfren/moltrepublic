@@ -550,6 +550,17 @@ impl State {
     /// missing suffix (catch-up).
     pub(crate) fn receive_block(&mut self, block: ChainBlock) {
         let Some(head) = self.chain_head.clone() else {
+            // a headless rejoiner (total device loss) bootstraps its chain from
+            // the genesis a survivor serves, then drains whatever else arrived
+            // first; a non-genesis block is buffered until the genesis lands
+            if block.height == 0 {
+                self.adopt_chain(vec![block]);
+                if self.chain_head.is_some() {
+                    self.drain_buffered_blocks();
+                }
+            } else {
+                self.pending_blocks.insert(block.height, block);
+            }
             return;
         };
         if block.height == head.height + 1 {
@@ -1006,5 +1017,41 @@ mod tests {
             "the lagging member caught up to the survivor"
         );
         assert!(peer.pending_blocks.is_empty());
+    }
+
+    /// A rejoiner that lost everything (no chain, no head) bootstraps from the
+    /// genesis a survivor serves and then catches up the whole chain — even when
+    /// later blocks arrive before the genesis (they buffer until it lands). The
+    /// state-recovery core of Phase 4.
+    #[test]
+    fn a_headless_rejoiner_bootstraps_from_a_served_genesis() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis_block = b.blocks[0].clone();
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let block1 = b.blocks[1].clone();
+        let block2 = b.blocks[2].clone();
+
+        let mut rejoiner = crate::tests::plain_state();
+        assert!(!rejoiner.is_chain_governed());
+
+        // a block arrives before the genesis — buffered, still headless
+        rejoiner.receive_block(block2);
+        assert!(!rejoiner.is_chain_governed());
+        assert_eq!(rejoiner.pending_blocks.len(), 1);
+
+        // the survivor serves the genesis — adopt it as the root
+        rejoiner.receive_block(genesis_block);
+        assert!(rejoiner.is_chain_governed(), "adopted the served genesis");
+        assert_eq!(rejoiner.chain_head.as_ref().expect("head").height, 0);
+
+        // the middle block fills the gap; the buffered tail drains behind it
+        rejoiner.receive_block(block1);
+        assert_eq!(
+            rejoiner.chain_head.as_ref().expect("head").height,
+            2,
+            "the rejoiner caught up the full chain from genesis"
+        );
+        assert!(rejoiner.pending_blocks.is_empty());
     }
 }
