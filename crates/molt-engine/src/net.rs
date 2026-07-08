@@ -288,6 +288,15 @@ impl NetRuntime {
         Some((snapshot, transport.export_creds()))
     }
 
+    /// A clone of the runtime transport, for minting a **dedicated recovery
+    /// queue** off the actor. The clone shares the transport's `Arc`, so it can
+    /// both create the queue and later subscribe to it (an SMP queue's receive
+    /// credential lives in the creating transport's state — a fresh transport
+    /// could send but never receive). `None` for the demo mesh (no real transport).
+    pub(crate) fn runtime_transport(&self) -> Option<crate::founding::RitualTransport> {
+        self.real_crypto.as_ref().map(|(transport, _)| transport.clone())
+    }
+
     /// Coordinator side of recovery: run `restore_member` on the runtime MLS
     /// group — remove the returning member's stale leaf + add its fresh
     /// KeyPackage in one commit → `(commit, welcome)`. `None` when this runtime
@@ -644,8 +653,19 @@ impl State {
         if !self.net_generation_current(generation) {
             return Ok(Reply::Ack);
         }
+        // Spend-once guard: the ticket must be a live one this node minted (via
+        // a recovery link). An unknown or already-spent ticket — a replay of a
+        // captured request, or a bare-queue probe — is dropped without a trace.
+        if !self.recovery_tickets.contains(&ticket) {
+            tracing::warn!(%member, "recovery request with an unknown or spent ticket — dropped");
+            return Ok(Reply::Ack);
+        }
         match self.verify_and_propose_restore(&member, &identity_pk, &key_package, &ticket, &seat_proof) {
             Ok(_id) => {
+                // spend the ticket only on a verified request, so a legitimate
+                // member whose first attempt failed (e.g. a truncated proof) can
+                // retry on the still-live queue
+                self.recovery_tickets.remove(&ticket);
                 self.pending_recovery.insert(
                     member.clone(),
                     crate::chain::PendingRecovery {
@@ -660,6 +680,82 @@ impl State {
                 tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
             }
         }
+        Ok(Reply::Ack)
+    }
+
+    /// A surviving coordinator mints a recovery link for a member who lost its
+    /// device (`recovery_ritual.md` §3) — a manually-granted re-admission for an
+    /// existing seat. Validate the request against the open chain-governed
+    /// workspace, mint a single-use ticket (the spend-once guard registers it),
+    /// then provision the dedicated recovery queue off the actor and report the
+    /// link. Rejections are surfaced to the operator; nothing is torn down.
+    pub(crate) fn cmd_recover_invite_start(
+        &mut self,
+        member: MemberId,
+    ) -> Result<Reply, MoltError> {
+        // recovery only exists for a chain-governed republic (the returning
+        // member re-verifies the handed-over chain from genesis)
+        if !self.is_chain_governed() {
+            return Err(MoltError::Recover(
+                "recovery needs an open, chain-governed republic".to_string(),
+            ));
+        }
+        let Some(replica) = self.replica.as_ref() else {
+            return Err(MoltError::Recover("no republic is open".to_string()));
+        };
+        // the returning member must be an anchored seat (the seat proof will be
+        // checked against this key when the request arrives)
+        if !replica.identities.iter().any(|i| i.member == member) {
+            return Err(MoltError::Recover(format!(
+                "{member} is not a member of this republic"
+            )));
+        }
+        let republic = replica.name.clone();
+        let republic_id = replica.republic_id.clone();
+        // the recovery queue is minted on the RUNTIME transport (a clone shares
+        // its Arc, so this node can both create the queue and subscribe to it)
+        let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) else {
+            return Err(MoltError::Recover(
+                "the republic's mesh is not running — cannot mint a recovery queue".to_string(),
+            ));
+        };
+        let ticket = molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
+        let wrap = molt_net::wrap::WrapKey::fresh().map_err(|e| MoltError::Recover(e.to_string()))?;
+        // register the ticket BEFORE the queue can carry a request, so the
+        // spend-once guard is armed the moment the returning member answers
+        self.recovery_tickets.insert(ticket.clone());
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Recover("engine stopped".to_string()));
+        };
+        crate::recovery::spawn_recovery_provisioning(
+            transport,
+            member,
+            republic,
+            republic_id,
+            ticket,
+            wrap,
+            self.net_generation,
+            cmd_tx,
+            self.recovery_material_sink.clone(),
+        );
+        Ok(Reply::Ack)
+    }
+
+    /// A minted recovery link became available (from the off-actor provisioning
+    /// task). Surface it to the operator so it can be shared off-band with the
+    /// returning member.
+    pub(crate) fn cmd_net_recover_link_ready(
+        &mut self,
+        member: MemberId,
+        link: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_generation_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        tracing::info!(%member, %link, "recovery link ready");
+        self.session.notice = format!("recovery-link:{link}");
+        self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
@@ -786,6 +882,7 @@ fn spawn_demo_peer(
         false,
         false,
         false,
+        None,
     );
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown

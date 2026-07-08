@@ -1868,6 +1868,15 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A surviving coordinator **mints a recovery link** for a member who lost
+    /// its device (`recovery_ritual.md` §3): a human decision (an existing seat,
+    /// manually granted), so it is a tool on both surfaces. The engine opens a
+    /// dedicated recovery queue, mints a single-use ticket, renders a
+    /// `molt://recover/…` link, and listens for the returning member's request.
+    RecoverInviteStart {
+        /// The returning member's seat handle (must be an anchored roster member).
+        member: MemberId,
+    },
     /// A returning member's **recovery request** arrived on the coordinator's
     /// recovery queue (engine-internal — the recovery-ritual transport speaks to
     /// the engine; a member must not be able to forge one). The coordinator
@@ -1926,6 +1935,18 @@ pub enum Command {
         /// Which seat (0-based).
         seat: u32,
         /// The full `molt://invite/…` link (with the transport handover).
+        link: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A minted recovery link became available once its dedicated queue was
+    /// provisioned (engine-internal, from the off-actor recovery-mint task).
+    /// Carries the transport handover, so it is never an MCP tool.
+    NetRecoverLinkReady {
+        /// The returning member the link re-admits.
+        member: MemberId,
+        /// The full `molt://recover/…` link (with the transport handover).
         link: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
@@ -2318,6 +2339,9 @@ pub enum MoltError {
     /// A join action was invalid or arrived in the wrong lifecycle state.
     #[error("join: {0}")]
     Join(String),
+    /// A recovery action was invalid or arrived in the wrong lifecycle state.
+    #[error("recover: {0}")]
+    Recover(String),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

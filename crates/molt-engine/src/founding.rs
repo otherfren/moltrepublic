@@ -561,7 +561,6 @@ pub(crate) fn recover_command(r: invite::RecoverRequest, generation: u64) -> Com
 /// [`invite::RitualMsg::Recover`] and issues [`Command::NetRecoverRequested`]
 /// (the engine verifies the seat proof + proposes re-admission); any other
 /// message on this queue is ignored.
-#[allow(dead_code)] // spawned by the recovery link-mint increment
 pub(crate) fn spawn_coordinator_recv(
     transport: RitualTransport,
     rcv: RcvQueue,

@@ -727,6 +727,21 @@ fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::CreateCancel),
         },
         ToolDef {
+            name: "recover_invite_start",
+            command: "recover_invite_start",
+            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The engine opens a dedicated recovery queue on the running mesh transport and listens; read_session shows the resulting molt://recover/… link to share off-band. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "member": { "type": "string", "description": "the returning member's seat handle (an anchored roster member)" }
+                },
+                "required": ["member"]
+            }),
+            build: |args| Ok(Command::RecoverInviteStart {
+                member: str_arg(args, "member")?,
+            }),
+        },
+        ToolDef {
             name: "create_propose",
             command: "create_propose",
             description: "Propose the deliberated charter — the final republic name and a free-text agenda — once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda with their signature, and only then does the workspace open.",
@@ -836,7 +851,7 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 19] = [
+        const INTERNAL: [&str; 20] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -844,6 +859,7 @@ mod tests {
             "net_join_requested",
             "net_seal_signed",
             "net_recover_requested",
+            "net_recover_link_ready",
             "net_test_result",
             "net_ritual_link_ready",
             "net_ritual_failed",

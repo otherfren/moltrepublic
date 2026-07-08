@@ -131,7 +131,7 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None);
     (handle, rx)
 }
 
@@ -147,8 +147,32 @@ pub fn __spawn_manual_founding_bootstrap(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None);
     (handle, rx)
+}
+
+/// Like [`__spawn_manual_founding_bootstrap`], but also installs the recovery
+/// material sink: a coordinator that founds + bootstraps its mesh here and then
+/// mints a recovery link hands the minted queue's transport handover out on the
+/// second receiver, so a *separate* returning-member side can drive the request.
+/// The recovery two-instance dev test uses this.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn __spawn_manual_founding_bootstrap_recoverable(
+    config: GroupConfig,
+    session: SessionView,
+) -> (
+    WalletHandle,
+    std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>,
+    std::sync::mpsc::Receiver<recovery::RecoveryMaterial>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (rtx, rrx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(
+        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx),
+    );
+    (handle, rx, rrx)
 }
 
 /// Storage-backed engine whose founding runs in the offline **sim** seam:
@@ -158,7 +182,7 @@ pub fn __spawn_manual_founding_bootstrap(
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None)
 }
 
 /// Like [`__spawn_manual_founding`], but the founding runs over the **real
@@ -173,7 +197,7 @@ pub fn __spawn_manual_founding_over_smp(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None);
     (handle, rx)
 }
 
@@ -207,6 +231,7 @@ pub fn spawn_with_config(
         // each stands its runtime supervisor up over the direct mesh — live
         // peer-to-peer MLS chat the moment the republic is founded
         true,
+        None,
     );
     Ok((handle, store))
 }
@@ -218,7 +243,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,6 +259,7 @@ fn spawn_actor(
     ritual_over_smp: bool,
     ritual_sim: bool,
     ritual_bootstrap: bool,
+    recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
@@ -242,6 +268,7 @@ fn spawn_actor(
     state.ritual_over_smp = ritual_over_smp;
     state.ritual_sim = ritual_sim;
     state.ritual_bootstrap = ritual_bootstrap;
+    state.recovery_material_sink = recovery_material_sink;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -355,6 +382,11 @@ pub(crate) struct State {
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
     /// block commits and the coordinator re-keys the group + sends the Welcome.
     pub(crate) pending_recovery: HashMap<String, chain::PendingRecovery>,
+    /// Recovery tickets this node has minted and is still listening for — the
+    /// spend-once guard. A ticket is inserted when a recovery link is minted and
+    /// removed the moment a valid request spends it, so a replayed request on a
+    /// live recovery queue finds a dead ticket and is dropped.
+    pub(crate) recovery_tickets: std::collections::HashSet<String>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -373,6 +405,13 @@ pub(crate) struct State {
     /// Only the two-instance dev test installs this.
     pub(crate) ritual_material_sink:
         Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    /// The recovery twin of [`Self::ritual_material_sink`]: when set, the
+    /// recovery link-mint hands the minted queue's transport handover out on
+    /// this channel so a *second* engine can run the returning-member side.
+    /// Only the two-instance recovery dev test installs it; a real mint reports
+    /// the link to the operator instead.
+    pub(crate) recovery_material_sink:
+        Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
     /// Forces the SMP transport for a founding in manual mode (the
     /// manual-over-SMP dev seam). The in-app founding uses SMP regardless;
     /// only the loopback dev seams leave this off.
@@ -467,11 +506,13 @@ impl State {
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
             pending_recovery: HashMap::new(),
+            recovery_tickets: std::collections::HashSet::new(),
             active: None,
             net,
             net_ritual: None,
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
+            recovery_material_sink: None,
             ritual_over_smp: false,
             ritual_sim: false,
             ritual_bootstrap: false,
@@ -637,6 +678,7 @@ impl State {
                 sig,
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, generation),
+            Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::NetRecoverRequested {
                 member,
                 identity_pk,
@@ -654,6 +696,11 @@ impl State {
                 reply,
                 generation,
             ),
+            Command::NetRecoverLinkReady {
+                member,
+                link,
+                generation,
+            } => self.cmd_net_recover_link_ready(member, link, generation),
             Command::NetTestServer { url } => self.cmd_net_test_server(url),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::NetRitualLinkReady {

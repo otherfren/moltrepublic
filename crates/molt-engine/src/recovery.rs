@@ -10,6 +10,12 @@
 //!
 //! Built stepwise, test-first. Today: the recovery **link** type.
 
+use crate::founding::RitualTransport;
+use crate::Envelope;
+use molt_core::Command;
+use molt_net::{SndQueueAddr, Transport, WrapKey};
+use tokio::sync::mpsc;
+
 /// A recovery link — `molt://recover/<republic>/<member>/<ticket>/<handover>` —
 /// mirroring [`crate::FoundingInvite`], but for an *existing* seat. It carries a
 /// transport handover (the coordinator's recovery queue) and a single-use ticket
@@ -126,6 +132,105 @@ pub(crate) fn sealed_roster_from_genesis(
         attestations: block.sigs.clone(),
         agenda: agenda.clone(),
     })
+}
+
+/// One minted recovery link's transport handover — the recovery twin of
+/// [`crate::founding::InviteMaterial`]. A real mint reports the rendered link to
+/// the operator; the two-instance recovery dev test reads this off the recovery
+/// material sink so a *separate* engine can drive the returning-member side
+/// against the coordinator's freshly-minted queue.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RecoveryMaterial<T: Transport = RitualTransport> {
+    /// The returning member the link re-admits.
+    pub member: String,
+    /// The transport the coordinator minted the recovery queue on (a clone that
+    /// shares its `Arc` — a genuinely separate node uses its own transport and
+    /// only reads the address / wrap / ticket below).
+    pub transport: T,
+    /// returning member → coordinator queue (the `RitualMsg::Recover` request).
+    pub recover_snd: SndQueueAddr,
+    /// The per-queue wrap key.
+    pub recover_wrap: WrapKey,
+    /// The single-use recovery ticket.
+    pub ticket: String,
+    /// The republic's content-derived id (carried in the link; the seat proof
+    /// binds it).
+    pub republic_id: String,
+    /// The fully-rendered `molt://recover/…` link.
+    pub link: String,
+}
+
+/// Provision the coordinator's dedicated **recovery queue** off the actor —
+/// `create_queue` is a live round-trip the synchronous command handler must not
+/// block on (mirrors [`crate::founding::spawn_smp_provisioning`]). Once the
+/// queue is up, wire the coordinator recv loop, render the recovery link, report
+/// it to the operator ([`Command::NetRecoverLinkReady`]) and hand the transport
+/// handover to the dev-seam sink if one is installed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_recovery_provisioning(
+    transport: RitualTransport,
+    member: String,
+    republic: String,
+    republic_id: String,
+    ticket: String,
+    wrap: WrapKey,
+    generation: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+    sink: Option<std::sync::mpsc::Sender<RecoveryMaterial>>,
+) {
+    tokio::spawn(async move {
+        let q = match transport.create_queue().await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(%member, error = %e, "recovery-queue provisioning failed");
+                return;
+            }
+        };
+        // listen for the returning member's request on the fresh queue: a
+        // `RitualMsg::Recover` becomes `Command::NetRecoverRequested`
+        crate::founding::spawn_coordinator_recv(
+            transport.clone(),
+            q.rcv.clone(),
+            wrap.clone(),
+            generation,
+            cmd_tx.clone(),
+        );
+        let link = RecoveryInvite {
+            republic,
+            member: member.clone(),
+            ticket: ticket.clone(),
+            server: q.snd.server.clone(),
+            queue_id: hex::encode(&q.snd.id.0),
+            wrap: hex::encode(wrap.to_bytes()),
+            republic_id: republic_id.clone(),
+        }
+        .render();
+        // report the shareable link to the operator (GUI/MCP read it back)
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        let _ = cmd_tx
+            .send(Envelope {
+                cmd: Command::NetRecoverLinkReady {
+                    member: member.clone(),
+                    link: link.clone(),
+                    generation: Some(generation),
+                },
+                reply,
+            })
+            .await;
+        // dev seam: hand the handover to a waiting second engine (test only)
+        if let Some(sink) = sink {
+            let _ = sink.send(RecoveryMaterial {
+                member,
+                transport,
+                recover_snd: q.snd,
+                recover_wrap: wrap,
+                ticket,
+                republic_id,
+                link,
+            });
+        }
+    });
 }
 
 #[cfg(test)]

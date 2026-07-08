@@ -29,7 +29,7 @@ use molt_core::{
 };
 use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
-use molt_net::{EngineSink, MlsChannel, MlsIncoming, MlsMember, NetError, PeerLink};
+use molt_net::{invite, msg_id, EngineSink, MlsChannel, MlsIncoming, MlsMember, NetError, PeerLink};
 use tokio::sync::watch;
 
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
@@ -1022,15 +1022,19 @@ async fn founding_governs_over_the_direct_mesh() {
     }
 }
 
-/// **Recovery step ❸ over the mesh.** A returning member proves its seat (a seat
-/// proof signed by its re-derived identity key); the coordinator engine verifies
-/// it against the anchored roster key and proposes the threshold
-/// `Membership{Restored}` re-admission, gossiping it over the mesh. Here the
-/// `RecoverRequest` is injected (the recovery-ritual transport delivers it in
-/// production); the assertion is that the coordinator proposes re-admission and
-/// the member sees the proposal.
+/// **Recovery link-mint + request, end to end over the minted queue.** The
+/// surviving coordinator mints a recovery link (`RecoverInviteStart`) — a
+/// dedicated recovery queue on its running mesh transport, a single-use ticket,
+/// a rendered `molt://recover/…` link. A returning member (device lost) proves
+/// its seat with a seat proof signed by its RE-DERIVED identity key and sends a
+/// `RecoverRequest` on that minted queue. The coordinator's recovery recv loop
+/// turns it into the internal command, verifies the proof against the anchored
+/// roster key, spends the ticket, and proposes the threshold
+/// `Membership{Restored}` re-admission — gossiped over the mesh, where the
+/// member sees it. Supersedes the earlier injected-request test: the request now
+/// flows over a real coordinator-minted link, not an engine-side injection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_recovery_request_makes_the_coordinator_propose_re_admission() {
+async fn recovery_flows_over_a_coordinator_minted_link() {
     let tmp = tempfile::tempdir().expect("tmp");
     let root_a = tmp.path().join("founder");
     let session_a = SessionView {
@@ -1041,8 +1045,11 @@ async fn a_recovery_request_makes_the_coordinator_propose_re_admission() {
         },
         ..SessionView::default()
     };
-    let (a, material_rx) =
-        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    let (a, material_rx, recovery_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap_recoverable(
+            molt_core::GroupConfig::demo(),
+            session_a,
+        );
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
@@ -1134,23 +1141,52 @@ async fn a_recovery_request_makes_the_coordinator_propose_re_admission() {
     let b_entropy = molt_storage::seed_entropy(&b_phrase_for_sig).expect("b entropy");
     let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
     let (b_sk, _) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
-    let ticket = "recovery-ticket";
     let kp_hex = "abcd"; // an opaque fresh key package for this test
-    let seat_proof = molt_engine::make_seat_proof(&b_sk, ticket, kp_hex, &sealed.republic_id);
 
-    // the recovery request reaches the coordinator (injected; the recovery-ritual
-    // transport delivers it in production)
-    a.execute(Command::NetRecoverRequested {
+    // the surviving coordinator mints a recovery link for member-b — a real
+    // dedicated queue on its running mesh transport, listening for the request
+    a.execute(Command::RecoverInviteStart {
+        member: "member-b".to_string(),
+    })
+    .await
+    .expect("mint recovery link");
+    let material = tokio::task::spawn_blocking(move || {
+        recovery_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A mints the recovery link + hands the queue material out")
+    })
+    .await
+    .expect("recovery mint blocking");
+    // the minted link is a well-formed, actionable recovery link bound to the
+    // republic id the coordinator carries in it
+    let parsed = molt_engine::RecoveryInvite::parse(&material.link).expect("actionable link");
+    assert_eq!(parsed.member, "member-b");
+    assert_eq!(parsed.republic_id, sealed.republic_id);
+    assert_eq!(parsed.ticket, material.ticket);
+
+    // member-b re-derives, signs the seat proof over the MINTED ticket + the
+    // republic id carried in the link, and sends the RecoverRequest on the
+    // coordinator's minted queue — the recovery-ritual transport in action
+    let seat_proof =
+        molt_engine::make_seat_proof(&b_sk, &material.ticket, kp_hex, &material.republic_id);
+    let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         member: "member-b".to_string(),
         identity_pk: b_pk,
         key_package: kp_hex.to_string(),
-        ticket: ticket.to_string(),
+        ticket: material.ticket.clone(),
         seat_proof,
-        reply: String::new(),
-        generation: None,
-    })
+        reply: None,
+    });
+    let payload = serde_json::to_vec(&request).expect("encode recover request");
+    supervisor::send_framed(
+        &material.transport,
+        &material.recover_snd,
+        &material.recover_wrap,
+        msg_id("member-b", "coordinator", 1),
+        &payload,
+    )
     .await
-    .expect("recover request");
+    .expect("send the recovery request on the minted queue");
 
     // the coordinator verified the seat proof and proposed re-admission — the
     // MembershipProposed{Restored} reaches the member over the direct mesh
