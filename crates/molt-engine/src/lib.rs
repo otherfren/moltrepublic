@@ -39,8 +39,8 @@ use std::path::PathBuf;
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use founding::{
-    join_founding_over_smp, ritual_join_over_smp, run_ritual_member, FoundingInvite, InviteMaterial,
-    Ratifier, RitualTransport,
+    join_founding_over_smp, make_seat_proof, ritual_join_over_smp, run_ritual_member,
+    verify_seat_proof, FoundingInvite, InviteMaterial, Ratifier, RitualTransport,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 

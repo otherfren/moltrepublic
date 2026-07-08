@@ -727,6 +727,61 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     Ok(())
 }
 
+/// The canonical bytes a **recovery seat proof** signs (concept §3.3):
+/// domain-separated `ticket ‖ key_package ‖ republic_id`. The rejoiner signs it
+/// with the identity key it re-derived from its recovery phrase; the approver
+/// verifies against the seat's *anchored* public key (from the genesis identity
+/// table). So a leaked recovery link alone — the transport path + the ticket —
+/// cannot answer the challenge: only the phrase re-derives the signing key, and
+/// the ticket is spent on first use (replay is dead). Binding the KeyPackage
+/// ties the proof to exactly the credential being re-added to the group, and the
+/// republic id to exactly this workspace.
+pub(crate) fn seat_proof_bytes(ticket: &str, key_package_hex: &str, republic_id: &str) -> Vec<u8> {
+    let mut m = Vec::with_capacity(
+        20 + ticket.len() + key_package_hex.len() + republic_id.len() + 2,
+    );
+    m.extend_from_slice(b"molt-seat-proof-v1\0");
+    m.extend_from_slice(ticket.as_bytes());
+    m.push(0);
+    m.extend_from_slice(key_package_hex.as_bytes());
+    m.push(0);
+    m.extend_from_slice(republic_id.as_bytes());
+    m
+}
+
+/// The **rejoiner** builds its seat proof: sign the canonical bytes with the
+/// identity key re-derived from its recovery phrase. Returns the signature (hex).
+pub fn make_seat_proof(
+    identity_sk: &molt_storage::SigningKey,
+    ticket: &str,
+    key_package_hex: &str,
+    republic_id: &str,
+) -> String {
+    molt_storage::identity_sign(
+        identity_sk,
+        &seat_proof_bytes(ticket, key_package_hex, republic_id),
+    )
+}
+
+/// The **approver** verifies a seat proof against the seat's *anchored* public
+/// key (from the genesis identity table). A leaked recovery link (transport +
+/// ticket) without the phrase cannot produce a signature that verifies here, and
+/// a request that fails this check never reaches the approval prompt (concept
+/// §3.3).
+pub fn verify_seat_proof(
+    anchored_pk: &str,
+    ticket: &str,
+    key_package_hex: &str,
+    republic_id: &str,
+    sig_hex: &str,
+) -> bool {
+    molt_storage::identity_verify(
+        anchored_pk,
+        &seat_proof_bytes(ticket, key_package_hex, republic_id),
+        sig_hex,
+    )
+}
+
 /// Verify a `Seal` proposal before ratifying it, and return the exact canonical
 /// bytes to sign. The republic id must be the content-derived value (no forged
 /// salt), and our own `(name, key)` must be in the roster — otherwise a founder
@@ -1915,6 +1970,21 @@ mod ritual_ops {
 mod tests {
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
+
+    #[test]
+    fn seat_proof_binds_ticket_key_package_and_republic() {
+        let (sk, pk) = molt_storage::derive_identity_key(&[7u8; 32], "ws");
+        let sig = make_seat_proof(&sk, "ticket-abc", "aabbcc", "rep-id-1");
+        // the genuine proof verifies against the anchored key
+        assert!(verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-1", &sig));
+        // tampering ANY of the three bound fields breaks it
+        assert!(!verify_seat_proof(&pk, "other", "aabbcc", "rep-id-1", &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "ffff", "rep-id-1", &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-2", &sig));
+        // a different identity key (a leaked link without the phrase) can't forge it
+        let (_, pk2) = molt_storage::derive_identity_key(&[8u8; 32], "ws");
+        assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", &sig));
+    }
 
     /// A fully-signed 2-member sealed roster with real keys.
     fn valid_roster() -> SealedRoster {
