@@ -211,22 +211,51 @@ The product never uses the seam.
 
 ---
 
-## 8. Implementation map (to be filled as the ritual lands)
+## 8. Implementation map (status as of 2026-07-08)
 
-- **Seat-proof crypto** — `crates/molt-engine/src/founding.rs`
+- **Seat-proof crypto** — ✅ `crates/molt-engine/src/founding.rs`
   (`make_seat_proof`, `verify_seat_proof`, `seat_proof_bytes`).
-- **MLS re-key** — `crates/molt-net/src/mls.rs` (`restore_member` →
-  `(commit, welcome)`).
-- **Threshold re-admission** — the `Membership{Restored}` producer + commit path
-  in `crates/molt-engine/src/chain.rs` (governance) — *to build*.
-- **Catch-up + genesis adoption** — `crates/molt-engine/src/chain.rs`
-  (`receive_block` headless-genesis, `request_catchup`, `serve_chain_from`).
-- **The recovery ritual driver + wire vocabulary** — `founding.rs` /
-  `lifecycles.rs` (recovery link, `RecoverRequest`, coordinator flow, rejoiner
-  finish) — *to build*, reusing the founding invite/transport machinery.
-- **Proven** — a two-instance engine test (coordinator re-admits a rejoiner that
-  proves its seat, re-keys it, and the rejoiner catches up the chain) — *to
-  write, test-first*.
+- **MLS re-key** — ✅ `crates/molt-net/src/mls.rs` (`restore_member` →
+  `(commit, welcome)`; `join_from_welcome`). Unit-tested end to end.
+- **Threshold re-admission** — ✅ `crates/molt-engine/src/chain.rs`: the
+  `Membership{Restored}` producer (`propose_membership`), the coordinator's
+  seat-proof→propose decision (`verify_and_propose_restore`), and the commit
+  trigger that runs the re-key on a committed Restored block (`coordinator_rekey`).
+- **Catch-up + genesis adoption** — ✅ `crates/molt-engine/src/chain.rs`
+  (`receive_block` headless-genesis, `request_catchup`, `serve_chain_from`) +
+  `recovery.rs::sealed_roster_from_genesis`.
+- **Recovery wire vocabulary** — ✅ `RecoveryInvite` link + `RitualMsg::Recover`
+  (request) + `RitualMsg::Welcome` (re-admit) in `molt-net`/`recovery.rs`.
+- **Coordinator link-mint** — ✅ `Command::RecoverInviteStart` (co-equal tool) →
+  `cmd_recover_invite_start` → `recovery::spawn_recovery_provisioning` (mints the
+  dedicated recovery queue on the runtime transport, wires the recv loop, renders
+  the link) + the spend-once ticket guard in `cmd_net_recover_requested`. Proven:
+  `two_instances.rs::recovery_flows_over_a_coordinator_minted_link`.
+- **Rejoiner driver** — ✅ `recovery.rs::run_rejoin` / `rejoin_over_smp`
+  (re-derive identity → fresh KeyPackage → `RecoverRequest` → await `Welcome` →
+  `join_from_welcome`). Proven with real crypto (post-rekey bidirectional
+  decryption) + two authentication tests (wrong phrase, doctored link) in
+  `two_instances.rs`.
+
+**Still open (the coupled integration):**
+- **Coordinator distribution — `coordinator_rekey`'s TODO.** One
+  `restore_member` yields `(commit, welcome)`; the Welcome must reach the
+  rejoiner's reply queue AND the commit must reach the other survivors, or the
+  group forks (coordinator advances its epoch, survivors do not). These are
+  coupled — do NOT ship the Welcome half alone.
+- **⚠ Design fork (deferred, user 2026-07-08 "decide later"): how the re-key
+  commit reaches survivors.** §6 decided a *recovery star*, but the runtime-mesh
+  send path today carries only encrypted `EventEnvelope`s (no raw handshake
+  frame), so BOTH the star and a mesh-broadcast need new plumbing. The receive
+  side already merges inbound commits (`MlsMember::decrypt` → `MlsIncoming::Commit`).
+  Re-confirm star-vs-mesh before building this half.
+- **Rejoiner follow-on: mesh re-establishment → catch-up → materialize.** After
+  `run_rejoin`, the rejoiner is in the group but has no mesh links to survivors;
+  it needs them to `ChainRequest{from:0}` and receive the served chain, then
+  `sealed_roster_from_genesis` + materialize. How it (re)joins the running mesh
+  is itself a design question to settle.
+- **Proven end to end** — the full 3-instance E2E (≥3 members so re-admitting one
+  leaves ≥m survivors to commit the Restored block) — *to write once the above land*.
 
 The state model this completes is `persistent_chain.md` (Phase 4); the founding
 it mirrors is `founding_ritual.md`.
