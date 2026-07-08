@@ -536,6 +536,68 @@ fn spawn_founder_recv(
     });
 }
 
+/// Map a returning member's [`invite::RecoverRequest`] to the internal
+/// [`Command::NetRecoverRequested`] — the coordinator recv loop's one decode.
+/// The reply-queue handover is re-serialized to the opaque string core carries.
+#[cfg_attr(not(test), allow(dead_code))] // wired by the recovery link-mint increment
+pub(crate) fn recover_command(r: invite::RecoverRequest, generation: u64) -> Command {
+    Command::NetRecoverRequested {
+        member: r.member,
+        identity_pk: r.identity_pk,
+        key_package: r.key_package,
+        ticket: r.ticket,
+        seat_proof: r.seat_proof,
+        reply: r
+            .reply
+            .as_ref()
+            .and_then(|h| serde_json::to_string(h).ok())
+            .unwrap_or_default(),
+        generation: Some(generation),
+    }
+}
+
+/// The recovery coordinator's recv loop on its recovery queue — the twin of
+/// [`spawn_founder_recv`]. It accepts a returning member's
+/// [`invite::RitualMsg::Recover`] and issues [`Command::NetRecoverRequested`]
+/// (the engine verifies the seat proof + proposes re-admission); any other
+/// message on this queue is ignored.
+#[allow(dead_code)] // spawned by the recovery link-mint increment
+pub(crate) fn spawn_coordinator_recv(
+    transport: RitualTransport,
+    rcv: RcvQueue,
+    wrap: WrapKey,
+    generation: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        let Ok(mut rx) = transport.subscribe(&rcv).await else {
+            return;
+        };
+        let mut reasm = molt_net::Reassembler::new();
+        while let Some(delivery) = rx.recv().await {
+            let Ok(plain) = molt_net::wrap::unwrap_block(&wrap, &delivery.block) else {
+                delivery.ack.ack();
+                continue;
+            };
+            let outcome = reasm.push(&plain);
+            delivery.ack.ack();
+            let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
+                continue;
+            };
+            let Ok(invite::RitualMsg::Recover(r)) =
+                serde_json::from_slice::<invite::RitualMsg>(&bytes)
+            else {
+                continue; // only a recovery request belongs on this queue
+            };
+            let cmd = recover_command(r, generation);
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
 /// Provision the founder's per-seat invite queues over SMP **off the actor**
 /// — SMP `create_queue` is a live NEW round-trip, which the synchronous
 /// command handler must not block on. Each seat gets its recv loop wired,
@@ -1991,6 +2053,54 @@ mod ritual_ops {
 mod tests {
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
+
+    #[test]
+    fn recover_command_maps_the_request_and_encodes_the_reply() {
+        let r = invite::RecoverRequest {
+            member: "walter".to_string(),
+            identity_pk: "aa".to_string(),
+            key_package: "bb".to_string(),
+            ticket: "cc".to_string(),
+            seat_proof: "dd".to_string(),
+            reply: Some(invite::ReplyHandover {
+                server: "smp://f@h".to_string(),
+                queue_id: "ee".to_string(),
+                wrap: "ff".to_string(),
+            }),
+        };
+        let Command::NetRecoverRequested {
+            member,
+            key_package,
+            ticket,
+            seat_proof,
+            reply,
+            generation,
+            ..
+        } = recover_command(r, 7)
+        else {
+            panic!("expected NetRecoverRequested");
+        };
+        assert_eq!(member, "walter");
+        assert_eq!(key_package, "bb");
+        assert_eq!(ticket, "cc");
+        assert_eq!(seat_proof, "dd");
+        assert_eq!(generation, Some(7));
+        assert!(reply.contains("smp://f@h"), "the reply handover is encoded: {reply}");
+
+        // no reply queue → empty handover string
+        let bare = invite::RecoverRequest {
+            member: "x".to_string(),
+            identity_pk: String::new(),
+            key_package: String::new(),
+            ticket: String::new(),
+            seat_proof: String::new(),
+            reply: None,
+        };
+        let Command::NetRecoverRequested { reply, .. } = recover_command(bare, 1) else {
+            panic!("expected NetRecoverRequested");
+        };
+        assert_eq!(reply, "");
+    }
 
     #[test]
     fn seat_proof_binds_ticket_key_package_and_republic() {
