@@ -386,6 +386,38 @@ impl State {
         self.next_id = self.next_id.max(id + 1);
     }
 
+    /// A recovery coordinator's re-admit decision (recovery step ❸): verify a
+    /// returning member's seat proof against its ANCHORED identity, then propose
+    /// the threshold `Membership{Restored}` block. Recovery re-derives the same
+    /// identity, so the requested key must equal the anchored one (it re-keys the
+    /// MLS leaf, not the roster). Returns the proposal id, or the refusal reason.
+    // Wired by the coordinator's `NetRecoverRequested` handler (the transport
+    // handshake increment); today the decision + its test exist.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn verify_and_propose_restore(
+        &mut self,
+        member: &str,
+        requested_pk: &str,
+        key_package_hex: &str,
+        ticket: &str,
+        seat_proof: &str,
+    ) -> Result<u64, String> {
+        let anchored = self
+            .replica
+            .as_ref()
+            .and_then(|r| r.identities.iter().find(|i| i.member == member))
+            .map(|i| i.identity_pk.clone())
+            .ok_or_else(|| format!("no anchored seat for {member}"))?;
+        if requested_pk != anchored {
+            return Err("recovery must re-derive the seat's own identity key".to_string());
+        }
+        let rid = self.republic_id();
+        if !crate::founding::verify_seat_proof(&anchored, ticket, key_package_hex, &rid, seat_proof) {
+            return Err(format!("seat proof for {member} does not verify"));
+        }
+        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored))
+    }
+
     /// Distinct collected approvals for a proposal (for the UI progress).
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
         self.pending_sigs.get(&id).map(|p| p.sigs.len()).unwrap_or(0)
@@ -1153,6 +1185,44 @@ mod tests {
             ),
             "the sealed block re-admits the member"
         );
+    }
+
+    /// Recovery step ❸: a coordinator re-admits a returning member ONLY on a
+    /// valid seat proof against the anchored identity — a forged proof, or a
+    /// request that would re-key to a different identity, is refused. A pass
+    /// proposes the threshold Restored block.
+    #[test]
+    fn a_coordinator_re_admits_only_a_valid_seat_proof() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        let rid = b.republic_id.clone();
+        let ticket = "recovery-ticket-xyz";
+        let kp_hex = "beef";
+
+        // the returning member (dora) signs the seat proof with its OWN key
+        let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid);
+        let id = coord
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good)
+            .expect("a valid seat proof re-admits");
+        assert!(matches!(
+            coord.proposal_changes.get(&id),
+            Some(ChainChange::Membership {
+                op: MembershipOp::Restored,
+                ..
+            })
+        ));
+
+        // a proof signed by the WRONG key (petra forging dora's) is rejected
+        let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid);
+        assert!(coord
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged)
+            .is_err());
+
+        // a request that re-keys the seat to a DIFFERENT identity is rejected —
+        // recovery re-derives the SAME key
+        assert!(coord
+            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good)
+            .is_err());
     }
 
     /// A rejoiner that lost everything (no chain, no head) bootstraps from the
