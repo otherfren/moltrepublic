@@ -323,14 +323,67 @@ impl State {
         self.chain_head.is_some()
     }
 
-    /// The committed change a pending proposal would enact.
+    /// The committed change a pending proposal would enact. A registered change
+    /// (any kind — e.g. a `Membership` re-admission) wins; otherwise it is a
+    /// gated `Applied` reconstructed from the surface proposal.
     fn proposal_change(&self, id: u64) -> Option<ChainChange> {
+        if let Some(change) = self.proposal_changes.get(&id) {
+            return Some(change.clone());
+        }
         let p = self.proposals.get(&id)?;
         Some(ChainChange::Applied {
             proposal_id: id,
             surface: p.surface,
             payload: p.payload.clone(),
         })
+    }
+
+    /// Propose a membership change (re-admit a returning member, or add a seat)
+    /// and co-sign it — the producer for `Membership` blocks (recovery step ❹).
+    /// Further approvals arrive from the other members; a block seals at m-of-n.
+    /// Returns the proposal id.
+    // Wired by the recovery-ritual coordinator flow (a seat-proof-verified
+    // RecoverRequest triggers it) — the transport handshake is the next
+    // increment; today only the producer + its threshold test exist.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn propose_membership(
+        &mut self,
+        op: MembershipOp,
+        member: &str,
+        identity_pk: &str,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.proposal_changes.insert(
+            id,
+            ChainChange::Membership {
+                op,
+                member: member.to_string(),
+                identity_pk: identity_pk.to_string(),
+            },
+        );
+        if self.config.self_cosign {
+            self.chain_sign_and_gossip_approval(id);
+        }
+        id
+    }
+
+    /// Register a membership proposal another member put forward, so this node
+    /// signs the SAME change (its bytes) when it approves.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn receive_membership_proposal(
+        &mut self,
+        id: u64,
+        op: MembershipOp,
+        member: &str,
+        identity_pk: &str,
+    ) {
+        self.proposal_changes.entry(id).or_insert_with(|| ChainChange::Membership {
+            op,
+            member: member.to_string(),
+            identity_pk: identity_pk.to_string(),
+        });
+        self.next_id = self.next_id.max(id + 1);
     }
 
     /// Distinct collected approvals for a proposal (for the UI progress).
@@ -443,6 +496,10 @@ impl State {
         let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
         self.record(env);
         self.after_block_applied(&block);
+        // clean up the proposal we just committed — a Membership block carries
+        // no proposal id for after_block_applied to key on, so drop it here
+        self.pending_sigs.remove(&proposal_id);
+        self.proposal_changes.remove(&proposal_id);
         tracing::debug!(height = block.height, %proposal_id, "sealed and broadcast a chain block");
     }
 
@@ -790,6 +847,29 @@ mod tests {
             let block = self.seal(height, change, signers);
             self.push(block);
         }
+
+        /// A member's signing key.
+        fn key(&self, member: &str) -> &SigningKey {
+            &self
+                .keys
+                .iter()
+                .find(|(m, _)| m == member)
+                .expect("known member")
+                .1
+        }
+
+        /// A member's anchored identity pk (from the genesis roster).
+        fn pk(&self, member: &str) -> String {
+            let ChainChange::Genesis { identities, .. } = &self.blocks[0].change else {
+                panic!("block 0 is not a genesis");
+            };
+            identities
+                .iter()
+                .find(|i| i.member == member)
+                .expect("anchored member")
+                .identity_pk
+                .clone()
+        }
     }
 
     #[test]
@@ -1017,6 +1097,62 @@ mod tests {
             "the lagging member caught up to the survivor"
         );
         assert!(peer.pending_blocks.is_empty());
+    }
+
+    /// A chain-governed member that can also SIGN (holds its identity key).
+    fn chain_signer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+        let mut s = chain_peer(member, b, chain);
+        s.identity_sk = Some(b.key(member).clone());
+        s
+    }
+
+    /// Re-admission (recovery step ❹): a survivor proposes a `Membership{Restored}`
+    /// change and, once the threshold of members has signed it (here + "over the
+    /// mesh"), a Restored block seals — the group's threshold-gated authorization
+    /// of a returning member. Recovery keeps the same anchored identity key.
+    #[test]
+    fn a_threshold_restored_block_re_admits_a_member() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let walter_pk = b.pk("walter");
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+
+        // petra proposes re-admitting walter and co-signs (1 of 2 — pending)
+        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk);
+        assert_eq!(
+            petra.chain_head.as_ref().expect("head").height,
+            0,
+            "one signature does not re-admit"
+        );
+
+        // walter learns the proposal + petra's signature, then co-signs
+        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk);
+        let petra_sig = petra
+            .pending_sigs
+            .get(&id)
+            .expect("petra's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "petra")
+            .expect("petra signed")
+            .sig
+            .clone();
+        walter.receive_approval(id, "petra", 1, &petra_sig);
+        walter.chain_sign_and_gossip_approval(id);
+
+        // the Restored block seals at 2-of-2
+        let head = walter.chain_head.as_ref().expect("head");
+        assert_eq!(head.height, 1);
+        assert!(
+            matches!(
+                walter.chain.last().expect("block").change,
+                ChainChange::Membership {
+                    op: MembershipOp::Restored,
+                    ..
+                }
+            ),
+            "the sealed block re-admits the member"
+        );
     }
 
     /// A rejoiner that lost everything (no chain, no head) bootstraps from the

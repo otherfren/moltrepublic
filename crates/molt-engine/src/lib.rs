@@ -336,6 +336,11 @@ pub(crate) struct State {
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
     pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
+    /// The exact [`molt_core::ChainChange`] each open proposal is voting on
+    /// (keyed by proposal id) — so approvers sign, and the committer seals, the
+    /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
+    /// re-admission). Ephemeral, rebuilt from the proposal gossip.
+    pub(crate) proposal_changes: HashMap<u64, molt_core::ChainChange>,
     /// Out-of-order catch-up buffer: blocks received ahead of our head (keyed
     /// by height), applied as the head advances to meet them. Ephemeral.
     pub(crate) pending_blocks: std::collections::BTreeMap<u64, molt_core::ChainBlock>,
@@ -450,6 +455,7 @@ impl State {
             chain_head: None,
             chain_applied: HashMap::new(),
             pending_sigs: HashMap::new(),
+            proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
             active: None,

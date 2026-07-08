@@ -279,6 +279,7 @@ impl State {
         self.chain_head = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();
+        self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;
         self.chat.clear();
