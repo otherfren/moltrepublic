@@ -24,6 +24,7 @@
 //! (navigation, settings, workspaces) and [`lifecycles`] (the three
 //! engine-run mocks: restore / create / join over one `RunCore`).
 
+mod chain;
 mod chat;
 mod configstore;
 mod events;
@@ -37,6 +38,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
+#[doc(hidden)]
+pub use chain::{verify_chain, ChainHead};
 #[doc(hidden)]
 pub use founding::{
     join_founding_over_smp, make_seat_proof, ritual_join_over_smp, run_ritual_member,

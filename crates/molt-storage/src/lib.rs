@@ -198,6 +198,15 @@ pub fn republic_id(
     hex::encode(h.finalize())
 }
 
+/// Lowercase-hex SHA-256 of `bytes`. The persistent chain hashes each block's
+/// [`molt_core::block_link_bytes`] with this to get the link the *next* block's
+/// `prev` points at; the bytes already carry their own domain tag, so no prefix
+/// is added here.
+pub fn content_hash(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// The member's per-workspace **identity keypair** (transport concept
 /// §3.3): Ed25519, derived from the member's own recovery seed via the
 /// same HKDF hierarchy — per-workspace (keeps the fresh-per-group rule),

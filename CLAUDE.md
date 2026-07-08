@@ -79,6 +79,39 @@ Load-bearing invariants — do not weaken them:
   leaves no trace) and **one-shot** for `CreatePropose` (re-proposing would
   corrupt collected signatures — cancel and re-mint to change the charter).
 
+## The persistent-change chain is the shared state model
+
+Read `documents/persistent_chain.md` before touching `chain.rs` (in `molt-core`
+and `molt-engine`). The republic's persistent state is a **single-branch,
+threshold-signed commit-block chain** ("git patches"); the founding is block 0.
+It is the state-model twin of the founding ritual — load-bearing invariants:
+
+- **Chain persistent changes only; chat + deliberation stay ephemeral.** Blocks
+  are the founding, gated `Applied` transitions, and `Membership` changes. Chat,
+  reactions, and the propose/approve gossip are *flüchtig* — never blocks. The
+  boundary: ephemeral by default; content becomes a block only when a gated,
+  threshold-approved change makes it durable republic knowledge.
+- **The genesis reuses the roster bytes.** Block 0's `sigs` *are* the founding
+  attestations and its `approval_bytes` *is* `roster_canonical_bytes` — do not
+  fork a second signing path for it. Genesis is n-of-n; later blocks are m-of-n.
+- **Signatures are position-bound.** Members sign over `republic_id ‖ height ‖
+  change`, so a block cannot move/reorder/splice without re-signing. A "re-base"
+  onto a contended slot means a **new height → the members re-sign**. `prev` is a
+  structural hash-link `verify_chain` checks, not part of the member signature.
+- **`verify_chain` is hard-reject, all-or-nothing.** Bad sig, broken `prev`,
+  height gap, below-threshold, repeated/unknown signer, double-applied proposal,
+  forged genesis id → the whole chain is rejected. A partially-trusted prefix
+  could fork state, so there is no soft path. Deterministic convergence demands it.
+- **Versioned byte layouts, like the roster.** `approval_bytes` /
+  `block_link_bytes` carry `molt-chain-change-v1` / `molt-chain-block-v1` — bump
+  the tag and update `verify_chain` together if you change a layout, or
+  signatures silently break. `ChainChange` is additive-only (`WorkspaceEvent`
+  rule): an unknown variant must stop a reader from extending the chain.
+- **Additive, not an `EventEnvelope` change.** The chain is a *separate*
+  structure; the local ephemeral event log (chat + materialized blocks) is
+  untouched. Phases 2–4 (real threshold wiring, catch-up, recovery) are still
+  open — today's running governance is the single-operator simulation.
+
 ## MLS / OpenMLS reference (crates/molt-net/src/mls.rs)
 
 Pure-Rust only (no C toolchain — same posture as the pure-Rust TLS/Ed448). Facts

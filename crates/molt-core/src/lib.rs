@@ -19,6 +19,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The republic's persistent-change chain: a single-branch, threshold-signed
+/// sequence of commit blocks (the founding is block 0). See [`chain`].
+pub mod chain;
+pub use chain::{
+    approval_bytes, block_link_bytes, ChainBlock, ChainChange, MembershipOp, GENESIS_PREV,
+};
+
 /// A member of the republic (the holder of one threshold share). In this
 /// scaffold it is just a display handle; the real per-group MLS identity is a
 /// future `molt-identity` concern.
