@@ -562,9 +562,20 @@ without sockets, everything below tests without the engine.
    group over a **live direct mesh** (bootstrap over the founding star → per-pair
    queues → real supervisor over the workspace log), and a clean close persists
    the ratchet + queue creds so a reopen resumes it (see the delta note above).
-   **Open:** recovery rejoin (Remove+Add, `MemberRestored`) and the
-   recovery-invite UI (mint / copy / re-issue) with the manual approval surface;
-   the §6 write-ahead outbox (full crash-safety, currently clean-close only).
+   **Recovery crypto DONE (2026-07-08):** the two primitives are locked +
+   tested — `MlsMember::restore_member` (Remove(lost leaf)+Add(re-derived
+   KeyPackage) as inline proposals in one commit; old leaf locked out) and the
+   non-interactive **seat proof** (`make_seat_proof`/`verify_seat_proof`:
+   `Sign(identity_sk, ticket‖KeyPackage‖republic_id)` verified against the seat's
+   anchored key). **Open:** the recovery ENGINE FLOW that drives them — mint
+   recovery-invite (queue+ticket, persisted in the minter's transport.state),
+   the approver's verify→approve→`restore_member`, distributing the commit across
+   the live members + the Welcome to the rejoiner, the rejoiner re-bootstrapping
+   into the mesh, the `MemberRestored` log event, the approval UI, and the MCP
+   verbs (`mint_recovery_invite`/`approve_join`/`reject_join`, on BOTH surfaces).
+   Founding-ritual-sized + distributed — best built with a multi-node/real-app
+   verification loop. Also open: the §6 write-ahead outbox (full crash-safety,
+   currently clean-close only).
 3. **T3** `SmpTransport` over TCP+TLS with fingerprint pinning; docker
    integration tests.
 4. **T4** Tor `local` mode via SOCKS5h + stream isolation; the no-leak
