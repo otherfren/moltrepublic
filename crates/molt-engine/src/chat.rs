@@ -30,7 +30,7 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    fn post_message(&mut self, from: MemberId, body: String, quote: Option<u64>) {
+    pub(crate) fn post_message(&mut self, from: MemberId, body: String, quote: Option<u64>) {
         // a quote only sticks when it points at an existing message
         let quote = quote.filter(|q| usize::try_from(*q).is_ok_and(|q| q < self.chat.len()));
         let msg = ChatMessage {

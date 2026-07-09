@@ -234,6 +234,53 @@ pub(crate) fn spawn_recovery_provisioning(
     });
 }
 
+/// Send the MLS **Welcome** to a returning member's reply queue off the actor —
+/// the coordinator's half of `recovery_ritual.md` §4 ❺: once the `Restored`
+/// block commits and `restore_member` produced `(commit, welcome)`, the commit
+/// is broadcast to the survivors (a recorded `MlsCommit`) and this delivers the
+/// welcome that brings the rejoiner back into the group. `reply_json` is the
+/// opaque `ReplyHandover` the rejoiner advertised in its `RecoverRequest`.
+pub(crate) fn spawn_welcome_send(transport: RitualTransport, reply_json: String, welcome: Vec<u8>) {
+    tokio::spawn(async move {
+        let Ok(handover) = serde_json::from_str::<invite::ReplyHandover>(&reply_json) else {
+            tracing::warn!("recovery reply handover is not valid JSON — cannot send the welcome");
+            return;
+        };
+        let (Ok(qid), Ok(wrap_bytes)) =
+            (hex::decode(&handover.queue_id), hex::decode(&handover.wrap))
+        else {
+            tracing::warn!("recovery reply handover has malformed hex — cannot send the welcome");
+            return;
+        };
+        let Ok(wrap_arr): Result<[u8; 32], _> = wrap_bytes.try_into() else {
+            tracing::warn!("recovery reply wrap key is not 32 bytes");
+            return;
+        };
+        let snd = SndQueueAddr {
+            server: handover.server,
+            id: QueueId::from_bytes(qid),
+        };
+        let wrap = WrapKey::from_bytes(wrap_arr);
+        let msg = invite::RitualMsg::Welcome {
+            welcome: hex::encode(&welcome),
+        };
+        let Ok(payload) = serde_json::to_vec(&msg) else {
+            return;
+        };
+        if let Err(e) = supervisor::send_framed(
+            &transport,
+            &snd,
+            &wrap,
+            msg_id("coordinator", "rejoiner", 1),
+            &payload,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "sending the recovery welcome failed");
+        }
+    });
+}
+
 /// The rejoiner's finished state after the recovery ritual's re-key: it is back
 /// inside the encrypted group, holding its re-derived identity and the fresh
 /// group snapshot. What remains (the next increment) is to re-establish the
@@ -400,6 +447,53 @@ mod tests {
             "spaces in the republic travel as dashes"
         );
         assert_eq!(RecoveryInvite::parse(&link).as_ref(), Some(&inv));
+    }
+
+    /// The coordinator's welcome-send half: given the rejoiner's advertised reply
+    /// handover, `spawn_welcome_send` delivers the MLS Welcome to that queue as a
+    /// `RitualMsg::Welcome`, intact.
+    #[tokio::test]
+    async fn the_welcome_reaches_the_rejoiners_reply_queue() {
+        use molt_net::LoopbackHub;
+
+        let hub = LoopbackHub::calm();
+        let transport = RitualTransport::Loopback(hub.transport());
+        let reply_q = transport.create_queue().await.expect("reply queue");
+        let reply_wrap = WrapKey::fresh().expect("wrap");
+        let handover = invite::ReplyHandover {
+            server: "loopback".to_string(),
+            queue_id: hex::encode(&reply_q.snd.id.0),
+            wrap: hex::encode(reply_wrap.to_bytes()),
+        };
+        let handover_json = serde_json::to_string(&handover).expect("handover json");
+        let welcome = vec![0xADu8, 0xBE, 0xEF, 0x01];
+
+        spawn_welcome_send(transport.clone(), handover_json, welcome.clone());
+
+        // the rejoiner receives the Welcome on its reply queue, intact
+        let mut rx = transport.subscribe(&reply_q.rcv).await.expect("subscribe");
+        let mut reasm = molt_net::Reassembler::new();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let delivery = rx.recv().await.expect("reply queue open");
+                let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
+                    delivery.ack.ack();
+                    continue;
+                };
+                let outcome = reasm.push(&plain);
+                delivery.ack.ack();
+                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
+                    if let Ok(invite::RitualMsg::Welcome { welcome }) =
+                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                    {
+                        break welcome;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the welcome arrives in time");
+        assert_eq!(got, hex::encode(&welcome));
     }
 
     #[test]

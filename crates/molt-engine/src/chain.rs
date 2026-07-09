@@ -611,9 +611,12 @@ impl State {
 
     /// The coordinator's MLS re-key once a `Restored` block committed: run
     /// `restore_member` on the runtime group with the returning member's fresh
-    /// KeyPackage → `(commit, welcome)`, to be distributed over the recovery
-    /// transport (that distribution is the next increment). Consumes the pending
-    /// recovery. A node with no runtime group logs and does nothing.
+    /// KeyPackage → `(commit, welcome)`, then distribute both. The commit is
+    /// broadcast to the survivors over the mesh (a recorded `MlsCommit`, sent raw
+    /// so each survivor advances to the new epoch); the welcome goes to the
+    /// returning member's reply queue. Finally the rejoin is announced in the
+    /// group chat. Consumes the pending recovery. A node with no runtime group
+    /// logs and does nothing.
     fn coordinator_rekey(&mut self, member: &str) {
         let Some(pending) = self.pending_recovery.remove(member) else {
             return;
@@ -623,10 +626,29 @@ impl State {
             return;
         };
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
-            Some(Ok((_commit, _welcome))) => {
-                // TODO(recovery transport): fan `_commit` out to the survivors +
-                // send `_welcome` to `pending.reply` over the recovery star
-                tracing::info!(%member, "re-keyed the MLS group for the returning member");
+            Some(Ok((commit, welcome))) => {
+                let me = self.member();
+                // 1) broadcast the raw re-key commit to the survivors: recorded as
+                // an `MlsCommit`, the outbox fans it out; every survivor merges it
+                // and advances to the new epoch (it MUST precede any new-epoch
+                // traffic — hence recorded before the announcement below).
+                let env =
+                    self.make_env(me.clone(), WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) });
+                self.record(env);
+                // 2) deliver the welcome to the returning member's reply queue so
+                // it rejoins the group (off the actor — a live send).
+                if let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) {
+                    crate::recovery::spawn_welcome_send(transport, pending.reply.clone(), welcome);
+                }
+                // 3) announce the rejoin in the group chat — AFTER the commit, so
+                // the survivors have advanced to the epoch this notice is
+                // encrypted at (ephemeral, best-effort like all chat).
+                self.post_message(
+                    me,
+                    format!("🔑 {member} rejoined the republic after recovery"),
+                    None,
+                );
+                tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }
             Some(Err(e)) => tracing::warn!(%member, error = %e, "MLS re-key failed"),
             None => tracing::warn!(%member, "no runtime MLS group to re-key (state-only)"),
