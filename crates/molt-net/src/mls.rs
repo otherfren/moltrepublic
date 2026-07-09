@@ -180,12 +180,14 @@ impl MlsMember {
             .ciphersuite(SUITE)
             // ship the ratchet tree in-band so a joiner needs nothing else
             .use_ratchet_tree_extension(true)
-            // keep a bounded window of PAST epochs' receive keys so a delayed
-            // pre-re-key message crossing a commit still decrypts (the
-            // backward half of cross-epoch delivery; forward = FutureEpoch
-            // retry). Two epochs: one in-flight re-key plus margin — a
-            // deliberate, small forward-secrecy trade.
-            .max_past_epochs(2)
+            // NO past-epoch receive window (`max_past_epochs` stays 0): the
+            // recovery re-key exists to EVICT a possibly-compromised device,
+            // and past-epoch keys would let that evicted leaf keep speaking as
+            // the member, authenticated, until further re-keys (pinned by
+            // `the_evicted_leaf_cannot_speak_after_the_rekey`). The price: a
+            // delayed pre-re-key message crossing the commit is dropped
+            // (chat is ephemeral; chain blocks have catch-up). Forward-racing
+            // messages are covered separately by the FutureEpoch retry.
             .build();
         let group = MlsGroup::new(&self.provider, &self.signer, &config, self.credential())
             .map_err(|e| MlsError::Mls(format!("creating group: {e:?}")))?;
@@ -299,8 +301,9 @@ impl MlsMember {
                 )))
             }
         };
-        // same past-epoch window as create_group (the config is per-node)
-        let config = MlsGroupJoinConfig::builder().max_past_epochs(2).build();
+        // same policy as create_group: NO past-epoch receive window — the
+        // eviction property of a recovery re-key outranks delayed delivery
+        let config = MlsGroupJoinConfig::builder().build();
         let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
             .map_err(|e| MlsError::Mls(format!("staging welcome: {e:?}")))?;
         let group = staged
@@ -628,12 +631,64 @@ mod tests {
         );
     }
 
-    /// **Cross-epoch delivery, backward direction.** A message encrypted at
-    /// the PREVIOUS epoch that arrives after the receiver already merged the
-    /// re-key commit still decrypts — `max_past_epochs` keeps a bounded window
-    /// of receive keys, so a delayed pre-re-key chat is not lost either.
+    /// **Security: the EVICTED device cannot keep speaking.** The recovery
+    /// re-key exists to evict a possibly-compromised lost device. A message the
+    /// removed leaf encrypts at its OLD epoch must be rejected by every
+    /// survivor — keeping past-epoch receive keys around (`max_past_epochs`)
+    /// would let the stolen device keep speaking as the member, authenticated,
+    /// for an unbounded wall-clock window (epochs only advance on re-keys).
     #[test]
-    fn an_old_epoch_message_still_decrypts_after_a_rekey() {
+    fn the_evicted_leaf_cannot_speak_after_the_rekey() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        let mut cara = cara;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        // bob's (compromised) device is evicted by the recovery re-key
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (commit, _welcome2) =
+            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+        match founder.decrypt(&commit).expect("merge") {
+            MlsIncoming::Commit => {}
+            other => panic!("expected a commit, got {other:?}"),
+        }
+
+        // the stolen device keeps encrypting at its old epoch — every survivor
+        // (the re-keyer AND a member that merged the broadcast commit) must
+        // reject it, never attribute it to the member
+        let stolen = bob.encrypt(b"i was evicted but still talk").expect("enc");
+        assert!(
+            !matches!(founder.decrypt(&stolen), Ok(MlsIncoming::Application { .. })),
+            "a survivor that merged the re-key must reject the evicted leaf's sends"
+        );
+        let stolen = bob.encrypt(b"second try").expect("enc");
+        assert!(
+            !matches!(cara.decrypt(&stolen), Ok(MlsIncoming::Application { .. })),
+            "the re-keying coordinator must reject the evicted leaf's sends"
+        );
+    }
+
+    /// **Cross-epoch delivery, backward direction — deliberately NOT
+    /// supported.** A message encrypted at the PREVIOUS epoch that arrives
+    /// after the receiver already merged the re-key commit is rejected:
+    /// keeping past-epoch receive keys (`max_past_epochs`) would equally let a
+    /// just-evicted device keep speaking as the member (see
+    /// [`the_evicted_leaf_cannot_speak_after_the_rekey`]), so forward secrecy
+    /// wins. A delayed pre-re-key message is dropped — chat is ephemeral and
+    /// chain blocks have catch-up.
+    #[test]
+    fn an_old_epoch_message_is_rejected_after_a_rekey() {
         let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
         let bob = MlsMember::new(&key(2), "bob").expect("bob");
         let cara = MlsMember::new(&key(3), "cara").expect("cara");
@@ -657,11 +712,10 @@ mod tests {
             cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
         let delayed = founder.encrypt(b"sent before the re-key").expect("enc");
 
-        // the delayed epoch-N message arrives at cara AFTER its re-key
-        assert_app(
-            cara.decrypt(&delayed).expect("an old-epoch message within the window decrypts"),
-            "founder",
-            b"sent before the re-key",
+        // the delayed epoch-N message arriving AFTER the re-key is rejected
+        assert!(
+            !matches!(cara.decrypt(&delayed), Ok(MlsIncoming::Application { .. })),
+            "past-epoch messages must not decrypt after a re-key"
         );
     }
 

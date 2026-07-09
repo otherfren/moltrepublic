@@ -283,17 +283,21 @@ The product never uses the seam.
   supervisor rebuild, and the rejoiner's engine stands its runtime net up over
   the re-established mesh. `RejoinOutcome.mesh` / `NetRecoverSealed.mesh`.
 
-- **Cross-epoch delivery** — ✅ (2026-07-09), both directions. *Forward:* a
-  message encrypted at an epoch the receiver has not reached classifies as
+- **Cross-epoch delivery** — ✅ forward direction (2026-07-09). A message
+  encrypted at an epoch the receiver has not reached classifies as
   `MlsIncoming::FutureEpoch` (the epoch header is compared before processing);
   the recv loop holds it — acks unfired, bounded buffer, shed = transport
   redelivery — and retries after every merged commit, so a chat (or the
   Proposed/Approved gossip of the lone-coordinator burst) racing ahead of the
-  re-key commit is delivered, not lost. *Backward:* `max_past_epochs(2)` keeps
-  a bounded window of past receive keys, so a delayed pre-re-key message
-  crossing the commit still decrypts (a small, deliberate forward-secrecy
-  trade). Pinned in `mls.rs` (both directions + the removed-leaf lock-out
-  restated) and `two_instances.rs::a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost`.
+  re-key commit is delivered, not lost. Pinned in `mls.rs` and
+  `two_instances.rs::a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost`.
+  The **backward** direction (a delayed pre-re-key message arriving after the
+  commit) is deliberately NOT supported: a past-epoch receive window
+  (`max_past_epochs`) would equally let the just-EVICTED device keep speaking
+  as the member — defeating the re-key's whole point — so such messages are
+  rejected (pinned by `the_evicted_leaf_cannot_speak_after_the_rekey` /
+  `an_old_epoch_message_is_rejected_after_a_rekey`). Chat is ephemeral; chain
+  blocks have catch-up.
 
 **Still open (deferred, not recovery-blocking):**
 - **Recovery UI** — the minted link surfaces only as `session.notice`
