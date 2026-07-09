@@ -108,7 +108,6 @@ impl RecoveryInvite {
 /// constitution and its `sigs` are the founding attestations, so the rejoiner
 /// materializes its local workspace from the verified chain (no live founder).
 /// `None` if the block is not a genesis.
-#[cfg_attr(not(test), allow(dead_code))] // wired by the rejoiner materialize increment
 pub(crate) fn sealed_roster_from_genesis(
     block: &molt_core::ChainBlock,
 ) -> Option<molt_core::SealedRoster> {
@@ -235,12 +234,19 @@ pub(crate) fn spawn_recovery_provisioning(
 }
 
 /// Send the MLS **Welcome** to a returning member's reply queue off the actor —
-/// the coordinator's half of `recovery_ritual.md` §4 ❺: once the `Restored`
+/// the coordinator's half of `recovery_ritual.md` §4 ❺–❽: once the `Restored`
 /// block commits and `restore_member` produced `(commit, welcome)`, the commit
 /// is broadcast to the survivors (a recorded `MlsCommit`) and this delivers the
-/// welcome that brings the rejoiner back into the group. `reply_json` is the
-/// opaque `ReplyHandover` the rejoiner advertised in its `RecoverRequest`.
-pub(crate) fn spawn_welcome_send(transport: RitualTransport, reply_json: String, welcome: Vec<u8>) {
+/// welcome that brings the rejoiner back into the group — bundled with the full
+/// `chain` (JSON of `Vec<ChainBlock>`) so the rejoiner catches its state up over
+/// this same channel (option A). `reply_json` is the opaque `ReplyHandover` the
+/// rejoiner advertised in its `RecoverRequest`.
+pub(crate) fn spawn_welcome_send(
+    transport: RitualTransport,
+    reply_json: String,
+    welcome: Vec<u8>,
+    chain_json: String,
+) {
     tokio::spawn(async move {
         let Ok(handover) = serde_json::from_str::<invite::ReplyHandover>(&reply_json) else {
             tracing::warn!("recovery reply handover is not valid JSON — cannot send the welcome");
@@ -263,6 +269,7 @@ pub(crate) fn spawn_welcome_send(transport: RitualTransport, reply_json: String,
         let wrap = WrapKey::from_bytes(wrap_arr);
         let msg = invite::RitualMsg::Welcome {
             welcome: hex::encode(&welcome),
+            chain: chain_json,
         };
         let Ok(payload) = serde_json::to_vec(&msg) else {
             return;
@@ -282,10 +289,10 @@ pub(crate) fn spawn_welcome_send(transport: RitualTransport, reply_json: String,
 }
 
 /// The rejoiner's finished state after the recovery ritual's re-key: it is back
-/// inside the encrypted group, holding its re-derived identity and the fresh
-/// group snapshot. What remains (the next increment) is to re-establish the
-/// runtime mesh, catch the chain up from any survivor, and materialize the local
-/// workspace from the verified chain (`recovery_ritual.md` §4 ❼–❽).
+/// inside the encrypted group, holding its re-derived identity, the fresh group
+/// snapshot, and the **verified** persistent chain caught up over the recovery
+/// channel. What remains (option A's follow-on) is for the engine to materialize
+/// the local workspace from `sealed` + `chain` (`recovery_ritual.md` §4 ❼–❽).
 #[derive(Debug, Clone)]
 pub struct RejoinOutcome {
     /// The recovered seat's member handle (from the link).
@@ -293,12 +300,19 @@ pub struct RejoinOutcome {
     /// The re-derived identity pk — equals the anchored roster key (the
     /// coordinator verified the seat proof against it), hex.
     pub pk: String,
-    /// The republic's content-derived id (carried in the link; the rejoiner
-    /// re-verifies it from the genesis once it catches up).
+    /// The republic's content-derived id — re-verified against the genesis
+    /// (not just the link), hex.
     pub republic_id: String,
     /// The MLS group snapshot after processing the Welcome — the rejoiner can
     /// decrypt live group traffic again.
     pub mls_snapshot: Vec<u8>,
+    /// The full persistent chain, **verified from block 0** (signatures, links,
+    /// threshold). Empty on a chain-less republic.
+    pub chain: Vec<molt_core::ChainBlock>,
+    /// The founding roster reconstructed from the genesis block — what the
+    /// engine materializes the local workspace from. `None` on a chain-less
+    /// republic (no genesis to rebuild it).
+    pub sealed: Option<molt_core::SealedRoster>,
 }
 
 /// Drive the **returning member's side** of the recovery ritual over `transport`
@@ -390,20 +404,63 @@ pub async fn run_rejoin<T: Transport>(
         let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
             continue;
         };
-        if let Ok(invite::RitualMsg::Welcome { welcome }) =
+        if let Ok(invite::RitualMsg::Welcome { welcome, chain }) =
             serde_json::from_slice::<invite::RitualMsg>(&bytes)
         {
+            // ❻ rejoin the encrypted group
             let welcome_bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
             mls.join_from_welcome(&welcome_bytes).map_err(|e| e.to_string())?;
             let snap = mls.snapshot().map_err(|e| e.to_string())?;
+            // ❼–❽ catch up: VERIFY the served chain from block 0 (an untrusted
+            // deliverer is safe — the signatures + links + threshold are checked
+            // here, not trusted), then reconstruct the founding roster from the
+            // genesis for the engine to materialize from.
+            let (verified_chain, sealed) = verify_served_chain(&chain, &inv, &pk)?;
             return Ok(RejoinOutcome {
                 member: inv.member,
                 pk,
                 republic_id: inv.republic_id,
                 mls_snapshot: snap,
+                chain: verified_chain,
+                sealed,
             });
         }
     }
+}
+
+/// Verify a coordinator-served chain from block 0 and reconstruct the founding
+/// roster from its genesis — the rejoiner's catch-up check (`recovery_ritual.md`
+/// §4 ❽, §5.2). Hard-rejects a chain whose signatures/links/threshold do not
+/// verify, whose genesis id differs from the seat-proof-bound `republic_id` (so
+/// a coordinator cannot swap in a different republic's chain), or that does not
+/// anchor the rejoiner's own `(member, pk)`. An empty chain (a chain-less/demo
+/// republic) verifies trivially to no roster.
+fn verify_served_chain(
+    chain_json: &str,
+    inv: &RecoveryInvite,
+    pk: &str,
+) -> Result<(Vec<molt_core::ChainBlock>, Option<molt_core::SealedRoster>), String> {
+    if chain_json.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let blocks: Vec<molt_core::ChainBlock> =
+        serde_json::from_str(chain_json).map_err(|e| format!("decoding the served chain: {e}"))?;
+    // the WHOLE chain, verified from block 0 (signatures, prev-links, threshold)
+    crate::chain::verify_chain(&blocks)?;
+    let genesis = blocks.first().ok_or("the served chain is empty")?;
+    let sealed = sealed_roster_from_genesis(genesis)
+        .ok_or("the served chain does not root on a genesis block")?;
+    if sealed.republic_id != inv.republic_id {
+        return Err("the served chain's republic id does not match the recovery link".to_string());
+    }
+    if !sealed
+        .identities
+        .iter()
+        .any(|i| i.member == inv.member && i.identity_pk == pk)
+    {
+        return Err("the served chain's roster does not anchor our own (name, key)".to_string());
+    }
+    Ok((blocks, Some(sealed)))
 }
 
 /// Rejoin a republic from a `molt://recover/…` link over the real SMP server the
@@ -468,7 +525,7 @@ mod tests {
         let handover_json = serde_json::to_string(&handover).expect("handover json");
         let welcome = vec![0xADu8, 0xBE, 0xEF, 0x01];
 
-        spawn_welcome_send(transport.clone(), handover_json, welcome.clone());
+        spawn_welcome_send(transport.clone(), handover_json, welcome.clone(), String::new());
 
         // the rejoiner receives the Welcome on its reply queue, intact
         let mut rx = transport.subscribe(&reply_q.rcv).await.expect("subscribe");
@@ -483,7 +540,7 @@ mod tests {
                 let outcome = reasm.push(&plain);
                 delivery.ack.ack();
                 if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
-                    if let Ok(invite::RitualMsg::Welcome { welcome }) =
+                    if let Ok(invite::RitualMsg::Welcome { welcome, .. }) =
                         serde_json::from_slice::<invite::RitualMsg>(&bytes)
                     {
                         break welcome;
@@ -563,5 +620,96 @@ mod tests {
             sigs: Vec::new(),
         };
         assert!(sealed_roster_from_genesis(&applied).is_none());
+    }
+
+    /// A real, n-of-n-signed single-block genesis chain for `members`
+    /// (name, signing key, pk) and its content-derived republic id.
+    fn signed_genesis(
+        members: &[(&str, &molt_storage::SigningKey, &str)],
+        rule_m: u8,
+    ) -> (Vec<ChainBlock>, String) {
+        let identities: Vec<MemberIdentity> = members
+            .iter()
+            .map(|(m, _, pk)| MemberIdentity {
+                member: (*m).to_string(),
+                identity_pk: (*pk).to_string(),
+            })
+            .collect();
+        let rule_n = u8::try_from(members.len()).expect("small roster");
+        let republic_id = molt_storage::republic_id("Guild", rule_m, rule_n, &identities);
+        let change = ChainChange::Genesis {
+            name: "Guild".to_string(),
+            republic_id: republic_id.clone(),
+            rule_m,
+            rule_n,
+            identities,
+            agenda: "found it".to_string(),
+        };
+        let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
+        let sigs = members
+            .iter()
+            .map(|(m, sk, _)| RosterAttestation {
+                member: (*m).to_string(),
+                sig: molt_storage::identity_sign(sk, &bytes),
+            })
+            .collect();
+        let genesis = ChainBlock {
+            height: 0,
+            prev: GENESIS_PREV.to_string(),
+            change,
+            sigs,
+        };
+        (vec![genesis], republic_id)
+    }
+
+    fn recovery_inv(member: &str, republic_id: &str) -> RecoveryInvite {
+        RecoveryInvite {
+            republic: "Guild".to_string(),
+            member: member.to_string(),
+            ticket: "0011223344".to_string(),
+            server: "loopback".to_string(),
+            queue_id: "aa".to_string(),
+            wrap: "bb".to_string(),
+            republic_id: republic_id.to_string(),
+        }
+    }
+
+    /// The rejoiner's catch-up check: a served chain is verified from block 0,
+    /// its genesis id must match the seat-proof-bound link id, and it must anchor
+    /// the rejoiner's own key — every other case is hard-rejected.
+    #[test]
+    fn a_served_chain_verifies_from_genesis_and_hard_rejects_tampering() {
+        let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let (chain, republic_id) = signed_genesis(
+            &[("coordinator", &coord_sk, &coord_pk), ("bob", &bob_sk, &bob_pk)],
+            2,
+        );
+        let chain_json = serde_json::to_string(&chain).expect("chain json");
+        let inv = recovery_inv("bob", &republic_id);
+
+        // valid: verifies + reconstructs the roster that anchors bob
+        let (blocks, sealed) =
+            verify_served_chain(&chain_json, &inv, &bob_pk).expect("a valid served chain");
+        assert_eq!(blocks.len(), 1);
+        let sealed = sealed.expect("a genesis roster");
+        assert!(sealed.identities.iter().any(|i| i.member == "bob" && i.identity_pk == bob_pk));
+
+        // an empty chain (chain-less republic) verifies trivially to no roster
+        assert_eq!(verify_served_chain("", &inv, &bob_pk).expect("empty ok").0.len(), 0);
+
+        // a doctored link id (≠ the genesis id) is rejected
+        let bad_id = recovery_inv("bob", "an-attackers-substituted-id");
+        assert!(verify_served_chain(&chain_json, &bad_id, &bob_pk).is_err());
+
+        // a rejoiner whose key the roster does not anchor is rejected
+        assert!(verify_served_chain(&chain_json, &inv, &coord_pk).is_err());
+        assert!(verify_served_chain(&chain_json, &recovery_inv("mallory", &republic_id), &bob_pk).is_err());
+
+        // a tampered chain (a flipped signature) is hard-rejected by verify_chain
+        let mut tampered = chain.clone();
+        tampered[0].sigs[0].sig = "0".repeat(128);
+        let tampered_json = serde_json::to_string(&tampered).expect("json");
+        assert!(verify_served_chain(&tampered_json, &inv, &bob_pk).is_err());
     }
 }

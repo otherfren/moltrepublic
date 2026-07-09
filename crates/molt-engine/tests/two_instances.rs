@@ -1341,6 +1341,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
     let reply_wrap = WrapKey::from_bytes(reply_wrap_bytes);
     let welcome_msg = invite::RitualMsg::Welcome {
         welcome: hex::encode(&welcome),
+        chain: String::new(), // this MLS-only test serves no chain
     };
     supervisor::send_framed(
         &t,

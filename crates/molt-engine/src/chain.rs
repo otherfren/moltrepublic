@@ -635,10 +635,17 @@ impl State {
                 let env =
                     self.make_env(me.clone(), WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) });
                 self.record(env);
-                // 2) deliver the welcome to the returning member's reply queue so
-                // it rejoins the group (off the actor — a live send).
+                // 2) deliver the welcome + the whole chain to the returning
+                // member's reply queue so it rejoins the group AND catches its
+                // state up over this same channel (option A). Off the actor.
                 if let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) {
-                    crate::recovery::spawn_welcome_send(transport, pending.reply.clone(), welcome);
+                    let chain_json = serde_json::to_string(&self.chain).unwrap_or_default();
+                    crate::recovery::spawn_welcome_send(
+                        transport,
+                        pending.reply.clone(),
+                        welcome,
+                        chain_json,
+                    );
                 }
                 // 3) announce the rejoin in the group chat — AFTER the commit, so
                 // the survivors have advanced to the epoch this notice is

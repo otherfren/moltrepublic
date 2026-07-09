@@ -202,12 +202,18 @@ pub enum RitualMsg {
     /// coordinator → returning member: the MLS **Welcome** that re-admits a
     /// recovered seat (`recovery_ritual.md` §4 ❺–❻), sent on the rejoiner's reply
     /// queue once the `Membership{Restored}` block commits and the coordinator
-    /// re-keys the group. Unlike founding's `Genesis`, it carries no roster — the
-    /// rejoiner catches the whole chain up from any survivor and materializes
-    /// from that, so the Welcome need only bring it back inside the group.
+    /// re-keys the group. It also carries the **persistent chain** (genesis →
+    /// head) so the rejoiner catches its whole state up over this same recovery
+    /// channel (recovery option A) — verified from block 0, no live mesh needed.
     Welcome {
         /// The MLS Welcome for the re-key (hex of the wire bytes).
         welcome: String,
+        /// The full persistent chain as JSON of `Vec<ChainBlock>` — the
+        /// coordinator's `chain.state`, for the rejoiner to verify + materialize.
+        /// Opaque here (this layer keeps no core types). Empty on a chain-less
+        /// republic.
+        #[serde(default)]
+        chain: String,
     },
 }
 
