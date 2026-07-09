@@ -532,15 +532,30 @@ impl State {
         mesh: &[molt_core::MeshLink],
         mls_blob: &[u8],
     ) -> Option<NetRuntime> {
+        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
+        // share the group between the supervisor (advances the ratchet) and the
+        // engine (snapshots it on a clean close, so a reopen resumes it)
+        self.build_real_net_shared(transport, mesh, Arc::new(Mutex::new(mls)))
+    }
+
+    /// [`Self::build_real_net`] over an **already-live** shared group — the
+    /// mesh-extension rebuild hands the running `Arc` straight through instead
+    /// of a snapshot→restore round-trip: a late encrypt by the dying outbox
+    /// advances the SAME ratchet the new supervisor continues from, so sender
+    /// generations are never reused (a reused generation is replay-rejected
+    /// and silently lost at every peer); resends of already-sent envelopes
+    /// dedup by msg id at the receiver.
+    pub(crate) fn build_real_net_shared(
+        &mut self,
+        transport: crate::founding::RitualTransport,
+        mesh: &[molt_core::MeshLink],
+        mls_arc: Arc<Mutex<molt_net::MlsMember>>,
+    ) -> Option<NetRuntime> {
         let active = self.active.as_ref()?;
         let links: Vec<PeerLink> = mesh.iter().filter_map(PeerLink::from_mesh).collect();
         if links.is_empty() {
             return None;
         }
-        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
-        // share the group between the supervisor (advances the ratchet) and the
-        // engine (snapshots it on a clean close, so a reopen resumes it)
-        let mls_arc = Arc::new(Mutex::new(mls));
         let owner = self.member();
         let peer_names: Vec<MemberId> = links.iter().map(|l| l.member.clone()).collect();
         let feed = StorageLog::new(active.handle.clone());
@@ -969,25 +984,39 @@ impl State {
         if !net.is_real() {
             return Ok(Reply::Ack);
         }
+        // everything fallible is hoisted BEFORE the teardown: a failed
+        // precondition must leave the old, working mesh standing (the rebuild
+        // itself cannot start until the old supervisor is down — a second
+        // subscriber on the same SMP queues would supersede the first
+        // server-side)
         let member = link.member.clone();
+        if PeerLink::from_mesh(&link).is_none() {
+            tracing::warn!(%member, "mesh extension link is malformed — keeping the old mesh");
+            return Ok(Reply::Ack);
+        }
         let mut mesh = net.mesh().to_vec();
         mesh.retain(|l| l.member != link.member);
         mesh.push(link);
-        let Some(transport) = net.runtime_transport() else {
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
             return Ok(Reply::Ack);
         };
-        let Some((Some(mls_blob), creds)) = net.crypto_for_close() else {
-            tracing::warn!(%member, "mesh extension: no MLS snapshot to rebuild from");
+        if self.active.is_none() {
             return Ok(Reply::Ack);
-        };
-        // stop the old supervisor before rebuilding over the grown mesh
+        }
+        // stop the old supervisor, then rebuild over the grown mesh SHARING
+        // the live group Arc — no snapshot→restore: a late encrypt by a dying
+        // outbox task advances the same ratchet the new supervisor continues
+        // from, so sender generations are never rewound/reused (the snapshot
+        // variant silently lost one message per peer in that race)
         self.teardown_net();
-        if let Some(new_net) = self.build_real_net(transport, &mesh, &mls_blob) {
-            self.net = Some(new_net);
+        if let Some(new_net) = self.build_real_net_shared(transport, &mesh, group.clone()) {
             // the grown mesh must survive a reopen — a LIVE merge (the rebuilt
-            // supervisor keeps saving its cursors afterwards, so no seal)
-            if let Some(active) = self.active.as_ref() {
-                active.handle.persist_mesh_crypto_blocking(Some(mls_blob), creds, mesh);
+            // supervisor keeps saving its cursors afterwards, so no seal),
+            // snapshotted AFTER the rebuild from the shared group
+            let crypto = new_net.crypto_for_close();
+            self.net = Some(new_net);
+            if let (Some(active), Some((mls, creds))) = (self.active.as_ref(), crypto) {
+                active.handle.persist_mesh_crypto_blocking(mls, creds, mesh);
             }
             self.session.notice = format!("mesh-extended:{member}");
             self.emit_session(SessionScope::Full);
