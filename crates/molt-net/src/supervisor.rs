@@ -699,13 +699,27 @@ async fn recv_task<S, K>(
                     }
                 }
                 MlsDecode::FutureEpoch => {
-                    tracing::debug!(peer = %peer.member, "holding a future-epoch message for its commit");
-                    epoch_buffer.push((id.0, complete, acks));
-                    if epoch_buffer.len() > EPOCH_BUFFER_MAX {
-                        // bounded: shed the oldest, acks unfired — the
-                        // transport redelivers it once the commit has landed
-                        epoch_buffer.remove(0);
+                    if epoch_buffer.len() >= EPOCH_BUFFER_MAX {
+                        // bounded: shed the NEWEST (this one), acks unfired —
+                        // the transport redelivers it once the commit has
+                        // landed. Newest, not oldest: the buffer must stay in
+                        // arrival order, which is the sender-ratchet
+                        // generation order — a rotated-out OLD message would
+                        // redeliver after the drain advanced the ratchet far
+                        // past its generation and fail the sender's
+                        // out-of-order window, while the shed newest simply
+                        // decrypts as the next generation. The reassembler
+                        // must FORGET the shed id, or the redelivered copy
+                        // would classify as a duplicate of an "accepted"
+                        // message and be acked away — erasing the only
+                        // durable copy (same discipline as the reorder
+                        // buffer's shed path below).
+                        reasm.forget(id);
+                        drop(acks);
                         tracing::warn!(peer = %peer.member, "epoch buffer full — shedding onto redelivery");
+                    } else {
+                        tracing::debug!(peer = %peer.member, "holding a future-epoch message for its commit");
+                        epoch_buffer.push((id.0, complete, acks));
                     }
                 }
                 MlsDecode::Discard => ack_all(acks), // replay / proposal / undecryptable

@@ -2512,3 +2512,116 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
     )
     .await;
 }
+
+/// **Cross-epoch retry under buffer pressure: a SHED message is not lost.**
+/// The future-epoch hold is bounded (64 per link); the 65th racing message is
+/// itself shed onto transport redelivery (newest, so the buffer stays in
+/// sender-ratchet generation order). The shed message's acks are unfired on
+/// purpose — but the reassembler must also FORGET its message id, or the
+/// redelivered copy classifies as a duplicate of an "accepted" message and is
+/// acked away: the only durable copy erased, silent permanent loss. Here `a`
+/// races 65 chats ahead of the re-key commit; after the commit lands, ALL 65
+/// must reach `b` — the shed one via redelivery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shed_future_epoch_message_survives_via_redelivery() {
+    use molt_net::{LoopbackHub, MlsChannel};
+    use std::sync::{Arc, Mutex};
+
+    let (a_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("a phrase"));
+    let (b_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("b phrase"));
+    let zoe_phrase = molt_storage::generate_seed_phrase().expect("zoe phrase");
+    let (zoe_sk, _) = member_identity(&zoe_phrase);
+    let mut a_member = MlsMember::new(&a_sk, "a").expect("a mls");
+    let mut b_member = MlsMember::new(&b_sk, "b").expect("b mls");
+    let zoe_member = MlsMember::new(&zoe_sk, "zoe").expect("zoe mls");
+    a_member.create_group().expect("a creates the group");
+    let welcome = a_member
+        .add_members(&[
+            b_member.key_package().expect("b kp"),
+            zoe_member.key_package().expect("zoe kp"),
+        ])
+        .expect("add b + zoe")
+        .expect("a welcome");
+    b_member.join_from_welcome(&welcome).expect("b joins");
+    let a_mls = Arc::new(Mutex::new(a_member));
+    let b_mls = Arc::new(Mutex::new(b_member));
+
+    let hub = LoopbackHub::calm();
+    let mut links = hub
+        .full_mesh(&["a".to_string(), "b".to_string()])
+        .expect("mesh wiring");
+    let a_links = links.remove("a").expect("a links");
+    let b_links = links.remove("b").expect("b links");
+    let a_log = MemLog::new();
+    let b_sink = RecordSink::default();
+    let (a_wake, a_wake_rx) = watch::channel(0u64);
+    let (_b_wake, b_wake_rx) = watch::channel(0u64);
+    let _a_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("a".to_string(), a_links, 1),
+        a_log.clone(),
+        MemStateStore::new(),
+        RecordSink::default(),
+        a_wake_rx,
+        Some(MlsChannel::from_shared(a_mls.clone())),
+    );
+    let _b_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("b".to_string(), b_links, 2),
+        MemLog::new(),
+        MemStateStore::new(),
+        b_sink.clone(),
+        b_wake_rx,
+        Some(MlsChannel::from_shared(b_mls.clone())),
+    );
+
+    a_log.push(ev_chat("a", 1, "before the re-key"));
+    let _ = a_wake.send(1);
+    wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 1, "b gets the pre-re-key chat").await;
+
+    // a re-keys zoe's seat → a is at epoch N+1, b still at N
+    let zoe2 = MlsMember::new(&zoe_sk, "zoe").expect("zoe2 mls");
+    let (commit, _welcome) = a_mls
+        .lock()
+        .expect("a mls lock")
+        .restore_member("zoe", &zoe2.key_package().expect("zoe2 kp"))
+        .expect("re-key zoe");
+
+    // 65 chats race ahead of the commit — one more than the hold buffer, so
+    // the LAST one is shed onto transport redelivery while b is still at N
+    for i in 0..65u64 {
+        a_log.push(ev_chat("a", 2 + i, &format!("racing #{i}")));
+    }
+    let _ = a_wake.send(66);
+    // let the burst arrive and the shed happen (b holds 64, sheds #64)
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        !b_sink.messages().iter().any(|(_, e)| e.seq >= 2),
+        "nothing may deliver before the commit"
+    );
+    // only then does the commit follow
+    a_log.push(ev_mls_commit("a", 67, &hex::encode(&commit)));
+    let _ = a_wake.send(67);
+
+    // EVERY racing chat delivers — the held 64 on the commit, the shed one via
+    // redelivery (its acks were never fired, and its id must be forgotten so
+    // the redelivered copy re-completes instead of being acked as a duplicate)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let got: std::collections::HashSet<u64> = b_sink
+            .messages()
+            .iter()
+            .filter(|(from, e)| from == "a" && e.seq >= 2)
+            .map(|(_, e)| e.seq)
+            .collect();
+        if (2..=66).all(|s| got.contains(&s)) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "all 65 racing chats must deliver; missing: {:?}",
+            (2..=66).filter(|s| !got.contains(s)).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
