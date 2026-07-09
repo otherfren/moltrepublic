@@ -422,15 +422,15 @@ pub async fn run_rejoin<T: Transport>(
             // deliverer is safe — the signatures + links + threshold are checked
             // here, not trusted), then reconstruct the founding roster from the
             // genesis for the engine to materialize from.
-            let (verified_chain, sealed) = verify_served_chain(&chain, &inv, &pk)?;
+            let (verified_chain, sealed, live_roster) = verify_served_chain(&chain, &inv, &pk)?;
             // re-establish the runtime mesh (best-effort — the recovered STATE
             // is already safe, so a mesh failure degrades to option A, never
             // fails the recovery). Only after the chain verified: the survivor
-            // list comes from the verified roster, not the link.
-            let mesh = match (&sealed, bootstrap) {
-                (Some(s), true) => {
-                    let survivors: Vec<String> = s
-                        .identities
+            // list is the verified HEAD's live roster (membership blocks may
+            // have added seats after the genesis), never the link.
+            let mesh = match (sealed.is_some(), bootstrap) {
+                (true, true) => {
+                    let survivors: Vec<String> = live_roster
                         .iter()
                         .map(|i| i.member.clone())
                         .filter(|m| m != &inv.member)
@@ -470,39 +470,51 @@ pub async fn run_rejoin<T: Transport>(
     }
 }
 
-/// Verify a coordinator-served chain from block 0 and reconstruct the founding
-/// roster from its genesis — the rejoiner's catch-up check (`recovery_ritual.md`
-/// §4 ❽, §5.2). Hard-rejects a chain whose signatures/links/threshold do not
-/// verify, whose genesis id differs from the seat-proof-bound `republic_id` (so
-/// a coordinator cannot swap in a different republic's chain), or that does not
-/// anchor the rejoiner's own `(member, pk)`. An empty chain (a chain-less/demo
-/// republic) verifies trivially to no roster.
-fn verify_served_chain(
-    chain_json: &str,
-    inv: &RecoveryInvite,
-    pk: &str,
-) -> Result<(Vec<molt_core::ChainBlock>, Option<molt_core::SealedRoster>), String> {
+/// What [`verify_served_chain`] hands back: the verified blocks, the genesis
+/// constitution (what the workspace materializes from; `None` on a chain-less
+/// republic) and the verified head's **live roster** (the survivor set —
+/// membership blocks may have evolved it past the genesis).
+type ServedChain = (
+    Vec<molt_core::ChainBlock>,
+    Option<molt_core::SealedRoster>,
+    Vec<molt_core::MemberIdentity>,
+);
+
+/// Verify a coordinator-served chain from block 0 — the rejoiner's catch-up
+/// check (`recovery_ritual.md` §4 ❽, §5.2). Hard-rejects a chain whose
+/// signatures/links/threshold do not verify, whose genesis id differs from the
+/// seat-proof-bound `republic_id` (so a coordinator cannot swap in a different
+/// republic's chain), or whose **verified head** does not anchor the
+/// rejoiner's own `(member, pk)` — the head, not the genesis: `Membership`
+/// blocks evolve the roster, and a member who joined after the founding must
+/// still be able to recover. Returns the blocks, the genesis constitution
+/// (what the workspace materializes from) and the head's LIVE roster (the
+/// survivor set). An empty chain (chain-less/demo) verifies trivially.
+fn verify_served_chain(chain_json: &str, inv: &RecoveryInvite, pk: &str) -> Result<ServedChain, String> {
     if chain_json.is_empty() {
-        return Ok((Vec::new(), None));
+        return Ok((Vec::new(), None, Vec::new()));
     }
     let blocks: Vec<molt_core::ChainBlock> =
         serde_json::from_str(chain_json).map_err(|e| format!("decoding the served chain: {e}"))?;
-    // the WHOLE chain, verified from block 0 (signatures, prev-links, threshold)
-    crate::chain::verify_chain(&blocks)?;
+    // the WHOLE chain, verified from block 0 (signatures, prev-links,
+    // threshold) — the head carries the roster after every membership block
+    let head = crate::chain::verify_chain(&blocks)?;
     let genesis = blocks.first().ok_or("the served chain is empty")?;
     let sealed = sealed_roster_from_genesis(genesis)
         .ok_or("the served chain does not root on a genesis block")?;
-    if sealed.republic_id != inv.republic_id {
+    if head.republic_id != inv.republic_id {
         return Err("the served chain's republic id does not match the recovery link".to_string());
     }
-    if !sealed
+    if !head
         .identities
         .iter()
         .any(|i| i.member == inv.member && i.identity_pk == pk)
     {
-        return Err("the served chain's roster does not anchor our own (name, key)".to_string());
+        return Err(
+            "the served chain's live roster does not anchor our own (name, key)".to_string(),
+        );
     }
-    Ok((blocks, Some(sealed)))
+    Ok((blocks, Some(sealed), head.identities))
 }
 
 /// Re-join the **runtime mesh** after recovery — the rejoiner side of dynamic
@@ -1169,6 +1181,57 @@ mod tests {
         assert!(err.contains("0/1"), "the timeout names the shortfall: {err}");
     }
 
+    /// **A member who joined AFTER the genesis recovers against the verified
+    /// HEAD, not the genesis roster.** `verify_chain` evolves the identities
+    /// across `Membership` blocks; the self-anchor check and the survivor set
+    /// must use that head — a genesis-only check would refuse a post-genesis
+    /// member's recovery outright and mesh-announce to a stale roster.
+    #[test]
+    fn a_post_genesis_member_recovers_against_the_verified_head() {
+        use molt_core::{approval_bytes, block_link_bytes, ChainBlock, ChainChange, MembershipOp, RosterAttestation};
+
+        let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let (_dave_sk, dave_pk) = molt_storage::derive_identity_key(&[4u8; 32], "dave");
+        let (mut chain, republic_id) = signed_genesis(
+            &[("coordinator", &coord_sk, &coord_pk), ("bob", &bob_sk, &bob_pk)],
+            1,
+        );
+        // dave joins later: a threshold-committed Membership{Joined} block
+        let change = ChainChange::Membership {
+            op: MembershipOp::Joined,
+            member: "dave".to_string(),
+            identity_pk: dave_pk.clone(),
+        };
+        let bytes = approval_bytes(&republic_id, 1, &change);
+        let block1 = ChainBlock {
+            height: 1,
+            prev: molt_storage::content_hash(&block_link_bytes(&republic_id, &chain[0])),
+            sigs: vec![RosterAttestation {
+                member: "coordinator".to_string(),
+                sig: molt_storage::identity_sign(&coord_sk, &bytes),
+            }],
+            change,
+        };
+        chain.push(block1);
+        let chain_json = serde_json::to_string(&chain).expect("chain json");
+
+        // dave lost his device — his recovery must verify against the HEAD
+        let inv = recovery_inv("dave", &republic_id);
+        let (blocks, sealed, roster) = verify_served_chain(&chain_json, &inv, &dave_pk)
+            .expect("a post-genesis member recovers");
+        assert_eq!(blocks.len(), 2);
+        // the genesis constitution stays what the workspace materializes from …
+        assert_eq!(
+            sealed.expect("genesis roster").identities.len(),
+            2,
+            "the genesis constitution is untouched by later membership"
+        );
+        // … while the LIVE roster (survivor set, anchor base) is the head's
+        let names: Vec<&str> = roster.iter().map(|i| i.member.as_str()).collect();
+        assert_eq!(names, vec!["coordinator", "bob", "dave"]);
+    }
+
     /// The rejoiner's catch-up check: a served chain is verified from block 0,
     /// its genesis id must match the seat-proof-bound link id, and it must anchor
     /// the rejoiner's own key — every other case is hard-rejected.
@@ -1184,11 +1247,12 @@ mod tests {
         let inv = recovery_inv("bob", &republic_id);
 
         // valid: verifies + reconstructs the roster that anchors bob
-        let (blocks, sealed) =
+        let (blocks, sealed, roster) =
             verify_served_chain(&chain_json, &inv, &bob_pk).expect("a valid served chain");
         assert_eq!(blocks.len(), 1);
         let sealed = sealed.expect("a genesis roster");
         assert!(sealed.identities.iter().any(|i| i.member == "bob" && i.identity_pk == bob_pk));
+        assert_eq!(roster, sealed.identities, "no membership blocks: head == genesis");
 
         // an empty chain (chain-less republic) verifies trivially to no roster
         assert_eq!(verify_served_chain("", &inv, &bob_pk).expect("empty ok").0.len(), 0);
