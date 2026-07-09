@@ -580,7 +580,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
         .map_err(|e| e.to_string())?;
 
     // collect + MLS-authenticate every survivor's reply, bounded by `timeout`
-    // (best-effort like the founding bootstrap — the caller recovers mesh-less)
+    // (best-effort like the founding bootstrap)
     let deadline = tokio::time::Instant::now() + timeout;
     let mut announces: BTreeMap<String, mesh::MeshAnnounce> = BTreeMap::new();
     while announces.len() < survivors.len() {
@@ -593,7 +593,19 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
                 {
                     if survivors.contains(&from) {
                         if let Ok(a) = serde_json::from_slice::<mesh::MeshAnnounce>(&plaintext) {
-                            announces.insert(from, a);
+                            // validate BEFORE counting it: one malformed reply
+                            // (no queue for us / bad hex) must degrade to "that
+                            // survivor stayed silent", never fail the final
+                            // assembly and nuke the honest survivors' links
+                            let usable = a
+                                .queues
+                                .get(me)
+                                .is_some_and(|h| h.addr().is_some() && h.wrap_key().is_some());
+                            if usable {
+                                announces.insert(from, a);
+                            } else {
+                                tracing::warn!(%from, "mesh reply carries no usable queue for us — ignored");
+                            }
                         }
                     }
                 }
@@ -605,15 +617,34 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
                 for r in &readers {
                     r.abort(); // inbound readers only — safe to abort
                 }
-                return Err(format!(
-                    "mesh re-join timed out: {}/{} survivors replied",
-                    announces.len(),
-                    survivors.len()
-                ));
+                // NOBODY answered: mesh-less recovery (option A) is honest.
+                if announces.is_empty() {
+                    return Err(format!(
+                        "mesh re-join timed out: 0/{} survivors replied",
+                        survivors.len()
+                    ));
+                }
+                // SOME answered: keep their links. Those survivors have
+                // already re-pointed and persisted their side — discarding
+                // the whole mesh would leave them sending into queues nobody
+                // ever subscribes (a durable blackhole pairing). The silent
+                // rest stays unlinked until a later announce.
+                tracing::warn!(
+                    got = announces.len(),
+                    want = survivors.len(),
+                    "mesh re-join timed out — assembling the partial mesh"
+                );
+                break;
             }
         }
     }
-    let links = mesh::assemble_mesh(me, &my_inbound, &announces)?;
+    // assemble over the survivors that actually replied (all of them on the
+    // happy path; the answering subset after a timeout)
+    let inbound: BTreeMap<String, (molt_net::RcvQueue, WrapKey)> = my_inbound
+        .into_iter()
+        .filter(|(m, _)| announces.contains_key(m))
+        .collect();
+    let links = mesh::assemble_mesh(me, &inbound, &announces)?;
     Ok(links.iter().map(molt_net::PeerLink::to_mesh).collect())
 }
 
@@ -992,6 +1023,114 @@ mod tests {
         for l in &links {
             assert!(molt_net::PeerLink::from_mesh(l).is_some(), "link {l:?} is runnable");
         }
+    }
+
+    /// **One silent survivor must not cost the links that DID come back.** The
+    /// survivors that replied have already re-pointed and persisted their side
+    /// — discarding the whole mesh on a timeout would leave them sending into
+    /// queues nobody ever subscribes. The re-join returns the PARTIAL mesh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_partial_mesh_survives_a_silent_survivor() {
+        use molt_net::{mesh, supervisor, LoopbackHub, MlsIncoming, MlsMember, Transport};
+        use molt_net::{msg_id, Reassembler};
+
+        // coordinator + cara are the survivors; cara stays silent
+        let (coord_sk, _) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, _) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let (cara_sk, _) = molt_storage::derive_identity_key(&[3u8; 32], "cara");
+        let mut coord = MlsMember::new(&coord_sk, "coordinator").expect("coord mls");
+        let mut bob = MlsMember::new(&bob_sk, "bob").expect("bob mls");
+        let cara = MlsMember::new(&cara_sk, "cara").expect("cara mls");
+        coord.create_group().expect("group");
+        let welcome = coord
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add members")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        let hub = LoopbackHub::calm();
+        let transport = hub.transport();
+        let recover_q = transport.create_queue().await.expect("recovery queue");
+        let recover_wrap = WrapKey::fresh().expect("wrap");
+
+        let bob_transport = hub.transport();
+        let recover_snd = recover_q.snd.clone();
+        let rw = recover_wrap.clone();
+        let bob_task = tokio::spawn(async move {
+            rejoin_mesh(
+                "bob",
+                &["coordinator".to_string(), "cara".to_string()],
+                &bob_transport,
+                &mut bob,
+                &recover_snd,
+                &rw,
+                std::time::Duration::from_secs(2),
+            )
+            .await
+        });
+
+        // only the coordinator answers; cara never does
+        let coord_transport = hub.transport();
+        let coord_task = tokio::spawn(async move {
+            let mut rx = coord_transport.subscribe(&recover_q.rcv).await.expect("subscribe");
+            let mut reasm = Reassembler::new();
+            let ct = loop {
+                let d = rx.recv().await.expect("recovery queue open");
+                let Ok(plain) = molt_net::wrap::unwrap_block(&recover_wrap, &d.block) else {
+                    d.ack.ack();
+                    continue;
+                };
+                let out = reasm.push(&plain);
+                d.ack.ack();
+                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = out {
+                    if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                    {
+                        break hex::decode(&ct).expect("announce hex");
+                    }
+                }
+            };
+            let MlsIncoming::Application { plaintext, .. } =
+                coord.decrypt(&ct).expect("decrypt bob's announce")
+            else {
+                panic!("an application message");
+            };
+            let a: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("announce");
+            let target = a.queues.get("coordinator").expect("a queue for the coordinator");
+            let own_q = coord_transport.create_queue().await.expect("own queue");
+            let own_wrap = WrapKey::fresh().expect("own wrap");
+            let mut queues = std::collections::BTreeMap::new();
+            queues.insert("bob".to_string(), mesh::QueueHandover::of(&own_q.snd, &own_wrap));
+            let reply = mesh::MeshAnnounce { queues };
+            let ct = coord
+                .encrypt(&serde_json::to_vec(&reply).expect("encode"))
+                .expect("encrypt reply");
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            let payload = serde_json::to_vec(&msg).expect("payload");
+            supervisor::send_framed(
+                &coord_transport,
+                &target.addr().expect("addr"),
+                &target.wrap_key().expect("wrap"),
+                msg_id("coordinator", "bob", 1),
+                &payload,
+            )
+            .await
+            .expect("reply reaches bob");
+            own_q.snd
+        });
+
+        let links = tokio::time::timeout(std::time::Duration::from_secs(10), bob_task)
+            .await
+            .expect("bob finishes in time")
+            .expect("bob task")
+            .expect("a PARTIAL mesh is still a mesh");
+        let coord_snd = coord_task.await.expect("coordinator fake");
+        assert_eq!(links.len(), 1, "the answering survivor's link survives the timeout");
+        assert_eq!(links[0].member, "coordinator");
+        assert_eq!(links[0].snd_queue, hex::encode(&coord_snd.id.0));
     }
 
     /// A survivor that never replies bounds the wait: the mesh re-join fails
