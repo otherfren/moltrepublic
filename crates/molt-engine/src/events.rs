@@ -286,6 +286,7 @@ impl State {
         self.net_scope += 1;
         self.recovery_tickets.clear();
         self.recovery_mesh_window.clear();
+        self.mesh_extension_at.clear();
         self.replica = None;
         self.identity_sk = None;
         self.chain.clear();

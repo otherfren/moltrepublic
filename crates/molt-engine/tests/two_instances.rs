@@ -1947,6 +1947,37 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    // RATE LIMIT: an immediate SECOND announce from the same member must not
+    // trigger another teardown+rebuild+fsync round (a member could otherwise
+    // churn every peer's supervisor at will) — within the cooldown it is
+    // ignored: no reply lands on the newly announced queue
+    let third_q = hub.create_queue().await.expect("b's third queue");
+    let third_wrap = WrapKey::fresh().expect("third wrap");
+    let mut queues = std::collections::BTreeMap::new();
+    queues.insert(
+        "founder-a".to_string(),
+        mesh::QueueHandover::of(&third_q.snd, &third_wrap),
+    );
+    let announce = mesh::MeshAnnounce { queues };
+    let ct = b_group
+        .lock()
+        .expect("b group")
+        .encrypt(&serde_json::to_vec(&announce).expect("encode"))
+        .expect("encrypt second announce");
+    feed2.push(EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_003,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+    });
+    let _ = wake2.send(2);
+    let mut rx3 = hub.subscribe(&third_q.rcv).await.expect("subscribe third queue");
+    let got_reply = tokio::time::timeout(Duration::from_secs(3), rx3.recv()).await.is_ok();
+    assert!(
+        !got_reply,
+        "a second announce within the cooldown must be ignored (no reply, no rebuild)"
+    );
 }
 
 /// The `member_identity` derivation (`entropy → workspace-id "member" → key`),
@@ -2511,6 +2542,168 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
         "the raced-ahead chat to deliver after the commit",
     )
     .await;
+}
+
+/// **A malformed announce must not burn the recovery-mesh window.** The
+/// one-shot window is the rejoiner's ONLY chance to re-mesh over the recovery
+/// channel; spending it on an announce that authenticates (MLS) but fails to
+/// parse would kill the mesh phase on a mere version skew or client bug. The
+/// window may only be consumed by an announce that actually parses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_announce_does_not_burn_the_recovery_window() {
+    use molt_net::mesh;
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: tmp.path().join("coordinator").display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx, recovery_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap_recoverable(
+            molt_core::GroupConfig::demo(),
+            session_a,
+        );
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 1,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_join = b_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_join, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "resilient windows".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let _lost_device = b_task.await.expect("B task");
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // mint + full rejoin WITHOUT the built-in mesh phase — the test drives the
+    // announces itself so it can inject a malformed one first
+    a.execute(Command::RecoverInviteStart {
+        member: "member-b".to_string(),
+    })
+    .await
+    .expect("mint recovery link");
+    let material = tokio::task::spawn_blocking(move || {
+        recovery_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A mints the recovery link + hands the queue material out")
+    })
+    .await
+    .expect("recovery mint blocking");
+    let inv = molt_engine::RecoveryInvite::parse(&material.link).expect("actionable link");
+    let rejoin_transport = material.transport.clone();
+    let rejoin_phrase = b_phrase.clone();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::spawn(async move {
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, false).await
+        }),
+    )
+    .await
+    .expect("the rejoin finishes in time")
+    .expect("rejoin task")
+    .expect("the rejoin succeeds");
+
+    // the rejoiner is back in the group; the coordinator's window is armed.
+    // ❶ a malformed (but MLS-authentic) announce: valid ciphertext, junk JSON
+    let mut b_group = MlsMember::restore(&outcome.mls_snapshot).expect("restore b group");
+    let junk_ct = b_group.encrypt(b"this is not a MeshAnnounce").expect("enc junk");
+    let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&junk_ct) };
+    let payload = serde_json::to_vec(&msg).expect("payload");
+    supervisor::send_framed(
+        &material.transport,
+        &material.recover_snd,
+        &material.recover_wrap,
+        msg_id("member-b", "mesh-junk", 1),
+        &payload,
+    )
+    .await
+    .expect("junk announce sent");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // ❷ the real announce follows — it must still be honored
+    let new_q = material.transport.create_queue().await.expect("b's fresh queue");
+    let new_wrap = WrapKey::fresh().expect("fresh wrap");
+    let mut queues = std::collections::BTreeMap::new();
+    queues.insert(
+        "founder-a".to_string(),
+        mesh::QueueHandover::of(&new_q.snd, &new_wrap),
+    );
+    let announce = mesh::MeshAnnounce { queues };
+    let ct = b_group
+        .encrypt(&serde_json::to_vec(&announce).expect("encode"))
+        .expect("encrypt announce");
+    let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+    let payload = serde_json::to_vec(&msg).expect("payload");
+    supervisor::send_framed(
+        &material.transport,
+        &material.recover_snd,
+        &material.recover_wrap,
+        msg_id("member-b", "mesh-real", 1),
+        &payload,
+    )
+    .await
+    .expect("real announce sent");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.notice == "mesh-extended:member-b" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the real announce must still extend the mesh after a malformed one"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// **A mesh rebuild must not kill an outstanding recovery.** The recovery

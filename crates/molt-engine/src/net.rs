@@ -37,6 +37,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{Envelope, State};
 
+/// Minimum seconds between accepted mesh (re-)announces per member — each
+/// costs every peer a supervisor teardown+rebuild+fsync (see
+/// `State::spawn_mesh_extension`).
+const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -864,16 +869,19 @@ impl State {
             tracing::warn!("a recovery-queue mesh announce did not decrypt — dropped");
             return Ok(Reply::Ack);
         };
+        // parse BEFORE spending the one-shot window: a malformed (but
+        // authentic) announce must degrade to a dropped frame, not burn the
+        // rejoiner's only chance to re-mesh (version skew / client bug)
+        let Ok(announce) = serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain) else {
+            tracing::warn!(%announcer, "mesh announce is malformed — dropped (window kept)");
+            return Ok(Reply::Ack);
+        };
         // only the member whose re-key JUST completed may (re)announce here —
         // the recovery queue can never re-point another member's links
         if !self.recovery_mesh_window.remove(&announcer) {
             tracing::warn!(%announcer, "mesh announce outside a recovery window — dropped");
             return Ok(Reply::Ack);
         }
-        let Ok(announce) = serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain) else {
-            tracing::warn!(%announcer, "mesh announce is malformed — dropped");
-            return Ok(Reply::Ack);
-        };
         // relay VERBATIM: each survivor decrypts (and thereby authenticates)
         // the announcer itself, exactly like the founding star relay
         let me = self.member();
@@ -894,6 +902,19 @@ impl State {
         member: MemberId,
         announce: &molt_net::mesh::MeshAnnounce,
     ) {
+        // per-member cooldown: an extension costs a full supervisor
+        // teardown+rebuild+fsync on THIS node, so a member re-announcing
+        // within the window is ignored (its first announce always passes —
+        // recovery and honest rotation are one-shot; only rapid repeats are
+        // capped, bounding the churn a misbehaving member can inflict)
+        let now = crate::now_secs();
+        if let Some(last) = self.mesh_extension_at.get(&member) {
+            if now.saturating_sub(*last) < MESH_EXTENSION_COOLDOWN_SECS {
+                tracing::warn!(%member, "mesh announce inside the cooldown — ignored");
+                return;
+            }
+        }
+        self.mesh_extension_at.insert(member.clone(), now);
         let me = self.member();
         let Some(target) = announce.queues.get(&me) else {
             tracing::warn!(%member, "mesh announce carries no queue for this node");

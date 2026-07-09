@@ -623,15 +623,22 @@ impl State {
                     surface: *surface,
                 });
             }
-            // a re-admission committed: if THIS node coordinated it (holds the
-            // returning member's fresh KeyPackage), drive the MLS re-key
+            // a re-admission committed: on EVERY node, a threshold-approved
+            // recovery outranks the announce rate limit (the member's fresh
+            // announce must never be swallowed by a cooldown stamped for its
+            // previous life — e.g. a re-recovery within the window); if THIS
+            // node coordinated it (holds the returning member's fresh
+            // KeyPackage), it also drives the MLS re-key
             ChainChange::Membership {
                 op: MembershipOp::Restored,
                 member,
                 ..
-            } if self.pending_recovery.contains_key(member) => {
-                let member = member.clone();
-                self.coordinator_rekey(&member);
+            } => {
+                self.mesh_extension_at.remove(member);
+                if self.pending_recovery.contains_key(member) {
+                    let member = member.clone();
+                    self.coordinator_rekey(&member);
+                }
             }
             _ => {}
         }

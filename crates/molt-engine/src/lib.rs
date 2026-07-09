@@ -395,6 +395,12 @@ pub(crate) struct State {
     /// is handled. The recovery queue can never re-point any OTHER member's
     /// links.
     pub(crate) recovery_mesh_window: std::collections::HashSet<MemberId>,
+    /// Per-member cooldown for mesh extensions (`member → now_secs of the
+    /// last accepted announce`): folding a link in costs every peer a full
+    /// supervisor teardown+rebuild+fsync, so a member re-announcing inside
+    /// the window is ignored — one rotation per member per minute is ample,
+    /// and it caps the churn a misbehaving member can inflict.
+    pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -539,6 +545,7 @@ impl State {
             pending_recovery: HashMap::new(),
             recovery_tickets: std::collections::HashSet::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
+            mesh_extension_at: std::collections::HashMap::new(),
             active: None,
             net,
             net_ritual: None,
