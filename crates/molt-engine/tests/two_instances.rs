@@ -1524,3 +1524,153 @@ async fn a_doctored_recovery_link_id_is_rejected() {
         &req.seat_proof,
     ));
 }
+
+fn ev_chat(by: &str, seq: u64, body: &str) -> EventEnvelope {
+    EventEnvelope {
+        seq,
+        ts: 1_751_000_000 + seq,
+        by: by.to_string(),
+        body: WorkspaceEvent::Chat(ChatMessage::text(by, body, 1_751_000_000 + seq)),
+    }
+}
+
+fn ev_mls_commit(by: &str, seq: u64, commit_hex: &str) -> EventEnvelope {
+    EventEnvelope {
+        seq,
+        ts: 1_751_000_000 + seq,
+        by: by.to_string(),
+        body: WorkspaceEvent::MlsCommit {
+            commit: commit_hex.to_string(),
+        },
+    }
+}
+
+async fn wait_for(
+    sink: &RecordSink,
+    pred: impl Fn(&(MemberId, EventEnvelope)) -> bool,
+    what: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if sink.messages().iter().any(&pred) {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// **Recovery step ❺, distribution: the re-key commit rides the mesh in-order
+/// with chat.** Two survivors (a, b) share a live MLS group that also holds a
+/// third seat (zoe). `a` re-keys zoe's seat (`restore_member`) — advancing its
+/// own epoch — and broadcasts the resulting commit over the runtime mesh as a
+/// `WorkspaceEvent::MlsCommit` (sent RAW, not application-encrypted: the receiver
+/// needs it to REACH the new epoch). `b` applies it via its normal receive path.
+/// The proof it worked: `b` can decrypt a chat `a` sends AFTER the re-key — an
+/// epoch-N+1 message `b` could only read if it applied the commit. The reverse
+/// direction confirms the group stayed coherent, not just one-way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch() {
+    use molt_net::{LoopbackHub, MlsChannel};
+    use std::sync::{Arc, Mutex};
+
+    // a live MLS group: a + b are the meshed survivors; zoe is a third seat that
+    // gets re-keyed (added, but its device is "lost" — it never joins the mesh)
+    let (a_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("a phrase"));
+    let (b_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("b phrase"));
+    let zoe_phrase = molt_storage::generate_seed_phrase().expect("zoe phrase");
+    let (zoe_sk, _) = member_identity(&zoe_phrase);
+
+    let mut a_member = MlsMember::new(&a_sk, "a").expect("a mls");
+    let mut b_member = MlsMember::new(&b_sk, "b").expect("b mls");
+    let zoe_member = MlsMember::new(&zoe_sk, "zoe").expect("zoe mls");
+    a_member.create_group().expect("a creates the group");
+    let welcome = a_member
+        .add_members(&[
+            b_member.key_package().expect("b kp"),
+            zoe_member.key_package().expect("zoe kp"),
+        ])
+        .expect("add b + zoe")
+        .expect("a welcome");
+    b_member.join_from_welcome(&welcome).expect("b joins");
+
+    let a_mls = Arc::new(Mutex::new(a_member));
+    let b_mls = Arc::new(Mutex::new(b_member));
+
+    // wire the 2-node runtime mesh over one loopback hub
+    let hub = LoopbackHub::calm();
+    let mut links = hub
+        .full_mesh(&["a".to_string(), "b".to_string()])
+        .expect("mesh wiring");
+    let a_links = links.remove("a").expect("a links");
+    let b_links = links.remove("b").expect("b links");
+
+    let a_log = MemLog::new();
+    let b_log = MemLog::new();
+    let a_sink = RecordSink::default();
+    let b_sink = RecordSink::default();
+    let (a_wake, a_wake_rx) = watch::channel(0u64);
+    let (b_wake, b_wake_rx) = watch::channel(0u64);
+
+    let _a_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("a".to_string(), a_links, 1),
+        a_log.clone(),
+        MemStateStore::new(),
+        a_sink.clone(),
+        a_wake_rx,
+        Some(MlsChannel::from_shared(a_mls.clone())),
+    );
+    let _b_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("b".to_string(), b_links, 2),
+        b_log.clone(),
+        MemStateStore::new(),
+        b_sink.clone(),
+        b_wake_rx,
+        Some(MlsChannel::from_shared(b_mls.clone())),
+    );
+
+    // 1) the base mesh works at the current epoch — a → b — and we WAIT for it,
+    // so this pre-re-key message is encrypted (and read) before the epoch moves
+    a_log.push(ev_chat("a", 1, "before the re-key"));
+    let _ = a_wake.send(1);
+    wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 1, "b gets the pre-re-key chat").await;
+
+    // 2) a re-keys zoe's seat → a advances to epoch N+1
+    let zoe2 = MlsMember::new(&zoe_sk, "zoe").expect("zoe2 mls");
+    let zoe2_kp = zoe2.key_package().expect("zoe2 kp");
+    let (commit, _welcome) = a_mls
+        .lock()
+        .expect("a mls lock")
+        .restore_member("zoe", &zoe2_kp)
+        .expect("re-key zoe");
+
+    // 3) broadcast the raw commit over the mesh. It is at-least-once (the log
+    // outbox) and applies at b's CURRENT epoch, so it lands reliably — but the
+    // MLS receive path has no cross-epoch reorder buffer: a message that reaches
+    // b at the wrong epoch is dropped, not retried. So a post-re-key chat that
+    // raced ahead of the commit would be lost (acceptable — chat is ephemeral).
+    // We let the commit settle before the post-re-key chat so this test pins the
+    // re-key application deterministically, not the epoch-boundary chat timing.
+    a_log.push(ev_mls_commit("a", 2, &hex::encode(&commit)));
+    let _ = a_wake.send(2);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // 4) a post-re-key chat (encrypted at epoch N+1)
+    a_log.push(ev_chat("a", 3, "after the re-key"));
+    let _ = a_wake.send(3);
+
+    // b can only decrypt+deliver the epoch-N+1 chat if it applied the commit —
+    // the proof the mesh-borne re-key worked
+    wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 3, "b gets the post-re-key chat").await;
+    // the commit itself is applied at the MLS layer, never delivered as an event
+    assert!(
+        !b_sink.messages().iter().any(|(_, e)| matches!(e.body, WorkspaceEvent::MlsCommit { .. })),
+        "the raw commit is merged into the ratchet, not surfaced as an event"
+    );
+
+    // 5) the group stayed coherent both ways: b → a still decrypts at N+1
+    b_log.push(ev_chat("b", 1, "b is still here"));
+    let _ = b_wake.send(1);
+    wait_for(&a_sink, |(from, e)| from == "b" && e.seq == 1, "a gets b's post-re-key chat").await;
+}

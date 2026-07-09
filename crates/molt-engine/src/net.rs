@@ -209,6 +209,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
+            | WorkspaceEvent::MlsCommit { .. }
     )
 }
 

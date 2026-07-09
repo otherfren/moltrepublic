@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use molt_core::{mockrand, EventEnvelope, MemberId, TransportState};
+use molt_core::{mockrand, EventEnvelope, MemberId, TransportState, WorkspaceEvent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinSet;
@@ -85,6 +85,16 @@ impl MlsChannel {
     fn ciphertext_for(&self, seq: u64, env: &EventEnvelope) -> Option<Vec<u8>> {
         if let Some(c) = self.cache.lock().ok()?.get(&seq) {
             return Some(c.clone());
+        }
+        // A re-key commit is itself an MLS handshake message: it is sent RAW, not
+        // wrapped in an application ciphertext (a commit encrypted at the old
+        // epoch could never be processed — the recipient needs it to REACH the
+        // new epoch). The receiver's `decrypt` recognises it as a commit and
+        // merges it. It still rides this per-link stream in order with chat.
+        if let WorkspaceEvent::MlsCommit { commit } = &env.body {
+            let raw = hex::decode(commit).ok()?;
+            self.cache.lock().ok()?.insert(seq, raw.clone());
+            return Some(raw);
         }
         let plaintext = serde_json::to_vec(env).ok()?;
         let mut m = self.member.lock().ok()?;

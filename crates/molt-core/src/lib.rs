@@ -1191,6 +1191,19 @@ pub enum WorkspaceEvent {
         /// The member's anchored identity pk the change carries.
         identity_pk: String,
     },
+    /// A **raw MLS re-key commit** to broadcast to the group (recovery: after a
+    /// coordinator re-keys a returning member's seat, every OTHER member must
+    /// apply the SAME commit to advance the epoch, or the group forks). It rides
+    /// the log purely as **transport**, but unlike every other wire event it is
+    /// NOT MLS-encrypted on the way out — it IS an MLS handshake message, sent
+    /// raw so the recipient's `decrypt` merges it (`apply`/replay is a no-op; the
+    /// MLS state lives in the group ratchet, not the log). Distinct frame kind
+    /// so the mesh carries the commit in-order with chat, on the one channel the
+    /// group already shares.
+    MlsCommit {
+        /// Hex of the MLS commit's wire bytes.
+        commit: String,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on

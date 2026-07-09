@@ -202,12 +202,13 @@ impl State {
             }
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
-            | WorkspaceEvent::MembershipProposed { .. } => {
+            | WorkspaceEvent::MembershipProposed { .. }
+            | WorkspaceEvent::MlsCommit { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
-                // catch-up request, a membership-proposal announcement) ride the
-                // log only to reach the outbox; the chain lives in chain.state
-                // and is NOT rebuilt from the log, so apply/replay is a
-                // deliberate no-op (the proposal registers in the net handler)
+                // catch-up request, a membership-proposal announcement, a raw MLS
+                // re-key commit) ride the log only to reach the outbox; the chain
+                // lives in chain.state and the MLS ratchet in the group, neither
+                // rebuilt from the log, so apply/replay is a deliberate no-op
             }
         }
     }
