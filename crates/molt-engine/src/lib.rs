@@ -389,6 +389,12 @@ pub(crate) struct State {
     /// removed the moment a valid request spends it, so a replayed request on a
     /// live recovery queue finds a dead ticket and is dropped.
     pub(crate) recovery_tickets: std::collections::HashSet<String>,
+    /// Members whose recovery re-key just completed and whose **mesh announce**
+    /// the coordinator therefore expects on the recovery queue (dynamic mesh
+    /// membership) — armed in `coordinator_rekey`, disarmed when the announce
+    /// is handled. The recovery queue can never re-point any OTHER member's
+    /// links.
+    pub(crate) recovery_mesh_window: std::collections::HashSet<MemberId>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -467,6 +473,13 @@ pub(crate) struct State {
     /// string, so it must NOT be re-derived from the member handle) and checks
     /// the served chain against the link. `None` outside a recovery.
     pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, String)>,
+    /// The **rejoiner's** transport slot — the twin of
+    /// [`State::join_transport`]: the off-actor rejoin task parks a clone of
+    /// its SMP transport here (its `Arc` owns the re-established mesh queues'
+    /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
+    /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
+    pub(crate) recover_transport:
+        std::sync::Arc<std::sync::Mutex<Option<founding::RitualTransport>>>,
     /// The channel the off-actor join task waits on for the joiner's charter
     /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
     /// while a join is paused at the ratification step, else `None`.
@@ -518,6 +531,7 @@ impl State {
             catchup_from: None,
             pending_recovery: HashMap::new(),
             recovery_tickets: std::collections::HashSet::new(),
+            recovery_mesh_window: std::collections::HashSet::new(),
             active: None,
             net,
             net_ritual: None,
@@ -534,6 +548,7 @@ impl State {
             join_generation: 0,
             recover_generation: 0,
             recover_ctx: None,
+            recover_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_confirm: None,
             persist,
             session,
@@ -697,10 +712,17 @@ impl State {
                 member,
                 chain,
                 mls,
+                mesh,
                 generation,
-            } => self.cmd_net_recover_sealed(member, chain, mls, generation),
+            } => self.cmd_net_recover_sealed(member, chain, mls, mesh, generation),
             Command::NetRecoverFailed { error, generation } => {
                 self.cmd_net_recover_failed(error, generation)
+            }
+            Command::NetRecoverAnnounced { ct, generation } => {
+                self.cmd_net_recover_announced(ct, generation)
+            }
+            Command::NetMeshExtended { link, generation } => {
+                self.cmd_net_mesh_extended(link, generation)
             }
             Command::NetRecoverRequested {
                 member,
@@ -1773,6 +1795,7 @@ mod tests {
                 member: "bob".to_string(),
                 chain: chain_json.clone(),
                 mls: String::new(),
+                mesh: Vec::new(),
                 generation: Some(999),
             })
             .await
@@ -1785,6 +1808,7 @@ mod tests {
                 member: "bob".to_string(),
                 chain: chain_json,
                 mls: String::new(),
+                mesh: Vec::new(),
                 generation: Some(1),
             })
             .await
@@ -1829,6 +1853,7 @@ mod tests {
                 member: "bob".to_string(),
                 chain: serde_json::to_string(&chain).expect("chain json"),
                 mls: String::new(),
+                mesh: Vec::new(),
                 generation: Some(1),
             })
             .await

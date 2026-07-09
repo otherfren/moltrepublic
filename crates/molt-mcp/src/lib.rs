@@ -863,6 +863,10 @@ mod tests {
         // failure; net_join_sealed / net_join_failed are the off-actor join
         // task reporting back; net_recover_sealed / net_recover_failed are the
         // off-actor rejoin task reporting back (recover_start is the tool);
+        // net_recover_announced is the recovery recv loop delivering a
+        // rejoiner's mesh announce and net_mesh_extended is the node's own
+        // off-actor mesh-extension task reporting its assembled link — both
+        // the node's own transport tasks speaking, not agent-forgeable;
         // reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
         // save_settings (see documents/mcp-security.md)
@@ -870,7 +874,7 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 22] = [
+        const INTERNAL: [&str; 24] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -886,6 +890,8 @@ mod tests {
             "net_join_failed",
             "net_recover_sealed",
             "net_recover_failed",
+            "net_recover_announced",
+            "net_mesh_extended",
             "net_join_accepted",
             "net_join_charter_proposed",
             "net_join_declined",

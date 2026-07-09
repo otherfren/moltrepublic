@@ -936,22 +936,41 @@ impl State {
         self.recover_generation += 1;
         let generation = self.recover_generation;
         self.recover_ctx = Some((inv.clone(), phrase.clone()));
+        // a fresh transport slot for this recovery: the task parks its SMP
+        // transport here BEFORE the rejoin, so cmd_net_recover_sealed can
+        // stand the runtime supervisor up over the re-established mesh (the
+        // slot's Arc owns the fresh queues' receive credentials — the
+        // join_transport twin)
+        self.recover_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let transport_slot = self.recover_transport.clone();
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
-            let cmd = match crate::recovery::rejoin_over_smp(&link, &phrase, true).await {
-                Ok(outcome) => match serde_json::to_string(&outcome.chain) {
-                    Ok(chain) => Command::NetRecoverSealed {
-                        member: outcome.member,
-                        chain,
-                        mls: hex::encode(&outcome.mls_snapshot),
-                        generation: Some(generation),
-                    },
-                    Err(e) => Command::NetRecoverFailed {
-                        error: e.to_string(),
-                        generation: Some(generation),
-                    },
-                },
+            let cmd = match crate::recovery::transport_for(&inv) {
+                Ok(transport) => {
+                    if let Ok(mut slot) = transport_slot.lock() {
+                        *slot = Some(transport.clone());
+                    }
+                    match crate::recovery::run_rejoin(transport, inv, &phrase, true).await {
+                        Ok(outcome) => match serde_json::to_string(&outcome.chain) {
+                            Ok(chain) => Command::NetRecoverSealed {
+                                member: outcome.member,
+                                chain,
+                                mls: hex::encode(&outcome.mls_snapshot),
+                                mesh: outcome.mesh,
+                                generation: Some(generation),
+                            },
+                            Err(e) => Command::NetRecoverFailed {
+                                error: e.to_string(),
+                                generation: Some(generation),
+                            },
+                        },
+                        Err(e) => Command::NetRecoverFailed {
+                            error: e,
+                            generation: Some(generation),
+                        },
+                    }
+                }
                 Err(e) => Command::NetRecoverFailed {
                     error: e,
                     generation: Some(generation),
@@ -975,6 +994,7 @@ impl State {
         member: String,
         chain: String,
         mls: String,
+        mesh: Vec<molt_core::MeshLink>,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted recovery bumped the generation — drop stale results
@@ -1037,6 +1057,8 @@ impl State {
                 }
             }
         };
+        // keep copies to stand the runtime supervisor up after materialising
+        let net_seed = (mls_blob.clone(), mesh.clone());
         let id = match self.materialize_workspace(
             &sealed.name,
             &member,
@@ -1049,7 +1071,7 @@ impl State {
             sealed.agenda.clone(),
             Some(sk),
             mls_blob,
-            Vec::new(), // option A: recovered without a live mesh
+            mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),
             MoltError::Recover,
         ) {
@@ -1073,6 +1095,20 @@ impl State {
             sealed.agenda.clone(),
         );
         self.session.active_workspace = id;
+        // stand the runtime supervisor up over the re-established mesh, REUSING
+        // the rejoin transport (its Arc owns the fresh mesh queues' receive
+        // credentials — the join-tail twin). Best-effort: no mesh or no
+        // transport just means no live links yet (option A still holds).
+        let (mls_blob, mesh) = net_seed;
+        let reused = self.recover_transport.lock().ok().and_then(|mut s| s.take());
+        if self.persist && !mesh.is_empty() {
+            if let (Some(blob), Some(transport)) = (mls_blob, reused) {
+                if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
+                    self.teardown_net();
+                    self.net = Some(net);
+                }
+            }
+        }
         self.session.notice = format!("recovered:{member}");
         self.session.screen = Screen::Main;
         self.emit_session(SessionScope::Full);

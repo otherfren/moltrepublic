@@ -203,11 +203,13 @@ impl State {
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
-            | WorkspaceEvent::MlsCommit { .. } => {
+            | WorkspaceEvent::MlsCommit { .. }
+            | WorkspaceEvent::MeshAnnounced { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
                 // catch-up request, a membership-proposal announcement, a raw MLS
-                // re-key commit) ride the log only to reach the outbox; the chain
-                // lives in chain.state and the MLS ratchet in the group, neither
+                // re-key commit, a relayed mesh announce) ride the log only to
+                // reach the outbox; the chain lives in chain.state, the MLS
+                // ratchet in the group and the mesh in transport.state, none
                 // rebuilt from the log, so apply/replay is a deliberate no-op
             }
         }

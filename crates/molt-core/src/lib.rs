@@ -1204,6 +1204,17 @@ pub enum WorkspaceEvent {
         /// Hex of the MLS commit's wire bytes.
         commit: String,
     },
+    /// A member **(re)announced its per-pair mesh queues** — the relay leg of
+    /// dynamic mesh membership (`documents/dynamic_mesh.md`): the coordinator
+    /// that received a rejoiner's announce over the recovery channel
+    /// re-broadcasts the MLS ciphertext **verbatim**, so every survivor
+    /// authenticates the announcer by decryption and extends its own mesh
+    /// toward it. Transport-only, like `MlsCommit` (`apply` is a no-op — the
+    /// mesh lives in `transport.state`, not the log).
+    MeshAnnounced {
+        /// Hex of the announcer's MLS-encrypted `MeshAnnounce`.
+        ct: String,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on
@@ -2030,6 +2041,12 @@ pub enum Command {
         /// `MlsMember` blob), sealed into the recovered `transport.state`.
         #[serde(default)]
         mls: String,
+        /// The re-established full-mesh handovers to the survivors (dynamic
+        /// mesh membership); sealed into `transport.state.mesh` and — when the
+        /// rejoin transport is available — the runtime supervisor stands up
+        /// over them. Empty when the mesh re-join was skipped or timed out.
+        #[serde(default)]
+        mesh: Vec<MeshLink>,
         /// Recovery incarnation (a superseded recovery drops stale results).
         #[serde(default)]
         generation: Option<u64>,
@@ -2040,6 +2057,30 @@ pub enum Command {
         /// A human-readable reason.
         error: String,
         /// Recovery incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A rejoiner's **mesh announce** arrived on the coordinator's recovery
+    /// queue (engine-internal, from the recovery recv loop). The coordinator
+    /// authenticates it against the just-re-keyed member, relays the ciphertext
+    /// over the runtime mesh, and extends its own mesh toward the rejoiner.
+    /// Never an MCP tool.
+    NetRecoverAnnounced {
+        /// Hex of the announcer's MLS-encrypted `MeshAnnounce`.
+        ct: String,
+        /// Ritual incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A node's off-actor **mesh-extension task** finished (engine-internal):
+    /// its fresh per-pair link to a (re)announced member is ready to fold into
+    /// the running mesh. The engine rebuilds its supervisor with the link
+    /// (replacing any stale link to the same member) and persists the grown
+    /// mesh. Never an MCP tool.
+    NetMeshExtended {
+        /// The ready-to-run link to the (re)announced member.
+        link: MeshLink,
+        /// Mesh incarnation (a torn-down mesh drops the extension).
         #[serde(default)]
         generation: Option<u64>,
     },

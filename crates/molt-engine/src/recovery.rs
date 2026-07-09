@@ -628,9 +628,18 @@ pub async fn rejoin_over_smp(
     bootstrap: bool,
 ) -> Result<RejoinOutcome, String> {
     let inv = RecoveryInvite::parse(link).ok_or("not an actionable recovery link")?;
-    let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
-    let transport = RitualTransport::Smp(SmpTransport::new(server));
+    let transport = transport_for(&inv)?;
     run_rejoin(transport, inv, phrase, bootstrap).await
+}
+
+/// The rejoiner's OWN SMP transport to the coordinator's server, from a parsed
+/// recovery link — split out of [`rejoin_over_smp`] so the engine can park a
+/// clone in its transport slot BEFORE the rejoin consumes it (the clone's `Arc`
+/// owns the re-established mesh queues' receive credentials the runtime
+/// supervisor must reuse — the SMP subscribe gotcha).
+pub(crate) fn transport_for(inv: &RecoveryInvite) -> Result<RitualTransport, String> {
+    let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
+    Ok(RitualTransport::Smp(SmpTransport::new(server)))
 }
 
 #[cfg(test)]

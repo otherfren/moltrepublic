@@ -683,6 +683,10 @@ impl State {
                     format!("🔑 {member} rejoined the republic after recovery"),
                     None,
                 );
+                // 4) dynamic mesh membership: the rejoiner's mesh announce
+                // follows on this same recovery queue — accept it for exactly
+                // this member (documents/dynamic_mesh.md §3)
+                self.recovery_mesh_window.insert(member.to_string());
                 tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }
             Some(Err(e)) => tracing::warn!(%member, error = %e, "MLS re-key failed"),

@@ -584,12 +584,16 @@ pub(crate) fn spawn_coordinator_recv(
             let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
                 continue;
             };
-            let Ok(invite::RitualMsg::Recover(r)) =
-                serde_json::from_slice::<invite::RitualMsg>(&bytes)
-            else {
-                continue; // only a recovery request belongs on this queue
+            // a recovery request, or — after the re-key — the rejoiner's mesh
+            // announce (dynamic mesh membership); anything else is dropped
+            let cmd = match serde_json::from_slice::<invite::RitualMsg>(&bytes) {
+                Ok(invite::RitualMsg::Recover(r)) => recover_command(r, generation),
+                Ok(invite::RitualMsg::MeshAnnounce { ct }) => Command::NetRecoverAnnounced {
+                    ct,
+                    generation: Some(generation),
+                },
+                _ => continue,
             };
-            let cmd = recover_command(r, generation);
             let (reply, _rx) = tokio::sync::oneshot::channel();
             if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
                 return;

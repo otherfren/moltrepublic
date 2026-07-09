@@ -1320,14 +1320,15 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     // ❷–❻ the rejoiner drives the REAL recovery: seat proof over the minted
     // ticket, coordinator verifies + proposes, the 1-of-2 self-cosign COMMITS
     // the Restored block, coordinator_rekey fires (restore_member → commit
-    // broadcast + welcome + chain served), run_rejoin re-enters the group and
-    // verifies the served chain from its genesis
+    // broadcast + welcome + chain served), run_rejoin re-enters the group,
+    // verifies the served chain from its genesis, and — dynamic mesh
+    // membership — re-establishes its per-pair link to the coordinator
     let rejoin_transport = material.transport.clone();
     let rejoin_phrase = b_phrase.clone();
     let outcome = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(30),
         tokio::spawn(async move {
-            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, false).await
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, true).await
         }),
     )
     .await
@@ -1363,6 +1364,66 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         "the rejoin notice is in the coordinator's chat: {chat:?}"
     );
 
+    // DYNAMIC MESH: the rejoiner assembled a fresh per-pair link to the
+    // coordinator, and the coordinator folded its own fresh link to the
+    // rejoiner into its RUNNING supervisor (rebuild, replacing the stale
+    // lost-device link) — proven by LIVE bidirectional chat over the new queues
+    assert_eq!(outcome.mesh.len(), 1, "one re-established link, to the coordinator");
+    assert_eq!(outcome.mesh[0].member, "founder-a");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if read_session(&a).await.notice == "mesh-extended:member-b" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the coordinator never folded the rejoiner into its mesh"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let links: Vec<PeerLink> = outcome.mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let r_group = MlsMember::restore(&outcome.mls_snapshot).expect("restore rejoiner MLS");
+    let r_feed = MemLog::new();
+    let r_sink = RecordSink::default();
+    let (r_wake, r_wake_rx) = watch::channel(0u64);
+    let _r_sup = supervisor::spawn(
+        material.transport.clone(),
+        NetConfig::fast("member-b".to_string(), links, 13),
+        r_feed.clone(),
+        MemStateStore::new(),
+        r_sink.clone(),
+        r_wake_rx,
+        Some(MlsChannel::new(r_group)),
+    );
+    a.execute(Command::Chat {
+        body: "welcome back to the mesh".to_string(),
+        quote: None,
+    })
+    .await
+    .expect("coordinator chats");
+    wait_for(
+        &r_sink,
+        |(_, env)| {
+            matches!(&env.body, WorkspaceEvent::Chat(m) if m.body == "welcome back to the mesh")
+        },
+        "the coordinator's chat to reach the rejoiner over the NEW link",
+    )
+    .await;
+    r_feed.push(ev_chat("member-b", 1, "alive on fresh queues"));
+    let _ = r_wake.send(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let chat = common::read_chat(&a).await;
+        if chat.iter().any(|m| m["body"].as_str() == Some("alive on fresh queues")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rejoiner's chat never reached the coordinator over the new link"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     // ❼–❽ the rejoiner's FRESH DEVICE materializes the recovered workspace
     // through the engine lifecycle. RecoverStart arms the context (link +
     // phrase); its background SMP task cannot run over the loopback hub, so
@@ -1387,6 +1448,11 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         member: outcome.member.clone(),
         chain: serde_json::to_string(&outcome.chain).expect("chain json"),
         mls: hex::encode(&outcome.mls_snapshot),
+        // the REAL re-established mesh: engine C seals it into the recovered
+        // transport.state (its own rejoin transport slot is empty on this
+        // injection seam, so no live supervisor stands up here — over real
+        // SMP, RecoverStart's own task fills the slot and the net comes up)
+        mesh: outcome.mesh.clone(),
         generation: Some(1),
     })
     .await
@@ -1499,21 +1565,25 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     a.execute(Command::CreateFinish).await.expect("enter");
 
     // the SURVIVOR stands its runtime supervisor up from its founded mesh +
-    // MLS group and stays online through the whole recovery
+    // MLS group and stays online through the whole recovery. Its group is
+    // shared with the test (from_shared): member-c is a raw supervisor, so the
+    // test code below plays its engine half of the mesh re-join.
     let c_mesh = c_outcome.mesh.expect("C assembled its direct mesh");
     let c_mls = c_outcome.mls_snapshot.expect("C post-bootstrap snapshot");
     let links: Vec<PeerLink> = c_mesh.iter().filter_map(PeerLink::from_mesh).collect();
-    let c_group = MlsMember::restore(&c_mls).expect("restore C's MLS");
+    let c_group = std::sync::Arc::new(std::sync::Mutex::new(
+        MlsMember::restore(&c_mls).expect("restore C's MLS"),
+    ));
     let c_sink = RecordSink::default();
     let (_c_wake, c_wake_rx) = watch::channel(0u64);
     let _c_sup = supervisor::spawn(
-        c_hub,
+        c_hub.clone(),
         NetConfig::fast("member-c".to_string(), links, 11),
         MemLog::new(),
         MemStateStore::new(),
         c_sink.clone(),
         c_wake_rx,
-        Some(MlsChannel::new(c_group)),
+        Some(MlsChannel::from_shared(c_group.clone())),
     );
 
     // the coordinator mints; the rejoiner drives the real recovery
@@ -1530,19 +1600,91 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     .await
     .expect("recovery mint blocking");
     let inv = molt_engine::RecoveryInvite::parse(&material.link).expect("actionable link");
+    // member-c's engine half of the mesh re-join, played by the test (c is a
+    // raw supervisor): when the coordinator's relayed MeshAnnounced lands in
+    // c's sink, decrypt it (authenticating bob), create the own fresh queue,
+    // and reply MLS-encrypted directly onto the queue bob announced for c —
+    // exactly what a survivor ENGINE does (pinned separately in
+    // a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh)
+    let c_reply_sink = c_sink.clone();
+    let c_reply_group = c_group.clone();
+    let c_reply_hub = c_hub.clone();
+    let c_reply = tokio::spawn(async move {
+        use molt_net::mesh;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let ct = loop {
+            let got = c_reply_sink.messages().into_iter().find_map(|(_, env)| {
+                if let WorkspaceEvent::MeshAnnounced { ct } = env.body {
+                    hex::decode(&ct).ok()
+                } else {
+                    None
+                }
+            });
+            if let Some(ct) = got {
+                break ct;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the relayed mesh announce never reached the survivor"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let molt_net::MlsIncoming::Application { from, plaintext } = c_reply_group
+            .lock()
+            .expect("c group")
+            .decrypt(&ct)
+            .expect("decrypt the relayed announce")
+        else {
+            panic!("the relayed announce is an application message");
+        };
+        assert_eq!(from, "member-b", "the announce authenticates as the rejoiner");
+        let a: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("announce");
+        let target = a.queues.get("member-c").expect("a queue for member-c");
+        let own_q = c_reply_hub.create_queue().await.expect("c's queue for bob");
+        let own_wrap = WrapKey::fresh().expect("wrap");
+        let mut queues = std::collections::BTreeMap::new();
+        queues.insert(
+            "member-b".to_string(),
+            mesh::QueueHandover::of(&own_q.snd, &own_wrap),
+        );
+        let reply = mesh::MeshAnnounce { queues };
+        let ct = c_reply_group
+            .lock()
+            .expect("c group")
+            .encrypt(&serde_json::to_vec(&reply).expect("encode"))
+            .expect("encrypt reply");
+        let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+        let payload = serde_json::to_vec(&msg).expect("payload");
+        supervisor::send_framed(
+            &c_reply_hub,
+            &target.addr().expect("addr"),
+            &target.wrap_key().expect("wrap"),
+            msg_id("member-c", "member-b", 1),
+            &payload,
+        )
+        .await
+        .expect("c's reply reaches bob's announced queue");
+    });
     let rejoin_transport = material.transport.clone();
     let rejoin_phrase = b_phrase.clone();
     let outcome = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(40),
         tokio::spawn(async move {
-            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, false).await
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, true).await
         }),
     )
     .await
     .expect("the rejoin finishes in time")
     .expect("rejoin task")
     .expect("the rejoin succeeds");
+    c_reply.await.expect("c's reply half");
     assert_eq!(outcome.chain.len(), 2, "genesis + the committed Restored block");
+    // the rejoiner re-established links to BOTH survivors — the coordinator
+    // (its engine replied) and member-c (the relayed announce reached it)
+    let mut mesh_members: Vec<&str> =
+        outcome.mesh.iter().map(|l| l.member.as_str()).collect();
+    mesh_members.sort_unstable();
+    assert_eq!(mesh_members, vec!["founder-a", "member-c"]);
 
     // the survivor receives the committed Restored block over the mesh …
     wait_for(
@@ -1573,6 +1715,238 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
         "the post-re-key chat notice to decrypt at the survivor",
     )
     .await;
+}
+
+/// **Dynamic mesh membership, survivor side.** A relayed
+/// `WorkspaceEvent::MeshAnnounced` arrives at a survivor ENGINE over the
+/// runtime mesh; the engine authenticates the announcer by MLS decryption (the
+/// event author is only the relay), creates a fresh per-pair queue, replies
+/// with its own announce directly onto the announced queue, and REBUILDS its
+/// running supervisor with the new link — replacing the stale one. Proven by
+/// live bidirectional chat over the rotated queues. (Here the announcer is an
+/// existing peer re-keying its own link — the same code path a recovery
+/// rejoiner's relayed announce takes, and the §4 queue-rotation shape.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
+    use molt_net::mesh;
+    use std::sync::{Arc, Mutex};
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: tmp.path().join("founder").display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "rotate the queues".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // member-b's runtime supervisor over the founded mesh — its group is
+    // SHARED with the test (from_shared) so the test can author the announce
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let b_group = Arc::new(Mutex::new(
+        MlsMember::restore(&member_mls).expect("restore member MLS"),
+    ));
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let member_sup = supervisor::spawn(
+        hub.clone(),
+        NetConfig::fast("member-b".to_string(), links, 7),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::from_shared(b_group.clone())),
+    );
+
+    // member-b re-keys its own link: a fresh inbound queue for the founder,
+    // announced as a MeshAnnounced event over the RUNNING mesh (in a recovery
+    // this ciphertext would be the coordinator's verbatim relay of a rejoiner)
+    let new_q = hub.create_queue().await.expect("b's fresh queue");
+    let new_wrap = WrapKey::fresh().expect("fresh wrap");
+    let mut queues = std::collections::BTreeMap::new();
+    queues.insert(
+        "founder-a".to_string(),
+        mesh::QueueHandover::of(&new_q.snd, &new_wrap),
+    );
+    let announce = mesh::MeshAnnounce { queues };
+    let ct = b_group
+        .lock()
+        .expect("b group")
+        .encrypt(&serde_json::to_vec(&announce).expect("encode"))
+        .expect("encrypt announce");
+    member_feed.push(EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_002,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+    });
+    let _ = member_wake.send(2);
+
+    // the survivor engine folds the announce in: fresh queue, direct reply,
+    // supervisor rebuild — surfaced as the mesh-extended notice
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.notice == "mesh-extended:member-b" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the survivor never folded the announce into its mesh"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // the survivor's reply announce is the FIRST frame on the announced queue
+    let mut rx = hub.subscribe(&new_q.rcv).await.expect("subscribe b's fresh queue");
+    let mut reasm = Reassembler::new();
+    let reply_ct = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let d = rx.recv().await.expect("queue open");
+            let Ok(plain) = molt_net::wrap::unwrap_block(&new_wrap, &d.block) else {
+                d.ack.ack();
+                continue;
+            };
+            let out = reasm.push(&plain);
+            d.ack.ack();
+            if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = out {
+                if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                    serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                {
+                    break hex::decode(&ct).expect("reply hex");
+                }
+            }
+        }
+    })
+    .await
+    .expect("the survivor's reply reaches the announced queue");
+    // tear b's OLD supervisor down BEFORE touching the shared ratchet again
+    member_sup.shutdown();
+    let molt_net::MlsIncoming::Application { from, plaintext } = b_group
+        .lock()
+        .expect("b group")
+        .decrypt(&reply_ct)
+        .expect("decrypt the survivor's reply")
+    else {
+        panic!("the reply is an application message");
+    };
+    assert_eq!(from, "founder-a", "the reply is MLS-authenticated");
+    let reply: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("reply announce");
+    let target = reply.queues.get("member-b").expect("a queue for member-b");
+
+    // member-b's ROTATED link: send to the survivor's fresh queue, receive on
+    // the queue it announced — a second supervisor runs over it
+    let rotated = PeerLink {
+        member: "founder-a".to_string(),
+        snd: target.addr().expect("addr"),
+        wrap_out: target.wrap_key().expect("wrap"),
+        rcv: new_q.rcv.clone(),
+        wrap_in: new_wrap.clone(),
+    };
+    let feed2 = MemLog::new();
+    let sink2 = RecordSink::default();
+    let (wake2, wake2_rx) = watch::channel(0u64);
+    let _sup2 = supervisor::spawn(
+        hub.clone(),
+        NetConfig::fast("member-b".to_string(), vec![rotated], 9),
+        feed2.clone(),
+        MemStateStore::new(),
+        sink2.clone(),
+        wake2_rx,
+        Some(MlsChannel::from_shared(b_group.clone())),
+    );
+
+    // live chat BOTH ways over the rotated queues
+    a.execute(Command::Chat {
+        body: "over the rotated link".to_string(),
+        quote: None,
+    })
+    .await
+    .expect("founder chats");
+    wait_for(
+        &sink2,
+        |(_, env)| {
+            matches!(&env.body, WorkspaceEvent::Chat(m) if m.body == "over the rotated link")
+        },
+        "the survivor's chat to arrive over the ROTATED link",
+    )
+    .await;
+    feed2.push(ev_chat("member-b", 1, "rotation complete"));
+    let _ = wake2.send(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let chat = common::read_chat(&a).await;
+        if chat.iter().any(|m| m["body"].as_str() == Some("rotation complete")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "member-b's chat never reached the survivor over the rotated link"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The `member_identity` derivation (`entropy → workspace-id "member" → key`),

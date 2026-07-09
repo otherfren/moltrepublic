@@ -210,6 +210,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::MlsCommit { .. }
+            | WorkspaceEvent::MeshAnnounced { .. }
     )
 }
 
@@ -262,6 +263,10 @@ pub(crate) struct NetRuntime {
     /// engine snapshots both into `transport.state` so a reopen resumes the mesh.
     /// `None` for the demo mesh (nothing to persist / resume).
     real_crypto: Option<RealCrypto>,
+    /// The mesh links this runtime was built over — what a dynamic mesh
+    /// extension grows (rebuild with `mesh + new link`) and what the grown
+    /// persist writes. Empty for the demo mesh.
+    mesh: Vec<molt_core::MeshLink>,
 }
 
 impl NetRuntime {
@@ -296,6 +301,31 @@ impl NetRuntime {
     /// could send but never receive). `None` for the demo mesh (no real transport).
     pub(crate) fn runtime_transport(&self) -> Option<crate::founding::RitualTransport> {
         self.real_crypto.as_ref().map(|(transport, _)| transport.clone())
+    }
+
+    /// Decrypt one MLS **application** message with the runtime group,
+    /// returning the group-authenticated sender and the plaintext — how a
+    /// relayed mesh announce is authenticated. `None` when this runtime has no
+    /// real group, or on any decrypt failure (incl. replays — MLS rejects them).
+    pub(crate) fn decrypt_group_message(&self, ct: &[u8]) -> Option<(MemberId, Vec<u8>)> {
+        let (_transport, mls) = self.real_crypto.as_ref()?;
+        let mut group = mls.lock().ok()?;
+        match group.decrypt(ct) {
+            Ok(molt_net::MlsIncoming::Application { from, plaintext }) => Some((from, plaintext)),
+            _ => None,
+        }
+    }
+
+    /// The shared runtime MLS group, for an off-actor task that must encrypt
+    /// in-sequence with the supervisor (same `Arc`, same ratchet). `None` for
+    /// the demo mesh.
+    pub(crate) fn group_arc(&self) -> Option<Arc<Mutex<molt_net::MlsMember>>> {
+        self.real_crypto.as_ref().map(|(_t, mls)| mls.clone())
+    }
+
+    /// The mesh links this runtime runs over (empty for the demo mesh).
+    pub(crate) fn mesh(&self) -> &[molt_core::MeshLink] {
+        &self.mesh
     }
 
     /// Coordinator side of recovery: run `restore_member` on the runtime MLS
@@ -483,6 +513,7 @@ impl State {
             peer_names: peers,
             generation: self.net_generation,
             real_crypto: None,
+            mesh: Vec::new(),
         })
     }
 
@@ -547,6 +578,7 @@ impl State {
             peer_names,
             generation,
             real_crypto: Some((transport_for_persist, mls_arc)),
+            mesh: mesh.to_vec(),
         })
     }
 
@@ -628,6 +660,25 @@ impl State {
                 identity_pk,
             } if self.is_chain_governed() => {
                 self.receive_membership_proposal(id.0, op, &member, &identity_pk);
+            }
+            // dynamic mesh membership ❸: a relayed mesh announce — authenticate
+            // the ANNOUNCER by MLS decryption (the event author is only the
+            // relay) and extend this node's own mesh toward it
+            WorkspaceEvent::MeshAnnounced { ct } if self.is_chain_governed() => {
+                let me = self.member();
+                if let Ok(raw) = hex::decode(&ct) {
+                    if let Some((announcer, plain)) =
+                        self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
+                    {
+                        if announcer != me && self.roster().contains(&announcer) {
+                            if let Ok(a) =
+                                serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain)
+                            {
+                                self.spawn_mesh_extension(announcer, &a);
+                            }
+                        }
+                    }
+                }
             }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
@@ -762,6 +813,191 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// A rejoiner's **mesh announce** arrived on the recovery queue (dynamic
+    /// mesh membership, `documents/dynamic_mesh.md` ❷): authenticate the
+    /// announcer by MLS decryption and check it is the member whose re-key
+    /// just completed, then relay the ciphertext **verbatim** over the runtime
+    /// mesh (every survivor authenticates + extends itself) and extend this
+    /// node's own mesh toward the rejoiner.
+    pub(crate) fn cmd_net_recover_announced(
+        &mut self,
+        ct: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_generation_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let Ok(raw) = hex::decode(&ct) else {
+            return Ok(Reply::Ack);
+        };
+        let Some((announcer, plain)) =
+            self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
+        else {
+            tracing::warn!("a recovery-queue mesh announce did not decrypt — dropped");
+            return Ok(Reply::Ack);
+        };
+        // only the member whose re-key JUST completed may (re)announce here —
+        // the recovery queue can never re-point another member's links
+        if !self.recovery_mesh_window.remove(&announcer) {
+            tracing::warn!(%announcer, "mesh announce outside a recovery window — dropped");
+            return Ok(Reply::Ack);
+        }
+        let Ok(announce) = serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain) else {
+            tracing::warn!(%announcer, "mesh announce is malformed — dropped");
+            return Ok(Reply::Ack);
+        };
+        // relay VERBATIM: each survivor decrypts (and thereby authenticates)
+        // the announcer itself, exactly like the founding star relay
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::MeshAnnounced { ct });
+        self.record(env);
+        self.spawn_mesh_extension(announcer, &announce);
+        Ok(Reply::Ack)
+    }
+
+    /// Extend this node's running mesh toward `member` (dynamic mesh
+    /// membership ❹): create a fresh per-pair inbound queue, reply with our
+    /// own MLS-encrypted announce **directly onto the queue `member` announced
+    /// for us** (per-queue FIFO puts it ahead of any runtime traffic), and
+    /// report the assembled link back as [`Command::NetMeshExtended`]. Off the
+    /// actor — queue creation is a live round-trip.
+    pub(crate) fn spawn_mesh_extension(
+        &mut self,
+        member: MemberId,
+        announce: &molt_net::mesh::MeshAnnounce,
+    ) {
+        let me = self.member();
+        let Some(target) = announce.queues.get(&me) else {
+            tracing::warn!(%member, "mesh announce carries no queue for this node");
+            return;
+        };
+        let (Some(snd), Some(wrap_out)) = (target.addr(), target.wrap_key()) else {
+            tracing::warn!(%member, "mesh announce handover is malformed");
+            return;
+        };
+        let Some(net) = self.net.as_ref() else {
+            return;
+        };
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+            tracing::warn!(%member, "no real runtime mesh to extend");
+            return;
+        };
+        let generation = self.net_generation;
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let pair = match transport.create_queue().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%member, error = %e, "mesh-extension queue creation failed");
+                    return;
+                }
+            };
+            let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
+                return;
+            };
+            let mut queues = std::collections::BTreeMap::new();
+            queues.insert(
+                member.clone(),
+                molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
+            );
+            let reply = molt_net::mesh::MeshAnnounce { queues };
+            let Ok(bytes) = serde_json::to_vec(&reply) else {
+                return;
+            };
+            // encrypt with the SHARED runtime group (same Arc as the
+            // supervisor — one ratchet, used in sequence)
+            let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(&bytes).ok()) else {
+                tracing::warn!(%member, "encrypting the mesh reply failed");
+                return;
+            };
+            let msg = molt_net::invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            let Ok(payload) = serde_json::to_vec(&msg) else {
+                return;
+            };
+            if let Err(e) = supervisor::send_framed(
+                &transport,
+                &snd,
+                &wrap_out,
+                molt_net::msg_id(&me, &member, 3),
+                &payload,
+            )
+            .await
+            {
+                tracing::warn!(%member, error = %e, "sending the mesh reply failed");
+                return;
+            }
+            let link = PeerLink {
+                member: member.clone(),
+                snd,
+                wrap_out,
+                rcv: pair.rcv,
+                wrap_in,
+            }
+            .to_mesh();
+            let (reply_tx, _rx) = oneshot::channel();
+            let _ = cmd_tx
+                .send(Envelope {
+                    cmd: Command::NetMeshExtended {
+                        link,
+                        generation: Some(generation),
+                    },
+                    reply: reply_tx,
+                })
+                .await;
+        });
+    }
+
+    /// Fold a freshly assembled per-pair link into the **running** mesh
+    /// (dynamic mesh membership ❺): rebuild the supervisor over
+    /// `old mesh + link` — replacing any stale link to the same member (a
+    /// recovered seat's old queues are dead) — and persist the grown mesh +
+    /// crypto so a reopen resumes it. The rebuild IS the reopen path: per-peer
+    /// cursors live in `transport.state` and survive it.
+    pub(crate) fn cmd_net_mesh_extended(
+        &mut self,
+        link: molt_core::MeshLink,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_generation_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let Some(net) = self.net.as_ref() else {
+            return Ok(Reply::Ack);
+        };
+        if !net.is_real() {
+            return Ok(Reply::Ack);
+        }
+        let member = link.member.clone();
+        let mut mesh = net.mesh().to_vec();
+        mesh.retain(|l| l.member != link.member);
+        mesh.push(link);
+        let Some(transport) = net.runtime_transport() else {
+            return Ok(Reply::Ack);
+        };
+        let Some((Some(mls_blob), creds)) = net.crypto_for_close() else {
+            tracing::warn!(%member, "mesh extension: no MLS snapshot to rebuild from");
+            return Ok(Reply::Ack);
+        };
+        // stop the old supervisor before rebuilding over the grown mesh
+        self.teardown_net();
+        if let Some(new_net) = self.build_real_net(transport, &mesh, &mls_blob) {
+            self.net = Some(new_net);
+            // the grown mesh must survive a reopen — a LIVE merge (the rebuilt
+            // supervisor keeps saving its cursors afterwards, so no seal)
+            if let Some(active) = self.active.as_ref() {
+                active.handle.persist_mesh_crypto_blocking(Some(mls_blob), creds, mesh);
+            }
+            self.session.notice = format!("mesh-extended:{member}");
+            self.emit_session(SessionScope::Full);
+            tracing::info!(%member, "mesh extended");
+        } else {
+            tracing::warn!(%member, "mesh extension rebuild failed");
+        }
+        Ok(Reply::Ack)
+    }
+
     /// Passive presence: mark the member's pill live.
     pub(crate) fn cmd_net_peer_seen(
         &mut self,
@@ -865,7 +1101,8 @@ fn spawn_demo_peer(
         context: (name.clone(), String::new()),
         peer_names: all.iter().filter(|m| *m != name).cloned().collect(),
         generation: 0,
-            real_crypto: None,
+        real_crypto: None,
+        mesh: Vec::new(),
     };
     let config = GroupConfig {
         member: name.clone(),

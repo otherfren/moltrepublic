@@ -1392,6 +1392,14 @@ enum WriterMsg {
     MergeCrypto {
         mls: Option<Vec<u8>>,
         smp_queues: Option<Vec<u8>>,
+        /// `Some` replaces the persisted mesh links (dynamic mesh membership:
+        /// a grown/re-keyed mesh must survive a reopen); `None` leaves them.
+        mesh: Option<Vec<molt_core::MeshLink>>,
+        /// `true` = the CLEAN-CLOSE merge: later `SaveTransport` cursor saves
+        /// from a supervisor winding down are ignored. `false` = a live
+        /// mid-session merge (mesh extension) — the running supervisor keeps
+        /// saving cursors afterwards.
+        seal: bool,
         ack: mpsc::SyncSender<()>,
     },
     /// Load `transport.state` (defaults when absent/damaged).
@@ -1485,7 +1493,31 @@ impl StorageHandle {
     /// durable (fsync'd). The clean-close persist that lets a reopened node
     /// resume the mesh. A gone writer is a silent no-op (nothing to resume into).
     pub fn persist_crypto_blocking(&self, mls: Option<Vec<u8>>, smp_queues: Option<Vec<u8>>) {
-        if mls.is_none() && smp_queues.is_none() {
+        self.merge_crypto_blocking(mls, smp_queues, None, true);
+    }
+
+    /// A **live** (mid-session) variant of [`Self::persist_crypto_blocking`]
+    /// that can also replace the persisted **mesh links** — dynamic mesh
+    /// membership grows/re-keys the mesh at runtime, and a reopen must resume
+    /// the grown mesh, not the founded one. Does NOT seal `transport.state`:
+    /// the (rebuilt) supervisor keeps saving its cursors afterwards.
+    pub fn persist_mesh_crypto_blocking(
+        &self,
+        mls: Option<Vec<u8>>,
+        smp_queues: Option<Vec<u8>>,
+        mesh: Vec<molt_core::MeshLink>,
+    ) {
+        self.merge_crypto_blocking(mls, smp_queues, Some(mesh), false);
+    }
+
+    fn merge_crypto_blocking(
+        &self,
+        mls: Option<Vec<u8>>,
+        smp_queues: Option<Vec<u8>>,
+        mesh: Option<Vec<molt_core::MeshLink>>,
+        seal: bool,
+    ) {
+        if mls.is_none() && smp_queues.is_none() && mesh.is_none() {
             return;
         }
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -1494,6 +1526,8 @@ impl StorageHandle {
             .send(WriterMsg::MergeCrypto {
                 mls,
                 smp_queues,
+                mesh,
+                seal,
                 ack: ack_tx,
             })
             .is_ok()
@@ -1624,7 +1658,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             fail(&failed_flag, "transport.state write", &e);
                         }
                     }
-                    Ok(WriterMsg::MergeCrypto { mls, smp_queues, ack }) => {
+                    Ok(WriterMsg::MergeCrypto { mls, smp_queues, mesh, seal, ack }) => {
                         let mut ts = ws.read_transport_state();
                         if mls.is_some() {
                             ts.mls = mls;
@@ -1632,10 +1666,18 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         if smp_queues.is_some() {
                             ts.smp_queues = smp_queues;
                         }
+                        if let Some(mesh) = mesh {
+                            ts.mesh = mesh;
+                        }
                         if let Err(e) = ws.write_transport_state(&ts).and_then(|()| ws.sync()) {
                             fail(&failed_flag, "crypto merge write", &e);
                         }
-                        crypto_sealed = true;
+                        // only the CLEAN-CLOSE merge seals — a live mesh-extension
+                        // merge is followed by a rebuilt supervisor that keeps
+                        // saving its cursors
+                        if seal {
+                            crypto_sealed = true;
+                        }
                         let _ = ack.send(());
                     }
                     Ok(WriterMsg::LoadTransport(reply)) => {
