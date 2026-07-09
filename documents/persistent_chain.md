@@ -16,7 +16,10 @@ the chain's first block, and everything the republic later ratifies extends it.
 > (proven end-to-end over the direct MLS mesh in
 > `two_instances.rs::founding_governs_over_the_direct_mesh`). Phase 3 (catch-up
 > sync) is wired too — out-of-order buffering + a survivor-serves-the-suffix
-> request/response. Phase 4 (recovery) remains. §10 tracks the split.
+> request/response. Phase 4 (recovery) is REAL end to end — the recovery ritual
+> (`recovery_ritual.md`) re-admits a total-loss member by threshold block,
+> re-keys the MLS group, serves the chain over the recovery channel, and the
+> rejoiner verifies from genesis + materializes. §10 tracks the split.
 
 ---
 
@@ -200,10 +203,16 @@ Having verified a chain, a member knows — not trusts — that:
   everyone**, independent of who originally committed each block. Trade-off: the
   server re-serves through the log (the outbox), so serving grows its log — the
   chain compaction the model already anticipates addresses this.
-- **Planned.** Phase 4: recovery as catch-up-from-genesis + MLS re-key (a
-  `Membership{Restored}` block). Also open: concurrent-race hardening (deep
-  reorg beyond a tip tie-break) and moving deliberation truly out-of-band
-  (today it rides the local log as transport).
+- **Real (Phase 4).** Recovery as catch-up-from-genesis + MLS re-key: a
+  `Membership{Restored}` block re-admits the seat by threshold, the coordinator
+  re-keys the group (`restore_member`) and broadcasts the raw commit over the
+  mesh, the Welcome carries the whole chain over the recovery channel, and the
+  rejoiner hard-verifies from block 0 and materializes (`recovery_ritual.md`
+  has the ritual + its own implementation map; proven E2E in
+  `two_instances.rs`). Still open: concurrent-race hardening (deep reorg beyond
+  a tip tie-break), moving deliberation truly out-of-band (today it rides the
+  local log as transport), and the rejoiner's mesh re-establishment (dynamic
+  mesh membership).
 
 ## 11. Implementation map
 

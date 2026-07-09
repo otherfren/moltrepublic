@@ -96,17 +96,16 @@ automatic — the group votes (§4, step ❹).
                                                     ❺ on commit: restore_member(
                                                        member, kpᵣ) → (commit,
                                                        welcome); apply commit to
-                                                       own group, send commit to
-                                                       the other survivors
-                          ◀──── Welcome{ welcome } on Qᵣ ────
-  ❻ join MLS group from Welcome
-    (now inside the encrypted group)
-    ─── ChainRequest{ from: 0 } on the mesh ───▶  ❼ serve_chain_from(0): every
-                                                       block, from genesis, as
-                          ◀──── Committed(block₀…blockₕ₊₁) ──   Committed frames
-  ❽ adopt genesis, drain the suffix,
-    VERIFY the whole chain from zero,
-    materialize local workspace → current
+                                                       own group, BROADCAST the
+                                                       raw commit over the mesh
+                                                       to the other survivors
+                          ◀── Welcome{ welcome, chain₀…ₕ₊₁ } on Qᵣ ──  ❼ serve the
+  ❻ join MLS group from Welcome                        whole chain with the Welcome
+    (now inside the encrypted group)                   (option A: the recovery
+  ❽ VERIFY the whole chain from zero                   channel, no mesh needed)
+    (sigs, links, threshold, own seat,
+    genesis id = link id), materialize
+    local workspace from it → current
 ```
 
 **❶ Re-derive.** `R` derives its identity from its phrase (same `pkᵣ` as always),
@@ -132,19 +131,24 @@ the roster.
 **❺ MLS re-key.** When the Restored block commits, `S` runs
 `restore_member(member, kpᵣ)` → `(commit, welcome)`: an inline Remove(`R`'s stale
 leaf) + Add(`R`'s fresh leaf) in one MLS commit. `S` applies the commit to its
-own group and forwards it to the other survivors (so every group advances past
-the same commit — one coordinator, all apply, like the founder at founding); the
-**Welcome** goes to `R` on `Qᵣ`.
+own group and **broadcasts it raw over the runtime mesh** to the other survivors
+(§6: a handshake frame riding the ordered per-link stream, so every group
+advances past the same commit before any new-epoch traffic — one coordinator,
+all apply, like the founder at founding); the **Welcome** goes to `R` on `Qᵣ`.
 
 **❻ Rejoin the group.** `R` processes the Welcome and is back inside the
 encrypted group — it can decrypt live traffic again.
 
-**❼–❽ Catch up.** `R` broadcasts `ChainRequest{from: 0}`; any survivor re-serves
-its whole chain from genesis (`serve_chain_from`). `R` **adopts the genesis**
-(the headless-bootstrap path), drains the suffix, and **verifies the entire chain
-from zero** — signatures, links, threshold, its own membership, the content id.
-It then materializes its local workspace from the verified chain and is current,
-holding the identical constitution + state as every survivor.
+**❼–❽ Catch up (option A: over the recovery channel).** The Welcome carries the
+coordinator's **whole chain from genesis** — `R` has no mesh links yet, so the
+recovery channel doubles as the catch-up channel. `R` **verifies the entire
+chain from zero** — signatures, links, threshold, its own `(name, key)`
+anchored, the genesis id equal to the seat-proof-bound link id (an untrusted
+deliverer is safe). It then materializes its local workspace from the verified
+chain and is current, holding the identical constitution + state as every
+survivor — with an empty mesh; re-meshing is the separate *dynamic mesh
+membership* feature (the mesh-based `ChainRequest{from: 0}` path from
+`persistent_chain.md` stays available once meshed).
 
 ---
 
@@ -193,12 +197,23 @@ The group gets the complementary guarantees:
   distributes it, exactly as the founder builds the group once at founding —
   never two members re-keying the same seat concurrently (that forks the group).
 
-**MLS distribution — decided (2026-07-08): a recovery-ritual transport.** `S`
-distributes `restore_member`'s commit to the survivors and the Welcome to `R`
-over **dedicated recovery queues that mirror the founding star** (reusing the
-founding invite / `send_framed` machinery), *not* over the runtime mesh. Recovery
-is the founding's twin: one coordinator builds + fans out the single membership
-commit, and every survivor applies it — the same shape that born the group.
+**MLS distribution — RE-decided (2026-07-09, supersedes the 2026-07-08 star):
+the commit rides the RUNTIME MESH.** `S` broadcasts `restore_member`'s commit to
+the survivors as a `WorkspaceEvent::MlsCommit` over the existing mesh — sent
+**raw** (an MLS handshake frame, not application-encrypted: a commit wrapped at
+the old epoch could never be processed), riding the per-link ordered stream so
+survivors apply it *before* any new-epoch traffic. Ordering comes free with the
+mesh; a star would split commit and follow-on chat across two channels and need
+cross-epoch buffering. Only the **Welcome (+ the full chain, option A)** goes
+over the dedicated recovery queue to `R`, which has no mesh links yet.
+
+Two sender-side orderings are load-bearing here (both pinned by E2E tests):
+the coordinator registers the pending recovery **before** proposing (a lone
+m=1 self-cosign coordinator commits synchronously inside the propose), and
+`adopt_committed_block` records the `Committed` envelope **after** the re-key's
+`MlsCommit` (the outbox encrypts lazily at send time — a Committed sequenced
+before the raw commit would reach still-old-epoch survivors as undecryptable
+new-epoch ciphertext and be silently lost).
 
 ---
 
@@ -211,7 +226,7 @@ The product never uses the seam.
 
 ---
 
-## 8. Implementation map (status as of 2026-07-08)
+## 8. Implementation map (status as of 2026-07-09)
 
 - **Seat-proof crypto** — ✅ `crates/molt-engine/src/founding.rs`
   (`make_seat_proof`, `verify_seat_proof`, `seat_proof_bytes`).
@@ -237,25 +252,48 @@ The product never uses the seam.
   decryption) + two authentication tests (wrong phrase, doctored link) in
   `two_instances.rs`.
 
-**Still open (the coupled integration):**
-- **Coordinator distribution — `coordinator_rekey`'s TODO.** One
-  `restore_member` yields `(commit, welcome)`; the Welcome must reach the
-  rejoiner's reply queue AND the commit must reach the other survivors, or the
-  group forks (coordinator advances its epoch, survivors do not). These are
-  coupled — do NOT ship the Welcome half alone.
-- **⚠ Design fork (deferred, user 2026-07-08 "decide later"): how the re-key
-  commit reaches survivors.** §6 decided a *recovery star*, but the runtime-mesh
-  send path today carries only encrypted `EventEnvelope`s (no raw handshake
-  frame), so BOTH the star and a mesh-broadcast need new plumbing. The receive
-  side already merges inbound commits (`MlsMember::decrypt` → `MlsIncoming::Commit`).
-  Re-confirm star-vs-mesh before building this half.
-- **Rejoiner follow-on: mesh re-establishment → catch-up → materialize.** After
-  `run_rejoin`, the rejoiner is in the group but has no mesh links to survivors;
-  it needs them to `ChainRequest{from:0}` and receive the served chain, then
-  `sealed_roster_from_genesis` + materialize. How it (re)joins the running mesh
-  is itself a design question to settle.
-- **Proven end to end** — the full 3-instance E2E (≥3 members so re-admitting one
-  leaves ≥m survivors to commit the Restored block) — *to write once the above land*.
+- **Coordinator distribution** — ✅ `coordinator_rekey` (chain.rs): on a
+  committed `Restored` block it records the raw `MlsCommit` broadcast (mesh, §6),
+  `spawn_welcome_send`s the Welcome **+ the full chain** to the rejoiner's reply
+  queue (option A catch-up over the recovery channel), and posts the "🔑 …
+  rejoined" group-chat notice after the commit.
+- **Rejoiner chain verification** — ✅ `run_rejoin` hard-verifies the served
+  chain from block 0 (`verify_served_chain`: signatures, links, threshold,
+  genesis id = the seat-proof-bound link id, own `(name, key)` anchored) and
+  returns `RejoinOutcome{…, chain, sealed}`.
+- **Rejoiner lifecycle + materialize (A2)** — ✅ co-equal
+  `Command::RecoverStart{link, phrase}` (MCP tool `recover_start`) runs
+  `rejoin_over_smp` off the actor; the INTERNAL `NetRecoverSealed` re-verifies
+  everything on the actor (defence in depth) and materializes the recovered
+  workspace, adopting the **full** chain (`materialize_workspace`'s
+  `full_chain` param) with an empty mesh (option A). `NetRecoverFailed`
+  surfaces failures.
+- **Proven end to end** — ✅ `two_instances.rs`:
+  `recovery_completes_end_to_end_and_the_rejoiner_materializes` (1-of-2, the
+  lone coordinator's self-cosign commits; mint → real seat-proofed request →
+  commit → re-key → welcome + chain → the rejoiner's fresh device materializes
+  and enters) and `recovery_distributes_the_rekey_commit_to_a_live_survivor`
+  (1-of-3 with a live survivor supervisor: the broadcast raw commit merges and
+  the post-re-key chat notice decrypts at the survivor).
+
+**Still open (deferred, not recovery-blocking):**
+- **Rejoiner mesh re-establishment** — the recovered workspace has no live mesh
+  links (option A). Re-meshing = the general *dynamic mesh membership* feature
+  (the runtime supervisor has a fixed peer set; changing membership rebuilds via
+  `build_real_net`, as reopen does) — also needed for adding new seats.
+- **Cross-epoch chat retry** — the MLS recv path drops wrong-epoch messages
+  (no reorder buffer): in the lone-coordinator commit burst the ephemeral
+  Proposed/Approved gossip can be lost to survivors (the committed block
+  supersedes it), and a chat racing ahead of the commit is dropped. Hardening =
+  classify wrong-epoch decrypt errors → don't-ack → redelivery; touches the
+  delicate ack discipline, do deliberately.
+- **Recovery UI** — the minted link surfaces only as `session.notice`
+  (`recovery-link:…`), the rejoin flow as `recover-started:` / `recovered:` /
+  `recover-failed:` notices; a real GUI surface + a distinct system-message
+  style for the rejoin notice are open.
+- **Ticket persistence + coordinator failover** — the spend-once ticket set and
+  `pending_recovery` are in-memory; a coordinator crash after the Restored block
+  commits leaves no one to re-key.
 
 The state model this completes is `persistent_chain.md` (Phase 4); the founding
 it mirrors is `founding_ritual.md`.
