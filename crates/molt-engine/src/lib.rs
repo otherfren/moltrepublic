@@ -458,6 +458,15 @@ pub(crate) struct State {
     /// concurrent founding/mesh change can neither be mistaken for a stale
     /// join nor silently drop a live one.
     pub(crate) join_generation: u64,
+    /// A separate incarnation counter for the **recovery** flow (an off-actor
+    /// rejoin over SMP) — the twin of [`State::join_generation`].
+    pub(crate) recover_generation: u64,
+    /// While a recovery is in flight: the parsed recovery link + the phrase
+    /// the rejoin task runs with. `cmd_net_recover_sealed` re-derives the seat
+    /// identity from the phrase (the ritual salts it with a workspace-id
+    /// string, so it must NOT be re-derived from the member handle) and checks
+    /// the served chain against the link. `None` outside a recovery.
+    pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, String)>,
     /// The channel the off-actor join task waits on for the joiner's charter
     /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
     /// while a join is paused at the ratification step, else `None`.
@@ -523,6 +532,8 @@ impl State {
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             net_generation: 0,
             join_generation: 0,
+            recover_generation: 0,
+            recover_ctx: None,
             join_confirm: None,
             persist,
             session,
@@ -681,6 +692,16 @@ impl State {
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, generation),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
+            Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
+            Command::NetRecoverSealed {
+                member,
+                chain,
+                mls,
+                generation,
+            } => self.cmd_net_recover_sealed(member, chain, mls, generation),
+            Command::NetRecoverFailed { error, generation } => {
+                self.cmd_net_recover_failed(error, generation)
+            }
             Command::NetRecoverRequested {
                 member,
                 identity_pk,
@@ -1612,6 +1633,214 @@ mod tests {
                 Reply::Session(s) => assert_eq!(s.join.run.outcome, 2, "garbage roster fails"),
                 other => panic!("unexpected: {other:?}"),
             }
+        });
+    }
+
+    /// A real, threshold-signed **two-block chain** for the recovery tests: a
+    /// genesis anchoring a coordinator and "bob" — whose identity derives from
+    /// `phrase` exactly as the ritual derives it — plus one gated `Applied`
+    /// block (m=1, signed by the coordinator). Recovering must adopt the FULL
+    /// chain: the genesis alone would not project block 1's surface state.
+    fn recovered_chain(phrase: &str) -> (Vec<molt_core::ChainBlock>, String) {
+        use molt_core::{ChainBlock, ChainChange, MemberIdentity, RosterAttestation, GENESIS_PREV};
+        let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[7u8; 32], "coordinator");
+        let (bob_sk, bob_pk) =
+            crate::founding::member_identity(phrase).expect("bob's ritual identity");
+        let identities = vec![
+            MemberIdentity { member: "coordinator".to_string(), identity_pk: coord_pk },
+            MemberIdentity { member: "bob".to_string(), identity_pk: bob_pk },
+        ];
+        let republic_id = molt_storage::republic_id("Guild", 1, 2, &identities);
+        let change = ChainChange::Genesis {
+            name: "Guild".to_string(),
+            republic_id: republic_id.clone(),
+            rule_m: 1,
+            rule_n: 2,
+            identities,
+            agenda: "survive total loss".to_string(),
+        };
+        let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
+        let genesis = ChainBlock {
+            height: 0,
+            prev: GENESIS_PREV.to_string(),
+            sigs: vec![
+                RosterAttestation {
+                    member: "coordinator".to_string(),
+                    sig: molt_storage::identity_sign(&coord_sk, &bytes),
+                },
+                RosterAttestation {
+                    member: "bob".to_string(),
+                    sig: molt_storage::identity_sign(&bob_sk, &bytes),
+                },
+            ],
+            change,
+        };
+        let change1 = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Memory,
+            payload: json!({"op":"add_note","title":"survived the loss"}),
+        };
+        let bytes1 = molt_core::approval_bytes(&republic_id, 1, &change1);
+        let block1 = ChainBlock {
+            height: 1,
+            prev: molt_storage::content_hash(&molt_core::block_link_bytes(&republic_id, &genesis)),
+            sigs: vec![RosterAttestation {
+                member: "coordinator".to_string(),
+                sig: molt_storage::identity_sign(&coord_sk, &bytes1),
+            }],
+            change: change1,
+        };
+        (vec![genesis, block1], republic_id)
+    }
+
+    /// An actionable recovery link with a bogus host (the background rejoin
+    /// task will fail, but the directly-injected commands are processed
+    /// in-process — the same seam as [`joinable_link`]).
+    fn recover_link(member: &str, republic_id: &str) -> String {
+        crate::recovery::RecoveryInvite {
+            republic: "Guild".to_string(),
+            member: member.to_string(),
+            ticket: "ab".repeat(8),
+            server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
+                .to_string(),
+            queue_id: "cd".repeat(12),
+            wrap: "ef".repeat(32),
+            republic_id: republic_id.to_string(),
+        }
+        .render()
+    }
+
+    fn storage_session(tmp: &tempfile::TempDir) -> SessionView {
+        SessionView {
+            workspaces: Vec::new(),
+            settings: SessionSettings {
+                workspace_dir: tmp.path().join("workspaces").display().to_string(),
+                ..SessionSettings::default()
+            },
+            ..SessionView::default()
+        }
+    }
+
+    #[test]
+    fn recover_start_guards_the_link_and_the_storage() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            // a bare preview link carries no transport handover — not actionable
+            let w = spawn_with_storage(GroupConfig::demo(), storage_session(&tmp));
+            let err = w
+                .execute(Command::RecoverStart {
+                    link: "molt://recover/Guild/bob/abcdef".to_string(),
+                    phrase: "some phrase".to_string(),
+                })
+                .await
+                .expect_err("a preview link cannot start a recovery");
+            assert!(matches!(err, MoltError::Recover(_)), "unexpected: {err:?}");
+
+            // a storage-less node has nowhere to materialize the recovery
+            let w2 = spawn(GroupConfig::demo(), SessionView::default());
+            let err = w2
+                .execute(Command::RecoverStart {
+                    link: recover_link("bob", "f00d"),
+                    phrase: "some phrase".to_string(),
+                })
+                .await
+                .expect_err("a storage-less node cannot recover");
+            assert!(matches!(err, MoltError::Recover(_)), "unexpected: {err:?}");
+        });
+    }
+
+    /// **The A2 keystone:** a completed rejoin materializes the recovered
+    /// workspace from the verified chain — adopting the FULL chain (block 1's
+    /// gated `Applied` projects into the surface state), anchoring the seat's
+    /// phrase-derived identity, and entering the republic.
+    #[test]
+    fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let w = spawn_with_storage(GroupConfig::demo(), storage_session(&tmp));
+            let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+            let (chain, republic_id) = recovered_chain(&phrase);
+            w.execute(Command::RecoverStart {
+                link: recover_link("bob", &republic_id),
+                phrase: phrase.clone(),
+            })
+            .await
+            .expect("recover start");
+
+            // a stale-generation result is dropped without a trace
+            let chain_json = serde_json::to_string(&chain).expect("chain json");
+            w.execute(Command::NetRecoverSealed {
+                member: "bob".to_string(),
+                chain: chain_json.clone(),
+                mls: String::new(),
+                generation: Some(999),
+            })
+            .await
+            .expect("stale sealed");
+            let s = read_session(&w).await;
+            assert!(s.workspaces.is_empty(), "a stale result must not materialize");
+
+            // the current-generation result materializes the workspace
+            w.execute(Command::NetRecoverSealed {
+                member: "bob".to_string(),
+                chain: chain_json,
+                mls: String::new(),
+                generation: Some(1),
+            })
+            .await
+            .expect("sealed");
+            let s = read_session(&w).await;
+            assert_eq!(s.screen, Screen::Main, "entered the recovered republic");
+            let ws = s
+                .workspaces
+                .iter()
+                .find(|x| x.name == "Guild")
+                .expect("the recovered workspace is listed");
+            assert_eq!(s.active_workspace, ws.id);
+            assert_eq!(ws.agenda, "survive total loss");
+            // the FULL chain was adopted, not just the genesis: block 1's
+            // gated Applied projects into the surface state
+            let mem = read_surface(&w, Surface::Memory).await;
+            assert_eq!(mem.applied.len(), 1, "block 1 projected");
+            assert_eq!(mem.applied[0]["title"], "survived the loss");
+        });
+    }
+
+    /// Defence in depth on the actor: a chain whose roster does not anchor the
+    /// identity derived from THIS recovery's phrase is hard-rejected — a forged
+    /// internal command (or a coordinator serving someone else's chain) must
+    /// not materialize a workspace the seat cannot sign for.
+    #[test]
+    fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let w = spawn_with_storage(GroupConfig::demo(), storage_session(&tmp));
+            // the chain anchors an identity derived from a DIFFERENT phrase
+            let other = molt_storage::generate_seed_phrase().expect("other phrase");
+            let (chain, republic_id) = recovered_chain(&other);
+            let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+            w.execute(Command::RecoverStart {
+                link: recover_link("bob", &republic_id),
+                phrase,
+            })
+            .await
+            .expect("recover start");
+            w.execute(Command::NetRecoverSealed {
+                member: "bob".to_string(),
+                chain: serde_json::to_string(&chain).expect("chain json"),
+                mls: String::new(),
+                generation: Some(1),
+            })
+            .await
+            .expect("sealed");
+            let s = read_session(&w).await;
+            assert!(s.workspaces.is_empty(), "an unanchored chain must not materialize");
+            assert_ne!(s.screen, Screen::Main);
+            assert!(
+                s.notice.starts_with("recover-failed:"),
+                "the failure surfaces to the operator; notice = {:?}",
+                s.notice
+            );
         });
     }
 

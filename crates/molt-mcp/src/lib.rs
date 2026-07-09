@@ -742,6 +742,23 @@ fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "recover_start",
+            command: "recover_start",
+            description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "link": { "type": "string", "description": "the molt://recover/… link (must carry the transport handover)" },
+                    "phrase": { "type": "string", "description": "the seat's recovery phrase" }
+                },
+                "required": ["link", "phrase"]
+            }),
+            build: |args| Ok(Command::RecoverStart {
+                link: str_arg(args, "link")?,
+                phrase: str_arg(args, "phrase")?,
+            }),
+        },
+        ToolDef {
             name: "create_propose",
             command: "create_propose",
             description: "Propose the deliberated charter — the final republic name and a free-text agenda — once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda with their signature, and only then does the workspace open.",
@@ -844,14 +861,16 @@ mod tests {
         // net_ritual_link_ready / net_ritual_failed are the off-actor
         // provisioning task reporting a seat's real link or a provisioning
         // failure; net_join_sealed / net_join_failed are the off-actor join
-        // task reporting back; reload_settings / config_notice are the config
+        // task reporting back; net_recover_sealed / net_recover_failed are the
+        // off-actor rejoin task reporting back (recover_start is the tool);
+        // reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
         // save_settings (see documents/mcp-security.md)
         // net_mesh_announced is a member's post-founding mesh handover reaching
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 20] = [
+        const INTERNAL: [&str; 22] = [
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -865,6 +884,8 @@ mod tests {
             "net_ritual_failed",
             "net_join_sealed",
             "net_join_failed",
+            "net_recover_sealed",
+            "net_recover_failed",
             "net_join_accepted",
             "net_join_charter_proposed",
             "net_join_declined",

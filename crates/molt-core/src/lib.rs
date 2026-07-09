@@ -1890,6 +1890,19 @@ pub enum Command {
         /// The returning member's seat handle (must be an anchored roster member).
         member: MemberId,
     },
+    /// A member who **lost its device** rejoins from a coordinator-minted
+    /// `molt://recover/…` link and its recovery phrase (`recovery_ritual.md`
+    /// §4) — a human decision on a fresh device, so it is a tool on both
+    /// surfaces. The engine runs the rejoin off the actor: re-derive the seat
+    /// identity, prove it to the coordinator, re-enter the MLS group from the
+    /// Welcome, verify the served chain from its genesis — the outcome arrives
+    /// as `NetRecoverSealed` / `NetRecoverFailed`.
+    RecoverStart {
+        /// The `molt://recover/…` link (must carry the transport handover).
+        link: String,
+        /// The seat's recovery phrase (the identity re-derives from it).
+        phrase: String,
+    },
     /// A returning member's **recovery request** arrived on the coordinator's
     /// recovery queue (engine-internal — the recovery-ritual transport speaks to
     /// the engine; a member must not be able to forge one). The coordinator
@@ -2000,6 +2013,33 @@ pub enum Command {
         /// A human-readable reason.
         error: String,
         /// Join incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A total-loss **recovery completed** (engine-internal): the off-actor
+    /// rejoin task re-entered the MLS group and verified the coordinator-served
+    /// chain from its genesis. The engine re-verifies and materializes the
+    /// recovered workspace from the chain. Never an MCP tool.
+    NetRecoverSealed {
+        /// The recovered seat's member handle.
+        member: MemberId,
+        /// JSON of the full, verified `Vec<ChainBlock>` — the genesis carries
+        /// the constitution the workspace materializes from.
+        chain: String,
+        /// The rejoiner's own post-Welcome MLS group snapshot (hex of the
+        /// `MlsMember` blob), sealed into the recovered `transport.state`.
+        #[serde(default)]
+        mls: String,
+        /// Recovery incarnation (a superseded recovery drops stale results).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A total-loss recovery failed (engine-internal): surfaced to the
+    /// operator. Never an MCP tool.
+    NetRecoverFailed {
+        /// A human-readable reason.
+        error: String,
+        /// Recovery incarnation.
         #[serde(default)]
         generation: Option<u64>,
     },

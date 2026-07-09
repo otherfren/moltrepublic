@@ -66,6 +66,10 @@ impl State {
         signing_key: Option<molt_storage::SigningKey>,
         mls_snapshot: Option<Vec<u8>>,
         mesh: Vec<molt_core::MeshLink>,
+        // a recovery adopts the FULL verified chain it caught up over the
+        // recovery channel (the genesis alone would drop every later block's
+        // state); `None` = a founding/join, whose chain IS the genesis.
+        full_chain: Option<Vec<molt_core::ChainBlock>>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -90,7 +94,10 @@ impl State {
         // pre-ritual/demo materialize leaves the chain empty. The signing key
         // (anchored in the roster) is kept + sealed so the open workspace can
         // co-sign governance and a reopen resumes without the phrase.
-        let chain = self.genesis_chain(&sealed);
+        let chain = match full_chain {
+            Some(c) => c,
+            None => self.genesis_chain(&sealed),
+        };
         let sk_bytes = signing_key.as_ref().map(|sk| sk.to_bytes().to_vec());
         let root = self.workspace_root();
         let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
@@ -254,6 +261,7 @@ impl State {
                 None,          // no chain yet → no signing key (S4/S5)
                 None,          // …and the MLS group (S4/S5)
                 Vec::new(),    // …and the mesh (S4/S5)
+                None,          // no recovered chain — this is the mock restore
                 MoltError::Restore,
             )?
         } else {
@@ -571,6 +579,7 @@ impl State {
                 // the founder's mesh is not known until its bootstrap finishes;
                 // it is persisted then, via NetMeshReady
                 Vec::new(),
+                None, // a founding's chain IS the genesis
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
@@ -838,6 +847,7 @@ impl State {
                 joiner_sk,
                 mls_blob,
                 mesh,
+                None, // a join's chain IS the genesis
                 MoltError::Join,
             ) {
                 Ok(id) => id,
@@ -880,6 +890,208 @@ impl State {
             }
         }
         self.session.screen = Screen::Main;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    // ---- recover (total-loss rejoin over a molt://recover/… link) --------
+
+    /// Begin recovering a lost seat from a coordinator-minted recovery link
+    /// and the seat's recovery phrase — the rejoiner side of the recovery
+    /// ritual (`recovery_ritual.md` §4), mirroring [`State::cmd_join_start`].
+    /// The rejoin runs off the actor (it waits for the coordinator's threshold
+    /// re-admission + Welcome, possibly long); the outcome returns as
+    /// [`Command::NetRecoverSealed`] / [`Command::NetRecoverFailed`].
+    pub(crate) fn cmd_recover_start(
+        &mut self,
+        link: String,
+        phrase: String,
+    ) -> Result<Reply, MoltError> {
+        let link = link.trim().to_string();
+        // an actionable recovery link carries the coordinator's transport
+        // handover — a bare preview link cannot reach anyone
+        let Some(inv) = crate::recovery::RecoveryInvite::parse(&link) else {
+            return Err(MoltError::Recover(
+                "not an actionable recovery link — it carries no transport details".to_string(),
+            ));
+        };
+        // a recovered republic only exists as a materialized workspace — a
+        // storage-less node has nowhere to put the verified chain
+        if !self.persist {
+            return Err(MoltError::Recover(
+                "this node has no workspace storage to recover into".to_string(),
+            ));
+        }
+        let phrase = phrase.trim().to_string();
+        if phrase.is_empty() {
+            return Err(MoltError::Recover(
+                "the recovery phrase must not be empty".to_string(),
+            ));
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Recover("engine stopped".to_string()));
+        };
+        // a restarted recovery supersedes the one in flight — bump the
+        // incarnation so the stale task's late result is dropped
+        self.recover_generation += 1;
+        let generation = self.recover_generation;
+        self.recover_ctx = Some((inv.clone(), phrase.clone()));
+        self.session.notice = format!("recover-started:{}", inv.member);
+        self.emit_session(SessionScope::Full);
+        tokio::spawn(async move {
+            let cmd = match crate::recovery::rejoin_over_smp(&link, &phrase).await {
+                Ok(outcome) => match serde_json::to_string(&outcome.chain) {
+                    Ok(chain) => Command::NetRecoverSealed {
+                        member: outcome.member,
+                        chain,
+                        mls: hex::encode(&outcome.mls_snapshot),
+                        generation: Some(generation),
+                    },
+                    Err(e) => Command::NetRecoverFailed {
+                        error: e.to_string(),
+                        generation: Some(generation),
+                    },
+                },
+                Err(e) => Command::NetRecoverFailed {
+                    error: e,
+                    generation: Some(generation),
+                },
+            };
+            let (reply, _rx) = oneshot::channel();
+            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The off-actor rejoin task finished: the seat is back inside the MLS
+    /// group and holds the coordinator-served chain, verified from its
+    /// genesis. The actor **re-verifies everything** before materializing
+    /// (defence in depth against a forged internal command — symmetric with
+    /// [`State::cmd_net_join_sealed`]), then writes the recovered workspace,
+    /// adopting the FULL chain, and enters the republic. Option A: no live
+    /// mesh yet — re-meshing is the separate dynamic-membership feature.
+    pub(crate) fn cmd_net_recover_sealed(
+        &mut self,
+        member: String,
+        chain: String,
+        mls: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        // a cancelled/restarted recovery bumped the generation — drop stale results
+        if generation != Some(self.recover_generation) {
+            return Ok(Reply::Ack);
+        }
+        let Some((inv, phrase)) = self.recover_ctx.clone() else {
+            return Ok(Reply::Ack);
+        };
+        let blocks: Vec<molt_core::ChainBlock> = match serde_json::from_str(&chain) {
+            Ok(b) => b,
+            Err(e) => {
+                return self
+                    .cmd_net_recover_failed(format!("decoding the recovered chain: {e}"), generation)
+            }
+        };
+        // the whole chain, verified from block 0 (signatures, links, threshold)
+        let head = match crate::chain::verify_chain(&blocks) {
+            Ok(h) => h,
+            Err(e) => return self.cmd_net_recover_failed(e, generation),
+        };
+        // the genesis IS the constitution the workspace materializes from
+        let Some(sealed) = blocks.first().and_then(crate::recovery::sealed_roster_from_genesis)
+        else {
+            return self.cmd_net_recover_failed(
+                "the recovered chain does not root on a genesis constitution".to_string(),
+                generation,
+            );
+        };
+        // the chain must be THIS recovery's republic (no swapping in another)
+        if head.republic_id != inv.republic_id || member != inv.member {
+            return self.cmd_net_recover_failed(
+                "the recovered chain does not match the recovery link".to_string(),
+                generation,
+            );
+        }
+        // the seat's identity re-derives from the phrase exactly as the ritual
+        // anchored it; the VERIFIED HEAD must anchor it (a Membership block may
+        // have evolved the key past the genesis — e.g. this very re-admission)
+        let (sk, pk) = match crate::founding::member_identity(&phrase) {
+            Ok(kp) => kp,
+            Err(e) => return self.cmd_net_recover_failed(e, generation),
+        };
+        if !head.identities.iter().any(|i| i.member == member && i.identity_pk == pk) {
+            return self.cmd_net_recover_failed(
+                "the recovered chain does not anchor this phrase's identity".to_string(),
+                generation,
+            );
+        }
+        // a corrupt MLS snapshot fails the recovery — materializing a workspace
+        // whose group can never decrypt is worse than a clean failure
+        let mls_blob = if mls.is_empty() {
+            None
+        } else {
+            match hex::decode(&mls) {
+                Ok(blob) => Some(blob),
+                Err(e) => {
+                    return self
+                        .cmd_net_recover_failed(format!("decoding MLS snapshot: {e}"), generation)
+                }
+            }
+        };
+        let id = match self.materialize_workspace(
+            &sealed.name,
+            &member,
+            sealed.rule_m,
+            sealed.roster.clone(),
+            &phrase,
+            sealed.identities.clone(),
+            sealed.attestations.clone(),
+            sealed.republic_id.clone(),
+            sealed.agenda.clone(),
+            Some(sk),
+            mls_blob,
+            Vec::new(), // option A: recovered without a live mesh
+            Some(blocks),
+            MoltError::Recover,
+        ) {
+            Ok(id) => id,
+            Err(e) => return self.cmd_net_recover_failed(e.to_string(), generation),
+        };
+        // the recovery is done — advance the incarnation so a late result from
+        // the (finished) rejoin task can't touch the recovered state
+        self.recover_generation += 1;
+        self.recover_ctx = None;
+        let members = roster_members(&sealed.roster, |_| true, "just now");
+        self.push_workspace_entry(
+            &id,
+            &sealed.name,
+            sealed.rule_m,
+            sealed.roster.len(),
+            members,
+            String::new(),
+            "tor".to_string(),
+            self.session.settings.s3_backup,
+            sealed.agenda.clone(),
+        );
+        self.session.active_workspace = id;
+        self.session.notice = format!("recovered:{member}");
+        self.session.screen = Screen::Main;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// A total-loss recovery failed: surface the reason to the operator. The
+    /// in-flight context is kept, so a slow legitimate result racing a
+    /// transport error can still land (retry = a fresh `RecoverStart`).
+    pub(crate) fn cmd_net_recover_failed(
+        &mut self,
+        error: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.recover_generation) {
+            return Ok(Reply::Ack);
+        }
+        tracing::warn!(error = %error, "recovery failed");
+        self.session.notice = format!("recover-failed:{error}");
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
