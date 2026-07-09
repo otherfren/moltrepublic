@@ -33,7 +33,7 @@ use crate::{Envelope, State};
 /// entering without a direct mesh (best-effort bootstrap — see the join gating
 /// decision). Generous: at founding time every peer is present, so the exchange
 /// normally completes in well under a second; this only bounds a failed peer.
-const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+pub(crate) const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// A fresh SMP transport for **resuming** a persisted mesh on reopen: build it
 /// for the mesh's server and re-adopt the persisted queue credentials (recv keys

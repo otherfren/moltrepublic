@@ -313,6 +313,11 @@ pub struct RejoinOutcome {
     /// engine materializes the local workspace from. `None` on a chain-less
     /// republic (no genesis to rebuild it).
     pub sealed: Option<molt_core::SealedRoster>,
+    /// The re-established full-mesh handovers to the survivors (dynamic mesh
+    /// membership, `documents/dynamic_mesh.md`) — the engine stands the runtime
+    /// supervisor up over them. Empty when the mesh phase was skipped or timed
+    /// out (best-effort: the recovered STATE never depends on it).
+    pub mesh: Vec<molt_core::MeshLink>,
 }
 
 /// Drive the **returning member's side** of the recovery ritual over `transport`
@@ -326,12 +331,15 @@ pub struct RejoinOutcome {
 /// 3. await the coordinator's `Welcome` on the reply queue and rejoin the group.
 ///
 /// The generic core a genuinely separate node runs; [`rejoin_over_smp`] wraps it
-/// with the transport parsed from a `molt://recover/…` link. It does **not**
-/// catch up or materialize — that is the caller's next step, over the mesh.
+/// with the transport parsed from a `molt://recover/…` link. With `bootstrap`
+/// it also re-establishes the runtime mesh ([`rejoin_mesh`], best-effort) after
+/// the chain verified — the engine's production path; tests that only exercise
+/// the crypto/ritual core pass `false`.
 pub async fn run_rejoin<T: Transport>(
     transport: T,
     inv: RecoveryInvite,
     phrase: &str,
+    bootstrap: bool,
 ) -> Result<RejoinOutcome, String> {
     // per-seat identity, deterministic from the phrase — the SAME key the
     // genesis roster anchors, so the coordinator's seat-proof check passes and
@@ -410,12 +418,45 @@ pub async fn run_rejoin<T: Transport>(
             // ❻ rejoin the encrypted group
             let welcome_bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
             mls.join_from_welcome(&welcome_bytes).map_err(|e| e.to_string())?;
-            let snap = mls.snapshot().map_err(|e| e.to_string())?;
             // ❼–❽ catch up: VERIFY the served chain from block 0 (an untrusted
             // deliverer is safe — the signatures + links + threshold are checked
             // here, not trusted), then reconstruct the founding roster from the
             // genesis for the engine to materialize from.
             let (verified_chain, sealed) = verify_served_chain(&chain, &inv, &pk)?;
+            // re-establish the runtime mesh (best-effort — the recovered STATE
+            // is already safe, so a mesh failure degrades to option A, never
+            // fails the recovery). Only after the chain verified: the survivor
+            // list comes from the verified roster, not the link.
+            let mesh = match (&sealed, bootstrap) {
+                (Some(s), true) => {
+                    let survivors: Vec<String> = s
+                        .identities
+                        .iter()
+                        .map(|i| i.member.clone())
+                        .filter(|m| m != &inv.member)
+                        .collect();
+                    match rejoin_mesh(
+                        &inv.member,
+                        &survivors,
+                        &transport,
+                        &mut mls,
+                        &recover_snd,
+                        &recover_wrap,
+                        crate::founding::MESH_BOOTSTRAP_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mesh re-join failed — recovered without live links");
+                            Vec::new()
+                        }
+                    }
+                }
+                _ => Vec::new(),
+            };
+            // snapshot AFTER the mesh phase — its announces advanced the ratchet
+            let snap = mls.snapshot().map_err(|e| e.to_string())?;
             return Ok(RejoinOutcome {
                 member: inv.member,
                 pk,
@@ -423,6 +464,7 @@ pub async fn run_rejoin<T: Transport>(
                 mls_snapshot: snap,
                 chain: verified_chain,
                 sealed,
+                mesh,
             });
         }
     }
@@ -463,16 +505,132 @@ fn verify_served_chain(
     Ok((blocks, Some(sealed)))
 }
 
+/// Re-join the **runtime mesh** after recovery — the rejoiner side of dynamic
+/// mesh membership (`documents/dynamic_mesh.md`): open one fresh per-pair
+/// inbound queue per survivor, announce them MLS-encrypted over the recovery
+/// channel (the coordinator authenticates the sender and relays the ciphertext
+/// verbatim over the runtime mesh), then await each survivor's reply announce
+/// as the **first frame on the very queue announced for it** (per-queue FIFO:
+/// the reply precedes any runtime traffic, so it is read here and acked before
+/// the queue is handed to the supervisor), authenticate each reply by MLS
+/// decryption, and assemble the full-mesh links.
+pub(crate) async fn rejoin_mesh<T: Transport>(
+    me: &str,
+    survivors: &[String],
+    transport: &T,
+    mls: &mut molt_net::MlsMember,
+    recover_snd: &SndQueueAddr,
+    recover_wrap: &WrapKey,
+    timeout: std::time::Duration,
+) -> Result<Vec<molt_core::MeshLink>, String> {
+    use molt_net::mesh;
+    use std::collections::BTreeMap;
+
+    // one fresh per-pair inbound queue per survivor (per-pair = unlinkability,
+    // same as the founding bootstrap), each subscribed BEFORE it is announced
+    // so a fast reply cannot race the subscription
+    let mut my_inbound: BTreeMap<String, (molt_net::RcvQueue, WrapKey)> = BTreeMap::new();
+    let mut queues: BTreeMap<String, mesh::QueueHandover> = BTreeMap::new();
+    let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(survivors.len().max(1));
+    let mut readers = Vec::with_capacity(survivors.len());
+    for s in survivors {
+        let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
+        let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
+        let mut rx = transport.subscribe(&pair.rcv).await.map_err(|e| e.to_string())?;
+        queues.insert(s.clone(), mesh::QueueHandover::of(&pair.snd, &wrap));
+        my_inbound.insert(s.clone(), (pair.rcv, wrap.clone()));
+        // the survivor's reply is the FIRST frame on this queue (it sends the
+        // reply before it stands its extended supervisor up, and the queue is
+        // fresh) — read exactly one framed message, ack it, and stop, leaving
+        // every later (runtime) frame for the supervisor's own subscription
+        let tx = reply_tx.clone();
+        readers.push(tokio::spawn(async move {
+            let mut reasm = molt_net::Reassembler::new();
+            while let Some(d) = rx.recv().await {
+                let Ok(plain) = molt_net::wrap::unwrap_block(&wrap, &d.block) else {
+                    d.ack.ack();
+                    continue;
+                };
+                let outcome = reasm.push(&plain);
+                d.ack.ack();
+                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
+                    if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                    {
+                        if let Ok(raw) = hex::decode(&ct) {
+                            let _ = tx.send(raw).await;
+                        }
+                    }
+                    return;
+                }
+            }
+        }));
+    }
+    drop(reply_tx);
+
+    // announce the queues — MLS-encrypted, so every survivor authenticates the
+    // sender — over the recovery channel (the coordinator relays to the mesh)
+    let announce = mesh::MeshAnnounce { queues };
+    let bytes = serde_json::to_vec(&announce).map_err(|e| e.to_string())?;
+    let ct = mls.encrypt(&bytes).map_err(|e| e.to_string())?;
+    let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+    let payload = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+    supervisor::send_framed(transport, recover_snd, recover_wrap, msg_id(me, "mesh", 2), &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // collect + MLS-authenticate every survivor's reply, bounded by `timeout`
+    // (best-effort like the founding bootstrap — the caller recovers mesh-less)
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut announces: BTreeMap<String, mesh::MeshAnnounce> = BTreeMap::new();
+    while announces.len() < survivors.len() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, reply_rx.recv()).await {
+            Ok(Some(raw)) => {
+                // decryption authenticates the replier — an announce from anyone
+                // but an expected survivor is ignored
+                if let Ok(molt_net::MlsIncoming::Application { from, plaintext }) = mls.decrypt(&raw)
+                {
+                    if survivors.contains(&from) {
+                        if let Ok(a) = serde_json::from_slice::<mesh::MeshAnnounce>(&plaintext) {
+                            announces.insert(from, a);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                return Err("mesh re-join reply channel closed".to_string());
+            }
+            Err(_) => {
+                for r in &readers {
+                    r.abort(); // inbound readers only — safe to abort
+                }
+                return Err(format!(
+                    "mesh re-join timed out: {}/{} survivors replied",
+                    announces.len(),
+                    survivors.len()
+                ));
+            }
+        }
+    }
+    let links = mesh::assemble_mesh(me, &my_inbound, &announces)?;
+    Ok(links.iter().map(molt_net::PeerLink::to_mesh).collect())
+}
+
 /// Rejoin a republic from a `molt://recover/…` link over the real SMP server the
 /// link points at — the total-loss member's entry point (a fresh device with
 /// only the recovery phrase). Builds this node's OWN transport to the
 /// coordinator's server (SMP clones share the recipient-key store, so the caller
 /// can reuse it for the follow-on catch-up mesh) and drives [`run_rejoin`].
-pub async fn rejoin_over_smp(link: &str, phrase: &str) -> Result<RejoinOutcome, String> {
+pub async fn rejoin_over_smp(
+    link: &str,
+    phrase: &str,
+    bootstrap: bool,
+) -> Result<RejoinOutcome, String> {
     let inv = RecoveryInvite::parse(link).ok_or("not an actionable recovery link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
     let transport = RitualTransport::Smp(SmpTransport::new(server));
-    run_rejoin(transport, inv, phrase).await
+    run_rejoin(transport, inv, phrase, bootstrap).await
 }
 
 #[cfg(test)]
@@ -672,6 +830,195 @@ mod tests {
             wrap: "bb".to_string(),
             republic_id: republic_id.to_string(),
         }
+    }
+
+    /// **Dynamic mesh membership, rejoiner side.** Bob (recovered, in the MLS
+    /// group) announces fresh per-pair queues over the recovery channel; the
+    /// coordinator authenticates + relays the ciphertext to the other survivor;
+    /// each survivor replies — MLS-encrypted, directly onto the queue bob
+    /// announced for it — and bob assembles correctly wired links to BOTH.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_rejoiner_reestablishes_mesh_links_with_the_survivors() {
+        use molt_net::{mesh, supervisor, LoopbackHub, MlsIncoming, MlsMember, Reassembler};
+        use molt_net::{msg_id, Transport};
+
+        // one real 3-member MLS group: coordinator + cara (survivors) + bob
+        let (coord_sk, _) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, _) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let (cara_sk, _) = molt_storage::derive_identity_key(&[3u8; 32], "cara");
+        let mut coord = MlsMember::new(&coord_sk, "coordinator").expect("coord mls");
+        let mut bob = MlsMember::new(&bob_sk, "bob").expect("bob mls");
+        let mut cara = MlsMember::new(&cara_sk, "cara").expect("cara mls");
+        coord.create_group().expect("group");
+        let welcome = coord
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add members")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        let hub = LoopbackHub::calm();
+        let transport = hub.transport();
+        // the coordinator's recovery queue (minted at link time in the product)
+        let recover_q = transport.create_queue().await.expect("recovery queue");
+        let recover_wrap = WrapKey::fresh().expect("wrap");
+
+        // bob drives the mesh re-join
+        let bob_transport = hub.transport();
+        let recover_snd = recover_q.snd.clone();
+        let rw = recover_wrap.clone();
+        let bob_task = tokio::spawn(async move {
+            let links = rejoin_mesh(
+                "bob",
+                &["coordinator".to_string(), "cara".to_string()],
+                &bob_transport,
+                &mut bob,
+                &recover_snd,
+                &rw,
+                std::time::Duration::from_secs(10),
+            )
+            .await;
+            (bob, links)
+        });
+
+        // survivor half shared by the coordinator and cara: decrypt bob's
+        // announce, create the own inbound queue for bob, reply MLS-encrypted
+        // directly onto the queue bob announced — returns the created queue's
+        // send address (what bob's link must point at)
+        async fn survivor_reply<T: Transport>(
+            me: &str,
+            mls: &mut MlsMember,
+            transport: &T,
+            announce_ct: &[u8],
+        ) -> molt_net::SndQueueAddr {
+            let MlsIncoming::Application { from, plaintext } =
+                mls.decrypt(announce_ct).expect("decrypt bob's announce")
+            else {
+                panic!("bob's announce is an application message");
+            };
+            assert_eq!(from, "bob", "the announce is MLS-authenticated as bob");
+            let a: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("announce");
+            let target = a.queues.get(me).expect("bob announced a queue for me");
+            let own_q = transport.create_queue().await.expect("own queue for bob");
+            let own_wrap = WrapKey::fresh().expect("own wrap");
+            let mut queues = std::collections::BTreeMap::new();
+            queues.insert("bob".to_string(), mesh::QueueHandover::of(&own_q.snd, &own_wrap));
+            let reply = mesh::MeshAnnounce { queues };
+            let ct = mls
+                .encrypt(&serde_json::to_vec(&reply).expect("encode"))
+                .expect("encrypt reply");
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            let payload = serde_json::to_vec(&msg).expect("payload");
+            supervisor::send_framed(
+                transport,
+                &target.addr().expect("announced addr"),
+                &target.wrap_key().expect("announced wrap"),
+                msg_id(me, "bob", 1),
+                &payload,
+            )
+            .await
+            .expect("reply reaches bob's announced queue");
+            own_q.snd
+        }
+
+        // the coordinator: read bob's announce off the recovery queue, relay the
+        // ciphertext verbatim to cara (in the product: a MeshAnnounced event over
+        // the runtime mesh), and answer for itself
+        let coord_transport = hub.transport();
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let coord_task = tokio::spawn(async move {
+            let mut rx = coord_transport.subscribe(&recover_q.rcv).await.expect("subscribe");
+            let mut reasm = Reassembler::new();
+            let ct = loop {
+                let d = rx.recv().await.expect("recovery queue open");
+                let Ok(plain) = molt_net::wrap::unwrap_block(&recover_wrap, &d.block) else {
+                    d.ack.ack();
+                    continue;
+                };
+                let out = reasm.push(&plain);
+                d.ack.ack();
+                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = out {
+                    if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                    {
+                        break hex::decode(&ct).expect("announce hex");
+                    }
+                }
+            };
+            relay_tx.send(ct.clone()).await.expect("relay to cara");
+            survivor_reply("coordinator", &mut coord, &coord_transport, &ct).await
+        });
+        let cara_transport = hub.transport();
+        let cara_task = tokio::spawn(async move {
+            let ct = relay_rx.recv().await.expect("relayed announce");
+            survivor_reply("cara", &mut cara, &cara_transport, &ct).await
+        });
+
+        // bob finishes only after BOTH survivors replied (or errors fast), so he
+        // is awaited FIRST — a red run must fail here, not hang on the fakes
+        let (_bob, links) = tokio::time::timeout(std::time::Duration::from_secs(15), bob_task)
+            .await
+            .expect("bob's mesh re-join finishes in time")
+            .expect("bob task");
+        let mut links = links.expect("bob assembles his mesh");
+        let coord_snd = tokio::time::timeout(std::time::Duration::from_secs(5), coord_task)
+            .await
+            .expect("the coordinator fake finished")
+            .expect("coordinator task");
+        let cara_snd = tokio::time::timeout(std::time::Duration::from_secs(5), cara_task)
+            .await
+            .expect("the cara fake finished")
+            .expect("cara task");
+        links.sort_by(|a, b| a.member.cmp(&b.member));
+        assert_eq!(links.len(), 2, "one link per survivor");
+        // each link SENDS to the queue that survivor created for bob …
+        assert_eq!(links[0].member, "cara");
+        assert_eq!(links[0].snd_queue, hex::encode(&cara_snd.id.0));
+        assert_eq!(links[1].member, "coordinator");
+        assert_eq!(links[1].snd_queue, hex::encode(&coord_snd.id.0));
+        // … and every link parses back into a runnable PeerLink
+        for l in &links {
+            assert!(molt_net::PeerLink::from_mesh(l).is_some(), "link {l:?} is runnable");
+        }
+    }
+
+    /// A survivor that never replies bounds the wait: the mesh re-join fails
+    /// with a timeout (the caller recovers mesh-less, option A) instead of
+    /// hanging the rejoin forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silent_survivor_times_the_mesh_rejoin_out() {
+        use molt_net::{LoopbackHub, MlsMember, Transport};
+        let (coord_sk, _) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, _) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let mut coord = MlsMember::new(&coord_sk, "coordinator").expect("coord mls");
+        let mut bob = MlsMember::new(&bob_sk, "bob").expect("bob mls");
+        coord.create_group().expect("group");
+        let welcome = coord
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        let hub = LoopbackHub::calm();
+        let transport = hub.transport();
+        let recover_q = transport.create_queue().await.expect("recovery queue");
+        let recover_wrap = WrapKey::fresh().expect("wrap");
+        // nobody listens on the recovery queue — no reply ever comes
+        let err = rejoin_mesh(
+            "bob",
+            &["coordinator".to_string()],
+            &transport,
+            &mut bob,
+            &recover_q.snd,
+            &recover_wrap,
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .expect_err("a silent survivor must time out");
+        assert!(err.contains("0/1"), "the timeout names the shortfall: {err}");
     }
 
     /// The rejoiner's catch-up check: a served chain is verified from block 0,

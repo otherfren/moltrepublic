@@ -939,7 +939,7 @@ impl State {
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
-            let cmd = match crate::recovery::rejoin_over_smp(&link, &phrase).await {
+            let cmd = match crate::recovery::rejoin_over_smp(&link, &phrase, true).await {
                 Ok(outcome) => match serde_json::to_string(&outcome.chain) {
                     Ok(chain) => Command::NetRecoverSealed {
                         member: outcome.member,

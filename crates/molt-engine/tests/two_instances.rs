@@ -1327,7 +1327,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),
         tokio::spawn(async move {
-            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase).await
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, false).await
         }),
     )
     .await
@@ -1535,7 +1535,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),
         tokio::spawn(async move {
-            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase).await
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase, false).await
         }),
     )
     .await
@@ -1643,7 +1643,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
 
     // the rejoiner runs the real driver over its own transport clone
     let rejoiner = tokio::spawn(async move {
-        molt_engine::run_rejoin(hub.transport(), parsed, &bob_phrase).await
+        molt_engine::run_rejoin(hub.transport(), parsed, &bob_phrase, false).await
     });
 
     // --- the coordinator side of the handshake (played by the test) ---
@@ -1793,7 +1793,7 @@ async fn capture_recover_request(
     let t = hub.transport();
     let mut rx = t.subscribe(&q.rcv).await.expect("subscribe recovery queue");
     let rejoiner = tokio::spawn(async move {
-        let _ = molt_engine::run_rejoin(hub.transport(), inv, &phrase).await;
+        let _ = molt_engine::run_rejoin(hub.transport(), inv, &phrase, false).await;
     });
 
     let mut reasm = Reassembler::new();
