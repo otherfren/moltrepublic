@@ -553,14 +553,26 @@ impl State {
 
     /// Append a block we sealed ourselves: adopt it, then broadcast it to the
     /// mesh (record a self-authored `Committed` envelope the outbox fans out).
+    ///
+    /// ORDER is load-bearing: `after_block_applied` runs **before** the
+    /// `Committed` envelope is recorded. A `Restored` block's re-key advances
+    /// this node's MLS epoch and records the raw `MlsCommit` — and because the
+    /// outbox encrypts lazily at *send* time, any envelope sequenced before
+    /// that `MlsCommit` gets new-epoch ciphertext the still-old-epoch peers
+    /// drop (no cross-epoch buffer). Recording `Committed` after the re-key
+    /// puts it *behind* the `MlsCommit` in the per-link stream, so every
+    /// survivor merges the commit first and then decrypts the block. (The
+    /// ephemeral Proposed/Approved gossip sequenced earlier may still be lost
+    /// in the lone-coordinator burst — acceptable: the committed block
+    /// supersedes it.) The recovery E2E with a live survivor pins this.
     fn adopt_committed_block(&mut self, block: ChainBlock, proposal_id: u64) {
         if !self.append_committed_block(block.clone()) {
             return;
         }
+        self.after_block_applied(&block);
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
         self.record(env);
-        self.after_block_applied(&block);
         // clean up the proposal we just committed — a Membership block carries
         // no proposal id for after_block_applied to key on, so drop it here
         self.pending_sigs.remove(&proposal_id);

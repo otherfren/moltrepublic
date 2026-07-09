@@ -1403,6 +1403,178 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     assert_eq!(ws.members.len(), 2, "the full roster came back from the chain");
 }
 
+/// **Recovery with a LIVE survivor: the re-key commit reaches the mesh.** A
+/// republic of three (1-of-3): the coordinator, member-c (a survivor whose
+/// runtime supervisor keeps running), and member-b (device lost). The
+/// coordinator re-admits b through the full ritual; the survivor must live
+/// through the re-key — the engine's `coordinator_rekey` broadcasts the raw
+/// `MlsCommit` over the runtime mesh, c's receive path merges it, and c then
+/// decrypts the post-re-key chat notice (an epoch-N+1 message c could only
+/// read if it applied the commit). This is the ENGINE-path twin of
+/// `a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch` (which
+/// proved the mechanism on raw supervisors): here the broadcast is driven by
+/// a real committed `Restored` block inside the coordinator's engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: tmp.path().join("coordinator").display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx, recovery_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap_recoverable(
+            molt_core::GroupConfig::demo(),
+            session_a,
+        );
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 1,
+        members: 3,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let mut seats = materials.into_iter();
+    let seat_b = seats.next().expect("seat for member-b");
+    let seat_c = seats.next().expect("seat for member-c");
+    let c_hub = seat_c.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let c_phrase = molt_storage::generate_seed_phrase().expect("c phrase");
+    let b_join = b_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat_b, "member-b".to_string(), b_join, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let c_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat_c, "member-c".to_string(), c_phrase, true, true, None, None)
+            .await
+            .expect("C completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the members never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "survive together".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let _lost_device = b_task.await.expect("B task");
+    let c_outcome = c_task.await.expect("C task");
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // the SURVIVOR stands its runtime supervisor up from its founded mesh +
+    // MLS group and stays online through the whole recovery
+    let c_mesh = c_outcome.mesh.expect("C assembled its direct mesh");
+    let c_mls = c_outcome.mls_snapshot.expect("C post-bootstrap snapshot");
+    let links: Vec<PeerLink> = c_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let c_group = MlsMember::restore(&c_mls).expect("restore C's MLS");
+    let c_sink = RecordSink::default();
+    let (_c_wake, c_wake_rx) = watch::channel(0u64);
+    let _c_sup = supervisor::spawn(
+        c_hub,
+        NetConfig::fast("member-c".to_string(), links, 11),
+        MemLog::new(),
+        MemStateStore::new(),
+        c_sink.clone(),
+        c_wake_rx,
+        Some(MlsChannel::new(c_group)),
+    );
+
+    // the coordinator mints; the rejoiner drives the real recovery
+    a.execute(Command::RecoverInviteStart {
+        member: "member-b".to_string(),
+    })
+    .await
+    .expect("mint recovery link");
+    let material = tokio::task::spawn_blocking(move || {
+        recovery_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A mints the recovery link + hands the queue material out")
+    })
+    .await
+    .expect("recovery mint blocking");
+    let inv = molt_engine::RecoveryInvite::parse(&material.link).expect("actionable link");
+    let rejoin_transport = material.transport.clone();
+    let rejoin_phrase = b_phrase.clone();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::spawn(async move {
+            molt_engine::run_rejoin(rejoin_transport, inv, &rejoin_phrase).await
+        }),
+    )
+    .await
+    .expect("the rejoin finishes in time")
+    .expect("rejoin task")
+    .expect("the rejoin succeeds");
+    assert_eq!(outcome.chain.len(), 2, "genesis + the committed Restored block");
+
+    // the survivor receives the committed Restored block over the mesh …
+    wait_for(
+        &c_sink,
+        |(_, env)| {
+            matches!(&env.body,
+                WorkspaceEvent::Committed(b)
+                    if matches!(&b.change,
+                        molt_core::ChainChange::Membership {
+                            op: molt_core::MembershipOp::Restored,
+                            member,
+                            ..
+                        } if member == "member-b"))
+        },
+        "the Restored block to reach the survivor",
+    )
+    .await;
+    // … and — having merged the broadcast raw MlsCommit — decrypts the chat
+    // notice the coordinator posted AT THE NEW EPOCH: the proof the re-key
+    // commit was distributed live and applied
+    wait_for(
+        &c_sink,
+        |(_, env)| {
+            matches!(&env.body,
+                WorkspaceEvent::Chat(m)
+                    if m.body.contains("member-b rejoined the republic after recovery"))
+        },
+        "the post-re-key chat notice to decrypt at the survivor",
+    )
+    .await;
+}
+
 /// The `member_identity` derivation (`entropy → workspace-id "member" → key`),
 /// reproduced here because the engine keeps it `pub(crate)`. The rejoiner
 /// (`run_rejoin`) derives its key this way internally; the test derives the same
