@@ -613,6 +613,17 @@ impl State {
         }
     }
 
+    /// Whether a command's **workspace scope** is still the open workspace.
+    /// The recovery recv loops and mesh-extension tasks live as long as the
+    /// workspace stays open — a mesh REBUILD (extension) does not invalidate
+    /// them; only a workspace switch/close does (`reset_workspace_state`).
+    fn net_scope_current(&self, scope: Option<u64>) -> bool {
+        match scope {
+            None => true,
+            Some(s) => s == self.net_scope,
+        }
+    }
+
     /// An authenticated peer event arrived. Validation failures are
     /// ack-and-skip (returning an error would wedge the supervisor on a
     /// poison event); T1's wire scope is [`crosses_wire`] — everything
@@ -717,7 +728,7 @@ impl State {
         reply: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if !self.net_generation_current(generation) {
+        if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
         // Spend-once guard: the ticket must be a live one this node minted (via
@@ -803,7 +814,9 @@ impl State {
             republic_id,
             ticket,
             wrap,
-            self.net_generation,
+            // recovery loops are scoped to the open WORKSPACE (a mesh rebuild
+            // mid-recovery must not orphan the minted link)
+            self.net_scope,
             cmd_tx,
             self.recovery_material_sink.clone(),
         );
@@ -819,7 +832,7 @@ impl State {
         link: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if !self.net_generation_current(generation) {
+        if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
         tracing::info!(%member, %link, "recovery link ready");
@@ -839,7 +852,7 @@ impl State {
         ct: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if !self.net_generation_current(generation) {
+        if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
         let Ok(raw) = hex::decode(&ct) else {
@@ -897,7 +910,9 @@ impl State {
             tracing::warn!(%member, "no real runtime mesh to extend");
             return;
         };
-        let generation = self.net_generation;
+        // workspace scope, not mesh generation: a CONCURRENT extension's
+        // rebuild must not drop this one's result (both fold into the live net)
+        let generation = self.net_scope;
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
@@ -975,7 +990,7 @@ impl State {
         link: molt_core::MeshLink,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if !self.net_generation_current(generation) {
+        if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
         let Some(net) = self.net.as_ref() else {

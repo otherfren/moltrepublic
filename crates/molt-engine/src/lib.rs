@@ -459,6 +459,13 @@ pub(crate) struct State {
     /// torn-down runtime are dropped (a delivery queued behind a workspace
     /// switch must not land in the new context's log).
     pub(crate) net_generation: u64,
+    /// Scope counter for the **open workspace** (bumped by
+    /// `reset_workspace_state`, i.e. on every workspace switch/close). The
+    /// recovery recv loops and mesh-extension tasks are scoped to the open
+    /// workspace, NOT to a mesh incarnation: a mesh-extension REBUILD bumps
+    /// `net_generation` mid-recovery and must not orphan an outstanding
+    /// recovery link or a concurrent extension — only a workspace switch may.
+    pub(crate) net_scope: u64,
     /// A separate incarnation counter for the **join** flow (an off-actor SMP
     /// join, possibly long-running). Kept apart from `net_generation` so a
     /// concurrent founding/mesh change can neither be mistaken for a stale
@@ -545,6 +552,7 @@ impl State {
             runtime_transport: None,
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             net_generation: 0,
+            net_scope: 0,
             join_generation: 0,
             recover_generation: 0,
             recover_ctx: None,

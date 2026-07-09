@@ -2513,6 +2513,272 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
     .await;
 }
 
+/// **A mesh rebuild must not kill an outstanding recovery.** The recovery
+/// queue's recv loop is spawned once at link-mint time; a later mesh
+/// EXTENSION rebuilds the supervisor (bumping the mesh incarnation). The
+/// recovery request arriving afterwards must still be processed — recovery
+/// lifetimes are scoped to the OPEN WORKSPACE, not to a mesh incarnation.
+/// Here: the coordinator mints a recovery link for lost member-c, THEN folds
+/// member-b's re-announced link in (a rebuild), and only then does c's
+/// seat-proofed request arrive on the minted queue: the coordinator must
+/// still propose the threshold re-admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
+    use molt_net::mesh;
+    use std::sync::{Arc, Mutex};
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: tmp.path().join("coordinator").display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx, recovery_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap_recoverable(
+            molt_core::GroupConfig::demo(),
+            session_a,
+        );
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 3,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let mut seats = materials.into_iter();
+    let seat_b = seats.next().expect("seat for member-b");
+    let seat_c = seats.next().expect("seat for member-c");
+    let hub = seat_b.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let c_phrase = molt_storage::generate_seed_phrase().expect("c phrase");
+    let c_join = c_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat_b, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let c_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat_c, "member-c".to_string(), c_join, true, true, None, None)
+            .await
+            .expect("C completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the members never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "outlive the rebuild".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let _lost_c = c_task.await.expect("C task"); // member-c's device is lost
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // member-b stays online: its supervisor over the founded mesh, group
+    // shared with the test so it can re-announce (and see the gossip)
+    let b_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let b_mls = b_outcome.mls_snapshot.expect("B post-bootstrap snapshot");
+    let sealed = b_outcome.sealed.expect("B collected the sealed roster");
+    let links: Vec<PeerLink> = b_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let b_group = Arc::new(Mutex::new(MlsMember::restore(&b_mls).expect("restore B MLS")));
+    let b_feed = MemLog::new();
+    let b_sink = RecordSink::default();
+    let (b_wake, b_wake_rx) = watch::channel(0u64);
+    let b_sup = supervisor::spawn(
+        hub.clone(),
+        NetConfig::fast("member-b".to_string(), links, 7),
+        b_feed.clone(),
+        MemStateStore::new(),
+        b_sink.clone(),
+        b_wake_rx,
+        Some(MlsChannel::from_shared(b_group.clone())),
+    );
+
+    // ❶ the coordinator mints the recovery link for lost member-c — its recv
+    // loop starts NOW, before any rebuild
+    a.execute(Command::RecoverInviteStart {
+        member: "member-c".to_string(),
+    })
+    .await
+    .expect("mint recovery link");
+    let material = tokio::task::spawn_blocking(move || {
+        recovery_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A mints the recovery link + hands the queue material out")
+    })
+    .await
+    .expect("recovery mint blocking");
+
+    // ❷ member-b rotates its link: a MeshAnnounced over the running mesh makes
+    // the coordinator REBUILD its supervisor (the mesh incarnation bumps)
+    let new_q = hub.create_queue().await.expect("b's fresh queue");
+    let new_wrap = WrapKey::fresh().expect("fresh wrap");
+    let mut queues = std::collections::BTreeMap::new();
+    queues.insert(
+        "founder-a".to_string(),
+        mesh::QueueHandover::of(&new_q.snd, &new_wrap),
+    );
+    let announce = mesh::MeshAnnounce { queues };
+    let ct = b_group
+        .lock()
+        .expect("b group")
+        .encrypt(&serde_json::to_vec(&announce).expect("encode"))
+        .expect("encrypt announce");
+    b_feed.push(EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_002,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+    });
+    let _ = b_wake.send(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.notice == "mesh-extended:member-b" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the coordinator never folded b's rotated link in"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // finish b's side of the rotation: read the coordinator's reply announce
+    // off the announced queue and stand b's supervisor up over the ROTATED
+    // link (the coordinator now sends on the new queues)
+    let mut rx = hub.subscribe(&new_q.rcv).await.expect("subscribe b's fresh queue");
+    let mut reasm = Reassembler::new();
+    let reply_ct = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let d = rx.recv().await.expect("queue open");
+            let Ok(plain) = molt_net::wrap::unwrap_block(&new_wrap, &d.block) else {
+                d.ack.ack();
+                continue;
+            };
+            let out = reasm.push(&plain);
+            d.ack.ack();
+            if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = out {
+                if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                    serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                {
+                    break hex::decode(&ct).expect("reply hex");
+                }
+            }
+        }
+    })
+    .await
+    .expect("the coordinator's reply reaches the announced queue");
+    b_sup.shutdown();
+    let molt_net::MlsIncoming::Application { plaintext, .. } = b_group
+        .lock()
+        .expect("b group")
+        .decrypt(&reply_ct)
+        .expect("decrypt the reply")
+    else {
+        panic!("the reply is an application message");
+    };
+    let reply: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("reply announce");
+    let target = reply.queues.get("member-b").expect("a queue for member-b");
+    let rotated = PeerLink {
+        member: "founder-a".to_string(),
+        snd: target.addr().expect("addr"),
+        wrap_out: target.wrap_key().expect("wrap"),
+        rcv: new_q.rcv.clone(),
+        wrap_in: new_wrap.clone(),
+    };
+    let b_sink = RecordSink::default();
+    let (_b_wake2, b_wake2_rx) = watch::channel(0u64);
+    let _b_sup2 = supervisor::spawn(
+        hub.clone(),
+        NetConfig::fast("member-b".to_string(), vec![rotated], 9),
+        MemLog::new(),
+        MemStateStore::new(),
+        b_sink.clone(),
+        b_wake2_rx,
+        Some(MlsChannel::from_shared(b_group.clone())),
+    );
+
+    // ❸ only NOW does member-c's seat-proofed request arrive on the queue
+    // minted BEFORE the rebuild — it must still drive the re-admission
+    let c_pk = sealed
+        .identities
+        .iter()
+        .find(|i| i.member == "member-c")
+        .expect("member-c anchored")
+        .identity_pk
+        .clone();
+    let (c_sk, _) = member_identity(&c_phrase);
+    let kp_hex = "abcd"; // an opaque fresh key package for this test
+    let seat_proof =
+        molt_engine::make_seat_proof(&c_sk, &material.ticket, kp_hex, &material.republic_id);
+    let request = invite::RitualMsg::Recover(invite::RecoverRequest {
+        member: "member-c".to_string(),
+        identity_pk: c_pk,
+        key_package: kp_hex.to_string(),
+        ticket: material.ticket.clone(),
+        seat_proof,
+        reply: None,
+    });
+    let payload = serde_json::to_vec(&request).expect("encode recover request");
+    supervisor::send_framed(
+        &material.transport,
+        &material.recover_snd,
+        &material.recover_wrap,
+        msg_id("member-c", "coordinator", 1),
+        &payload,
+    )
+    .await
+    .expect("send the recovery request on the minted queue");
+
+    // the coordinator must verify + propose despite the interleaved rebuild:
+    // the MembershipProposed{Restored} reaches member-b over the (rotated) mesh
+    wait_for(
+        &b_sink,
+        |(_, env)| {
+            matches!(&env.body,
+                WorkspaceEvent::MembershipProposed { member, op, .. }
+                    if member == "member-c" && *op == molt_core::MembershipOp::Restored)
+        },
+        "the re-admission proposal to reach member-b after the rebuild",
+    )
+    .await;
+}
+
 /// **Cross-epoch retry across LINKS: the commit and the held message may
 /// arrive on different peers' links.** The MLS group is node-global but each
 /// per-peer recv loop holds its own future-epoch buffer — a commit that merges

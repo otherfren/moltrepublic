@@ -279,6 +279,13 @@ impl State {
 
     /// Drop all workspace state (close path). The next open starts clean.
     pub(crate) fn reset_workspace_state(&mut self) {
+        // the workspace scope advances: outstanding recovery recv loops and
+        // mesh-extension tasks of the OLD workspace die at this boundary
+        // (their commands carry the old scope) — a mere mesh rebuild within
+        // one workspace deliberately does not pass through here
+        self.net_scope += 1;
+        self.recovery_tickets.clear();
+        self.recovery_mesh_window.clear();
         self.replica = None;
         self.identity_sk = None;
         self.chain.clear();
