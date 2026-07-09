@@ -2513,6 +2513,125 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
     .await;
 }
 
+/// **Cross-epoch retry across LINKS: the commit and the held message may
+/// arrive on different peers' links.** The MLS group is node-global but each
+/// per-peer recv loop holds its own future-epoch buffer — a commit that merges
+/// via peer A's link must also release messages held on peer B's link, or they
+/// sit there for the whole session (B may never send another commit). Here: a
+/// re-keys zoe's seat; b merges the commit FAST (out of band) and chats at the
+/// new epoch — that chat reaches c on the b→c link BEFORE a's commit arrives
+/// on the a→c link. Once the commit lands via a, the chat held on the b link
+/// must deliver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_on_one_link_releases_messages_held_on_another() {
+    use molt_net::{LoopbackHub, MlsChannel};
+    use std::sync::{Arc, Mutex};
+
+    let (a_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("a phrase"));
+    let (b_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("b phrase"));
+    let (c_sk, _) = member_identity(&molt_storage::generate_seed_phrase().expect("c phrase"));
+    let zoe_phrase = molt_storage::generate_seed_phrase().expect("zoe phrase");
+    let (zoe_sk, _) = member_identity(&zoe_phrase);
+    let mut a_member = MlsMember::new(&a_sk, "a").expect("a mls");
+    let mut b_member = MlsMember::new(&b_sk, "b").expect("b mls");
+    let mut c_member = MlsMember::new(&c_sk, "c").expect("c mls");
+    let zoe_member = MlsMember::new(&zoe_sk, "zoe").expect("zoe mls");
+    a_member.create_group().expect("a creates the group");
+    let welcome = a_member
+        .add_members(&[
+            b_member.key_package().expect("b kp"),
+            c_member.key_package().expect("c kp"),
+            zoe_member.key_package().expect("zoe kp"),
+        ])
+        .expect("add b + c + zoe")
+        .expect("a welcome");
+    b_member.join_from_welcome(&welcome).expect("b joins");
+    c_member.join_from_welcome(&welcome).expect("c joins");
+    let a_mls = Arc::new(Mutex::new(a_member));
+    let b_mls = Arc::new(Mutex::new(b_member));
+    let c_mls = Arc::new(Mutex::new(c_member));
+
+    let hub = LoopbackHub::calm();
+    let mut links = hub
+        .full_mesh(&["a".to_string(), "b".to_string(), "c".to_string()])
+        .expect("mesh wiring");
+    let a_links = links.remove("a").expect("a links");
+    let b_links = links.remove("b").expect("b links");
+    let c_links = links.remove("c").expect("c links");
+    let a_log = MemLog::new();
+    let b_log = MemLog::new();
+    let c_sink = RecordSink::default();
+    let (a_wake, a_wake_rx) = watch::channel(0u64);
+    let (b_wake, b_wake_rx) = watch::channel(0u64);
+    let (_c_wake, c_wake_rx) = watch::channel(0u64);
+    let _a_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("a".to_string(), a_links, 1),
+        a_log.clone(),
+        MemStateStore::new(),
+        RecordSink::default(),
+        a_wake_rx,
+        Some(MlsChannel::from_shared(a_mls.clone())),
+    );
+    let _b_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("b".to_string(), b_links, 2),
+        b_log.clone(),
+        MemStateStore::new(),
+        RecordSink::default(),
+        b_wake_rx,
+        Some(MlsChannel::from_shared(b_mls.clone())),
+    );
+    let _c_sup = supervisor::spawn(
+        hub.transport(),
+        NetConfig::fast("c".to_string(), c_links, 3),
+        MemLog::new(),
+        MemStateStore::new(),
+        c_sink.clone(),
+        c_wake_rx,
+        Some(MlsChannel::from_shared(c_mls.clone())),
+    );
+
+    // a re-keys zoe's seat → a at N+1; b merges the commit FAST, out of band
+    // (in production: b's a-link simply delivered the commit before c's did)
+    let zoe2 = MlsMember::new(&zoe_sk, "zoe").expect("zoe2 mls");
+    let (commit, _welcome) = a_mls
+        .lock()
+        .expect("a mls lock")
+        .restore_member("zoe", &zoe2.key_package().expect("zoe2 kp"))
+        .expect("re-key zoe");
+    match b_mls.lock().expect("b mls").decrypt(&commit).expect("b merges") {
+        molt_net::MlsIncoming::Commit => {}
+        other => panic!("expected a commit, got {other:?}"),
+    }
+
+    // b chats at the NEW epoch — it reaches c on the b→c link while c is
+    // still at N (a's commit has not been sent yet): held on the b link
+    b_log.push(ev_chat("b", 1, "crossed the epoch on another link"));
+    let _ = b_wake.send(1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !c_sink.messages().iter().any(|(from, _)| from == "b"),
+        "the future-epoch chat must be held while c is behind"
+    );
+
+    // only now does a's commit reach c — on the a→c link
+    a_log.push(ev_mls_commit("a", 1, &hex::encode(&commit)));
+    let _ = a_wake.send(1);
+
+    // the commit merged via the a link must release the chat held on the b link
+    wait_for(
+        &c_sink,
+        |(from, e)| {
+            from == "b"
+                && matches!(&e.body,
+                    WorkspaceEvent::Chat(m) if m.body == "crossed the epoch on another link")
+        },
+        "the chat held on the b link to deliver after the commit from a",
+    )
+    .await;
+}
+
 /// **Cross-epoch retry under buffer pressure: a SHED message is not lost.**
 /// The future-epoch hold is bounded (64 per link); the 65th racing message is
 /// itself shed onto transport redelivery (newest, so the buffer stays in

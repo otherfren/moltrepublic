@@ -55,6 +55,11 @@ pub struct MlsChannel {
     /// persistent (crash-safe) encrypted outbox lands with the runtime mesh —
     /// the current sole caller is a bounded test, so it never leaks in practice.
     cache: Arc<Mutex<BTreeMap<u64, Vec<u8>>>>,
+    /// Bumped whenever a commit merges (the epoch advanced). The group is
+    /// node-global but each per-peer recv loop holds its own future-epoch
+    /// buffer — a commit arriving on ONE link must wake every OTHER link's
+    /// loop to retry its held messages, or they sit there for the session.
+    epoch_bump: Arc<watch::Sender<u64>>,
 }
 
 impl std::fmt::Debug for MlsChannel {
@@ -76,7 +81,14 @@ impl MlsChannel {
         MlsChannel {
             member,
             cache: Arc::new(Mutex::new(BTreeMap::new())),
+            epoch_bump: Arc::new(watch::channel(0u64).0),
         }
+    }
+
+    /// Subscribe to node-wide epoch advances (one bump per merged commit,
+    /// whichever link it arrived on).
+    fn epoch_watch(&self) -> watch::Receiver<u64> {
+        self.epoch_bump.subscribe()
     }
 
     /// The MLS ciphertext for one outbound envelope, encrypting exactly once per
@@ -118,8 +130,12 @@ impl MlsChannel {
                 }
             }
             // a merged commit advanced the epoch — held future-epoch messages
-            // may decrypt now
-            Ok(MlsIncoming::Commit) => MlsDecode::EpochAdvanced,
+            // may decrypt now; wake every recv loop of this node (the buffers
+            // are per-link, the group is not)
+            Ok(MlsIncoming::Commit) => {
+                self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
+                MlsDecode::EpochAdvanced
+            }
             // its commit is still in flight — hold the SAME bytes and retry
             Ok(MlsIncoming::FutureEpoch) => MlsDecode::FutureEpoch,
             // proposals / replays / past-window / garbage: redelivery cannot help
@@ -556,6 +572,56 @@ async fn advance_outbound<S: StateStore>(
 /// with the reassembler's own partial cap).
 const CHUNK_ACK_MAX: usize = 64;
 
+/// Await the next node-wide epoch advance; pends forever on the plaintext
+/// path (no MLS channel) or once the watch sender is gone.
+async fn epoch_changed(rx: &mut Option<watch::Receiver<u64>>) {
+    match rx {
+        Some(r) => {
+            if r.changed().await.is_err() {
+                *rx = None; // sender gone — never wake through this again
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Retry every held future-epoch message after an epoch advance, in hold
+/// order (= the sender-ratchet generation order); keep passing while progress
+/// is made (a held commit can unlock further messages). Returns `false` when
+/// the engine sink is gone and the recv task must stop.
+async fn drain_epoch_buffer<K: EngineSink>(
+    ch: &MlsChannel,
+    sink: &K,
+    peer: &PeerLink,
+    epoch_buffer: &mut Vec<([u8; 16], Vec<u8>, Vec<AckToken>)>,
+) -> bool {
+    let mut progressed = true;
+    while progressed && !epoch_buffer.is_empty() {
+        progressed = false;
+        for (id, bytes, held) in std::mem::take(epoch_buffer) {
+            match ch.decode(&bytes) {
+                MlsDecode::Deliver(from, env) => {
+                    progressed = true;
+                    sink.peer_seen(&peer.member).await;
+                    if sink.deliver(&from, *env).await.is_err() {
+                        return false;
+                    }
+                    ack_all(held);
+                }
+                MlsDecode::EpochAdvanced => {
+                    progressed = true;
+                    ack_all(held);
+                }
+                MlsDecode::FutureEpoch => {
+                    epoch_buffer.push((id, bytes, held)); // still ahead
+                }
+                MlsDecode::Discard => ack_all(held),
+            }
+        }
+    }
+    true
+}
+
 /// Future-epoch messages held per peer awaiting their re-key commit. The
 /// claimed epoch is unauthenticated before decryption, so a forgery can claim
 /// a future epoch — the buffer is small and shed-tolerant: a shed entry's acks
@@ -602,7 +668,26 @@ async fn recv_task<S, K>(
         .ok()
         .and_then(|s| s.inbound.get(&peer.member).copied())
         .unwrap_or(0);
-    while let Some(delivery) = rx.recv().await {
+    // node-wide epoch advances: a commit merging on ANOTHER peer's link makes
+    // messages held HERE decryptable — without this wake they would sit until
+    // this link happened to carry a commit itself (it may never)
+    let mut epoch_rx = mls.as_ref().map(MlsChannel::epoch_watch);
+    loop {
+        let delivery = tokio::select! {
+            biased;
+            _ = epoch_changed(&mut epoch_rx), if !epoch_buffer.is_empty() => {
+                if let Some(ch) = &mls {
+                    if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
+                        return; // engine gone
+                    }
+                }
+                continue;
+            }
+            d = rx.recv() => match d {
+                Some(d) => d,
+                None => break,
+            },
+        };
         let plain = match unwrap_block(&peer.wrap_in, &delivery.block) {
             Ok(p) => p,
             Err(e) => {
@@ -671,31 +756,8 @@ async fn recv_task<S, K>(
                 }
                 MlsDecode::EpochAdvanced => {
                     ack_all(acks);
-                    // retry every held message; keep passing while progress is
-                    // made (a drained commit can unlock further messages)
-                    let mut progressed = true;
-                    while progressed && !epoch_buffer.is_empty() {
-                        progressed = false;
-                        for (id, bytes, held) in std::mem::take(&mut epoch_buffer) {
-                            match ch.decode(&bytes) {
-                                MlsDecode::Deliver(from, env) => {
-                                    progressed = true;
-                                    sink.peer_seen(&peer.member).await;
-                                    if sink.deliver(&from, *env).await.is_err() {
-                                        return;
-                                    }
-                                    ack_all(held);
-                                }
-                                MlsDecode::EpochAdvanced => {
-                                    progressed = true;
-                                    ack_all(held);
-                                }
-                                MlsDecode::FutureEpoch => {
-                                    epoch_buffer.push((id, bytes, held)); // still ahead
-                                }
-                                MlsDecode::Discard => ack_all(held),
-                            }
-                        }
+                    if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
+                        return; // engine gone
                     }
                 }
                 MlsDecode::FutureEpoch => {
