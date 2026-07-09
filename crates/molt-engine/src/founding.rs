@@ -1685,15 +1685,15 @@ mod ritual_ops {
             self.founder_mesh_in = None;
             let peers = mesh.len();
             if let Some(active) = &self.active {
-                // a full overwrite is safe here: this is the just-founded
-                // workspace and no runtime traffic has run yet, so the outbound/
-                // inbound cursors are still empty (nothing to preserve)
-                let ts = molt_core::TransportState {
-                    mls: Some(mls_snapshot.clone()),
-                    mesh: mesh.clone(),
-                    ..Default::default()
-                };
-                active.handle.save_transport_state(ts);
+                // merge the founder's post-bootstrap MLS + assembled mesh into
+                // transport.state (a LIVE merge: the writer owns the file, and
+                // plain cursor saves carry only the cursor maps — this is the
+                // one path that writes the crypto/mesh fields mid-session)
+                active.handle.persist_mesh_crypto_blocking(
+                    Some(mls_snapshot.clone()),
+                    None,
+                    mesh.clone(),
+                );
             }
             // stand the runtime supervisor up over the direct mesh, reusing the
             // ritual transport (the loopback hub / the founder's SMP server), so

@@ -1654,8 +1654,19 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         // the merged crypto (the workspace is closing anyway)
                         if crypto_sealed {
                             tracing::debug!("ignoring a post-merge transport.state save");
-                        } else if let Err(e) = ws.write_transport_state(&state) {
-                            fail(&failed_flag, "transport.state write", &e);
+                        } else {
+                            // the supervisor owns ONLY the delivery cursors; the
+                            // rest of its in-memory clone (mls/mesh/creds) may
+                            // predate a LIVE crypto merge (dynamic mesh
+                            // extension), so merge the cursor maps into the
+                            // current file state instead of writing the whole
+                            // stale clone back over the merged values
+                            let mut ts = ws.read_transport_state();
+                            ts.outbound = state.outbound;
+                            ts.inbound = state.inbound;
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "transport.state write", &e);
+                            }
                         }
                     }
                     Ok(WriterMsg::MergeCrypto { mls, smp_queues, mesh, seal, ack }) => {
@@ -2175,6 +2186,77 @@ mod tests {
             "outbound cursor preserved through the merge"
         );
         assert_eq!(ts.inbound.get("bob").copied(), Some(5), "inbound cursor preserved");
+    }
+
+    /// **A live mesh-extension merge must survive later cursor saves.** The
+    /// live merge (dynamic mesh membership) deliberately does NOT seal the
+    /// state — the rebuilt supervisor keeps saving cursors afterwards. Those
+    /// saves come from a full in-memory `TransportState` clone the supervisor
+    /// loaded BEFORE the merge, so a save must only carry the supervisor-owned
+    /// cursor maps into the file — never write its stale mls/mesh/creds copies
+    /// back over the merged values.
+    #[test]
+    fn a_cursor_save_never_clobbers_a_live_crypto_merge() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+
+        // the extension merges the grown mesh + fresh crypto, LIVE (no seal)
+        let grown = vec![molt_core::MeshLink {
+            member: "bob".to_string(),
+            snd_server: "smp://fp@host".to_string(),
+            snd_queue: "aa".to_string(),
+            snd_wrap: "bb".to_string(),
+            rcv_queue: "cc".to_string(),
+            rcv_wrap: "dd".to_string(),
+        }];
+        handle.persist_mesh_crypto_blocking(
+            Some(b"fresh-mls".to_vec()),
+            Some(b"fresh-creds".to_vec()),
+            grown.clone(),
+        );
+
+        // the rebuilt supervisor saves a cursor advance from its PRE-merge
+        // in-memory clone (mls/mesh/creds all stale/empty in that clone)
+        let mut outbound = std::collections::BTreeMap::new();
+        outbound.insert(
+            "bob".to_string(),
+            molt_core::OutboundCursor { log_seq: 9, wire_seq: 4 },
+        );
+        let mut inbound = std::collections::BTreeMap::new();
+        inbound.insert("bob".to_string(), 6u64);
+        handle.save_transport_state(TransportState {
+            outbound,
+            inbound,
+            ..TransportState::default()
+        });
+        handle.close(None);
+
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        let ts = ws.read_transport_state();
+        assert_eq!(
+            ts.mesh, grown,
+            "the grown mesh survives a later cursor save"
+        );
+        assert_eq!(
+            ts.mls.as_deref(),
+            Some(b"fresh-mls".as_slice()),
+            "the merged MLS snapshot survives a later cursor save"
+        );
+        assert_eq!(
+            ts.smp_queues.as_deref(),
+            Some(b"fresh-creds".as_slice()),
+            "the merged queue creds survive a later cursor save"
+        );
+        assert_eq!(
+            ts.outbound.get("bob").map(|c| (c.log_seq, c.wire_seq)),
+            Some((9, 4)),
+            "the cursor save itself lands"
+        );
+        assert_eq!(ts.inbound.get("bob").copied(), Some(6));
     }
 
     /// A snapshot pointing past the surviving log (partial dir copy, old
