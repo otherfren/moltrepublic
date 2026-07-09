@@ -103,19 +103,42 @@ impl MlsChannel {
         Some(c)
     }
 
-    /// Decrypt one inbound MLS message into (authenticated sender, envelope).
-    /// Duplicates and non-application messages (commits/proposals) return `None`
-    /// — MLS itself rejects replays, so there is no separate dedup window here.
-    fn decode(&self, wire: &[u8]) -> Option<(MemberId, EventEnvelope)> {
-        let mut m = self.member.lock().ok()?;
+    /// Decrypt one inbound MLS message, classified for the recv loop's ack
+    /// discipline. MLS itself rejects replays, so there is no separate dedup
+    /// window here.
+    fn decode(&self, wire: &[u8]) -> MlsDecode {
+        let Ok(mut m) = self.member.lock() else {
+            return MlsDecode::Discard;
+        };
         match m.decrypt(wire) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
-                let env: EventEnvelope = serde_json::from_slice(&plaintext).ok()?;
-                Some((from, env))
+                match serde_json::from_slice::<EventEnvelope>(&plaintext) {
+                    Ok(env) => MlsDecode::Deliver(from, Box::new(env)),
+                    Err(_) => MlsDecode::Discard,
+                }
             }
-            _ => None,
+            // a merged commit advanced the epoch — held future-epoch messages
+            // may decrypt now
+            Ok(MlsIncoming::Commit) => MlsDecode::EpochAdvanced,
+            // its commit is still in flight — hold the SAME bytes and retry
+            Ok(MlsIncoming::FutureEpoch) => MlsDecode::FutureEpoch,
+            // proposals / replays / past-window / garbage: redelivery cannot help
+            Ok(MlsIncoming::Proposal) | Err(_) => MlsDecode::Discard,
         }
     }
+}
+
+/// What the recv loop should do with one inbound MLS message.
+enum MlsDecode {
+    /// An authenticated application envelope — deliver and ack.
+    Deliver(MemberId, Box<EventEnvelope>),
+    /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
+    EpochAdvanced,
+    /// Encrypted at an epoch this node has not reached — hold it (acks
+    /// unfired) and retry after the next commit merges.
+    FutureEpoch,
+    /// Replay / proposal / undecryptable — ack it away.
+    Discard,
 }
 
 /// Out-of-order inbound messages buffered per peer before the incoming
@@ -533,6 +556,13 @@ async fn advance_outbound<S: StateStore>(
 /// with the reassembler's own partial cap).
 const CHUNK_ACK_MAX: usize = 64;
 
+/// Future-epoch messages held per peer awaiting their re-key commit. The
+/// claimed epoch is unauthenticated before decryption, so a forgery can claim
+/// a future epoch — the buffer is small and shed-tolerant: a shed entry's acks
+/// are dropped unfired, so the transport redelivers it later (by which time
+/// the commit has usually landed).
+const EPOCH_BUFFER_MAX: usize = 64;
+
 /// The per-peer receive loop: unwrap → reassemble → parse → per-sender
 /// in-order delivery, ack after the engine accepted.
 ///
@@ -562,6 +592,9 @@ async fn recv_task<S, K>(
     let mut reorder: BTreeMap<u64, (EventEnvelope, Vec<AckToken>)> = BTreeMap::new();
     // message id → wire seq for messages sitting in `reorder`
     let mut buffered_ids: HashMap<[u8; 16], u64> = HashMap::new();
+    // MLS path: complete messages encrypted at an epoch ahead of ours, held
+    // (acks unfired) until a commit merges — the cross-epoch retry
+    let mut epoch_buffer: Vec<([u8; 16], Vec<u8>, Vec<AckToken>)> = Vec::new();
     // this task is the sole writer of inbound[peer]; the shared state is
     // only the persistence snapshot
     let mut cursor = state
@@ -588,6 +621,8 @@ async fn recv_task<S, K>(
                     .and_then(|seq| reorder.get_mut(seq))
                 {
                     held.1.push(delivery.ack); // message buffered behind a gap
+                } else if let Some(held) = epoch_buffer.iter_mut().find(|e| e.0 == id.0) {
+                    held.2.push(delivery.ack); // message held for its epoch
                 } else {
                     delivery.ack.ack(); // message was accepted — safe
                 }
@@ -618,18 +653,62 @@ async fn recv_task<S, K>(
         // MLS path: the reassembled bytes are group ciphertext. Decrypt to the
         // authenticated sender + envelope; MLS itself rejects replays, so a
         // duplicate/undecryptable message is just acked away. Ordering is MLS's
-        // job, so the per-link reorder buffer below does not apply.
+        // job, so the per-link reorder buffer below does not apply — EXCEPT
+        // across an epoch boundary: a message encrypted at an epoch we have not
+        // reached (its re-key commit still in flight) is held, acks unfired,
+        // and retried after each merged commit (the cross-epoch retry;
+        // `documents/recovery_ritual.md` §8). A held message a crash loses is
+        // redelivered by the transport (its acks never fired).
         if let Some(ch) = &mls {
             match ch.decode(&complete) {
-                Some((from, env)) => {
+                MlsDecode::Deliver(from, env) => {
                     sink.peer_seen(&peer.member).await;
-                    if sink.deliver(&from, env).await.is_err() {
+                    if sink.deliver(&from, *env).await.is_err() {
                         tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
                         return;
                     }
                     ack_all(acks);
                 }
-                None => ack_all(acks), // replay / commit / undecryptable
+                MlsDecode::EpochAdvanced => {
+                    ack_all(acks);
+                    // retry every held message; keep passing while progress is
+                    // made (a drained commit can unlock further messages)
+                    let mut progressed = true;
+                    while progressed && !epoch_buffer.is_empty() {
+                        progressed = false;
+                        for (id, bytes, held) in std::mem::take(&mut epoch_buffer) {
+                            match ch.decode(&bytes) {
+                                MlsDecode::Deliver(from, env) => {
+                                    progressed = true;
+                                    sink.peer_seen(&peer.member).await;
+                                    if sink.deliver(&from, *env).await.is_err() {
+                                        return;
+                                    }
+                                    ack_all(held);
+                                }
+                                MlsDecode::EpochAdvanced => {
+                                    progressed = true;
+                                    ack_all(held);
+                                }
+                                MlsDecode::FutureEpoch => {
+                                    epoch_buffer.push((id, bytes, held)); // still ahead
+                                }
+                                MlsDecode::Discard => ack_all(held),
+                            }
+                        }
+                    }
+                }
+                MlsDecode::FutureEpoch => {
+                    tracing::debug!(peer = %peer.member, "holding a future-epoch message for its commit");
+                    epoch_buffer.push((id.0, complete, acks));
+                    if epoch_buffer.len() > EPOCH_BUFFER_MAX {
+                        // bounded: shed the oldest, acks unfired — the
+                        // transport redelivers it once the commit has landed
+                        epoch_buffer.remove(0);
+                        tracing::warn!(peer = %peer.member, "epoch buffer full — shedding onto redelivery");
+                    }
+                }
+                MlsDecode::Discard => ack_all(acks), // replay / proposal / undecryptable
             }
             continue;
         }

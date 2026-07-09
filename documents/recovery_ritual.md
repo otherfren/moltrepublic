@@ -283,13 +283,19 @@ The product never uses the seam.
   supervisor rebuild, and the rejoiner's engine stands its runtime net up over
   the re-established mesh. `RejoinOutcome.mesh` / `NetRecoverSealed.mesh`.
 
+- **Cross-epoch delivery** — ✅ (2026-07-09), both directions. *Forward:* a
+  message encrypted at an epoch the receiver has not reached classifies as
+  `MlsIncoming::FutureEpoch` (the epoch header is compared before processing);
+  the recv loop holds it — acks unfired, bounded buffer, shed = transport
+  redelivery — and retries after every merged commit, so a chat (or the
+  Proposed/Approved gossip of the lone-coordinator burst) racing ahead of the
+  re-key commit is delivered, not lost. *Backward:* `max_past_epochs(2)` keeps
+  a bounded window of past receive keys, so a delayed pre-re-key message
+  crossing the commit still decrypts (a small, deliberate forward-secrecy
+  trade). Pinned in `mls.rs` (both directions + the removed-leaf lock-out
+  restated) and `two_instances.rs::a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost`.
+
 **Still open (deferred, not recovery-blocking):**
-- **Cross-epoch chat retry** — the MLS recv path drops wrong-epoch messages
-  (no reorder buffer): in the lone-coordinator commit burst the ephemeral
-  Proposed/Approved gossip can be lost to survivors (the committed block
-  supersedes it), and a chat racing ahead of the commit is dropped. Hardening =
-  classify wrong-epoch decrypt errors → don't-ack → redelivery; touches the
-  delicate ack discipline, do deliberately.
 - **Recovery UI** — the minted link surfaces only as `session.notice`
   (`recovery-link:…`), the rejoin flow as `recover-started:` / `recovered:` /
   `recover-failed:` notices; a real GUI surface + a distinct system-message

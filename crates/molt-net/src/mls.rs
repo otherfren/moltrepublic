@@ -90,6 +90,13 @@ pub enum MlsIncoming {
     Commit,
     /// A bare proposal was stored, awaiting its commit.
     Proposal,
+    /// The message claims an epoch **ahead** of this group's — its re-key
+    /// commit is still in flight. The message was NOT consumed: buffer it and
+    /// feed the SAME bytes back through [`MlsMember::decrypt`] once a commit
+    /// merges (the transport's cross-epoch retry). NB the epoch header is
+    /// unauthenticated pre-decryption — a forgery can claim a future epoch, so
+    /// the buffer must be bounded and shed-tolerant.
+    FutureEpoch,
 }
 
 /// One node's live MLS membership: the provider (holding all secret state), the
@@ -173,6 +180,12 @@ impl MlsMember {
             .ciphersuite(SUITE)
             // ship the ratchet tree in-band so a joiner needs nothing else
             .use_ratchet_tree_extension(true)
+            // keep a bounded window of PAST epochs' receive keys so a delayed
+            // pre-re-key message crossing a commit still decrypts (the
+            // backward half of cross-epoch delivery; forward = FutureEpoch
+            // retry). Two epochs: one in-flight re-key plus margin — a
+            // deliberate, small forward-secrecy trade.
+            .max_past_epochs(2)
             .build();
         let group = MlsGroup::new(&self.provider, &self.signer, &config, self.credential())
             .map_err(|e| MlsError::Mls(format!("creating group: {e:?}")))?;
@@ -286,7 +299,8 @@ impl MlsMember {
                 )))
             }
         };
-        let config = MlsGroupJoinConfig::builder().build();
+        // same past-epoch window as create_group (the config is per-node)
+        let config = MlsGroupJoinConfig::builder().max_past_epochs(2).build();
         let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
             .map_err(|e| MlsError::Mls(format!("staging welcome: {e:?}")))?;
         let group = staged
@@ -323,6 +337,14 @@ impl MlsMember {
             other => return Err(MlsError::Wire(format!("not a group message: {other:?}"))),
         };
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
+        // a message claiming an epoch we have NOT reached yet is not an error —
+        // its re-key commit is still in flight. Nothing is consumed; the caller
+        // buffers the bytes and feeds them back once a commit merges (the
+        // transport's cross-epoch retry). The claimed epoch is unauthenticated
+        // at this point, so the caller's buffer must be bounded.
+        if protocol.epoch().as_u64() > group.epoch().as_u64() {
+            return Ok(MlsIncoming::FutureEpoch);
+        }
         let processed = group
             .process_message(&self.provider, protocol)
             .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
@@ -544,8 +566,103 @@ mod tests {
         let ct = founder.encrypt(b"welcome back bob").expect("enc");
         assert_app(bob2.decrypt(&ct).expect("dec"), "founder", b"welcome back bob");
 
-        // the OLD bob leaf was removed — its stale state can't read the new epoch
-        assert!(bob.decrypt(&ct).is_err(), "the removed leaf is locked out");
+        // the OLD bob leaf was removed — the new-epoch message shows up only as
+        // an opaque future-epoch header (no plaintext, no authentication), and
+        // even fed the very commit that removed it, the stale leaf never
+        // reaches an epoch that would decrypt it: the lock-out holds
+        match bob.decrypt(&ct) {
+            Ok(MlsIncoming::FutureEpoch) => {}
+            other => panic!("expected an opaque future-epoch hold, got {other:?}"),
+        }
+        let _ = bob.decrypt(&commit); // removal commit: unprocessable or self-removing
+        assert!(
+            !matches!(bob.decrypt(&ct), Ok(MlsIncoming::Application { .. })),
+            "the removed leaf is locked out of the new epoch"
+        );
+    }
+
+    /// **Cross-epoch delivery, forward direction.** A message encrypted at an
+    /// epoch the receiver has NOT reached yet (its re-key commit is still in
+    /// flight) classifies as [`MlsIncoming::FutureEpoch`] — the transport
+    /// buffers it and retries after the commit merges instead of dropping it —
+    /// and the SAME ciphertext decrypts normally once the epoch caught up.
+    #[test]
+    fn a_future_epoch_message_classifies_for_retry_and_decrypts_after_the_commit() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        let mut cara = cara;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        // bob's seat is re-keyed by cara → cara is at N+1, the founder still at N
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (commit, _welcome2) =
+            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+        let ct = cara.encrypt(b"raced ahead of the commit").expect("enc");
+
+        // ❶ ahead of the commit: classified for retry, not dropped as an error
+        match founder.decrypt(&ct) {
+            Ok(MlsIncoming::FutureEpoch) => {}
+            other => panic!("expected FutureEpoch, got {other:?}"),
+        }
+        // ❷ the commit lands …
+        match founder.decrypt(&commit).expect("merge the commit") {
+            MlsIncoming::Commit => {}
+            other => panic!("expected a commit, got {other:?}"),
+        }
+        // ❸ … and the SAME ciphertext now decrypts, sender authenticated
+        assert_app(
+            founder.decrypt(&ct).expect("decrypts at the caught-up epoch"),
+            "cara",
+            b"raced ahead of the commit",
+        );
+    }
+
+    /// **Cross-epoch delivery, backward direction.** A message encrypted at
+    /// the PREVIOUS epoch that arrives after the receiver already merged the
+    /// re-key commit still decrypts — `max_past_epochs` keeps a bounded window
+    /// of receive keys, so a delayed pre-re-key chat is not lost either.
+    #[test]
+    fn an_old_epoch_message_still_decrypts_after_a_rekey() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        let mut cara = cara;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        // cara re-keys bob's seat and is at N+1; the founder, still at N,
+        // has a chat in flight that was encrypted before the commit
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (_commit, _welcome2) =
+            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+        let delayed = founder.encrypt(b"sent before the re-key").expect("enc");
+
+        // the delayed epoch-N message arrives at cara AFTER its re-key
+        assert_app(
+            cara.decrypt(&delayed).expect("an old-epoch message within the window decrypts"),
+            "founder",
+            b"sent before the re-key",
+        );
     }
 
     /// A member snapshotted after founding rehydrates and still decrypts a

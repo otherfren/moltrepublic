@@ -562,9 +562,10 @@ impl State {
     /// drop (no cross-epoch buffer). Recording `Committed` after the re-key
     /// puts it *behind* the `MlsCommit` in the per-link stream, so every
     /// survivor merges the commit first and then decrypts the block. (The
-    /// ephemeral Proposed/Approved gossip sequenced earlier may still be lost
-    /// in the lone-coordinator burst — acceptable: the committed block
-    /// supersedes it.) The recovery E2E with a live survivor pins this.
+    /// ephemeral Proposed/Approved gossip sequenced earlier is caught by the
+    /// receive side's cross-epoch retry — held until the commit merges — but
+    /// this sender-side ordering keeps the BLOCK's delivery independent of
+    /// that bounded buffer.) The recovery E2E with a live survivor pins this.
     fn adopt_committed_block(&mut self, block: ChainBlock, proposal_id: u64) {
         if !self.append_committed_block(block.clone()) {
             return;
