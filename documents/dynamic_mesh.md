@@ -77,16 +77,38 @@ Key decisions (and why):
   the announce simply stays unlinked until the next recovery/announce; chat is
   ephemeral by design and the chain has catch-up.
 
-## 3. Guards
+## 3. Guards (hardened by the 2026-07-10 review)
 
 - **Coordinator window.** The coordinator accepts a recovery-queue
   `MeshAnnounce` only for a member whose re-key it just performed (armed in
   `coordinator_rekey`, disarmed when handled) — the recovery queue cannot be
-  used to re-point arbitrary members' links.
-- **Survivor idempotency.** A survivor ignores an announce whose sender is
-  already in its live mesh extension set (redelivered events are no-ops).
-- **Persistence.** The extended mesh merges into `transport.state`
-  (`MergeCrypto` gains the mesh) so a later reopen resumes the *grown* mesh.
+  used to re-point arbitrary members' links. The announce is **parsed before
+  the window is spent**: a malformed-but-authentic frame degrades to a drop,
+  never burns the rejoiner's only re-mesh chance.
+- **Per-member cooldown.** Folding a link in costs every peer a supervisor
+  teardown+rebuild+fsync, so an accepted announce stamps a 60 s per-member
+  cooldown — the first announce always passes, rapid repeats are ignored
+  (bounding the churn a misbehaving member can inflict). A committed
+  `Restored` block clears the member's cooldown on every node: a
+  threshold-approved re-admission outranks the rate limit.
+- **Live roster, not genesis.** The rejoiner's anchor check and survivor set
+  come from the **verified chain head** (membership blocks evolve the roster)
+  — a post-genesis member can recover, and the announce reaches every live
+  seat.
+- **Partial mesh.** One silent survivor no longer costs the links that DID
+  come back: the timeout assembles the answering subset (mesh-less option A
+  only when nobody replied), and a reply must carry a usable handover before
+  it counts.
+- **Workspace scope.** Recovery recv loops and extension results are scoped
+  to the OPEN WORKSPACE (`net_scope`), not to a mesh incarnation — an
+  extension's own rebuild cannot orphan an outstanding recovery or a
+  concurrent extension; only a workspace switch does.
+- **Ratchet continuity.** The extension rebuild hands the LIVE group `Arc`
+  through (no snapshot→restore), so a dying outbox's late encrypt can never
+  rewind sender generations; the persist snapshot is taken after the rebuild.
+- **Persistence.** The extended mesh merges into `transport.state` via a
+  LIVE (non-sealing) `MergeCrypto`, and cursor saves merge **only** the
+  cursor maps — a stale supervisor clone can never revert the grown mesh.
 
 ## 4. What this deliberately does not do (yet)
 
