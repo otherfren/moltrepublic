@@ -661,20 +661,22 @@ impl State {
             tracing::warn!(%member, "recovery request with an unknown or spent ticket — dropped");
             return Ok(Reply::Ack);
         }
-        match self.verify_and_propose_restore(&member, &identity_pk, &key_package, &ticket, &seat_proof) {
+        // NB: on a verified request, verify_and_propose_restore registers the
+        // pending recovery BEFORE proposing (a lone coordinator commits the
+        // block synchronously inside the propose, which consumes that entry)
+        match self.verify_and_propose_restore(
+            &member,
+            &identity_pk,
+            &key_package,
+            &ticket,
+            &seat_proof,
+            &reply,
+        ) {
             Ok(_id) => {
                 // spend the ticket only on a verified request, so a legitimate
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
                 self.recovery_tickets.remove(&ticket);
-                self.pending_recovery.insert(
-                    member.clone(),
-                    crate::chain::PendingRecovery {
-                        member: member.clone(),
-                        key_package,
-                        reply,
-                    },
-                );
                 tracing::info!(%member, "recovery seat proof verified — proposing re-admission");
             }
             Err(e) => {

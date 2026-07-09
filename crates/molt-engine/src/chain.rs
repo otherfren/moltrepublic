@@ -411,6 +411,13 @@ impl State {
     /// the threshold `Membership{Restored}` block. Recovery re-derives the same
     /// identity, so the requested key must equal the anchored one (it re-keys the
     /// MLS leaf, not the roster). Returns the proposal id, or the refusal reason.
+    ///
+    /// A verified request also registers the [`PendingRecovery`] (the fresh
+    /// KeyPackage + `reply` handover the MLS re-key consumes) — and it must do
+    /// so **before** proposing: with a lone coordinator (m=1, self-cosign) the
+    /// `Restored` block commits *synchronously inside* `propose_membership`,
+    /// and `after_block_applied` keys the re-key on this entry. Registering it
+    /// afterwards would silently skip the re-key (the recovery E2E pins this).
     pub(crate) fn verify_and_propose_restore(
         &mut self,
         member: &str,
@@ -418,6 +425,7 @@ impl State {
         key_package_hex: &str,
         ticket: &str,
         seat_proof: &str,
+        reply: &str,
     ) -> Result<u64, String> {
         let anchored = self
             .replica
@@ -432,6 +440,14 @@ impl State {
         if !crate::founding::verify_seat_proof(&anchored, ticket, key_package_hex, &rid, seat_proof) {
             return Err(format!("seat proof for {member} does not verify"));
         }
+        self.pending_recovery.insert(
+            member.to_string(),
+            PendingRecovery {
+                member: member.to_string(),
+                key_package: key_package_hex.to_string(),
+                reply: reply.to_string(),
+            },
+        );
         Ok(self.propose_membership(MembershipOp::Restored, member, &anchored))
     }
 
@@ -1284,7 +1300,7 @@ mod tests {
         // the returning member (dora) signs the seat proof with its OWN key
         let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid);
         let id = coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good)
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "")
             .expect("a valid seat proof re-admits");
         assert!(matches!(
             coord.proposal_changes.get(&id),
@@ -1293,17 +1309,20 @@ mod tests {
                 ..
             })
         ));
+        // a verified request registers the pending recovery (the MLS re-key
+        // consumes it the moment the block commits — even synchronously)
+        assert!(coord.pending_recovery.contains_key("dora"));
 
         // a proof signed by the WRONG key (petra forging dora's) is rejected
         let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid);
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged)
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "")
             .is_err());
 
         // a request that re-keys the seat to a DIFFERENT identity is rejected —
         // recovery re-derives the SAME key
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good)
+            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "")
             .is_err());
     }
 
