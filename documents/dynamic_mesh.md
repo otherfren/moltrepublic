@@ -1,8 +1,12 @@
 # Dynamic Mesh Membership
 
-*Status: increment 1 (recovered seat re-joins the running mesh) — design +
-implementation 2026-07-09. The general "add a new seat" case reuses this
-machinery once seat-adding itself exists.*
+*Status: IMPLEMENTED 2026-07-09 for the recovered-seat case, end to end
+(rejoiner `rejoin_mesh`; coordinator window + relay; survivor extension +
+supervisor rebuild + grown-mesh persist; rejoiner engine standup). Proven live
+in `two_instances.rs` (`recovery_completes_…`, `recovery_distributes_…`,
+`a_survivor_folds_…` — the last also pins the §4 queue-rotation shape). The
+general "add a new seat" case reuses this machinery once seat-adding itself
+exists.*
 
 ## 1. Problem
 

@@ -276,11 +276,14 @@ The product never uses the seam.
   (1-of-3 with a live survivor supervisor: the broadcast raw commit merges and
   the post-re-key chat notice decrypts at the survivor).
 
+- **Rejoiner mesh re-establishment** — ✅ *dynamic mesh membership*
+  (`dynamic_mesh.md`, 2026-07-09): the rejoiner announces fresh per-pair queues
+  over the recovery channel, the coordinator relays the ciphertext over the
+  runtime mesh, every survivor replies directly and folds a fresh link in by
+  supervisor rebuild, and the rejoiner's engine stands its runtime net up over
+  the re-established mesh. `RejoinOutcome.mesh` / `NetRecoverSealed.mesh`.
+
 **Still open (deferred, not recovery-blocking):**
-- **Rejoiner mesh re-establishment** — the recovered workspace has no live mesh
-  links (option A). Re-meshing = the general *dynamic mesh membership* feature
-  (the runtime supervisor has a fixed peer set; changing membership rebuilds via
-  `build_real_net`, as reopen does) — also needed for adding new seats.
 - **Cross-epoch chat retry** — the MLS recv path drops wrong-epoch messages
   (no reorder buffer): in the lone-coordinator commit burst the ephemeral
   Proposed/Approved gossip can be lost to survivors (the committed block
