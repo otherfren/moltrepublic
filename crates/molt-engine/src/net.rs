@@ -198,17 +198,21 @@ impl supervisor::StateStore for FileStateStore {
 // ---------------------------------------------------------------------------
 
 /// The wire scope, in ONE place: which workspace events cross the transport.
-/// Chat (the ephemeral conversation) and the chain-governance traffic —
+/// Chat and its id-addressed verbs (reactions, deletions, file removals —
+/// chat bus B1: they carry a stable [`molt_core::MessageId`], so they are
+/// global refs, not sender-local indices) and the chain-governance traffic —
 /// `Proposed`/`Approved` gossip and a broadcast `Committed` block. Everything
-/// else (index-referencing reactions/deletions, presence) stays node-local.
-/// Consulted by the outbox feed gate; the receiving side's match in
-/// `cmd_net_delivered` is the defense-in-depth twin (a persisted log's outbox
-/// has no feed gate), and it drops the governance variants for a non-chain
-/// workspace.
+/// else (presence, membership frames) stays node-local. Consulted by the
+/// outbox feed gate; the receiving side's match in `cmd_net_delivered` is the
+/// defense-in-depth twin (a persisted log's outbox has no feed gate), and it
+/// drops the governance variants for a non-chain workspace.
 pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
     matches!(
         event,
         WorkspaceEvent::Chat(_)
+            | WorkspaceEvent::ChatReacted { .. }
+            | WorkspaceEvent::ChatDeleted { .. }
+            | WorkspaceEvent::FileRemoved { .. }
             | WorkspaceEvent::Proposed { .. }
             | WorkspaceEvent::Approved { .. }
             | WorkspaceEvent::Committed(_)
@@ -659,8 +663,31 @@ impl State {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
                 msg.quote = None; // sender-local LEGACY index — does not transfer
-                                  // (`quote_id`/`channel` are global refs and stay;
-                                  // duplicate-id rejection + parking land with B1)
+                                  // (`quote_id`/`channel` are global refs and stay)
+                // The channel tag is a CLAIM, not a fact (display routing,
+                // never a boundary — nothing engine-side trusts it): run it
+                // through the same normalization a local send gets, and
+                // COERCE an unnormalizable claim (empty/oversized topic
+                // name) to the all-hands `Group` channel instead of
+                // dropping the message — a peer's mangled tag must not
+                // suppress content anyone was meant to see, and the log
+                // keeps its "every stored topic name is normalized"
+                // invariant.
+                msg.channel = msg
+                    .channel
+                    .normalized()
+                    .unwrap_or(molt_core::ChannelRef::Group);
+                // P5: the wire admits each message exactly once, by stable
+                // id — a nil id (pre-chat-bus sender) or an already-known
+                // id (duplicate / replay / mesh-rebuild resend) is dropped
+                if msg.id.is_nil() {
+                    tracing::warn!(%from, "dropping a wire chat message without a stable id");
+                    return Ok(Reply::Ack);
+                }
+                if self.chat_pos.contains_key(&msg.id) {
+                    tracing::debug!(%from, id = %msg.id, "dropping a wire chat message with a duplicate id");
+                    return Ok(Reply::Ack);
+                }
                 let id = msg.id;
                 let channel = msg.channel.clone();
                 let body = msg.body.clone();
@@ -672,6 +699,120 @@ impl State {
                     body,
                     channel,
                 });
+                // P6 seam: parked reactions/deletes/file-removes targeting
+                // `id` would drain here once the parking buffer exists (it
+                // needs a State field in lib.rs, which B1 does not own —
+                // see the B1 report; until then an early-arriving ref is
+                // dropped in its own arm below)
+            }
+            // chat-bus B1, the P5 receive-side matrix: the id-addressed chat
+            // verbs. Defense in depth mirrors the Chat arm — the acting
+            // member (`by`) is ALWAYS the authenticated link identity, the
+            // target resolves by stable id only (a sender-local index never
+            // transfers, same posture as the legacy quote), and the recorded
+            // event writes the LOCAL position into the legacy `index` field
+            // for older readers.
+            WorkspaceEvent::ChatReacted { id, emoji, .. } => {
+                let Some(id) = id else {
+                    tracing::debug!(%from, "dropping a wire reaction without a message id");
+                    return Ok(Reply::Ack);
+                };
+                // the local-send sanity check (cmd_react_chat's twin)
+                let emoji = emoji.trim().to_string();
+                if emoji.is_empty() || emoji.chars().count() > 4 {
+                    tracing::warn!(%from, "dropping a wire reaction with a malformed emoji");
+                    return Ok(Reply::Ack);
+                }
+                let Some(index) = self
+                    .chat_pos
+                    .get(&id)
+                    .and_then(|p| u64::try_from(*p).ok())
+                else {
+                    // unknown target: P6 says PARK until the message
+                    // arrives — parking is not wired yet (needs a State
+                    // field; see the B1 report), so an early reaction is
+                    // dropped for now
+                    tracing::warn!(%from, %id, "a wire reaction arrived before its message — dropped (parking pending)");
+                    return Ok(Reply::Ack);
+                };
+                let env = self.make_env(
+                    from.clone(),
+                    WorkspaceEvent::ChatReacted {
+                        index,
+                        id: Some(id),
+                        emoji: emoji.clone(),
+                        by: from.clone(),
+                    },
+                );
+                self.record(env);
+                self.emit(molt_core::Event::Reacted { id, emoji, by: from });
+            }
+            WorkspaceEvent::ChatDeleted { id, .. } => {
+                let Some(id) = id else {
+                    tracing::debug!(%from, "dropping a wire delete without a message id");
+                    return Ok(Reply::Ack);
+                };
+                let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
+                let Some((index, author)) = self
+                    .chat_pos
+                    .get(&id)
+                    .and_then(|p| u64::try_from(*p).ok())
+                    .zip(target.map(|m| m.from.clone()))
+                else {
+                    // unknown target: P6 parking pending (see the Chat arm)
+                    tracing::warn!(%from, %id, "a wire delete arrived before its message — dropped (parking pending)");
+                    return Ok(Reply::Ack);
+                };
+                // no moderation concept: only the author wipes its own
+                // message — and the author is what OUR log says, never a
+                // claim in the event
+                if author != from {
+                    tracing::warn!(%from, %id, "dropping a wire delete from a non-author");
+                    return Ok(Reply::Ack);
+                }
+                let env = self.make_env(
+                    from.clone(),
+                    WorkspaceEvent::ChatDeleted {
+                        index,
+                        id: Some(id),
+                        by: from.clone(),
+                    },
+                );
+                self.record(env);
+                self.emit(molt_core::Event::Deleted { id, by: from });
+            }
+            WorkspaceEvent::FileRemoved { id, .. } => {
+                let Some(id) = id else {
+                    tracing::debug!(%from, "dropping a wire file-removal without a message id");
+                    return Ok(Reply::Ack);
+                };
+                let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
+                let Some((index, msg)) = self
+                    .chat_pos
+                    .get(&id)
+                    .and_then(|p| u64::try_from(*p).ok())
+                    .zip(target)
+                else {
+                    // unknown target: P6 parking pending (see the Chat arm)
+                    tracing::warn!(%from, %id, "a wire file-removal arrived before its message — dropped (parking pending)");
+                    return Ok(Reply::Ack);
+                };
+                // only the sharer (the share message's author in OUR log)
+                // may flip its own share to unavailable
+                if msg.from != from || msg.file.is_none() {
+                    tracing::warn!(%from, %id, "dropping a wire file-removal from a non-sharer");
+                    return Ok(Reply::Ack);
+                }
+                let env = self.make_env(
+                    from.clone(),
+                    WorkspaceEvent::FileRemoved {
+                        index,
+                        id: Some(id),
+                        by: from.clone(),
+                    },
+                );
+                self.record(env);
+                self.emit(molt_core::Event::FileRemoved { id, by: from });
             }
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)

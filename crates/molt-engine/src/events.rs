@@ -14,12 +14,39 @@ use molt_core::{
     EngineStateDump, EventEnvelope, MemberId, ProposalRecord, ProposalState, Surface,
     WorkspaceEvent, WorkspaceSnapshot,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{now_secs, ReplicaState, State};
 
 /// Write a snapshot every N events (plus one on clean close). Snapshots are
 /// an optimization; the log holds the truth.
 const SNAPSHOT_EVERY: u64 = 1000;
+
+/// Domain-separation tag of the P4 legacy-id synthesis (chat bus). The
+/// formula is a **cross-node contract** — every node must derive the same
+/// id for the same legacy message, or id-addressed events stop converging:
+/// `sha256(TAG ‖ le64(position) ‖ from ‖ le64(ts) ‖ body)[..16]`. Pinned by
+/// a literal in `legacy_log_replay_synthesizes_stable_ids`.
+const LEGACY_ID_TAG: &[u8] = b"molt-chat-legacy-id\0";
+
+/// Synthesize the stable id of a legacy (pre-chat-bus, nil-id) chat message
+/// at its ingest `position` (index in the chat log at insertion). Both
+/// ingest choke points — [`State::apply`]'s `Chat` arm and
+/// [`State::restore_dump`] — see the same positions and the same
+/// at-insertion fields, so full replay and snapshot+tail agree on every id
+/// (the determinism keystone).
+fn legacy_message_id(position: usize, from: &str, ts: u64, body: &str) -> molt_core::MessageId {
+    let mut h = Sha256::new();
+    h.update(LEGACY_ID_TAG);
+    h.update(u64::try_from(position).unwrap_or(u64::MAX).to_le_bytes());
+    h.update(from.as_bytes());
+    h.update(ts.to_le_bytes());
+    h.update(body.as_bytes());
+    let digest = h.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    molt_core::MessageId(id)
+}
 
 impl State {
     /// Stamp the next envelope: seq from the workspace's monotonic counter,
@@ -110,12 +137,30 @@ impl State {
                 }
             }
             WorkspaceEvent::Chat(msg) => {
-                if !msg.id.is_nil() {
-                    // maintain the id→position map next to the log (nil =
-                    // legacy entry; B1 synthesizes those ids at ingest)
-                    self.chat_pos.insert(msg.id, self.chat.len());
+                let mut msg = msg.clone();
+                // P4: a legacy message (pre-chat-bus, nil id) gets its
+                // stable id synthesized deterministically from its ingest
+                // position — the same formula as restore_dump, so replay
+                // and snapshot+tail agree. After this line no message in
+                // state carries a nil id, and chat_pos indexes the whole
+                // log (the pre-B1 nil-skip is obsolete).
+                if msg.id.is_nil() {
+                    msg.id = legacy_message_id(self.chat.len(), &msg.from, msg.ts, &msg.body);
                 }
-                self.chat.push(msg.clone());
+                // a legacy numeric quote resolves to the (possibly just
+                // synthesized) id of the message it pointed at — the index
+                // is still well-defined at apply time; the legacy field
+                // itself stays readable and is never written by new code
+                if msg.quote_id.is_none() {
+                    if let Some(q) = msg.quote {
+                        msg.quote_id = usize::try_from(q)
+                            .ok()
+                            .and_then(|i| self.chat.get(i))
+                            .map(|m| m.id);
+                    }
+                }
+                self.chat_pos.insert(msg.id, self.chat.len());
+                self.chat.push(msg);
             }
             WorkspaceEvent::ChatReacted {
                 index,
@@ -281,12 +326,49 @@ impl State {
             republic_id: dump.republic_id,
         });
         self.chat = dump.chat;
-        // the id→position map is derived state — rebuilt, never persisted
+        // P4, the second ingest choke point: a LEGACY snapshot (written by
+        // pre-chat-bus code) may still carry nil-id messages and unresolved
+        // numeric quotes — synthesize/resolve exactly like apply's Chat arm,
+        // over the same positions, so snapshot+tail equals full replay.
+        // (Snapshots written after B1 already carry the synthesized ids and
+        // pass through untouched. One inherent legacy edge: a pre-chat-bus
+        // snapshot of an already-deleted legacy message hashes the wiped
+        // body, so such a tombstone's id can differ from the full-replay
+        // id — bounded to unaddressable legacy tombstones.)
+        for i in 0..self.chat.len() {
+            if self.chat.get(i).is_some_and(|m| m.id.is_nil()) {
+                let id = self
+                    .chat
+                    .get(i)
+                    .map(|m| legacy_message_id(i, &m.from, m.ts, &m.body));
+                if let (Some(m), Some(id)) = (self.chat.get_mut(i), id) {
+                    m.id = id;
+                }
+            }
+            let unresolved_quote = self
+                .chat
+                .get(i)
+                .filter(|m| m.quote_id.is_none())
+                .and_then(|m| m.quote);
+            if let Some(q) = unresolved_quote {
+                // apply resolved against the log BEFORE this message, so
+                // only a backward reference (j < i) resolves here too
+                let qid = usize::try_from(q)
+                    .ok()
+                    .filter(|&j| j < i)
+                    .and_then(|j| self.chat.get(j))
+                    .map(|m| m.id);
+                if let Some(m) = self.chat.get_mut(i) {
+                    m.quote_id = qid;
+                }
+            }
+        }
+        // the id→position map is derived state — rebuilt, never persisted;
+        // after the synthesis above every message has a non-nil id
         self.chat_pos = self
             .chat
             .iter()
             .enumerate()
-            .filter(|(_, m)| !m.id.is_nil())
             .map(|(i, m)| (m.id, i))
             .collect();
         self.applied.clear();
@@ -506,6 +588,125 @@ mod tests {
             assert_eq!(st2.dump(), full, "diverged at k={k}");
         }
     }
+
+    /// A pre-chat-bus log, committed as **JSON literals in the exact wire
+    /// shape old nodes wrote** (no `id`/`channel`/`quote_id`, a numeric
+    /// `quote`, index-addressed reactions/deletes) — the old-log
+    /// compatibility contract, pinned forever. Never regenerate these with
+    /// current code: the test proves old bytes, not current serialization.
+    const LEGACY_LOG: [&str; 7] = [
+        r#"{"seq":1,"ts":101,"by":"petra","body":{"type":"founded","name":"Chess Club","rule_m":2,"rule_n":3,"member":"petra","roster":["petra","walter"]}}"#,
+        r#"{"seq":2,"ts":102,"by":"petra","body":{"type":"chat","from":"petra","body":"gm","ts":102}}"#,
+        r#"{"seq":3,"ts":103,"by":"walter","body":{"type":"chat","from":"walter","body":"re: gm","ts":103,"quote":0}}"#,
+        r#"{"seq":4,"ts":104,"by":"walter","body":{"type":"chat_reacted","index":0,"emoji":"👍","by":"walter"}}"#,
+        r#"{"seq":5,"ts":105,"by":"petra","body":{"type":"chat","from":"petra","body":"","ts":105,"file":{"name":"charter.pdf","size":48000,"kind":"PDF","modified":100,"available":true}}}"#,
+        r#"{"seq":6,"ts":106,"by":"petra","body":{"type":"file_removed","index":2,"by":"petra"}}"#,
+        r#"{"seq":7,"ts":107,"by":"petra","body":{"type":"chat_deleted","index":0,"by":"petra"}}"#,
+    ];
+
+    /// The legacy log above plus new-style (chat-bus) events on top — the
+    /// mixed history a long-lived workspace actually has.
+    fn mixed_envs() -> Vec<EventEnvelope> {
+        let mut all: Vec<EventEnvelope> = LEGACY_LOG
+            .iter()
+            .map(|s| serde_json::from_str(s).expect("legacy envelope decodes"))
+            .collect();
+        let new_id = molt_core::MessageId([0x42; 16]);
+        let mut msg = ChatMessage::text(new_id, "walter", "new era", 108).with_channel(
+            molt_core::ChannelRef::Topic {
+                name: "budget".to_string(),
+            },
+        );
+        msg.quote_id = None;
+        all.push(EventEnvelope {
+            seq: 8,
+            ts: 108,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::Chat(msg),
+        });
+        all.push(EventEnvelope {
+            seq: 9,
+            ts: 109,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::ChatReacted {
+                index: 3,
+                id: Some(new_id),
+                emoji: "🔥".to_string(),
+                by: "petra".to_string(),
+            },
+        });
+        all
+    }
+
+    /// P4: replaying a pre-chat-bus log synthesizes a **stable, non-nil id
+    /// for every legacy message** (identical across replays and across the
+    /// snapshot+tail path), resolves the legacy numeric quote to the right
+    /// `quote_id`, and leaves `chat_pos` indexing the whole log.
+    #[test]
+    fn legacy_log_replay_synthesizes_stable_ids() {
+        let run = || {
+            let mut st = plain_state();
+            for env in mixed_envs() {
+                st.apply(&env);
+            }
+            st
+        };
+        // deterministic: two replays, identical dumps
+        assert_eq!(run().dump(), run().dump());
+
+        let st = run();
+        assert_eq!(st.chat.len(), 4);
+        for (i, m) in st.chat.iter().enumerate() {
+            assert!(!m.id.is_nil(), "message {i} kept a nil id after ingest");
+            assert_eq!(st.chat_pos.get(&m.id), Some(&i), "chat_pos indexes message {i}");
+        }
+        // the P4 formula is a cross-node contract: pin the synthesized id of
+        // message 0 (position 0, from "petra", ts 102, body "gm") as a literal
+        // so a formula change can never slip through silently
+        assert_eq!(st.chat[0].id.to_string(), LEGACY_ID_OF_MSG_0);
+        // the legacy numeric quote resolved to message 0's synthesized id;
+        // the legacy field itself stays readable, untouched
+        assert_eq!(st.chat[1].quote_id, Some(st.chat[0].id));
+        assert_eq!(st.chat[1].quote, Some(0));
+        // the index-addressed legacy events replayed as before
+        assert_eq!(st.chat[0].deleted_by.as_deref(), Some("petra"));
+        assert!(st.chat[0].reactions.is_empty(), "delete drops reactions");
+        assert!(
+            !st.chat[2].file.as_ref().expect("share survives").available,
+            "the legacy file removal replays"
+        );
+        // the new-style events landed by id
+        assert_eq!(
+            st.chat[3].channel,
+            molt_core::ChannelRef::Topic {
+                name: "budget".to_string()
+            }
+        );
+        assert_eq!(st.chat[3].reactions["🔥"], vec!["petra".to_string()]);
+
+        // the determinism keystone over the MIXED log: snapshot at every k
+        // plus tail equals full replay — both ingest choke points synthesize
+        // the same ids
+        let all = mixed_envs();
+        let full = run().dump();
+        for k in 0..all.len() {
+            let mut st = plain_state();
+            for env in &all[..k] {
+                st.apply(env);
+            }
+            let snap = st.dump();
+            let mut st2 = plain_state();
+            st2.restore_dump(snap);
+            for env in &all[k..] {
+                st2.apply(env);
+            }
+            assert_eq!(st2.dump(), full, "diverged at k={k}");
+        }
+    }
+
+    /// The P4 pin for `legacy_log_replay_synthesizes_stable_ids`:
+    /// `sha256("molt-chat-legacy-id\0" ‖ le64(0) ‖ "petra" ‖ le64(102) ‖ "gm")[..16]`.
+    const LEGACY_ID_OF_MSG_0: &str = "bbb7bc990b87cf10ecf6ed59f31e8ce2";
 
     /// Envelopes that no longer match the state (corrupted log) are ignored,
     /// never a panic.

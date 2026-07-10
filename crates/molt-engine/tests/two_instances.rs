@@ -873,6 +873,188 @@ async fn founding_chats_over_the_direct_mesh() {
     );
 }
 
+/// **Chat-bus wire semantics over the direct mesh** (B1): the founder's
+/// reaction to the member's message crosses the wire carrying the stable
+/// message id, and the member's deletion of its own message is honored on
+/// the founder — the tombstone shows. Rides the exact
+/// [`founding_chats_over_the_direct_mesh`] setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reactions_and_deletes_converge_across_two_instances() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "react over the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // --- the member's runtime supervisor on the shared hub ---
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 7),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // founder chats, member answers — both logs converge on two messages
+    a.execute(Command::Chat {
+        body: "first light".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("founder chat");
+    member_feed.push(member_chat(2, "aye"));
+    let _ = member_wake.send(2);
+    common::await_chat_len(&a, 2, 15).await;
+
+    // --- the founder reacts to the MEMBER's message; the reaction crosses
+    // the wire addressed by the stable id ---
+    a.execute(Command::ReactChat {
+        id: test_msg_id(2),
+        emoji: "👍".to_string(),
+    })
+    .await
+    .expect("founder reacts");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let got = member_sink.messages();
+        if got.iter().any(|(from, env)| {
+            from == "founder-a"
+                && matches!(
+                    &env.body,
+                    WorkspaceEvent::ChatReacted { id: Some(id), by, emoji, .. }
+                        if *id == test_msg_id(2) && by == "founder-a" && emoji == "👍"
+                )
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder's reaction never crossed the mesh; got {:?}",
+            got.iter().map(|(_, e)| &e.body).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // and the founder's own state carries it (the local apply path)
+    let chat = common::read_chat(&a).await;
+    assert_eq!(
+        chat[1]["reactions"]["👍"],
+        serde_json::json!(["founder-a"]),
+        "the founder's reaction is on the member's message: {chat:?}"
+    );
+
+    // --- the member deletes its OWN message; the founder honors it and
+    // shows the tombstone ---
+    member_feed.push(EventEnvelope {
+        seq: 3,
+        ts: 1_751_000_003,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::ChatDeleted {
+            index: 0, // the member's sender-local idea of the position
+            id: Some(test_msg_id(2)),
+            by: "member-b".to_string(),
+        },
+    });
+    let _ = member_wake.send(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let chat = common::read_chat(&a).await;
+        if chat
+            .get(1)
+            .is_some_and(|m| m["deleted_by"] == serde_json::json!("member-b"))
+        {
+            assert_eq!(chat[1]["body"], serde_json::json!(""), "the body is wiped");
+            assert!(
+                chat[1].get("reactions").is_none(),
+                "reactions drop with the message: {:?}",
+                chat[1]
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the member's delete never reached the founder: {chat:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// **Real threshold governance over the direct mesh.** The founder engine
 /// (chain-governed from its founding) proposes a gated change and co-signs it —
 /// one of two, so it stays pending. The member then co-signs the exact change
