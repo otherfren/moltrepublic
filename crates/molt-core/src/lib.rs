@@ -655,27 +655,174 @@ fn file_available_default() -> bool {
     true
 }
 
+/// The stable, globally unique identity of one chat message (chat-bus
+/// concept Q1): 16 random bytes, minted by the **sender's engine** per
+/// message (`molt-core` holds no I/O, so no RNG lives here — the bytes are
+/// passed into the constructor). On the wire and in JSON it is a 32-char
+/// **lowercase** hex string; [`MessageId::NIL`] (all zero) marks a legacy
+/// message that predates ids and is skipped when serializing, so old log
+/// entries re-serialize byte-identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MessageId(pub [u8; 16]);
+
+impl MessageId {
+    /// The all-zero id: "this message predates stable ids". Never minted
+    /// for a new message.
+    pub const NIL: MessageId = MessageId([0u8; 16]);
+
+    /// Whether this is the [`MessageId::NIL`] placeholder.
+    pub fn is_nil(&self) -> bool {
+        self.0 == [0u8; 16]
+    }
+}
+
+impl std::fmt::Display for MessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
+impl std::str::FromStr for MessageId {
+    type Err = String;
+
+    /// Parse the canonical form only: exactly 32 lowercase hex chars.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 32 || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(format!(
+                "a message id is 32 lowercase hex chars, got {s:?}"
+            ));
+        }
+        let bytes = hex::decode(s).map_err(|e| format!("bad message id: {e}"))?;
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&bytes);
+        Ok(MessageId(id))
+    }
+}
+
+impl Serialize for MessageId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Which chat "channel" a message files under (chat-bus concept Q2). There
+/// is exactly **one** broadcast stream per republic; a channel is a *view*
+/// over it, never a boundary — every member receives every message, a tag
+/// hides nothing from anyone, and nothing engine-side trusts it beyond
+/// display routing. Exactly one channel per message; cross-posting happens
+/// by quoting into another channel.
+///
+/// New *system* channel kinds are new enum variants — deliberate, additive
+/// design decisions, never free-form strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChannelRef {
+    /// The all-hands group chat — the serde default, so every legacy
+    /// message (and every old sender) files here.
+    #[default]
+    Group,
+    /// Discussion attached to one proposal ("patch"); the UI resolves the
+    /// title from proposal/chain state, lazily and tolerant of unknown ids.
+    Patch {
+        /// The referenced proposal.
+        id: ProposalId,
+    },
+    /// A free, human-named topic channel — the escape valve.
+    Topic {
+        /// The topic's display name. Compared by **exact string equality**
+        /// — no case or unicode folding in v1 (`"Budget"` and `"budget"`
+        /// are different channels); normalization happens once, on send
+        /// ([`ChannelRef::normalized`]).
+        name: String,
+    },
+}
+
+/// The cap a topic name is normalized against (in `char`s, on send).
+pub const TOPIC_NAME_MAX_CHARS: usize = 64;
+
+impl ChannelRef {
+    /// Whether this is the all-hands [`ChannelRef::Group`] channel (the
+    /// `skip_serializing_if` guard that keeps a legacy-shaped message
+    /// byte-identical on the wire).
+    pub fn is_group(&self) -> bool {
+        matches!(self, ChannelRef::Group)
+    }
+
+    /// Normalize on send: a topic name is trimmed, must be non-empty and at
+    /// most [`TOPIC_NAME_MAX_CHARS`] chars. Case is **preserved** and
+    /// equality stays exact-string — deliberately no unicode folding in v1.
+    /// `Group` and `Patch` pass through unchanged.
+    pub fn normalized(self) -> Result<ChannelRef, String> {
+        match self {
+            ChannelRef::Topic { name } => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return Err("a topic name must not be empty".to_string());
+                }
+                if name.chars().count() > TOPIC_NAME_MAX_CHARS {
+                    return Err(format!(
+                        "a topic name is at most {TOPIC_NAME_MAX_CHARS} characters"
+                    ));
+                }
+                Ok(ChannelRef::Topic { name })
+            }
+            other => Ok(other),
+        }
+    }
+}
+
 impl ChatMessage {
     /// A plain text message — the one constructor chat posts and test
-    /// builders share, so the default-field shape cannot drift.
-    pub fn text(from: impl Into<MemberId>, body: impl Into<String>, ts: u64) -> ChatMessage {
+    /// builders share, so the default-field shape cannot drift. The id is
+    /// minted by the caller (the engine's CSPRNG; [`MessageId::NIL`] only
+    /// for pre-id fixtures); the channel defaults to `Group` — set it via
+    /// [`ChatMessage::with_channel`].
+    pub fn text(
+        id: MessageId,
+        from: impl Into<MemberId>,
+        body: impl Into<String>,
+        ts: u64,
+    ) -> ChatMessage {
         ChatMessage {
+            id,
             from: from.into(),
             body: body.into(),
             ts,
             quote: None,
+            quote_id: None,
+            channel: ChannelRef::Group,
             reactions: BTreeMap::new(),
             deleted_by: None,
             file: None,
         }
     }
+
+    /// The same message filed under `channel` (builder-style).
+    pub fn with_channel(mut self, channel: ChannelRef) -> ChatMessage {
+        self.channel = channel;
+        self
+    }
 }
 
 /// One chat message — THE schema of the chat log. The engine mutates and
 /// the GUI reads this one type; on the wire (`read_state.applied`) it
-/// serializes to the same JSON object as before.
+/// serializes to the same JSON object as before, with **additive fields
+/// since the chat bus** (`id`, `channel`, `quote_id`) that all skip their
+/// default/legacy state — a pre-chat-bus message re-serializes
+/// byte-identically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// Stable unique message id (chat bus). [`MessageId::NIL`] on legacy
+    /// log entries written before ids existed; never nil on a new message.
+    #[serde(default, skip_serializing_if = "MessageId::is_nil")]
+    pub id: MessageId,
     /// Sender handle.
     pub from: MemberId,
     /// Message body (empty once deleted).
@@ -683,9 +830,17 @@ pub struct ChatMessage {
     /// Seconds since the Unix epoch.
     #[serde(default)]
     pub ts: u64,
-    /// Quoted message (0-based position in the chat log), if replying.
+    /// Legacy quote (0-based position in the chat log). Readable forever,
+    /// **never written by new code** — new quotes use [`ChatMessage::quote_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<u64>,
+    /// Quoted message by stable id (chat bus), if replying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_id: Option<MessageId>,
+    /// The one channel this message files under (chat bus); `Group` for
+    /// every legacy message.
+    #[serde(default, skip_serializing_if = "ChannelRef::is_group")]
+    pub channel: ChannelRef,
     /// Emoji → the members who picked it (one reaction per member; a
     /// BTreeMap keeps the pill order stable across re-renders).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1094,8 +1249,14 @@ pub enum WorkspaceEvent {
     Chat(ChatMessage),
     /// A member's emoji reaction on a chat message was toggled.
     ChatReacted {
-        /// Message position in the chat log (0-based).
+        /// Message position in the chat log (0-based). Legacy addressing —
+        /// applied only when `id` is absent (pre-chat-bus log entries);
+        /// new events still record the position for older readers.
         index: u64,
+        /// The target message's stable id (chat bus; additive — `None` on
+        /// legacy log entries). Preferred over `index` when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<MessageId>,
         /// The reaction emoji.
         emoji: String,
         /// Who toggled it.
@@ -1103,16 +1264,28 @@ pub enum WorkspaceEvent {
     },
     /// A chat message was wiped; only the deletion notice remains.
     ChatDeleted {
-        /// Message position in the chat log (0-based).
+        /// Message position in the chat log (0-based). Legacy addressing —
+        /// applied only when `id` is absent (pre-chat-bus log entries);
+        /// new events still record the position for older readers.
         index: u64,
+        /// The target message's stable id (chat bus; additive — `None` on
+        /// legacy log entries). Preferred over `index` when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<MessageId>,
         /// Who deleted it.
         by: MemberId,
     },
     /// The sharer deleted a shared file from their disk — the share at
     /// this chat position is unavailable from now on.
     FileRemoved {
-        /// The share message's position in the chat log (0-based).
+        /// The share message's position in the chat log (0-based). Legacy
+        /// addressing — applied only when `id` is absent (pre-chat-bus log
+        /// entries); new events still record the position for older readers.
         index: u64,
+        /// The share message's stable id (chat bus; additive — `None` on
+        /// legacy log entries). Preferred over `index` when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<MessageId>,
         /// The sharer.
         by: MemberId,
     },
@@ -1611,9 +1784,12 @@ pub enum Command {
     Chat {
         /// The message body.
         body: String,
-        /// Quoted message (0-based position in the chat log), if replying.
+        /// Quoted message (by stable id), if replying.
         #[serde(default)]
-        quote: Option<u64>,
+        quote: Option<MessageId>,
+        /// The channel this message files under (`Group` when omitted).
+        #[serde(default)]
+        channel: ChannelRef,
     },
     /// An authenticated peer event arrived over the transport. Sent by the
     /// node's own `molt-net` supervisor (engine-internal, like the run
@@ -1673,15 +1849,15 @@ pub enum Command {
     /// Delete a chat message: its text is wiped for everyone and replaced
     /// by a deletion notice naming who deleted it (reactions are dropped).
     DeleteChat {
-        /// The message's position in the chat log (0-based).
-        index: u64,
+        /// The message's stable id.
+        id: MessageId,
     },
     /// Toggle the local member's emoji reaction on a chat message: reacting
     /// with the emoji you already picked un-reacts, picking another emoji
     /// switches — one reaction per member per message.
     ReactChat {
-        /// The message's position in the chat log (0-based).
-        index: u64,
+        /// The message's stable id.
+        id: MessageId,
         /// The reaction emoji.
         emoji: String,
     },
@@ -1703,19 +1879,24 @@ pub enum Command {
     /// availability, moves no bytes). Fails once the sharer deleted the
     /// local file.
     DownloadFile {
-        /// The share message's position in the chat log (0-based).
-        index: u64,
+        /// The share message's stable id.
+        id: MessageId,
     },
     /// Sharer-only: the local file is gone (deleted from this disk) — the
     /// share becomes permanently unavailable for every participant.
     RemoveFile {
-        /// The share message's position in the chat log (0-based).
-        index: u64,
+        /// The share message's stable id.
+        id: MessageId,
     },
     /// Read the projected state of one surface.
     ReadState {
         /// Which surface to read.
         surface: Surface,
+        /// Chat only: return just the messages of this channel (`None` =
+        /// the whole log). The snapshot's channel enumeration always lists
+        /// every channel, filtered or not.
+        #[serde(default)]
+        channel: Option<ChannelRef>,
     },
     /// List every proposal the engine currently knows about.
     ListProposals,
@@ -2231,6 +2412,20 @@ pub struct ProposalView {
     pub state: ProposalState,
 }
 
+/// One chat channel as the engine enumerates it for the read contract
+/// (chat-bus concept Q5): every distinct [`ChannelRef`] in the log, with
+/// its message count and last activity — the sidebar's (and an agent's)
+/// orientation data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    /// The channel.
+    pub channel: ChannelRef,
+    /// Messages filed under it.
+    pub count: usize,
+    /// Timestamp of its newest message (unix seconds; 0 when empty).
+    pub last_ts: u64,
+}
+
 /// A projected snapshot of one surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceSnapshot {
@@ -2238,10 +2433,15 @@ pub struct SurfaceSnapshot {
     pub surface: Surface,
     /// Whether it is threshold-gated.
     pub gated: bool,
-    /// The ordered log of applied transitions (for chat, the messages).
+    /// The ordered log of applied transitions (for chat, the messages —
+    /// possibly filtered by [`Command::ReadState`]'s `channel`).
     pub applied: Vec<Value>,
     /// Proposals still pending against this surface.
     pub pending: Vec<ProposalView>,
+    /// Chat only: every channel in the log (always the full list, even on
+    /// a filtered read; `Group` is always present). Empty on other surfaces.
+    #[serde(default)]
+    pub channels: Vec<ChannelInfo>,
 }
 
 /// Per-surface counters for the status summary.
@@ -2302,22 +2502,26 @@ impl GroupConfig {
 pub enum Event {
     /// A chat message was posted.
     Chat {
+        /// The message's stable id.
+        id: MessageId,
         /// Sender.
         from: MemberId,
         /// Body.
         body: String,
+        /// The channel it files under.
+        channel: ChannelRef,
     },
     /// A chat message was deleted (wiped and tombstoned).
     Deleted {
-        /// The message's position in the chat log.
-        index: u64,
+        /// The message's stable id.
+        id: MessageId,
         /// Who deleted it.
         by: MemberId,
     },
     /// A member's reaction on a chat message was toggled.
     Reacted {
-        /// The message's position in the chat log.
-        index: u64,
+        /// The message's stable id.
+        id: MessageId,
         /// The reaction emoji.
         emoji: String,
         /// Who toggled it.
@@ -2325,8 +2529,8 @@ pub enum Event {
     },
     /// A shared file became unavailable (its sharer deleted it locally).
     FileRemoved {
-        /// The share message's position in the chat log.
-        index: u64,
+        /// The share message's stable id.
+        id: MessageId,
         /// The sharer.
         by: MemberId,
     },
@@ -2412,18 +2616,18 @@ pub enum MoltError {
     /// The named sub-view does not exist on the given surface.
     #[error("surface {0:?} has no view `{1}`")]
     UnknownView(Surface, String),
-    /// The chat log has no message at this position.
+    /// The chat log has no message with this id.
     #[error("unknown chat message {0}")]
-    UnknownMessage(u64),
-    /// The chat message at this position carries no shared file.
+    UnknownMessage(MessageId),
+    /// The chat message with this id carries no shared file.
     #[error("message {0} has no shared file")]
-    NoFile(u64),
+    NoFile(MessageId),
     /// The shared file's owner deleted it locally; nothing to download.
     #[error("the shared file at message {0} is no longer available")]
-    FileUnavailable(u64),
+    FileUnavailable(MessageId),
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
-    NotYourFile(u64),
+    NotYourFile(MessageId),
     /// A restore action arrived in the wrong lifecycle state.
     #[error("restore: {0}")]
     Restore(String),
@@ -2520,6 +2724,7 @@ mod tests {
             by: "mithra".to_string(),
             body: WorkspaceEvent::ChatReacted {
                 index: 3,
+                id: None,
                 emoji: "🔥".to_string(),
                 by: "mithra".to_string(),
             },
@@ -2543,5 +2748,148 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert_eq!(a, demo_workspace_id("Family Office"));
         assert_ne!(a, demo_workspace_id("Savings-DAO"));
+    }
+
+    // --- chat bus Stage A: message identity + channel tags -----------------
+
+    #[test]
+    fn message_id_round_trips_as_hex_and_rejects_bad_input() {
+        let id = MessageId([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]);
+        // Display / FromStr: 32-char lowercase hex
+        let s = id.to_string();
+        assert_eq!(s, "00112233445566778899aabbccddeeff");
+        assert_eq!(s.parse::<MessageId>().expect("parse back"), id);
+        // serde: the same hex string on the wire
+        assert_eq!(
+            serde_json::to_string(&id).expect("encode"),
+            "\"00112233445566778899aabbccddeeff\""
+        );
+        let back: MessageId =
+            serde_json::from_str("\"00112233445566778899aabbccddeeff\"").expect("decode");
+        assert_eq!(back, id);
+        // NIL is all-zero and the only nil value
+        assert!(MessageId::NIL.is_nil());
+        assert_eq!(MessageId::NIL.to_string(), "0".repeat(32));
+        assert!(!id.is_nil());
+        // bad input: wrong length, non-hex, uppercase (canonical form only)
+        for bad in [
+            "",
+            "0011",
+            "00112233445566778899aabbccddeeff00",
+            "zz112233445566778899aabbccddeeff",
+            "00112233445566778899AABBCCDDEEFF",
+        ] {
+            assert!(bad.parse::<MessageId>().is_err(), "accepted {bad:?}");
+            assert!(
+                serde_json::from_str::<MessageId>(&format!("\"{bad}\"")).is_err(),
+                "decoded {bad:?}"
+            );
+        }
+        // and a non-string JSON value is rejected too
+        assert!(serde_json::from_str::<MessageId>("42").is_err());
+    }
+
+    #[test]
+    fn channel_ref_serdes_by_kind_tag_and_group_serializes_to_nothing() {
+        // the enum itself: internally tagged by `kind`, snake_case
+        assert_eq!(
+            serde_json::to_string(&ChannelRef::Group).expect("encode"),
+            r#"{"kind":"group"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ChannelRef::Patch { id: ProposalId(7) }).expect("encode"),
+            r#"{"kind":"patch","id":7}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ChannelRef::Topic {
+                name: "budget".to_string()
+            })
+            .expect("encode"),
+            r#"{"kind":"topic","name":"budget"}"#
+        );
+        for wire in [
+            r#"{"kind":"group"}"#,
+            r#"{"kind":"patch","id":7}"#,
+            r#"{"kind":"topic","name":"budget"}"#,
+        ] {
+            let c: ChannelRef = serde_json::from_str(wire).expect("decode");
+            assert_eq!(serde_json::to_string(&c).expect("re-encode"), wire);
+        }
+        assert!(ChannelRef::Group.is_group());
+        assert!(!ChannelRef::Topic {
+            name: "budget".to_string()
+        }
+        .is_group());
+        assert_eq!(ChannelRef::default(), ChannelRef::Group);
+
+        // THE compatibility pin: a Group / nil-id / no-quote_id message
+        // serializes byte-identical to the pre-chat-bus fixture (captured
+        // from the tree before this change).
+        let plain = ChatMessage::text(MessageId::NIL, "petra", "gm", 102);
+        assert_eq!(
+            serde_json::to_string(&plain).expect("encode"),
+            r#"{"from":"petra","body":"gm","ts":102}"#
+        );
+        // and a decoded legacy message re-serializes byte-identical, numeric
+        // `quote` included (skip-if-nil / skip-if-group / skip-if-none)
+        let legacy = r#"{"from":"walter","body":"re: gm","ts":103,"quote":0}"#;
+        let msg: ChatMessage = serde_json::from_str(legacy).expect("decode");
+        assert_eq!(serde_json::to_string(&msg).expect("re-encode"), legacy);
+    }
+
+    #[test]
+    fn legacy_chat_json_without_id_or_channel_still_decodes() {
+        // fixtures in the pre-chat-bus wire shape, incl. a numeric quote and
+        // a file share (captured before this change)
+        let quoted = r#"{"from":"walter","body":"re: gm","ts":103,"quote":0}"#;
+        let msg: ChatMessage = serde_json::from_str(quoted).expect("decode");
+        assert!(msg.id.is_nil());
+        assert_eq!(msg.channel, ChannelRef::Group);
+        assert_eq!(msg.quote, Some(0), "the legacy index quote is preserved");
+        assert_eq!(msg.quote_id, None);
+        assert_eq!(msg.from, "walter");
+        assert_eq!(msg.ts, 103);
+
+        let full = r#"{"from":"petra","body":"","ts":104,"reactions":{"👍":["walter"]},"file":{"name":"charter.pdf","size":48000,"kind":"PDF","modified":100,"available":true}}"#;
+        let msg: ChatMessage = serde_json::from_str(full).expect("decode");
+        assert!(msg.id.is_nil());
+        assert_eq!(msg.channel, ChannelRef::Group);
+        assert_eq!(msg.reactions["👍"], vec!["walter".to_string()]);
+        assert_eq!(msg.file.as_ref().map(|f| f.size), Some(48_000));
+    }
+
+    #[test]
+    fn topic_names_normalize_on_send_but_stay_case_preserving() {
+        let ok = ChannelRef::Topic {
+            name: "  Budget 2027  ".to_string(),
+        }
+        .normalized()
+        .expect("valid topic");
+        assert_eq!(
+            ok,
+            ChannelRef::Topic {
+                name: "Budget 2027".to_string()
+            },
+            "trimmed, case preserved"
+        );
+        assert!(ChannelRef::Topic {
+            name: "   ".to_string()
+        }
+        .normalized()
+        .is_err());
+        assert!(ChannelRef::Topic {
+            name: "x".repeat(65)
+        }
+        .normalized()
+        .is_err());
+        assert_eq!(
+            ChannelRef::Group.normalized().expect("group passes"),
+            ChannelRef::Group
+        );
+        let patch = ChannelRef::Patch { id: ProposalId(3) };
+        assert_eq!(patch.clone().normalized().expect("patch passes"), patch);
     }
 }

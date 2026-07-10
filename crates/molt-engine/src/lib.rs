@@ -53,8 +53,8 @@ pub use founding::{
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
 use molt_core::{
-    ChatMessage, Command, Event, GroupConfig, MemberId, MoltError, ProposalRecord, Reply,
-    SessionScope, SessionView, Surface, WorkspaceId,
+    ChatMessage, Command, Event, GroupConfig, MemberId, MessageId, MoltError, ProposalRecord,
+    Reply, SessionScope, SessionView, Surface, WorkspaceId,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -335,6 +335,11 @@ pub(crate) struct State {
     pub(crate) cmd_tx: mpsc::WeakSender<Envelope>,
     /// The chat log — typed, THE schema lives in [`molt_core::ChatMessage`].
     pub(crate) chat: Vec<ChatMessage>,
+    /// Chat-bus id → position in [`State::chat`] — the O(1) lookup every
+    /// id-addressed verb resolves through (and, with B1, the duplicate-id
+    /// gate). Runtime state, NOT persisted: rebuilt on ingest/restore; nil
+    /// ids (legacy entries) are skipped until B1 synthesizes theirs.
+    pub(crate) chat_pos: HashMap<MessageId, usize>,
     /// Applied transition log per gated surface.
     pub(crate) applied: HashMap<Surface, Vec<Value>>,
     /// Every known proposal — stored as the schema type
@@ -529,6 +534,7 @@ impl State {
             ev_tx,
             cmd_tx: cmd_tx.downgrade(),
             chat: Vec::new(),
+            chat_pos: HashMap::new(),
             applied,
             proposals: HashMap::new(),
             next_id: 1,
@@ -620,23 +626,32 @@ impl State {
     fn handle(&mut self, cmd: Command) -> Result<Reply, MoltError> {
         match cmd {
             // chat.rs
-            Command::Chat { body, quote } => self.cmd_chat(body, quote),
-            Command::ReactChat { index, emoji } => self.cmd_react_chat(index, emoji),
-            Command::DeleteChat { index } => self.cmd_delete_chat(index),
+            Command::Chat {
+                body,
+                quote,
+                channel,
+            } => self.cmd_chat(body, quote, channel),
+            Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
+            Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile {
                 name,
                 size,
                 kind,
                 modified,
             } => self.cmd_share_file(name, size, kind, modified),
-            Command::DownloadFile { index } => self.cmd_download_file(index),
-            Command::RemoveFile { index } => self.cmd_remove_file(index),
+            Command::DownloadFile { id } => self.cmd_download_file(id),
+            Command::RemoveFile { id } => self.cmd_remove_file(id),
 
             // proposals.rs
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
             Command::Approve { proposal } => self.cmd_approve(proposal),
             Command::Decline { proposal } => self.cmd_decline(proposal),
-            Command::ReadState { surface } => Ok(Reply::State(self.snapshot(surface))),
+            // the channel filter is threaded into the snapshot with the
+            // read-contract package (B2); the field is frozen here
+            Command::ReadState {
+                surface,
+                channel: _,
+            } => Ok(Reply::State(self.snapshot(surface))),
             Command::ListProposals => {
                 let mut views: Vec<_> = self
                     .proposals
@@ -862,13 +877,25 @@ mod tests {
 
     async fn read_surface(w: &WalletHandle, surface: Surface) -> molt_core::SurfaceSnapshot {
         match w
-            .execute(Command::ReadState { surface })
+            .execute(Command::ReadState {
+                surface,
+                channel: None,
+            })
             .await
             .expect("read state")
         {
             Reply::State(s) => s,
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// The stable id a chat snapshot row carries, parsed back into the type.
+    fn msg_id(v: &serde_json::Value) -> MessageId {
+        v["id"]
+            .as_str()
+            .expect("message id on the wire")
+            .parse()
+            .expect("valid message id")
     }
 
     /// The "it survives a restart" keystone: found a republic on a storage
@@ -911,20 +938,25 @@ mod tests {
             assert!(ws.seed.is_empty());
 
             // write history: chat, reaction, delete, proposal to threshold
+            // (all chat verbs address by stable id since the chat bus)
             w.execute(Command::Chat {
                 body: "first".to_string(),
                 quote: None,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("chat 1");
+            let first_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[0]);
             w.execute(Command::Chat {
                 body: "second".to_string(),
-                quote: Some(0),
+                quote: Some(first_id),
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("chat 2");
+            let second_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[1]);
             w.execute(Command::ReactChat {
-                index: 0,
+                id: first_id,
                 emoji: "👍".to_string(),
             })
             .await
@@ -943,7 +975,7 @@ mod tests {
             w.execute(Command::Approve { proposal: pid })
                 .await
                 .expect("approve");
-            w.execute(Command::DeleteChat { index: 1 })
+            w.execute(Command::DeleteChat { id: second_id })
                 .await
                 .expect("delete");
             // two file shares: one stays available, one is removed — both
@@ -964,9 +996,14 @@ mod tests {
             })
             .await
             .expect("share 2");
-            w.execute(Command::RemoveFile { index: 3 })
-                .await
-                .expect("remove");
+            let snap = read_surface(&w, Surface::Chat).await;
+            let kept_share_id = msg_id(&snap.applied[2]);
+            let removed_share_id = msg_id(&snap.applied[3]);
+            w.execute(Command::RemoveFile {
+                id: removed_share_id,
+            })
+            .await
+            .expect("remove");
 
             let chat_before = read_surface(&w, Surface::Chat).await;
             let memory_before = read_surface(&w, Surface::Memory).await;
@@ -987,13 +1024,17 @@ mod tests {
             assert_eq!(memory_after.applied, memory_before.applied);
             assert_eq!(memory_after.pending.len(), memory_before.pending.len());
 
-            // the file shares replay with their availability intact
-            w.execute(Command::DownloadFile { index: 2 })
+            // the file shares replay with their availability intact —
+            // and stay addressable by the SAME ids after the reopen
+            w.execute(Command::DownloadFile { id: kept_share_id })
                 .await
                 .expect("kept file downloads after reopen");
             assert!(matches!(
-                w.execute(Command::DownloadFile { index: 3 }).await,
-                Err(MoltError::FileUnavailable(3))
+                w.execute(Command::DownloadFile {
+                    id: removed_share_id,
+                })
+                .await,
+                Err(MoltError::FileUnavailable(i)) if i == removed_share_id
             ));
 
             // the roster and rule replayed from the genesis event
@@ -1043,6 +1084,7 @@ mod tests {
                 w.execute(Command::Chat {
                     body: "hi".into(),
                     quote: None,
+                    channel: molt_core::ChannelRef::default(),
                 })
                 .await,
                 Ok(Reply::Ack)
@@ -1097,14 +1139,17 @@ mod tests {
             w.execute(Command::Chat {
                 body: "gm".into(),
                 quote: None,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("chat");
+            let id = msg_id(&read_surface(&w, Surface::Chat).await.applied[0]);
 
             let read = |w: WalletHandle| async move {
                 match w
                     .execute(Command::ReadState {
                         surface: Surface::Chat,
+                        channel: None,
                     })
                     .await
                     .expect("read")
@@ -1116,7 +1161,7 @@ mod tests {
 
             // react 👍 — my name lands under that emoji
             w.execute(Command::ReactChat {
-                index: 0,
+                id,
                 emoji: "👍".into(),
             })
             .await
@@ -1126,7 +1171,7 @@ mod tests {
 
             // switching to 🔥 removes 👍 (one reaction per member)
             w.execute(Command::ReactChat {
-                index: 0,
+                id,
                 emoji: "🔥".into(),
             })
             .await
@@ -1138,7 +1183,7 @@ mod tests {
             // reacting with the same emoji again un-reacts; the empty map
             // disappears from the wire entirely
             w.execute(Command::ReactChat {
-                index: 0,
+                id,
                 emoji: "🔥".into(),
             })
             .await
@@ -1146,14 +1191,15 @@ mod tests {
             let msg = read(w.clone()).await;
             assert!(msg.get("reactions").is_none());
 
-            // out-of-range message
+            // an unknown message id
+            let unknown = MessageId([9u8; 16]);
             assert!(matches!(
                 w.execute(Command::ReactChat {
-                    index: 7,
+                    id: unknown,
                     emoji: "👍".into(),
                 })
                 .await,
-                Err(MoltError::UnknownMessage(7))
+                Err(MoltError::UnknownMessage(i)) if i == unknown
             ));
         });
     }
@@ -1172,9 +1218,10 @@ mod tests {
             .expect("share");
 
             // the chat log carries exactly the metadata
-            match w
+            let share_id = match w
                 .execute(Command::ReadState {
                     surface: Surface::Chat,
+                    channel: None,
                 })
                 .await
                 .expect("read")
@@ -1186,38 +1233,41 @@ mod tests {
                     assert_eq!(f["kind"], json!("PDF"));
                     assert_eq!(f["modified"], json!(1_751_000_000));
                     assert_eq!(f["available"], json!(true));
+                    msg_id(&s.applied[0])
                 }
                 other => panic!("unexpected: {other:?}"),
-            }
+            };
 
             // downloadable while the sharer keeps the file …
-            w.execute(Command::DownloadFile { index: 0 })
+            w.execute(Command::DownloadFile { id: share_id })
                 .await
                 .expect("download works while available");
 
             // … the sharer removes it locally → permanently unavailable
-            w.execute(Command::RemoveFile { index: 0 })
+            w.execute(Command::RemoveFile { id: share_id })
                 .await
                 .expect("remove own share");
             assert!(matches!(
-                w.execute(Command::DownloadFile { index: 0 }).await,
-                Err(MoltError::FileUnavailable(0))
+                w.execute(Command::DownloadFile { id: share_id }).await,
+                Err(MoltError::FileUnavailable(i)) if i == share_id
             ));
             assert!(matches!(
-                w.execute(Command::RemoveFile { index: 0 }).await,
-                Err(MoltError::FileUnavailable(0))
+                w.execute(Command::RemoveFile { id: share_id }).await,
+                Err(MoltError::FileUnavailable(i)) if i == share_id
             ));
 
             // plain messages have nothing to download
             w.execute(Command::Chat {
                 body: "hi".into(),
                 quote: None,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("chat");
+            let plain_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[1]);
             assert!(matches!(
-                w.execute(Command::DownloadFile { index: 1 }).await,
-                Err(MoltError::NoFile(1))
+                w.execute(Command::DownloadFile { id: plain_id }).await,
+                Err(MoltError::NoFile(i)) if i == plain_id
             ));
             // deleting a share message drops the share entirely
             w.execute(Command::ShareFile {
@@ -1228,16 +1278,18 @@ mod tests {
             })
             .await
             .expect("share 2");
-            w.execute(Command::DeleteChat { index: 2 })
+            let share2_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[2]);
+            w.execute(Command::DeleteChat { id: share2_id })
                 .await
                 .expect("delete");
             assert!(matches!(
-                w.execute(Command::DownloadFile { index: 2 }).await,
-                Err(MoltError::NoFile(2))
+                w.execute(Command::DownloadFile { id: share2_id }).await,
+                Err(MoltError::NoFile(i)) if i == share2_id
             ));
+            let unknown = MessageId([9u8; 16]);
             assert!(matches!(
-                w.execute(Command::DownloadFile { index: 9 }).await,
-                Err(MoltError::UnknownMessage(9))
+                w.execute(Command::DownloadFile { id: unknown }).await,
+                Err(MoltError::UnknownMessage(i)) if i == unknown
             ));
         });
     }
@@ -1249,21 +1301,24 @@ mod tests {
             w.execute(Command::Chat {
                 body: "secret".into(),
                 quote: None,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("chat");
+            let id = msg_id(&read_surface(&w, Surface::Chat).await.applied[0]);
             w.execute(Command::ReactChat {
-                index: 0,
+                id,
                 emoji: "🔥".into(),
             })
             .await
             .expect("react");
-            w.execute(Command::DeleteChat { index: 0 })
+            w.execute(Command::DeleteChat { id })
                 .await
                 .expect("delete");
             match w
                 .execute(Command::ReadState {
                     surface: Surface::Chat,
+                    channel: None,
                 })
                 .await
                 .expect("read")
@@ -1276,10 +1331,141 @@ mod tests {
                 }
                 other => panic!("unexpected: {other:?}"),
             }
+            let unknown = MessageId([9u8; 16]);
             assert!(matches!(
-                w.execute(Command::DeleteChat { index: 9 }).await,
-                Err(MoltError::UnknownMessage(9))
+                w.execute(Command::DeleteChat { id: unknown }).await,
+                Err(MoltError::UnknownMessage(i)) if i == unknown
             ));
+        });
+    }
+
+    /// Chat bus Stage A pin: every chat verb addresses messages by their
+    /// stable id — send, react, delete, and a quote all work by id; an
+    /// unknown id is `UnknownMessage`.
+    #[test]
+    fn chat_commands_address_by_id() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::Chat {
+                body: "root".into(),
+                quote: None,
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("chat");
+            // the demo peers may chat back mid-test — address rows by body
+            let row = |snap: &molt_core::SurfaceSnapshot, body: &str| {
+                snap.applied
+                    .iter()
+                    .find(|m| m["body"] == json!(body))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("no chat row with body {body:?}"))
+            };
+            let snap = read_surface(&w, Surface::Chat).await;
+            let root_id = msg_id(&row(&snap, "root"));
+            assert!(!root_id.is_nil(), "a new message carries a minted id");
+
+            // react by id
+            w.execute(Command::ReactChat {
+                id: root_id,
+                emoji: "👍".into(),
+            })
+            .await
+            .expect("react by id");
+            let snap = read_surface(&w, Surface::Chat).await;
+            assert_eq!(row(&snap, "root")["reactions"]["👍"], json!(["me"]));
+
+            // quote by id survives in the log (as quote_id; the legacy
+            // numeric quote is never written by new code)
+            w.execute(Command::Chat {
+                body: "reply".into(),
+                quote: Some(root_id),
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("quoted reply");
+            let snap = read_surface(&w, Surface::Chat).await;
+            let reply = row(&snap, "reply");
+            assert_eq!(
+                reply["quote_id"],
+                json!(root_id.to_string()),
+                "the quote rides as a stable id"
+            );
+            assert!(
+                reply.get("quote").is_none(),
+                "new code never writes the legacy index quote"
+            );
+            let reply_id = msg_id(&reply);
+
+            // delete by id
+            w.execute(Command::DeleteChat { id: reply_id })
+                .await
+                .expect("delete by id");
+            let snap = read_surface(&w, Surface::Chat).await;
+            let tombstone = snap
+                .applied
+                .iter()
+                .find(|m| m["id"] == json!(reply_id.to_string()))
+                .expect("the deleted row remains as a tombstone");
+            assert_eq!(tombstone["deleted_by"], json!("me"));
+            assert_eq!(tombstone["body"], json!(""));
+
+            // an unknown id is rejected with the id in the error
+            let unknown = MessageId([7u8; 16]);
+            assert!(matches!(
+                w.execute(Command::ReactChat {
+                    id: unknown,
+                    emoji: "👍".into(),
+                })
+                .await,
+                Err(MoltError::UnknownMessage(i)) if i == unknown
+            ));
+            assert!(matches!(
+                w.execute(Command::DeleteChat { id: unknown }).await,
+                Err(MoltError::UnknownMessage(i)) if i == unknown
+            ));
+
+            // a quote pointing at an unknown id is dropped, not kept dangling
+            w.execute(Command::Chat {
+                body: "dangling".into(),
+                quote: Some(unknown),
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("chat with dangling quote");
+            let snap = read_surface(&w, Surface::Chat).await;
+            assert!(row(&snap, "dangling").get("quote_id").is_none());
+        });
+    }
+
+    /// Chat bus Stage A pin: ids are minted per message — non-nil and
+    /// pairwise distinct.
+    #[test]
+    fn every_new_message_gets_a_unique_nonnil_id() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            const N: usize = 20;
+            for i in 0..N {
+                w.execute(Command::Chat {
+                    body: format!("msg {i}"),
+                    quote: None,
+                    channel: molt_core::ChannelRef::default(),
+                })
+                .await
+                .expect("chat");
+            }
+            let snap = read_surface(&w, Surface::Chat).await;
+            // the demo peers may have chatted back — pick out OUR messages
+            let ids: Vec<MessageId> = snap
+                .applied
+                .iter()
+                .filter(|m| m["from"] == json!("me"))
+                .map(msg_id)
+                .collect();
+            assert_eq!(ids.len(), N);
+            assert!(ids.iter().all(|id| !id.is_nil()), "no nil ids");
+            let distinct: std::collections::HashSet<_> = ids.iter().collect();
+            assert_eq!(distinct.len(), N, "all ids are pairwise distinct");
         });
     }
 
@@ -1305,6 +1491,7 @@ mod tests {
             match w
                 .execute(Command::ReadState {
                     surface: Surface::Memory,
+                    channel: None,
                 })
                 .await
                 .expect("read")

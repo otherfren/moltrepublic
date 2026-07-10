@@ -35,8 +35,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{
-    ChatMessage, Command, Event, ProposalId, Reply, Screen, SessionScope, SessionSettings,
-    SessionView, Surface, SurfaceSnapshot,
+    ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, Reply, Screen, SessionScope,
+    SessionSettings, SessionView, Surface, SurfaceSnapshot,
 };
 use molt_engine::WalletHandle;
 use slint::{Model, ModelRc, VecModel};
@@ -594,19 +594,31 @@ pub fn run_app(
             if body.is_empty() {
                 return;
             }
-            let quote = u64::try_from(quote).ok();
-            issue(&rt, &w, &weak, Command::Chat { body, quote });
+            // "" = no quote; a legacy row without an id can't be quoted
+            let quote = quote.parse::<MessageId>().ok();
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::Chat {
+                    body,
+                    quote,
+                    // channel selection arrives with the UI-channels
+                    // package (B4); everything files to Group until then
+                    channel: ChannelRef::default(),
+                },
+            );
         });
     }
     {
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_delete_chat(move |index| {
-            let Ok(index) = u64::try_from(index) else {
-                return;
+        ui.on_delete_chat(move |id| {
+            let Ok(id) = id.parse::<MessageId>() else {
+                return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::DeleteChat { index });
+            issue(&rt, &w, &weak, Command::DeleteChat { id });
         });
     }
     {
@@ -656,38 +668,38 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_download_file(move |index| {
-            let Ok(index) = u64::try_from(index) else {
-                return;
+        ui.on_download_file(move |id| {
+            let Ok(id) = id.parse::<MessageId>() else {
+                return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::DownloadFile { index });
+            issue(&rt, &w, &weak, Command::DownloadFile { id });
         });
     }
     {
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_remove_file(move |index| {
-            let Ok(index) = u64::try_from(index) else {
-                return;
+        ui.on_remove_file(move |id| {
+            let Ok(id) = id.parse::<MessageId>() else {
+                return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::RemoveFile { index });
+            issue(&rt, &w, &weak, Command::RemoveFile { id });
         });
     }
     {
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_toggle_reaction(move |index, emoji| {
-            let Ok(index) = u64::try_from(index) else {
-                return;
+        ui.on_toggle_reaction(move |id, emoji| {
+            let Ok(id) = id.parse::<MessageId>() else {
+                return; // legacy row without an id — nothing to address
             };
             issue(
                 &rt,
                 &w,
                 &weak,
                 Command::ReactChat {
-                    index,
+                    id,
                     emoji: emoji.to_string(),
                 },
             );
@@ -1285,6 +1297,8 @@ struct SurfaceData {
     pending: Vec<ProposalRowData>,
 }
 struct LogLineData {
+    /// Stable message id, 32-char hex ("" on legacy entries without one).
+    id: String,
     lead: String,
     text: String,
     when: String,
@@ -1321,7 +1335,14 @@ async fn push_surfaces(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
     };
     let mut surfaces = Vec::new();
     for sf in Surface::ALL {
-        if let Ok(Reply::State(snap)) = wallet.execute(Command::ReadState { surface: sf }).await {
+        if let Ok(Reply::State(snap)) = wallet
+            .execute(Command::ReadState {
+                surface: sf,
+                // per-channel reads arrive with the UI-channels package (B4)
+                channel: None,
+            })
+            .await
+        {
             surfaces.push(surface_data(sf, &snap, &member));
         }
     }
@@ -1363,6 +1384,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         })
                         .collect();
                     LogLine {
+                        id: l.id.clone().into(),
                         lead: l.lead.clone().into(),
                         text: l.text.clone().into(),
                         when: l.when.clone().into(),
@@ -1484,15 +1506,27 @@ fn view_icon(key: &str) -> &'static str {
 /// member handle — it marks own messages and the own reaction pill.
 fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
     let mut log: Vec<LogLineData> = if sf == Surface::Chat {
-        snap.applied
+        let msgs: Vec<ChatMessage> = snap
+            .applied
             .iter()
             .filter_map(|v| serde_json::from_value::<ChatMessage>(v.clone()).ok())
-            .map(|m| chat_line(&m, me))
+            .collect();
+        // id → row, so quotes (stable ids) resolve to the row the quote
+        // teaser and the scroll-to-target need
+        let row_of: std::collections::HashMap<MessageId, usize> = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.id.is_nil())
+            .map(|(i, m)| (m.id, i))
+            .collect();
+        msgs.iter()
+            .map(|m| chat_line(m, me, quote_row(m, &row_of)))
             .collect()
     } else {
         snap.applied
             .iter()
             .map(|v| LogLineData {
+                id: String::new(),
                 lead: String::new(),
                 text: summarize(v),
                 when: String::new(),
@@ -1531,8 +1565,21 @@ fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
     }
 }
 
-/// One typed chat message, projected for display.
-fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
+/// The display row a message's quote points at: the stable `quote_id`
+/// resolved through the id→row map, with the legacy numeric `quote` as the
+/// fallback for pre-chat-bus log entries (-1 = no quote; out-of-range
+/// legacy values are dropped later by [`annotate_chat_log`]).
+fn quote_row(m: &ChatMessage, row_of: &std::collections::HashMap<MessageId, usize>) -> i32 {
+    m.quote_id
+        .and_then(|q| row_of.get(&q).copied())
+        .or_else(|| m.quote.and_then(|q| usize::try_from(q).ok()))
+        .and_then(|q| i32::try_from(q).ok())
+        .unwrap_or(-1)
+}
+
+/// One typed chat message, projected for display. `quote` is the resolved
+/// quoted row (see [`quote_row`]).
+fn chat_line(m: &ChatMessage, me: &str, quote: i32) -> LogLineData {
     let mut mine_emoji = String::new();
     // the BTreeMap iterates sorted by emoji, so the pill order is
     // deterministic across re-renders
@@ -1567,6 +1614,11 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         None => (false, String::new(), String::new(), false),
     };
     LogLineData {
+        id: if m.id.is_nil() {
+            String::new() // a legacy entry: not addressable until B1
+        } else {
+            m.id.to_string()
+        },
         lead: m.from.clone(),
         text: m.body.clone(),
         when: if m.ts > 0 {
@@ -1574,7 +1626,7 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         } else {
             String::new()
         },
-        quote: m.quote.and_then(|q| i32::try_from(q).ok()).unwrap_or(-1),
+        quote,
         quote_label: String::new(), // teaser, filled in by annotate_chat_log
         deleted_by: m.deleted_by.clone().unwrap_or_default(),
         first: true, // author-block start, filled in by annotate_chat_log
@@ -2040,6 +2092,7 @@ mod tests {
 
     fn line(lead: &str, text: &str) -> LogLineData {
         LogLineData {
+            id: String::new(),
             lead: lead.to_string(),
             text: text.to_string(),
             when: String::new(),

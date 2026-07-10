@@ -658,11 +658,20 @@ impl State {
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
-                msg.quote = None; // sender-local index — does not transfer (stable ids: T2)
+                msg.quote = None; // sender-local LEGACY index — does not transfer
+                                  // (`quote_id`/`channel` are global refs and stay;
+                                  // duplicate-id rejection + parking land with B1)
+                let id = msg.id;
+                let channel = msg.channel.clone();
                 let body = msg.body.clone();
                 let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
                 self.record(env);
-                self.emit(molt_core::Event::Chat { from, body });
+                self.emit(molt_core::Event::Chat {
+                    id,
+                    from,
+                    body,
+                    channel,
+                });
             }
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
@@ -1214,7 +1223,7 @@ fn spawn_brain(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
-            let molt_core::Event::Chat { from, body } = ev else {
+            let molt_core::Event::Chat { from, body, .. } = ev else {
                 continue;
             };
             if from != owner {
@@ -1238,6 +1247,7 @@ fn spawn_brain(
                     cmd: Command::Chat {
                         body: line.to_string(),
                         quote: None,
+                        channel: molt_core::ChannelRef::default(),
                     },
                     reply,
                 })

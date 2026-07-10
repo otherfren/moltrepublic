@@ -123,12 +123,19 @@ async fn mesh(hub: &LoopbackHub, members: &[&str], seed: u64) -> Vec<Node> {
     nodes
 }
 
+/// A deterministic non-nil message id for hand-built test envelopes.
+fn test_msg_id(seq: u64) -> molt_core::MessageId {
+    let mut b = [0xa5u8; 16];
+    b[..8].copy_from_slice(&seq.to_le_bytes());
+    molt_core::MessageId(b)
+}
+
 fn chat_env(by: &str, seq: u64, body: &str) -> EventEnvelope {
     EventEnvelope {
         seq,
         ts: 1_000 + seq,
         by: by.to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(by, body, 1_000 + seq)),
+        body: WorkspaceEvent::Chat(ChatMessage::text(test_msg_id(seq), by, body, 1_000 + seq)),
     }
 }
 

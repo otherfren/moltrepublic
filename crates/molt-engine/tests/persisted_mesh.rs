@@ -59,12 +59,25 @@ fn genesis(member: &str) -> EventEnvelope {
     }
 }
 
+/// A deterministic non-nil message id for hand-built test envelopes (the
+/// engine mints real random ids; this stands in for a peer's minting).
+fn test_msg_id(seq: u64) -> molt_core::MessageId {
+    let mut b = [0xa5u8; 16];
+    b[..8].copy_from_slice(&seq.to_le_bytes());
+    molt_core::MessageId(b)
+}
+
 fn chat_env(seq: u64, body: &str) -> EventEnvelope {
     EventEnvelope {
         seq,
         ts: 1_751_000_000 + seq,
         by: "ada".to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text("ada", body, 1_751_000_000 + seq)),
+        body: WorkspaceEvent::Chat(ChatMessage::text(
+            test_msg_id(seq),
+            "ada",
+            body,
+            1_751_000_000 + seq,
+        )),
     }
 }
 

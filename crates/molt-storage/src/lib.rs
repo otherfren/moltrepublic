@@ -1801,16 +1801,26 @@ mod tests {
         }
     }
 
+    /// A deterministic non-nil message id for hand-built test envelopes.
+    fn test_msg_id(seq: u64) -> molt_core::MessageId {
+        let mut b = [0xa5u8; 16];
+        b[..8].copy_from_slice(&seq.to_le_bytes());
+        molt_core::MessageId(b)
+    }
+
     fn chat(seq: u64, body: &str) -> EventEnvelope {
         EventEnvelope {
             seq,
             ts: 1_000_000 + seq,
             by: "mithra".to_string(),
             body: WorkspaceEvent::Chat(ChatMessage {
+                id: test_msg_id(seq),
                 from: "mithra".to_string(),
                 body: body.to_string(),
                 ts: 1_000_000 + seq,
                 quote: None,
+                quote_id: None,
+                channel: molt_core::ChannelRef::Group,
                 reactions: BTreeMap::new(),
                 deleted_by: None,
                 file: None,

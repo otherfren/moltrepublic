@@ -21,7 +21,7 @@
 
 use std::net::IpAddr;
 
-use molt_core::{Command, ProposalId, Screen, SessionSettings, Surface};
+use molt_core::{ChannelRef, Command, MessageId, ProposalId, Screen, SessionSettings, Surface};
 use molt_engine::WalletHandle;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -246,6 +246,24 @@ fn surface_arg(args: &Value) -> Result<Surface, String> {
     Surface::parse(&s).ok_or_else(|| format!("unknown surface `{s}`"))
 }
 
+/// A required chat-message id argument (32-char lowercase hex).
+fn id_arg(args: &Value, key: &str) -> Result<MessageId, String> {
+    str_arg(args, key)?
+        .parse()
+        .map_err(|e| format!("argument `{key}`: {e}"))
+}
+
+/// An optional chat-message id argument (32-char lowercase hex).
+fn opt_id_arg(args: &Value, key: &str) -> Result<Option<MessageId>, String> {
+    match args.get(key).and_then(Value::as_str) {
+        Some(s) => s
+            .parse()
+            .map(Some)
+            .map_err(|e| format!("argument `{key}`: {e}")),
+        None => Ok(None),
+    }
+}
+
 fn screen_arg(args: &Value) -> Result<Screen, String> {
     let s = str_arg(args, "screen")?;
     Screen::parse(&s).ok_or_else(|| format!("unknown screen `{s}`"))
@@ -329,34 +347,37 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "chat_send",
             command: "chat",
-            description: "Post a message to the ungated chat surface; pass `quote` (0-based log index) to reply to an earlier message.",
+            description: "Post a message to the ungated chat surface; pass `quote` (a message id) to reply to an earlier message.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "body": { "type": "string" },
-                    "quote": { "type": "integer", "description": "optional: quoted message position in the chat log" }
+                    "quote": { "type": "string", "description": "optional: quoted message id (32-char hex)" }
                 },
                 "required": ["body"]
             }),
             build: |args| Ok(Command::Chat {
                 body: str_arg(args, "body")?,
-                quote: args.get("quote").and_then(Value::as_u64),
+                quote: opt_id_arg(args, "quote")?,
+                // the channel parameter joins the schema with the MCP
+                // package (B3); the command field is frozen here
+                channel: ChannelRef::default(),
             }),
         },
         ToolDef {
             name: "react_chat",
             command: "react_chat",
-            description: "Toggle this member's emoji reaction on a chat message (0-based log index). Reacting with the emoji you already picked un-reacts; picking another switches — one reaction per member per message.",
+            description: "Toggle this member's emoji reaction on a chat message (by message id). Reacting with the emoji you already picked un-reacts; picking another switches — one reaction per member per message.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "index": { "type": "integer", "description": "message position in the chat log (0-based)" },
+                    "id": { "type": "string", "description": "message id (32-char hex)" },
                     "emoji": { "type": "string", "description": "a short emoji, e.g. 👍" }
                 },
-                "required": ["index", "emoji"]
+                "required": ["id", "emoji"]
             }),
             build: |args| Ok(Command::ReactChat {
-                index: u64_arg(args, "index")?,
+                id: id_arg(args, "id")?,
                 emoji: str_arg(args, "emoji")?,
             }),
         },
@@ -384,40 +405,40 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "download_file",
             command: "download_file",
-            description: "Download a shared file from its sharer's disk (0-based chat log index). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
+            description: "Download a shared file from its sharer's disk (by the share message's id). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
             schema: || json!({
                 "type": "object",
-                "properties": { "index": { "type": "integer" } },
-                "required": ["index"]
+                "properties": { "id": { "type": "string", "description": "share message id (32-char hex)" } },
+                "required": ["id"]
             }),
             build: |args| Ok(Command::DownloadFile {
-                index: u64_arg(args, "index")?,
+                id: id_arg(args, "id")?,
             }),
         },
         ToolDef {
             name: "remove_file",
             command: "remove_file",
-            description: "Sharer-only: mark a shared file as deleted from this disk (0-based chat log index) — the share becomes permanently unavailable for every participant.",
+            description: "Sharer-only: mark a shared file as deleted from this disk (by the share message's id) — the share becomes permanently unavailable for every participant.",
             schema: || json!({
                 "type": "object",
-                "properties": { "index": { "type": "integer" } },
-                "required": ["index"]
+                "properties": { "id": { "type": "string", "description": "share message id (32-char hex)" } },
+                "required": ["id"]
             }),
             build: |args| Ok(Command::RemoveFile {
-                index: u64_arg(args, "index")?,
+                id: id_arg(args, "id")?,
             }),
         },
         ToolDef {
             name: "delete_chat",
             command: "delete_chat",
-            description: "Delete a chat message (0-based log index): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",
+            description: "Delete a chat message (by message id): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",
             schema: || json!({
                 "type": "object",
-                "properties": { "index": { "type": "integer" } },
-                "required": ["index"]
+                "properties": { "id": { "type": "string", "description": "message id (32-char hex)" } },
+                "required": ["id"]
             }),
             build: |args| Ok(Command::DeleteChat {
-                index: u64_arg(args, "index")?,
+                id: id_arg(args, "id")?,
             }),
         },
         ToolDef {
@@ -474,6 +495,9 @@ fn tools() -> Vec<ToolDef> {
             }),
             build: |args| Ok(Command::ReadState {
                 surface: surface_arg(args)?,
+                // the channel filter joins the schema with the MCP package
+                // (B3); the command field is frozen here
+                channel: None,
             }),
         },
         ToolDef {

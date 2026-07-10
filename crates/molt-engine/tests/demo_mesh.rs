@@ -23,6 +23,7 @@ async fn demo_peers_answer_over_the_loopback_mesh() {
         w.execute(Command::Chat {
             body: format!("hello {i}"),
             quote: None,
+            channel: molt_core::ChannelRef::default(),
         })
         .await
         .expect("chat");
@@ -66,6 +67,7 @@ async fn engine_and_mesh_shut_down_when_the_last_handle_drops() {
     w.execute(Command::Chat {
         body: "build the mesh".to_string(),
         quote: None,
+        channel: molt_core::ChannelRef::default(),
     })
     .await
     .expect("chat");
@@ -99,6 +101,7 @@ async fn demo_workspace_mesh_updates_presence_on_reply() {
         w.execute(Command::Chat {
             body: format!("family checkin {i}"),
             quote: None,
+            channel: molt_core::ChannelRef::default(),
         })
         .await
         .expect("chat");

@@ -26,6 +26,7 @@ export struct ReactionItem {
 // One line in a surface's log: for chat, `lead` is the sender and `text` the
 // body; for gated surfaces `lead` is empty and `text` is the proposal summary.
 export struct LogLine {
+    id: string, // stable message id (32-char hex; "" on legacy entries)
     lead: string,
     text: string,
     when: string, // "2026-06-02 13:37 (~20 minutes ago)", grey in the header

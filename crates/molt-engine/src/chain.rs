@@ -686,11 +686,15 @@ impl State {
                 // 3) announce the rejoin in the group chat — AFTER the commit, so
                 // the survivors have advanced to the epoch this notice is
                 // encrypted at (ephemeral, best-effort like all chat).
-                self.post_message(
+                if let Err(e) = self.post_message(
                     me,
                     format!("🔑 {member} rejoined the republic after recovery"),
                     None,
-                );
+                    molt_core::ChannelRef::Group,
+                ) {
+                    // best-effort, like all chat — never blocks the re-key
+                    tracing::warn!(error = %e, "could not post the rejoin notice");
+                }
                 // 4) dynamic mesh membership: the rejoiner's mesh announce
                 // follows on this same recovery queue — accept it for exactly
                 // this member (documents/dynamic_mesh.md §3)

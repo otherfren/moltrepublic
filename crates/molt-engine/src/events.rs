@@ -110,13 +110,20 @@ impl State {
                 }
             }
             WorkspaceEvent::Chat(msg) => {
+                if !msg.id.is_nil() {
+                    // maintain the id→position map next to the log (nil =
+                    // legacy entry; B1 synthesizes those ids at ingest)
+                    self.chat_pos.insert(msg.id, self.chat.len());
+                }
                 self.chat.push(msg.clone());
             }
-            WorkspaceEvent::ChatReacted { index, emoji, by } => {
-                let Some(msg) = usize::try_from(*index)
-                    .ok()
-                    .and_then(|i| self.chat.get_mut(i))
-                else {
+            WorkspaceEvent::ChatReacted {
+                index,
+                id,
+                emoji,
+                by,
+            } => {
+                let Some(msg) = self.chat_target(id, *index) else {
                     return;
                 };
                 let had_this = msg.reactions.get(emoji).is_some_and(|who| who.contains(by));
@@ -128,11 +135,8 @@ impl State {
                     msg.reactions.entry(emoji.clone()).or_default().push(by.clone());
                 }
             }
-            WorkspaceEvent::ChatDeleted { index, by } => {
-                let Some(msg) = usize::try_from(*index)
-                    .ok()
-                    .and_then(|i| self.chat.get_mut(i))
-                else {
+            WorkspaceEvent::ChatDeleted { index, id, by } => {
+                let Some(msg) = self.chat_target(id, *index) else {
                     return;
                 };
                 msg.body.clear();
@@ -141,12 +145,8 @@ impl State {
                 msg.file = None;
                 msg.deleted_by = Some(by.clone());
             }
-            WorkspaceEvent::FileRemoved { index, .. } => {
-                if let Some(file) = usize::try_from(*index)
-                    .ok()
-                    .and_then(|i| self.chat.get_mut(i))
-                    .and_then(|m| m.file.as_mut())
-                {
+            WorkspaceEvent::FileRemoved { index, id, .. } => {
+                if let Some(file) = self.chat_target(id, *index).and_then(|m| m.file.as_mut()) {
                     file.available = false;
                 }
             }
@@ -215,6 +215,23 @@ impl State {
         }
     }
 
+    /// Resolve a chat event's target message: **prefer the stable id**
+    /// (chat bus) and fall back to the legacy position only when the event
+    /// predates ids (`id == None`). An id that is present but unknown means
+    /// the target is missing here — the event is ignored (never re-routed
+    /// through the untrusted index; B1 adds wire-side parking).
+    fn chat_target(
+        &mut self,
+        id: &Option<molt_core::MessageId>,
+        index: u64,
+    ) -> Option<&mut molt_core::ChatMessage> {
+        let pos = match id {
+            Some(id) => *self.chat_pos.get(id)?,
+            None => usize::try_from(index).ok()?,
+        };
+        self.chat.get_mut(pos)
+    }
+
     /// Serialize the actor's workspace state — the snapshot payload.
     pub(crate) fn dump(&self) -> EngineStateDump {
         let replica = self.replica.clone().unwrap_or_default();
@@ -264,6 +281,14 @@ impl State {
             republic_id: dump.republic_id,
         });
         self.chat = dump.chat;
+        // the id→position map is derived state — rebuilt, never persisted
+        self.chat_pos = self
+            .chat
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.id.is_nil())
+            .map(|(i, m)| (m.id, i))
+            .collect();
         self.applied.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
@@ -298,6 +323,7 @@ impl State {
         self.catchup_from = None;
         self.pending_recovery.clear();
         self.chat.clear();
+        self.chat_pos.clear();
         self.applied.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
@@ -322,12 +348,18 @@ mod tests {
             by: by.to_string(),
             body,
         };
+        // legacy-shaped messages (nil id, no channel): the keystones pin
+        // that pre-chat-bus logs keep replaying identically, index fallback
+        // included
         let msg = |from: &str, body: &str, ts: u64| {
             ChatMessage {
+                id: molt_core::MessageId::NIL,
                 from: from.to_string(),
                 body: body.to_string(),
                 ts,
                 quote: None,
+                quote_id: None,
+                channel: molt_core::ChannelRef::Group,
                 reactions: Default::default(),
                 deleted_by: None,
                 file: None,
@@ -355,6 +387,7 @@ mod tests {
                 "walter",
                 WorkspaceEvent::ChatReacted {
                     index: 0,
+                    id: None,
                     emoji: "👍".to_string(),
                     by: "walter".to_string(),
                 },
@@ -394,6 +427,7 @@ mod tests {
                 "petra",
                 WorkspaceEvent::ChatDeleted {
                     index: 0,
+                    id: None,
                     by: "petra".to_string(),
                 },
             ),
@@ -413,6 +447,7 @@ mod tests {
                 "petra",
                 WorkspaceEvent::FileRemoved {
                     index: 1,
+                    id: None,
                     by: "petra".to_string(),
                 },
             ),
@@ -483,6 +518,7 @@ mod tests {
             by: "x".to_string(),
             body: WorkspaceEvent::ChatDeleted {
                 index: 99,
+                id: None,
                 by: "x".to_string(),
             },
         });

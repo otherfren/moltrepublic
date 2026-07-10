@@ -11,7 +11,10 @@ use molt_engine::WalletHandle;
 /// Read a surface's applied log.
 pub async fn read_applied(w: &WalletHandle, surface: Surface) -> Vec<serde_json::Value> {
     match w
-        .execute(Command::ReadState { surface })
+        .execute(Command::ReadState {
+            surface,
+            channel: None,
+        })
         .await
         .expect("read state")
     {
@@ -25,6 +28,7 @@ pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
     match w
         .execute(Command::ReadState {
             surface: Surface::Chat,
+            channel: None,
         })
         .await
         .expect("read chat")

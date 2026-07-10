@@ -709,12 +709,25 @@ impl EngineSink for RecordSink {
     async fn send_failed(&self, _m: &MemberId, _r: &str) {}
 }
 
+/// A deterministic non-nil message id for hand-built test envelopes (the
+/// engine mints real random ids; this stands in for a peer's minting).
+fn test_msg_id(seq: u64) -> molt_core::MessageId {
+    let mut b = [0xa5u8; 16];
+    b[..8].copy_from_slice(&seq.to_le_bytes());
+    molt_core::MessageId(b)
+}
+
 fn member_chat(seq: u64, body: &str) -> EventEnvelope {
     EventEnvelope {
         seq,
         ts: 1_751_000_000 + seq,
         by: "member-b".to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text("member-b", body, 1_751_000_000 + seq)),
+        body: WorkspaceEvent::Chat(ChatMessage::text(
+            test_msg_id(seq),
+            "member-b",
+            body,
+            1_751_000_000 + seq,
+        )),
     }
 }
 
@@ -827,6 +840,7 @@ async fn founding_chats_over_the_direct_mesh() {
     a.execute(Command::Chat {
         body: "the mesh carries us".to_string(),
         quote: None,
+        channel: molt_core::ChannelRef::default(),
     })
     .await
     .expect("founder chat");
@@ -1398,6 +1412,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     a.execute(Command::Chat {
         body: "welcome back to the mesh".to_string(),
         quote: None,
+        channel: molt_core::ChannelRef::default(),
     })
     .await
     .expect("coordinator chats");
@@ -1922,6 +1937,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
     a.execute(Command::Chat {
         body: "over the rotated link".to_string(),
         quote: None,
+        channel: molt_core::ChannelRef::default(),
     })
     .await
     .expect("founder chats");
@@ -2299,7 +2315,12 @@ fn ev_chat(by: &str, seq: u64, body: &str) -> EventEnvelope {
         seq,
         ts: 1_751_000_000 + seq,
         by: by.to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(by, body, 1_751_000_000 + seq)),
+        body: WorkspaceEvent::Chat(ChatMessage::text(
+            test_msg_id(seq),
+            by,
+            body,
+            1_751_000_000 + seq,
+        )),
     }
 }
 

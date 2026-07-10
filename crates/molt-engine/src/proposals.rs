@@ -222,6 +222,9 @@ impl State {
             gated: surface.is_gated(),
             applied: self.applied_values(surface),
             pending,
+            // frozen in the contract here; the read-contract package (B2)
+            // enumerates the chat log's channels into it
+            channels: Vec::new(),
         }
     }
 

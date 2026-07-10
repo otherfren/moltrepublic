@@ -12,11 +12,26 @@
 //! `Founded` genesis, a bit of chat history — so the node's Open screen
 //! lists it and opening replays it. Prints the recovery phrase and the id.
 
-use molt_core::{ChatMessage, EventEnvelope, FileMeta, WorkspaceEvent};
+use molt_core::{ChatMessage, EventEnvelope, FileMeta, MessageId, WorkspaceEvent};
 
-fn chat_env(seq: u64, ts: u64, from: &str, body: &str, quote: Option<u64>) -> EventEnvelope {
-    let mut msg = ChatMessage::text(from, body, ts);
-    msg.quote = quote;
+/// A fixed, non-nil message id for the canned history (a live engine mints
+/// random ids; a dummy log just needs stable, distinct ones).
+fn dummy_id(n: u8) -> MessageId {
+    let mut b = [0xd0u8; 16];
+    b[15] = n;
+    MessageId(b)
+}
+
+fn chat_env(
+    seq: u64,
+    ts: u64,
+    id: MessageId,
+    from: &str,
+    body: &str,
+    quote_id: Option<MessageId>,
+) -> EventEnvelope {
+    let mut msg = ChatMessage::text(id, from, body, ts);
+    msg.quote_id = quote_id;
     EventEnvelope {
         seq,
         ts,
@@ -55,26 +70,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut ws = molt_storage::create_workspace(&root, &seed, &genesis)?;
 
-    // a little pre-existing history, so opening shows a lived-in chat
+    // a little pre-existing history, so opening shows a lived-in chat —
+    // every message carries its stable id; reactions/removals/quotes
+    // address by those ids (the numeric `index` on the events is only the
+    // legacy slot older readers fall back to)
+    let id_welcome = dummy_id(1);
+    let id_here = dummy_id(2);
+    let id_survives = dummy_id(3);
+    let id_try = dummy_id(4);
+    let id_charter = dummy_id(5);
+    let id_scan = dummy_id(6);
     let t = now - 3500;
-    ws.append(&chat_env(2, t, "me", "welcome to the dummy republic 🎉", None))?;
-    ws.append(&chat_env(3, t + 60, "peer-1", "good to be here", Some(0)))?;
-    ws.append(&chat_env(4, t + 120, "peer-2", "everything in this workspace survives a restart", None))?;
+    ws.append(&chat_env(2, t, id_welcome, "me", "welcome to the dummy republic 🎉", None))?;
+    ws.append(&chat_env(3, t + 60, id_here, "peer-1", "good to be here", Some(id_welcome)))?;
+    ws.append(&chat_env(4, t + 120, id_survives, "peer-2", "everything in this workspace survives a restart", None))?;
     ws.append(&EventEnvelope {
         seq: 5,
         ts: t + 180,
         by: "peer-1".to_string(),
         body: WorkspaceEvent::ChatReacted {
+            // the legacy slot of the id_survives message (positions count
+            // messages, not envelopes — this reaction occupies no slot)
             index: 2,
+            id: Some(id_survives),
             emoji: "👍".to_string(),
             by: "peer-1".to_string(),
         },
     })?;
-    ws.append(&chat_env(6, t + 240, "me", "try sending a message, then restart moltd", None))?;
+    ws.append(&chat_env(6, t + 240, id_try, "me", "try sending a message, then restart moltd", None))?;
     // two file shares: one still on "peer-1's disk", one already removed —
     // the chat shows both card states out of the box
-    let share = |seq: u64, ts: u64, from: &str, name: &str, size: u64, kind: &str| {
-        let mut msg = ChatMessage::text(from, "", ts);
+    let share = |seq: u64, ts: u64, id: MessageId, from: &str, name: &str, size: u64, kind: &str| {
+        let mut msg = ChatMessage::text(id, from, "", ts);
         msg.file = Some(FileMeta {
             name: name.to_string(),
             size,
@@ -89,17 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             body: WorkspaceEvent::Chat(msg),
         }
     };
-    ws.append(&share(7, t + 300, "peer-1", "dummy-charter.pdf", 148_480, "PDF"))?;
-    ws.append(&share(8, t + 360, "peer-2", "old-scan.jpg", 2_411_724, "Image"))?;
+    ws.append(&share(7, t + 300, id_charter, "peer-1", "dummy-charter.pdf", 148_480, "PDF"))?;
+    ws.append(&share(8, t + 360, id_scan, "peer-2", "old-scan.jpg", 2_411_724, "Image"))?;
     ws.append(&EventEnvelope {
         seq: 9,
         ts: t + 420,
         by: "peer-2".to_string(),
         body: WorkspaceEvent::FileRemoved {
-            // chat position of the seq-8 share: the sixth chat message
-            // (indices count messages, not envelopes — the reaction at
-            // seq 5 occupies no chat slot)
+            // the id addresses the seq-8 share; index 5 is its legacy slot
+            // (the sixth chat message) for pre-chat-bus readers
             index: 5,
+            id: Some(id_scan),
             by: "peer-2".to_string(),
         },
     })?;

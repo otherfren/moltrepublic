@@ -43,16 +43,26 @@ fn key(s: u8) -> SigningKey {
     SigningKey::from_bytes(&[s; 32])
 }
 
+/// A deterministic non-nil message id for hand-built test envelopes.
+fn test_msg_id(seq: u64) -> molt_core::MessageId {
+    let mut b = [0xa5u8; 16];
+    b[..8].copy_from_slice(&seq.to_le_bytes());
+    molt_core::MessageId(b)
+}
+
 fn chat_env(seq: u64, by: &str, body: &str) -> EventEnvelope {
     EventEnvelope {
         seq,
         ts: 1_751_000_000,
         by: by.to_string(),
         body: WorkspaceEvent::Chat(ChatMessage {
+            id: test_msg_id(seq),
             from: by.to_string(),
             body: body.to_string(),
             ts: 1_751_000_000,
             quote: None,
+            quote_id: None,
+            channel: molt_core::ChannelRef::Group,
             reactions: std::collections::BTreeMap::new(),
             deleted_by: None,
             file: None,

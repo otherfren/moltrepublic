@@ -125,8 +125,8 @@ export component AppWindow inherits Window {
     callback discard-and-leave();
     callback rotate-token();
     callback quit();
-    // body + quoted log index (-1 = plain message)
-    callback send-chat(string, int);
+    // body + quoted message id ("" = plain message)
+    callback send-chat(string, string);
     callback propose(string, string);
     callback approve(int);
     callback decline(int);
@@ -138,12 +138,14 @@ export component AppWindow inherits Window {
     // share a file into the chat: opens the native file picker; Rust reads
     // the real metadata (name, size, type, date) — no bytes are uploaded
     callback share-pick();
-    callback download-file(int);
-    callback remove-file(int);
-    // toggle the local member's emoji reaction on chat message #i (ReactChat)
-    callback toggle-reaction(int, string);
-    // wipe chat message #i and leave the deletion notice (DeleteChat)
-    callback delete-chat(int);
+    callback download-file(string);
+    callback remove-file(string);
+    // toggle the local member's emoji reaction on a chat message, by its
+    // stable id (ReactChat)
+    callback toggle-reaction(string, string);
+    // wipe a chat message (by stable id) and leave the deletion notice
+    // (DeleteChat)
+    callback delete-chat(string);
     // workspace verbs (engine-backed, co-equal with MCP)
     callback open-workspace(string);
     callback close-workspace();
@@ -208,15 +210,16 @@ export component AppWindow inherits Window {
     // (raised from Rust's window close-requested handler)
     in-out property <bool> confirm-quit-open: false;
     property <string> mv-draft;
-    // compose quote state: which message the next send replies to (-1 = none)
-    property <int> mv-quote-index: -1;
+    // compose quote state: the id of the message the next send replies to
+    // ("" = none); the scroll target stays a row index (chat-scroll-to)
+    property <string> mv-quote-id: "";
     property <string> mv-quote-label;
     // one-shot scroll request: the ChatRow with this index brings itself
     // into view and resets it to -1
     property <int> chat-scroll-to: -1;
-    // modal: confirm deleting a chat message (holds the target index)
+    // modal: confirm deleting a chat message (holds the target id)
     property <bool> confirm-delmsg-open: false;
-    property <int> delmsg-index: -1;
+    property <string> delmsg-id: "";
 
     // create: the local configuration draft (like the settings draft, local
     // until create-start hands it to the engine) …
@@ -2497,18 +2500,18 @@ export component AppWindow inherits Window {
                                                 indent: l.quote >= 0;
                                                 scroll-request: root.chat-scroll-to;
                                                 toggle-reaction(emoji) => {
-                                                    root.toggle-reaction(i, emoji);
+                                                    root.toggle-reaction(l.id, emoji);
                                                 }
                                                 copy-requested => {
                                                     root.copy-text(l.text);
                                                     root.show-toast(Strings.toast-copied);
                                                 }
                                                 delete-requested => {
-                                                    root.delmsg-index = i;
+                                                    root.delmsg-id = l.id;
                                                     root.confirm-delmsg-open = true;
                                                 }
                                                 quote-requested => {
-                                                    root.mv-quote-index = i;
+                                                    root.mv-quote-id = l.id;
                                                     root.mv-quote-label = l.lead + ": " + l.text;
                                                     chat-in.focus();
                                                 }
@@ -2517,14 +2520,14 @@ export component AppWindow inherits Window {
                                                 }
                                                 file-clicked => {
                                                     if (l.file-available) {
-                                                        root.download-file(i);
+                                                        root.download-file(l.id);
                                                         root.show-toast(Strings.toast-download + " " + l.file-name);
                                                     } else {
                                                         root.show-toast(Strings.mv-file-gone);
                                                     }
                                                 }
                                                 file-remove-requested => {
-                                                    root.remove-file(i);
+                                                    root.remove-file(l.id);
                                                     root.show-toast(Strings.toast-file-removed);
                                                 }
                                                 bring-into-view => {
@@ -2546,7 +2549,7 @@ export component AppWindow inherits Window {
 
                             // replying? a quiet banner names the quoted
                             // message; × drops the quote again
-                            if root.mv-quote-index >= 0: Rectangle {
+                            if root.mv-quote-id != "": Rectangle {
                                 height: 26px;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
@@ -2586,7 +2589,7 @@ export component AppWindow inherits Window {
                                         qx-ta := TouchArea {
                                             mouse-cursor: MouseCursor.pointer;
                                             clicked => {
-                                                root.mv-quote-index = -1;
+                                                root.mv-quote-id = "";
                                             }
                                         }
                                     }
@@ -2635,9 +2638,9 @@ export component AppWindow inherits Window {
                                             // Shift+Enter) fall through to the
                                             // TextInput, which inserts the break
                                             if (event.text == Key.Return && !event.modifiers.alt && !event.modifiers.shift) {
-                                                root.send-chat(root.mv-draft, root.mv-quote-index);
+                                                root.send-chat(root.mv-draft, root.mv-quote-id);
                                                 root.mv-draft = "";
-                                                root.mv-quote-index = -1;
+                                                root.mv-quote-id = "";
                                                 // keep typing: the focus stays here
                                                 self.focus();
                                                 return accept;
@@ -2716,9 +2719,9 @@ export component AppWindow inherits Window {
                                         label: Strings.mv-send;
                                         primary: true;
                                         clicked => {
-                                            root.send-chat(root.mv-draft, root.mv-quote-index);
+                                            root.send-chat(root.mv-draft, root.mv-quote-id);
                                             root.mv-draft = "";
-                                            root.mv-quote-index = -1;
+                                            root.mv-quote-id = "";
                                             // keep typing: focus returns to the box
                                             chat-in.focus();
                                         }
@@ -4030,8 +4033,8 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.confirm-delmsg-open = false;
-            root.delete-chat(root.delmsg-index);
-            root.delmsg-index = -1;
+            root.delete-chat(root.delmsg-id);
+            root.delmsg-id = "";
         }
     }
 
@@ -4090,8 +4093,8 @@ export component AppWindow inherits Window {
                             primary: true;
                             clicked => {
                                 root.confirm-delmsg-open = false;
-                                root.delete-chat(root.delmsg-index);
-                                root.delmsg-index = -1;
+                                root.delete-chat(root.delmsg-id);
+                                root.delmsg-id = "";
                             }
                         }
                     }

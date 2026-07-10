@@ -3685,6 +3685,7 @@ dependencies = [
 name = "molt-core"
 version = "0.0.1"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "strum 0.27.2",
