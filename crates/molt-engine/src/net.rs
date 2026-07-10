@@ -26,9 +26,10 @@
 //! a fake member recorded in a real log would replay forever.
 
 use molt_core::{
-    fnv1a64, mockrand, Command, EventEnvelope, GroupConfig, MemberId, MoltError, Reply,
-    SessionScope, SessionView, WorkspaceEvent, WorkspaceId,
+    fnv1a64, mockrand, Command, EventEnvelope, GroupConfig, MemberId, MessageId, MoltError,
+    Reply, SessionScope, SessionView, WorkspaceEvent, WorkspaceId,
 };
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use molt_net::supervisor::{self, EngineSink, MemLog, MemStateStore, MlsChannel, NetConfig, PeerLink};
@@ -71,6 +72,119 @@ const LINES: [&str; 16] = [
     "good morning everyone",
     "that fence isn't going to fix itself 🙂",
 ];
+
+// ---------------------------------------------------------------------------
+// P6: the parking buffer for out-of-order wire references
+// ---------------------------------------------------------------------------
+
+/// Cap on distinct target message ids the parking buffer holds at once;
+/// when full, the OLDEST parked target (insertion order) is evicted whole.
+const PARKED_TARGET_CAP: usize = 256;
+/// Cap on refs parked under ONE target id (a flood of reactions to a single
+/// unknown id must not grow without bound); the oldest ref is shed first.
+const PARKED_REFS_PER_TARGET: usize = 64;
+
+/// One wire reference (reaction / delete / file-removal) whose target
+/// message has not arrived yet. `by` is ALWAYS the authenticated link
+/// identity it arrived on (forced at park time, exactly like a live wire
+/// event), so the P5 enforcement matrix re-evaluates at drain time against
+/// trusted data only — never against a claim inside the parked event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingRef {
+    /// A reaction toggle; the emoji passed the wire sanity check at park time.
+    React {
+        /// The reacting member (the link identity).
+        by: MemberId,
+        /// The sanitized emoji.
+        emoji: String,
+    },
+    /// A message deletion — honored at drain only if `by` turns out to be
+    /// the target's author (no moderation concept).
+    Delete {
+        /// The deleting member (the link identity).
+        by: MemberId,
+    },
+    /// A file-share removal — honored at drain only if `by` turns out to be
+    /// the sharer.
+    FileRemove {
+        /// The removing member (the link identity).
+        by: MemberId,
+    },
+}
+
+/// The P6 parking buffer: cross-sender ordering is not guaranteed (per-sender
+/// in-order only, and the MLS path bypasses the wire reorder buffer), so a
+/// reaction/delete/file-removal can arrive BEFORE the message it targets.
+/// Such refs are parked here, keyed by the unknown target id, and drained
+/// when the `Chat` lands. Bounded (FIFO eviction of the oldest target) and
+/// strictly runtime-only: never persisted — a restart loses parked refs,
+/// which is fine, the chat bus is ephemeral by design.
+pub(crate) struct ParkedRefs {
+    /// Parked refs per unknown target id, in arrival order.
+    refs: BTreeMap<MessageId, Vec<PendingRef>>,
+    /// Target ids in insertion order — the FIFO eviction ledger.
+    order: VecDeque<MessageId>,
+}
+
+impl ParkedRefs {
+    /// An empty buffer.
+    pub(crate) fn new() -> Self {
+        ParkedRefs {
+            refs: BTreeMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Park one ref under its (unknown) target id. A new target beyond the
+    /// cap evicts the OLDEST parked target wholesale; within one target the
+    /// oldest ref is shed once the per-target cap is hit.
+    pub(crate) fn park(&mut self, target: MessageId, r: PendingRef) {
+        if let Some(list) = self.refs.get_mut(&target) {
+            if list.len() >= PARKED_REFS_PER_TARGET {
+                list.remove(0);
+            }
+            list.push(r);
+            return;
+        }
+        if self.order.len() >= PARKED_TARGET_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.refs.remove(&oldest);
+                tracing::warn!(target = %oldest, "parking buffer full — evicting the oldest parked target");
+            }
+        }
+        self.refs.insert(target, vec![r]);
+        self.order.push_back(target);
+    }
+
+    /// Remove and return everything parked for `target` (its message just
+    /// arrived), freeing the target's slot in the eviction ledger.
+    pub(crate) fn drain(&mut self, target: &MessageId) -> Vec<PendingRef> {
+        let parked = self.refs.remove(target).unwrap_or_default();
+        if !parked.is_empty() {
+            self.order.retain(|t| t != target);
+        }
+        parked
+    }
+
+    /// Drop everything (workspace close/switch).
+    pub(crate) fn clear(&mut self) {
+        self.refs.clear();
+        self.order.clear();
+    }
+
+    /// Number of distinct parked targets (tests).
+    #[cfg(test)]
+    fn targets(&self) -> usize {
+        debug_assert_eq!(self.refs.len(), self.order.len());
+        self.refs.len()
+    }
+
+    /// Whether a target has parked refs (tests).
+    #[cfg(test)]
+    fn holds(&self, target: &MessageId) -> bool {
+        self.refs.contains_key(target)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EngineSink / OutboxLog / StateStore implementations
@@ -699,11 +813,20 @@ impl State {
                     body,
                     channel,
                 });
-                // P6 seam: parked reactions/deletes/file-removes targeting
-                // `id` would drain here once the parking buffer exists (it
-                // needs a State field in lib.rs, which B1 does not own —
-                // see the B1 report; until then an early-arriving ref is
-                // dropped in its own arm below)
+                // P6 drain: refs that outran this message were parked under
+                // its id — the appliers re-evaluate the P5 rules NOW,
+                // against the just-landed link-authenticated message
+                // (delete only from its author, file-removal only from its
+                // sharer, a reaction always — `by` was forced to the link
+                // at park time), through the very same record/emit path a
+                // live arrival takes.
+                for r in self.parked.drain(&id) {
+                    match r {
+                        PendingRef::React { by, emoji } => self.wire_react(id, by, emoji),
+                        PendingRef::Delete { by } => self.wire_delete(id, by),
+                        PendingRef::FileRemove { by } => self.wire_file_remove(id, by),
+                    }
+                }
             }
             // chat-bus B1, the P5 receive-side matrix: the id-addressed chat
             // verbs. Defense in depth mirrors the Chat arm — the acting
@@ -711,7 +834,8 @@ impl State {
             // target resolves by stable id only (a sender-local index never
             // transfers, same posture as the legacy quote), and the recorded
             // event writes the LOCAL position into the legacy `index` field
-            // for older readers.
+            // for older readers. An unknown target parks (P6) and re-applies
+            // when its message lands — see the Chat arm's drain.
             WorkspaceEvent::ChatReacted { id, emoji, .. } => {
                 let Some(id) = id else {
                     tracing::debug!(%from, "dropping a wire reaction without a message id");
@@ -723,96 +847,21 @@ impl State {
                     tracing::warn!(%from, "dropping a wire reaction with a malformed emoji");
                     return Ok(Reply::Ack);
                 }
-                let Some(index) = self
-                    .chat_pos
-                    .get(&id)
-                    .and_then(|p| u64::try_from(*p).ok())
-                else {
-                    // unknown target: P6 says PARK until the message
-                    // arrives — parking is not wired yet (needs a State
-                    // field; see the B1 report), so an early reaction is
-                    // dropped for now
-                    tracing::warn!(%from, %id, "a wire reaction arrived before its message — dropped (parking pending)");
-                    return Ok(Reply::Ack);
-                };
-                let env = self.make_env(
-                    from.clone(),
-                    WorkspaceEvent::ChatReacted {
-                        index,
-                        id: Some(id),
-                        emoji: emoji.clone(),
-                        by: from.clone(),
-                    },
-                );
-                self.record(env);
-                self.emit(molt_core::Event::Reacted { id, emoji, by: from });
+                self.wire_react(id, from, emoji);
             }
             WorkspaceEvent::ChatDeleted { id, .. } => {
                 let Some(id) = id else {
                     tracing::debug!(%from, "dropping a wire delete without a message id");
                     return Ok(Reply::Ack);
                 };
-                let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
-                let Some((index, author)) = self
-                    .chat_pos
-                    .get(&id)
-                    .and_then(|p| u64::try_from(*p).ok())
-                    .zip(target.map(|m| m.from.clone()))
-                else {
-                    // unknown target: P6 parking pending (see the Chat arm)
-                    tracing::warn!(%from, %id, "a wire delete arrived before its message — dropped (parking pending)");
-                    return Ok(Reply::Ack);
-                };
-                // no moderation concept: only the author wipes its own
-                // message — and the author is what OUR log says, never a
-                // claim in the event
-                if author != from {
-                    tracing::warn!(%from, %id, "dropping a wire delete from a non-author");
-                    return Ok(Reply::Ack);
-                }
-                let env = self.make_env(
-                    from.clone(),
-                    WorkspaceEvent::ChatDeleted {
-                        index,
-                        id: Some(id),
-                        by: from.clone(),
-                    },
-                );
-                self.record(env);
-                self.emit(molt_core::Event::Deleted { id, by: from });
+                self.wire_delete(id, from);
             }
             WorkspaceEvent::FileRemoved { id, .. } => {
                 let Some(id) = id else {
                     tracing::debug!(%from, "dropping a wire file-removal without a message id");
                     return Ok(Reply::Ack);
                 };
-                let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
-                let Some((index, msg)) = self
-                    .chat_pos
-                    .get(&id)
-                    .and_then(|p| u64::try_from(*p).ok())
-                    .zip(target)
-                else {
-                    // unknown target: P6 parking pending (see the Chat arm)
-                    tracing::warn!(%from, %id, "a wire file-removal arrived before its message — dropped (parking pending)");
-                    return Ok(Reply::Ack);
-                };
-                // only the sharer (the share message's author in OUR log)
-                // may flip its own share to unavailable
-                if msg.from != from || msg.file.is_none() {
-                    tracing::warn!(%from, %id, "dropping a wire file-removal from a non-sharer");
-                    return Ok(Reply::Ack);
-                }
-                let env = self.make_env(
-                    from.clone(),
-                    WorkspaceEvent::FileRemoved {
-                        index,
-                        id: Some(id),
-                        by: from.clone(),
-                    },
-                );
-                self.record(env);
-                self.emit(molt_core::Event::FileRemoved { id, by: from });
+                self.wire_file_remove(id, from);
             }
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
@@ -1213,6 +1262,99 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    // ---- the P5 appliers (live wire arrivals AND P6 drains) --------------
+    //
+    // Each resolves the target by stable id; an unknown target parks the
+    // ref (P6) instead of dropping it. `from` is ALWAYS the authenticated
+    // link identity (a live arm passes the link; a drain passes the `by`
+    // that was forced to the link at park time), so the authorization
+    // checks below never trust event-claimed data. A drain runs right
+    // after the target's `Chat` was inserted, so it cannot re-park.
+
+    /// Apply (or park) a link-authenticated wire reaction.
+    fn wire_react(&mut self, id: MessageId, from: MemberId, emoji: String) {
+        let Some(index) = self.chat_pos.get(&id).and_then(|p| u64::try_from(*p).ok()) else {
+            tracing::debug!(%from, %id, "a wire reaction arrived before its message — parked (P6)");
+            self.parked.park(id, PendingRef::React { by: from, emoji });
+            return;
+        };
+        let env = self.make_env(
+            from.clone(),
+            WorkspaceEvent::ChatReacted {
+                index,
+                id: Some(id),
+                emoji: emoji.clone(),
+                by: from.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(molt_core::Event::Reacted { id, emoji, by: from });
+    }
+
+    /// Apply (or park) a link-authenticated wire delete. Honored only if
+    /// `from` is the target's author in OUR log (no moderation concept).
+    fn wire_delete(&mut self, id: MessageId, from: MemberId) {
+        let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
+        let Some((index, author)) = self
+            .chat_pos
+            .get(&id)
+            .and_then(|p| u64::try_from(*p).ok())
+            .zip(target.map(|m| m.from.clone()))
+        else {
+            tracing::debug!(%from, %id, "a wire delete arrived before its message — parked (P6)");
+            self.parked.park(id, PendingRef::Delete { by: from });
+            return;
+        };
+        // no moderation concept: only the author wipes its own message —
+        // and the author is what OUR log says, never a claim in the event
+        if author != from {
+            tracing::warn!(%from, %id, "dropping a wire delete from a non-author");
+            return;
+        }
+        let env = self.make_env(
+            from.clone(),
+            WorkspaceEvent::ChatDeleted {
+                index,
+                id: Some(id),
+                by: from.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(molt_core::Event::Deleted { id, by: from });
+    }
+
+    /// Apply (or park) a link-authenticated wire file-removal. Honored only
+    /// if `from` is the sharer (the share message's author in OUR log).
+    fn wire_file_remove(&mut self, id: MessageId, from: MemberId) {
+        let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
+        let Some((index, msg)) = self
+            .chat_pos
+            .get(&id)
+            .and_then(|p| u64::try_from(*p).ok())
+            .zip(target)
+        else {
+            tracing::debug!(%from, %id, "a wire file-removal arrived before its message — parked (P6)");
+            self.parked.park(id, PendingRef::FileRemove { by: from });
+            return;
+        };
+        // only the sharer (the share message's author in OUR log) may flip
+        // its own share to unavailable
+        if msg.from != from || msg.file.is_none() {
+            tracing::warn!(%from, %id, "dropping a wire file-removal from a non-sharer");
+            return;
+        }
+        let env = self.make_env(
+            from.clone(),
+            WorkspaceEvent::FileRemoved {
+                index,
+                id: Some(id),
+                by: from.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(molt_core::Event::FileRemoved { id, by: from });
+    }
+
     /// Passive presence: mark the member's pill live.
     pub(crate) fn cmd_net_peer_seen(
         &mut self,
@@ -1399,4 +1541,60 @@ fn spawn_brain(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
+    use molt_core::MessageId;
+
+    fn id(n: usize) -> MessageId {
+        let mut b = [0u8; 16];
+        b[..8].copy_from_slice(&(u64::try_from(n).expect("small")).to_le_bytes());
+        MessageId(b)
+    }
+
+    fn react(by: &str) -> PendingRef {
+        PendingRef::React {
+            by: by.to_string(),
+            emoji: "🎉".to_string(),
+        }
+    }
+
+    /// Cap overflow evicts the OLDEST parked target (FIFO), and a drained
+    /// target frees its slot so the next new target evicts nothing.
+    #[test]
+    fn park_eviction_is_fifo_and_a_drain_frees_the_slot() {
+        let mut p = ParkedRefs::new();
+        for n in 0..PARKED_TARGET_CAP {
+            p.park(id(n), react("ada"));
+        }
+        assert_eq!(p.targets(), PARKED_TARGET_CAP);
+        assert!(p.holds(&id(0)));
+
+        // one over the cap: the oldest target (0) goes, the newest stays
+        p.park(id(PARKED_TARGET_CAP), react("ben"));
+        assert_eq!(p.targets(), PARKED_TARGET_CAP);
+        assert!(!p.holds(&id(0)), "the OLDEST target is evicted first");
+        assert!(p.holds(&id(1)));
+        assert!(p.holds(&id(PARKED_TARGET_CAP)));
+
+        // draining a target frees its slot: the next new target fits
+        // without evicting anything
+        assert_eq!(p.drain(&id(5)), vec![react("ada")]);
+        assert!(!p.holds(&id(5)), "drained refs are gone");
+        assert!(p.drain(&id(5)).is_empty(), "a second drain finds nothing");
+        p.park(id(PARKED_TARGET_CAP + 1), react("chi"));
+        assert_eq!(p.targets(), PARKED_TARGET_CAP);
+        assert!(p.holds(&id(1)), "no eviction after a drain freed a slot");
+
+        // several refs under one target keep their arrival order
+        let mut q = ParkedRefs::new();
+        q.park(id(7), react("ada"));
+        q.park(id(7), PendingRef::Delete { by: "ben".to_string() });
+        assert_eq!(
+            q.drain(&id(7)),
+            vec![react("ada"), PendingRef::Delete { by: "ben".to_string() }]
+        );
+    }
 }

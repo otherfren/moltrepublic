@@ -336,10 +336,17 @@ pub(crate) struct State {
     /// The chat log — typed, THE schema lives in [`molt_core::ChatMessage`].
     pub(crate) chat: Vec<ChatMessage>,
     /// Chat-bus id → position in [`State::chat`] — the O(1) lookup every
-    /// id-addressed verb resolves through (and, with B1, the duplicate-id
-    /// gate). Runtime state, NOT persisted: rebuilt on ingest/restore; nil
-    /// ids (legacy entries) are skipped until B1 synthesizes theirs.
+    /// id-addressed verb resolves through, and the wire's duplicate-id gate.
+    /// Runtime state, NOT persisted: rebuilt on ingest/restore. It indexes
+    /// the WHOLE log: legacy (nil-id) entries get their deterministic id
+    /// synthesized at the ingest choke points (P4), so no message in state
+    /// ever carries a nil id.
     pub(crate) chat_pos: HashMap<MessageId, usize>,
+    /// The P6 parking buffer: wire reactions/deletes/file-removes whose
+    /// target message has not arrived yet (cross-sender ordering is not
+    /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
+    /// never persisted, a restart loses parked refs (ephemerality is fine).
+    pub(crate) parked: net::ParkedRefs,
     /// Applied transition log per gated surface.
     pub(crate) applied: HashMap<Surface, Vec<Value>>,
     /// Every known proposal — stored as the schema type
@@ -535,6 +542,7 @@ impl State {
             cmd_tx: cmd_tx.downgrade(),
             chat: Vec::new(),
             chat_pos: HashMap::new(),
+            parked: net::ParkedRefs::new(),
             applied,
             proposals: HashMap::new(),
             next_id: 1,

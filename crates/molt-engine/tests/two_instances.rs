@@ -1055,6 +1055,163 @@ async fn reactions_and_deletes_converge_across_two_instances() {
     }
 }
 
+/// **P6 parking under chaos: a reaction that arrives BEFORE its message is
+/// parked and applied when the message lands.** Cross-sender ordering is
+/// not guaranteed (per-sender in-order only), so at the receiving engine
+/// chi's reaction to ada's message can outrun ada's message itself. Two raw
+/// sender supervisors feed one full engine (`net_sink`) over a loopback hub
+/// with the chaos policy of the molt-net convergence suite (delay,
+/// duplicate, drop + redelivery; the same seeds). The reaction is injected
+/// FIRST and the target message only after a settle pause — without the
+/// parking buffer the engine drops the early reaction and the final
+/// reaction set never converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
+    for seed in [3u64, 17, 40_961] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root_b = tmp.path().join("node-ben");
+
+        // the receiving engine: member "ben" on a persisted workspace whose
+        // genesis roster contains both raw senders
+        let seed_b =
+            molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("gen"))
+                .expect("entropy");
+        let genesis = EventEnvelope {
+            seq: 1,
+            ts: 1_751_000_000,
+            by: "ben".to_string(),
+            body: WorkspaceEvent::Founded {
+                name: "Park Club".to_string(),
+                rule_m: 2,
+                rule_n: 3,
+                member: "ben".to_string(),
+                roster: vec!["ada".to_string(), "ben".to_string(), "chi".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
+                republic_id: String::new(),
+                agenda: String::new(),
+            },
+        };
+        let ws_b =
+            molt_storage::create_workspace(&root_b, &seed_b, &genesis).expect("create ben");
+        let id_b = ws_b.manifest.workspace.id.clone();
+        drop(ws_b); // release the LOCK for the engine
+        let session = SessionView {
+            workspaces: molt_storage::scan_workspaces(&root_b)
+                .iter()
+                .map(molt_storage::ScanEntry::info)
+                .collect(),
+            settings: SessionSettings {
+                workspace_dir: root_b.display().to_string(),
+                ..SessionSettings::default()
+            },
+            ..SessionView::default()
+        };
+        let w_ben = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session);
+        w_ben
+            .execute(Command::OpenWorkspace { id: id_b })
+            .await
+            .expect("open ben");
+
+        // the chaotic mesh (supervisor.rs convergence-suite policy)
+        let hub = LoopbackHub::new(molt_net::ChaosPolicy {
+            seed,
+            delay_ms: (0, 30),
+            drop_pct: 20,
+            duplicate_pct: 20,
+            redeliver_after_ms: 60,
+        });
+        let members: Vec<MemberId> =
+            vec!["ada".to_string(), "ben".to_string(), "chi".to_string()];
+        let mut mesh = hub.full_mesh(&members).expect("mesh wiring");
+        let links_ada = mesh.remove("ada").expect("ada links");
+        let links_ben = mesh.remove("ben").expect("ben links");
+        let links_chi = mesh.remove("chi").expect("chi links");
+
+        let (_wake_ben, wake_ben_rx) = watch::channel(0u64);
+        let _sup_ben = supervisor::spawn(
+            hub.transport(),
+            NetConfig::fast("ben".to_string(), links_ben, seed),
+            MemLog::new(),
+            MemStateStore::new(),
+            w_ben.net_sink(),
+            wake_ben_rx,
+            None,
+        );
+        let ada_feed = MemLog::new();
+        let (wake_ada, wake_ada_rx) = watch::channel(0u64);
+        let _sup_ada = supervisor::spawn(
+            hub.transport(),
+            NetConfig::fast("ada".to_string(), links_ada, seed.wrapping_add(1)),
+            ada_feed.clone(),
+            MemStateStore::new(),
+            RecordSink::default(),
+            wake_ada_rx,
+            None,
+        );
+        let chi_feed = MemLog::new();
+        let (wake_chi, wake_chi_rx) = watch::channel(0u64);
+        let _sup_chi = supervisor::spawn(
+            hub.transport(),
+            NetConfig::fast("chi".to_string(), links_chi, seed.wrapping_add(2)),
+            chi_feed.clone(),
+            MemStateStore::new(),
+            RecordSink::default(),
+            wake_chi_rx,
+            None,
+        );
+
+        // chi's reaction to ada's (not yet sent!) message goes out FIRST
+        let target = test_msg_id(42);
+        chi_feed.push(EventEnvelope {
+            seq: 1,
+            ts: 1_751_000_001,
+            by: "chi".to_string(),
+            body: WorkspaceEvent::ChatReacted {
+                index: 999, // a bogus sender-local index: must not matter
+                id: Some(target),
+                emoji: "🎉".to_string(),
+                by: "chi".to_string(),
+            },
+        });
+        let _ = wake_chi.send(1);
+        // let the reaction (and its chaos redeliveries) land well before the
+        // message exists anywhere — the out-of-order case by construction
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        ada_feed.push(EventEnvelope {
+            seq: 1,
+            ts: 1_751_000_002,
+            by: "ada".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage::text(
+                target,
+                "ada",
+                "the parked target",
+                1_751_000_002,
+            )),
+        });
+        let _ = wake_ada.send(1);
+
+        // convergence: ben's log holds ada's message WITH chi's reaction
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let chat = common::read_chat(&w_ben).await;
+            if chat
+                .first()
+                .is_some_and(|m| m["reactions"]["🎉"] == serde_json::json!(["chi"]))
+            {
+                assert_eq!(chat.len(), 1, "exactly one message (seed {seed}): {chat:?}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the early reaction never converged (seed {seed}): {chat:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
 /// **Real threshold governance over the direct mesh.** The founder engine
 /// (chain-governed from its founding) proposes a gated change and co-signs it —
 /// one of two, so it stays pending. The member then co-signs the exact change

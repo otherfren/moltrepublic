@@ -406,6 +406,7 @@ impl State {
         self.pending_recovery.clear();
         self.chat.clear();
         self.chat_pos.clear();
+        self.parked.clear();
         self.applied.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
