@@ -26,12 +26,13 @@ export struct ReactionItem {
 // One line in a surface's log: for chat, `lead` is the sender and `text` the
 // body; for gated surfaces `lead` is empty and `text` is the proposal summary.
 export struct LogLine {
-    id: string, // stable message id (32-char hex; "" on legacy entries)
+    id: string, // stable message id (32-char hex; "" on legacy entries — such rows offer NO id-requiring actions)
     lead: string,
     text: string,
     when: string, // "2026-06-02 13:37 (~20 minutes ago)", grey in the header
-    quote: int, // quoted message position in the log (-1 = no quote)
-    quote-label: string, // "author: body" teaser of the quoted message
+    quote: int, // quoted row in the DISPLAYED log (-1 = none/out of view)
+    system: bool, // a UI-synthesized governance line (patch channels): quiet, no author, no actions
+    quote-label: string, // "author: body" teaser of the quoted message ("" = no quote; may be set with quote == -1 for a cross-channel quote)
     deleted-by: string, // who deleted the message ("" = live)
     first: bool, // starts a new author block (shows the name + time header)
     own: bool, // the local member wrote it
@@ -42,6 +43,15 @@ export struct LogLine {
     file-name: string,
     file-meta: string, // rendered "1.2 MiB · PDF · 2026-07-01"
     file-available: bool, // still on the sharer's disk (false = removed)
+}
+
+// One chat channel in the sidebar (chat bus): a VIEW over the one log,
+// never a boundary. Built Rust-side from the engine's channel enumeration.
+export struct ChannelItem {
+    key: string, // "group" | "patch:<id>" | "topic:<name>" — the select-channel address
+    label: string, // display label ("" for group: the UI substitutes Strings.ch-group)
+    icon: string, // Twemoji glyph per kind
+    unread: int, // messages since last seen (0 = caught up)
 }
 
 // A pending proposal on a gated surface, with its approval progress.
@@ -464,6 +474,12 @@ export global Strings {
     in property <string> mv-empty-pending;
     in property <string> mv-empty-applied;
     in property <string> mv-deleted-by;
+    // chat channels (chat bus)
+    in property <string> ch-channels;
+    in property <string> ch-group;
+    in property <string> ch-new-topic;
+    in property <string> ch-topic-ph;
+    in property <string> ch-topic-open;
     in property <string> mv-file-gone;
     in property <string> toast-download;
     in property <string> toast-file-removed;
