@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, WorkspaceItem, MemberSync, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
+import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
     AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -209,9 +209,30 @@ export component AppWindow inherits Window {
     // modal: confirm quitting the program while a workspace is open
     // (raised from Rust's window close-requested handler)
     in-out property <bool> confirm-quit-open: false;
+    // ---- chat channels (chat bus) ----
+    // sidebar rows, pushed from Rust (engine channel enumeration + unread)
+    in property <[ChannelItem]> chat-channels;
+    // The SELECTED channel is deliberately UI-LOCAL state (like
+    // nav-collapsed), NOT part of the shared SessionView: the filter itself
+    // runs engine-side (ReadState { channel }), so GUI and MCP stay
+    // co-equal — each operator passes its own filter; which channel this
+    // window looks at is presentation, not shared state. Written only from
+    // Rust: select-channel echoes the canonical key back into it.
+    in property <string> selected-channel: "group";
+    // display label of the selected channel ("" = group): the compose
+    // banner's feedback — for a fresh topic the only signal it is armed
+    in property <string> selected-channel-label: "";
+    callback select-channel(string);
+    // new-topic affordance: a compose-side reveal row (send-to-new-topic).
+    // Deliberately NOT a "create channel" ritual — a channel exists because
+    // a message exists (concept Q2).
+    property <bool> nt-open: false;
+    property <string> nt-draft: "";
     property <string> mv-draft;
     // compose quote state: the id of the message the next send replies to
-    // ("" = none); the scroll target stays a row index (chat-scroll-to)
+    // ("" = none); the scroll target stays a row index (chat-scroll-to).
+    // Quoting ACROSS channels is allowed — it is one log, the quote is the
+    // sanctioned cross-post.
     property <string> mv-quote-id: "";
     property <string> mv-quote-label;
     // one-shot scroll request: the ChatRow with this index brings itself
@@ -655,6 +676,36 @@ export component AppWindow inherits Window {
                                 chosen => {
                                     root.mv-draft = "";
                                     root.select-view(s.key, v.key);
+                                }
+                            }
+                        }
+                        // chat channels (chat bus): group first, then patch
+                        // discussions, then topics — views over the ONE log,
+                        // with a per-channel unread pill. Selecting re-reads
+                        // through the engine's channel filter.
+                        if s.key == "chat" && s.key == root.selected-surface && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
+                            spacing: 1px;
+                            HorizontalLayout {
+                                padding-left: 26px;
+                                padding-top: 6px;
+                                padding-bottom: 2px;
+                                Text {
+                                    text: Strings.ch-channels;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 700;
+                                }
+                            }
+                            for c in root.chat-channels: ViewRow {
+                                label: c.key == "group" ? Strings.ch-group : c.label;
+                                icon: c.icon;
+                                selected: c.key == root.selected-channel;
+                                pending: c.unread;
+                                chosen => {
+                                    // channel switches keep the compose
+                                    // draft — only the filter changes
+                                    root.select-view("chat", "today");
+                                    root.select-channel(c.key);
                                 }
                             }
                         }
@@ -2497,38 +2548,54 @@ export component AppWindow inherits Window {
                                                 line: l;
                                                 index: i;
                                                 // replies indent behind their quote
-                                                indent: l.quote >= 0;
+                                                // (a cross-channel quote has a
+                                                // teaser but no in-view row)
+                                                indent: l.quote-label != "";
                                                 scroll-request: root.chat-scroll-to;
+                                                // feedback honesty: rows without a
+                                                // real id (legacy entries, system
+                                                // lines) must never trigger
+                                                // success-shaped UI — the buttons
+                                                // are hidden in ChatRow, and these
+                                                // guards keep the handlers honest
                                                 toggle-reaction(emoji) => {
-                                                    root.toggle-reaction(l.id, emoji);
+                                                    if (l.id != "") {
+                                                        root.toggle-reaction(l.id, emoji);
+                                                    }
                                                 }
                                                 copy-requested => {
                                                     root.copy-text(l.text);
                                                     root.show-toast(Strings.toast-copied);
                                                 }
                                                 delete-requested => {
-                                                    root.delmsg-id = l.id;
-                                                    root.confirm-delmsg-open = true;
+                                                    if (l.id != "") {
+                                                        root.delmsg-id = l.id;
+                                                        root.confirm-delmsg-open = true;
+                                                    }
                                                 }
                                                 quote-requested => {
-                                                    root.mv-quote-id = l.id;
-                                                    root.mv-quote-label = l.lead + ": " + l.text;
-                                                    chat-in.focus();
+                                                    if (l.id != "") {
+                                                        root.mv-quote-id = l.id;
+                                                        root.mv-quote-label = l.lead + ": " + l.text;
+                                                        chat-in.focus();
+                                                    }
                                                 }
                                                 quote-jump => {
                                                     root.chat-scroll-to = l.quote;
                                                 }
                                                 file-clicked => {
-                                                    if (l.file-available) {
+                                                    if (!l.file-available) {
+                                                        root.show-toast(Strings.mv-file-gone);
+                                                    } else if (l.id != "") {
                                                         root.download-file(l.id);
                                                         root.show-toast(Strings.toast-download + " " + l.file-name);
-                                                    } else {
-                                                        root.show-toast(Strings.mv-file-gone);
                                                     }
                                                 }
                                                 file-remove-requested => {
-                                                    root.remove-file(l.id);
-                                                    root.show-toast(Strings.toast-file-removed);
+                                                    if (l.id != "") {
+                                                        root.remove-file(l.id);
+                                                        root.show-toast(Strings.toast-file-removed);
+                                                    }
                                                 }
                                                 bring-into-view => {
                                                     chfl.viewport-y = clamp(
@@ -2544,6 +2611,111 @@ export component AppWindow inherits Window {
                                     view-h: chfl.height;
                                     content-h: chfl.viewport-height;
                                     scroll-y: chfl.viewport-y;
+                                }
+                            }
+
+                            // composing into a non-group channel? a quiet
+                            // banner names it (for a fresh topic this is the
+                            // only signal until its first message exists);
+                            // × returns to the group channel
+                            if root.selected-channel != "group": Rectangle {
+                                height: 26px;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 6px;
+                                border-width: 1px;
+                                border-color: Theme.line;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 4px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "#";
+                                        color: Theme.accent;
+                                        font-size: Theme.fs-cap;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.selected-channel-label;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Rectangle {
+                                        width: 20px;
+                                        height: 20px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: Theme.win95 ? 0px : 5px;
+                                        background: chx-ta.has-hover ? Theme.raised : transparent;
+                                        Text {
+                                            text: "×";
+                                            color: Theme.dim;
+                                            font-size: 13px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        chx-ta := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => {
+                                                root.select-channel("group");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // new-topic reveal row (send-to-new-topic): name
+                            // a topic and the NEXT message opens the channel
+                            if root.nt-open: HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 34px;
+                                    background: Theme.panel;
+                                    border-radius: Theme.radius;
+                                    border-width: Theme.border-w;
+                                    border-color: nt-in.has-focus ? Theme.accent : Theme.line;
+                                    clip: true;
+                                    if root.nt-draft == "": Text {
+                                        x: 10px;
+                                        y: 8px;
+                                        text: Strings.ch-topic-ph;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-body;
+                                    }
+                                    nt-in := TextInput {
+                                        x: 10px;
+                                        y: 8px;
+                                        width: parent.width - 20px;
+                                        text <=> root.nt-draft;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-body;
+                                        single-line: true;
+                                        init => {
+                                            self.focus();
+                                        }
+                                        accepted => {
+                                            if (root.nt-draft != "") {
+                                                root.select-channel("topic:" + root.nt-draft);
+                                                root.nt-open = false;
+                                                root.nt-draft = "";
+                                                chat-in.focus();
+                                            }
+                                        }
+                                    }
+                                }
+                                AppButton {
+                                    height: 34px;
+                                    label: Strings.ch-topic-open;
+                                    enabled: root.nt-draft != "";
+                                    clicked => {
+                                        root.select-channel("topic:" + root.nt-draft);
+                                        root.nt-open = false;
+                                        root.nt-draft = "";
+                                        chat-in.focus();
+                                    }
                                 }
                             }
 
@@ -2646,6 +2818,39 @@ export component AppWindow inherits Window {
                                                 return accept;
                                             }
                                             reject
+                                        }
+                                    }
+                                }
+                                // send-to-new-topic: reveals the topic-name
+                                // row above (a channel exists because a
+                                // message exists — no create ritual)
+                                VerticalLayout {
+                                    alignment: end;
+                                    Rectangle {
+                                        width: 38px;
+                                        height: 38px;
+                                        background: root.nt-open ? Theme.accent-soft : (nt-ta.has-hover ? Theme.raised : Theme.panel);
+                                        border-radius: Theme.radius;
+                                        border-width: Theme.border-w;
+                                        border-color: root.nt-open ? Theme.accent : Theme.line;
+                                        Text {
+                                            text: "#";
+                                            color: root.nt-open ? Theme.accent : Theme.dim;
+                                            font-size: 19px;
+                                            font-weight: 700;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        nt-ta := TouchArea {
+                                            clicked => {
+                                                root.nt-open = !root.nt-open;
+                                            }
+                                        }
+                                        HoverTip {
+                                            label: Strings.ch-new-topic;
+                                            shown: nt-ta.has-hover;
+                                            x: (parent.width - self.width) / 2;
+                                            y: -(self.height + 7px);
                                         }
                                     }
                                 }

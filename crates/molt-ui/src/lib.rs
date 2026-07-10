@@ -34,9 +34,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use std::collections::HashMap;
+
 use molt_core::{
-    ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, Reply, Screen, SessionScope,
-    SessionSettings, SessionView, Surface, SurfaceSnapshot,
+    ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, ProposalState,
+    ProposalView, Reply, Screen, SessionScope, SessionSettings, SessionView, Surface,
+    SurfaceSnapshot,
 };
 use molt_engine::WalletHandle;
 use slint::{Model, ModelRc, VecModel};
@@ -161,6 +164,10 @@ pub fn run_app(
     // the settings draft only on real changes, the leave-guard to detect a
     // dirty draft.
     let last_settings: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+
+    // Chat-bus UI state (selected channel, unread ledger, proposal
+    // first-seen times) — UI-local by design, see [`ChatUiState`].
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
     // --- actions: each becomes a Command on the shared engine ---
     {
@@ -589,6 +596,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
         ui.on_send_chat(move |body, quote| {
             let body = body.trim().to_string();
             if body.is_empty() {
@@ -596,18 +604,59 @@ pub fn run_app(
             }
             // "" = no quote; a legacy row without an id can't be quoted
             let quote = quote.parse::<MessageId>().ok();
-            issue(
-                &rt,
-                &w,
-                &weak,
-                Command::Chat {
-                    body,
-                    quote,
-                    // channel selection arrives with the UI-channels
-                    // package (B4); everything files to Group until then
-                    channel: ChannelRef::default(),
-                },
-            );
+            // compose files into the channel this window has selected
+            let channel = chat_ui
+                .lock()
+                .ok()
+                .map(|s| s.selected.clone())
+                .unwrap_or_default();
+            issue(&rt, &w, &weak, Command::Chat { body, quote, channel });
+        });
+    }
+    {
+        // Channel selection (chat bus). UI-LOCAL state, not a session
+        // command: the filter itself is engine-side (`ReadState{channel}`),
+        // so co-equality holds — an MCP agent passes its own filter and
+        // neither operator can hijack the other's view. The canonical key
+        // is echoed back into `selected-channel` (single writer: Rust).
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_select_channel(move |key| {
+            let Some(ch) = parse_channel_key(&key) else {
+                return;
+            };
+            // topics normalize on selection exactly as on send (trim, cap);
+            // a rejected name is told, not silently swallowed
+            let ch = match ch.normalized() {
+                Ok(ch) => ch,
+                Err(e) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_show_toast(format!("⚠ {e}").into());
+                    }
+                    return;
+                }
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.set_selected_channel(channel_key(&ch).as_str().into());
+                // instant banner feedback — for a fresh (still empty) topic
+                // this is the only visible signal until its first message
+                // exists; the next push refreshes it with the lazy title
+                ui.set_selected_channel_label(
+                    channel_display_label(&ch, &HashMap::new()).as_str().into(),
+                );
+            }
+            if let Ok(mut st) = chat_ui.lock() {
+                st.selected = ch;
+            }
+            // re-read through the engine filter (the point of the bus)
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
         });
     }
     {
@@ -760,10 +809,11 @@ pub fn run_app(
         let weak = ui.as_weak();
         let w = wallet.clone();
         let last_settings = last_settings.clone();
+        let chat_ui = chat_ui.clone();
         rt.spawn(async move {
             let mut rx = w.subscribe();
             push_session(&w, &weak, &last_settings, SessionScope::Full).await;
-            push_surfaces(&w, &weak).await;
+            push_surfaces(&w, &weak, &chat_ui).await;
             loop {
                 match rx.recv().await {
                     Ok(Event::SessionChanged { scope }) => {
@@ -774,15 +824,18 @@ pub fn run_app(
                         // chat/proposal event firing. Run-scoped ticks
                         // (90 ms) deliberately skip this.
                         if scope == SessionScope::Full {
-                            push_surfaces(&w, &weak).await;
+                            push_surfaces(&w, &weak, &chat_ui).await;
                         }
                     }
                     // Any surface event (chat / propose / approve / …) re-reads
                     // the surfaces, so the GUI mirrors what an MCP agent did.
-                    Ok(_) => push_surfaces(&w, &weak).await,
+                    // An Event::Chat carries id+channel and could tick unread
+                    // counters directly, but the re-read stays the single
+                    // source of truth — event payloads never drive state.
+                    Ok(_) => push_surfaces(&w, &weak, &chat_ui).await,
                     Err(RecvError::Lagged(_)) => {
                         push_session(&w, &weak, &last_settings, SessionScope::Full).await;
-                        push_surfaces(&w, &weak).await;
+                        push_surfaces(&w, &weak, &chat_ui).await;
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -1288,6 +1341,61 @@ struct SurfacesBundle {
     member: String,
     threshold_badge: String,
     surfaces: Vec<SurfaceData>,
+    /// The chat sidebar's channel rows (chat bus).
+    channels: Vec<ChannelRowData>,
+    /// Canonical key of the selected channel (echoed into the UI so the
+    /// sidebar highlight always matches what the engine filtered by).
+    selected_key: String,
+    /// Compose-banner label of the selected channel ("" = group).
+    selected_label: String,
+}
+
+/// One chat-channel sidebar row (plain, `Send` twin of the Slint
+/// `ChannelItem`). The group row's `label` stays empty — the UI substitutes
+/// the localized `Strings.ch-group`.
+struct ChannelRowData {
+    key: String,
+    label: String,
+    icon: String,
+    unread: i32,
+}
+
+/// One quotable message, as the teaser renderer needs it — built over the
+/// FULL chat log, because a quote may point across channels (the sanctioned
+/// cross-post) and must still tease when its target is filtered out of view.
+struct QuoteSrc {
+    lead: String,
+    text: String,
+    deleted: bool,
+}
+
+/// Per-channel unread bookkeeping (P9 — in-memory only for this iteration;
+/// persisting into `WorkspacePrefs` is the B5 stretch package).
+#[derive(Default)]
+struct UnreadLedger {
+    /// Channel key → message count up to which the channel counts as read.
+    last_seen: HashMap<String, usize>,
+    /// The very first observation seeds `last_seen` (opening a workspace
+    /// must not present its whole history as one unread wall).
+    seeded: bool,
+}
+
+/// UI-local chat-bus state shared between the Slint callbacks and the
+/// mirror task. The SELECTED channel deliberately lives here (UI-local,
+/// like `nav-collapsed`) and NOT in the shared `SessionView`: the filter
+/// itself runs engine-side (`ReadState { channel }`), so GUI and MCP stay
+/// co-equal — each operator passes its own filter, and which channel this
+/// window looks at is presentation, not shared state.
+#[derive(Default)]
+struct ChatUiState {
+    /// The channel the chat pane shows; compose files new messages here.
+    selected: ChannelRef,
+    /// Per-channel unread counts (reset on selection).
+    ledger: UnreadLedger,
+    /// Proposal id → unix time this UI first saw it. Proposals carry no
+    /// timestamp, so the patch-channel system lines interleave at this
+    /// first-seen approximation (documented in `patch_system_lines`).
+    first_seen: HashMap<u64, u64>,
 }
 struct SurfaceData {
     key: String,
@@ -1297,12 +1405,19 @@ struct SurfaceData {
     pending: Vec<ProposalRowData>,
 }
 struct LogLineData {
-    /// Stable message id, 32-char hex ("" on legacy entries without one).
+    /// Stable message id, 32-char hex ("" on legacy entries without one —
+    /// such rows must never offer id-requiring actions, see the `id != ""`
+    /// guards in the .slint files: the UI must not fake success).
     id: String,
     lead: String,
     text: String,
     when: String,
     quote: i32,
+    /// Quoted message by stable id ("" = none / legacy numeric quote).
+    quote_id: String,
+    /// A UI-synthesized governance line (patch channels, P8): quiet
+    /// styling, no author, no actions.
+    system: bool,
     quote_label: String,
     deleted_by: String,
     first: bool,
@@ -1328,28 +1443,98 @@ struct ProposalRowData {
 }
 
 /// Read status + every surface snapshot and push them into the Slint models.
-async fn push_surfaces(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
+///
+/// The chat surface is read TWICE: once unfiltered (channel enumeration and
+/// quote teasers are whole-log concerns — a quote may point across
+/// channels), and once through the engine's channel filter for the
+/// displayed log. Filtering client-side would break co-equality with MCP,
+/// so the filter deliberately rides `ReadState { channel }` even though it
+/// is a no-op until B2 lands.
+async fn push_surfaces(
+    wallet: &WalletHandle,
+    weak: &slint::Weak<AppWindow>,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
+) {
     let (member, threshold_badge) = match wallet.execute(Command::Status).await {
         Ok(Reply::Status(s)) => (s.member, format!("{}-of-{}", s.threshold, s.members.len())),
         _ => return,
     };
-    let mut surfaces = Vec::new();
+    let selected = chat_ui
+        .lock()
+        .ok()
+        .map(|s| s.selected.clone())
+        .unwrap_or_default();
+    let full_chat = match wallet
+        .execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+        })
+        .await
+    {
+        Ok(Reply::State(snap)) => Some(snap),
+        _ => None,
+    };
+    let mut snaps: Vec<(Surface, SurfaceSnapshot)> = Vec::new();
     for sf in Surface::ALL {
+        let channel = (sf == Surface::Chat).then(|| selected.clone());
         if let Ok(Reply::State(snap)) = wallet
-            .execute(Command::ReadState {
-                surface: sf,
-                // per-channel reads arrive with the UI-channels package (B4)
-                channel: None,
-            })
+            .execute(Command::ReadState { surface: sf, channel })
             .await
         {
-            surfaces.push(surface_data(sf, &snap, &member));
+            snaps.push((sf, snap));
         }
     }
+    // proposal state across ALL surfaces feeds the patch channels: lazy
+    // titles for the sidebar and the system lines (P8)
+    let all_pending: Vec<ProposalView> = snaps
+        .iter()
+        .flat_map(|(_, s)| s.pending.iter().cloned())
+        .collect();
+    let titles: HashMap<u64, String> = all_pending
+        .iter()
+        .map(|p| (p.id.0, summarize(&p.payload)))
+        .collect();
+    let full_msgs = full_chat.as_ref().map(chat_messages).unwrap_or_default();
+    let infos = match &full_chat {
+        Some(s) if !s.channels.is_empty() => s.channels.clone(),
+        // PRE-B2 FALLBACK: the engine does not enumerate channels yet
+        _ => fallback_channels(&full_msgs),
+    };
+    let quotes = quote_sources(&full_msgs);
+    let counts: Vec<(String, usize)> = infos
+        .iter()
+        .map(|i| (channel_key(&i.channel), i.count))
+        .collect();
+    let selected_key = channel_key(&selected);
+    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let (unread, first_seen) = {
+        let mut st = chat_ui.lock().expect("chat ui state poisoned");
+        for p in &all_pending {
+            st.first_seen.entry(p.id.0).or_insert(now);
+        }
+        (st.ledger.observe(&counts, &selected_key), st.first_seen.clone())
+    };
+    let channels = derive_channels(&infos, &titles, &unread);
+    let selected_label = channel_display_label(&selected, &titles);
+    let ctx = ChatViewCtx {
+        selected,
+        proposals: all_pending,
+        first_seen,
+        quotes,
+    };
+    let surfaces: Vec<SurfaceData> = snaps
+        .iter()
+        .map(|(sf, snap)| {
+            surface_data(*sf, snap, &member, (*sf == Surface::Chat).then_some(&ctx))
+        })
+        .collect();
     let bundle = SurfacesBundle {
         member,
         threshold_badge,
         surfaces,
+        channels,
+        selected_key,
+        selected_label,
     };
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -1389,6 +1574,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         text: l.text.clone().into(),
                         when: l.when.clone().into(),
                         quote: l.quote,
+                        system: l.system,
                         quote_label: l.quote_label.clone().into(),
                         deleted_by: l.deleted_by.clone().into(),
                         first: l.first,
@@ -1440,6 +1626,22 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         })
         .collect();
     sync_rows(&ui.get_surfaces(), tabs, |m| ui.set_surfaces(m));
+
+    // the chat sidebar's channel rows + the canonical selection echo (so
+    // the highlight always names the channel the engine filtered by)
+    let channels: Vec<ChannelItem> = b
+        .channels
+        .iter()
+        .map(|c| ChannelItem {
+            key: c.key.as_str().into(),
+            label: c.label.as_str().into(),
+            icon: c.icon.as_str().into(),
+            unread: c.unread,
+        })
+        .collect();
+    sync_rows(&ui.get_chat_channels(), channels, |m| ui.set_chat_channels(m));
+    ui.set_selected_channel(b.selected_key.as_str().into());
+    ui.set_selected_channel_label(b.selected_label.as_str().into());
 }
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
@@ -1502,26 +1704,47 @@ fn view_icon(key: &str) -> &'static str {
     }
 }
 
+/// Everything the chat surface's projection needs beyond its own (possibly
+/// channel-filtered) snapshot: the selected channel, the collected proposal
+/// state feeding the patch-channel system lines (P8), the UI-side
+/// first-seen times standing in for the timestamps proposals do not carry,
+/// and the FULL log's quote sources (see [`QuoteSrc`]).
+struct ChatViewCtx {
+    selected: ChannelRef,
+    proposals: Vec<ProposalView>,
+    first_seen: HashMap<u64, u64>,
+    quotes: HashMap<String, QuoteSrc>,
+}
+
+/// The typed chat messages of a snapshot (chat surface only).
+fn chat_messages(snap: &SurfaceSnapshot) -> Vec<ChatMessage> {
+    snap.applied
+        .iter()
+        .filter_map(|v| serde_json::from_value::<ChatMessage>(v.clone()).ok())
+        .collect()
+}
+
 /// Project one surface snapshot into plain display data. `me` is the local
 /// member handle — it marks own messages and the own reaction pill.
-fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
+/// `chat_ctx` is `Some` for the chat surface only.
+fn surface_data(
+    sf: Surface,
+    snap: &SurfaceSnapshot,
+    me: &str,
+    chat_ctx: Option<&ChatViewCtx>,
+) -> SurfaceData {
     let mut log: Vec<LogLineData> = if sf == Surface::Chat {
-        let msgs: Vec<ChatMessage> = snap
-            .applied
-            .iter()
-            .filter_map(|v| serde_json::from_value::<ChatMessage>(v.clone()).ok())
-            .collect();
-        // id → row, so quotes (stable ids) resolve to the row the quote
-        // teaser and the scroll-to-target need
-        let row_of: std::collections::HashMap<MessageId, usize> = msgs
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| !m.id.is_nil())
-            .map(|(i, m)| (m.id, i))
-            .collect();
-        msgs.iter()
-            .map(|m| chat_line(m, me, quote_row(m, &row_of)))
-            .collect()
+        let msgs = chat_messages(snap);
+        // (ts, line) pairs: the patch-channel system lines merge in by time
+        let pairs: Vec<(u64, LogLineData)> = msgs.iter().map(|m| (m.ts, chat_line(m, me))).collect();
+        let system = match chat_ctx.map(|c| &c.selected) {
+            Some(ChannelRef::Patch { id }) => {
+                let ctx = chat_ctx.expect("checked above");
+                patch_system_lines(id.0, &ctx.proposals, &ctx.first_seen)
+            }
+            _ => Vec::new(),
+        };
+        merge_by_time(pairs, system)
     } else {
         snap.applied
             .iter()
@@ -1531,6 +1754,8 @@ fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
                 text: summarize(v),
                 when: String::new(),
                 quote: -1,
+                quote_id: String::new(),
+                system: false,
                 quote_label: String::new(),
                 deleted_by: String::new(),
                 first: true,
@@ -1545,7 +1770,8 @@ fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
             })
             .collect()
     };
-    annotate_chat_log(&mut log);
+    let no_quotes = HashMap::new();
+    annotate_chat_log(&mut log, chat_ctx.map_or(&no_quotes, |c| &c.quotes));
     let pending: Vec<ProposalRowData> = snap
         .pending
         .iter()
@@ -1565,21 +1791,11 @@ fn surface_data(sf: Surface, snap: &SurfaceSnapshot, me: &str) -> SurfaceData {
     }
 }
 
-/// The display row a message's quote points at: the stable `quote_id`
-/// resolved through the id→row map, with the legacy numeric `quote` as the
-/// fallback for pre-chat-bus log entries (-1 = no quote; out-of-range
-/// legacy values are dropped later by [`annotate_chat_log`]).
-fn quote_row(m: &ChatMessage, row_of: &std::collections::HashMap<MessageId, usize>) -> i32 {
-    m.quote_id
-        .and_then(|q| row_of.get(&q).copied())
-        .or_else(|| m.quote.and_then(|q| usize::try_from(q).ok()))
-        .and_then(|q| i32::try_from(q).ok())
-        .unwrap_or(-1)
-}
-
-/// One typed chat message, projected for display. `quote` is the resolved
-/// quoted row (see [`quote_row`]).
-fn chat_line(m: &ChatMessage, me: &str, quote: i32) -> LogLineData {
+/// One typed chat message, projected for display. Quote resolution (row +
+/// teaser) happens later in [`annotate_chat_log`]: the row index can only
+/// be known once system lines are merged in, and the teaser may resolve
+/// against a message outside the displayed (filtered) log.
+fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
     let mut mine_emoji = String::new();
     // the BTreeMap iterates sorted by emoji, so the pill order is
     // deterministic across re-renders
@@ -1626,7 +1842,18 @@ fn chat_line(m: &ChatMessage, me: &str, quote: i32) -> LogLineData {
         } else {
             String::new()
         },
-        quote,
+        // legacy numeric quote only (pre-chat-bus rows; B1 resolves these
+        // to quote_id at ingest, after which this path goes dormant) — the
+        // id path leaves it to annotate_chat_log
+        quote: if m.quote_id.is_none() {
+            m.quote
+                .and_then(|q| i32::try_from(q).ok())
+                .unwrap_or(-1)
+        } else {
+            -1
+        },
+        quote_id: m.quote_id.map(|q| q.to_string()).unwrap_or_default(),
+        system: false,
         quote_label: String::new(), // teaser, filled in by annotate_chat_log
         deleted_by: m.deleted_by.clone().unwrap_or_default(),
         first: true, // author-block start, filled in by annotate_chat_log
@@ -1683,11 +1910,21 @@ fn file_kind_label(name: &str) -> String {
 
 /// The whole-log pass over a chat: author-block zebra (the stripe flips
 /// whenever a DIFFERENT author takes over), the once-per-block header flag,
-/// and the quote teasers (which need the quoted line resolved).
-fn annotate_chat_log(log: &mut [LogLineData]) {
+/// and the quote teasers. Id-based quotes resolve their teaser through
+/// `quotes` (built over the FULL log — a cross-channel quote teases even
+/// when its target is filtered out of view) and their jump row by scanning
+/// the displayed log; legacy numeric quotes resolve by row as before.
+fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String, QuoteSrc>) {
     let mut alt = false;
     let mut prev_lead: Option<String> = None;
     for line in log.iter_mut() {
+        if line.system {
+            // a governance line is transparent to the author-block rhythm:
+            // the surrounding block keeps its stripe and shows no header
+            line.first = false;
+            line.alt = alt;
+            continue;
+        }
         if prev_lead.as_deref().is_some_and(|p| p != line.lead) {
             alt = !alt;
         }
@@ -1696,9 +1933,32 @@ fn annotate_chat_log(log: &mut [LogLineData]) {
         line.first = prev_lead.as_deref() != Some(line.lead.as_str());
         prev_lead = Some(line.lead.clone());
     }
+    // id → displayed row: the jump target of an in-view quote
+    let row_of: HashMap<String, usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.id.is_empty())
+        .map(|(i, l)| (l.id.clone(), i))
+        .collect();
     for i in 0..log.len() {
-        let q = log[i].quote;
-        if q >= 0 {
+        if !log[i].quote_id.is_empty() {
+            let qid = log[i].quote_id.clone();
+            log[i].quote = row_of
+                .get(&qid)
+                .and_then(|r| i32::try_from(*r).ok())
+                .unwrap_or(-1);
+            match quotes.get(&qid) {
+                Some(src) if !src.deleted => {
+                    log[i].quote_label = format!("{}: {}", src.lead, src.text);
+                }
+                Some(src) => log[i].quote_label = format!("{}: …", src.lead),
+                // not in the full-log map either: dangling — drop the quote
+                None => log[i].quote = -1,
+            }
+        } else if log[i].quote >= 0 {
+            // legacy numeric quote (pre-chat-bus rows; B1 resolves these to
+            // quote_id at ingest, after which this path goes dormant)
+            let q = log[i].quote;
             match usize::try_from(q).ok().and_then(|q| log.get(q)) {
                 Some(src) if src.deleted_by.is_empty() => {
                     log[i].quote_label = format!("{}: {}", src.lead, src.text);
@@ -1707,6 +1967,254 @@ fn annotate_chat_log(log: &mut [LogLineData]) {
                 None => log[i].quote = -1,
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chat channels (chat bus, package B4): pure projection helpers. All of
+// these are engine-data driven — the UI never invents channel state.
+// ---------------------------------------------------------------------------
+
+/// The stable string form of a channel across the Rust↔Slint boundary:
+/// `"group"`, `"patch:<id>"`, `"topic:<name>"`. Sidebar rows carry it; the
+/// `select-channel` callback hands it back.
+fn channel_key(c: &ChannelRef) -> String {
+    match c {
+        ChannelRef::Group => "group".to_string(),
+        ChannelRef::Patch { id } => format!("patch:{}", id.0),
+        ChannelRef::Topic { name } => format!("topic:{name}"),
+    }
+}
+
+/// Parse a sidebar channel key back into a [`ChannelRef`]. `None` on junk —
+/// a stale or malformed key must never panic the UI.
+fn parse_channel_key(key: &str) -> Option<ChannelRef> {
+    if key == "group" {
+        return Some(ChannelRef::Group);
+    }
+    if let Some(id) = key.strip_prefix("patch:") {
+        return id.parse().ok().map(|id| ChannelRef::Patch { id: ProposalId(id) });
+    }
+    key.strip_prefix("topic:").map(|name| ChannelRef::Topic {
+        name: name.to_string(),
+    })
+}
+
+/// The sidebar's channel rows from the engine enumeration: `group` always
+/// first (synthesized when absent), then patch channels by ascending
+/// proposal id — titles resolved lazily from proposal state with a `#id`
+/// fallback, never an error on an unknown id (concept Q4) — then topics in
+/// byte order (channel equality is exact-string in core, so no case folding
+/// here either).
+fn derive_channels(
+    infos: &[ChannelInfo],
+    titles: &HashMap<u64, String>,
+    unread: &HashMap<String, usize>,
+) -> Vec<ChannelRowData> {
+    let unread_of =
+        |key: &str| i32::try_from(unread.get(key).copied().unwrap_or(0)).unwrap_or(i32::MAX);
+    let mut patches: Vec<u64> = Vec::new();
+    let mut topics: Vec<String> = Vec::new();
+    for i in infos {
+        match &i.channel {
+            ChannelRef::Group => {}
+            ChannelRef::Patch { id } => patches.push(id.0),
+            ChannelRef::Topic { name } => topics.push(name.clone()),
+        }
+    }
+    patches.sort_unstable();
+    patches.dedup();
+    topics.sort();
+    topics.dedup();
+    let mut rows = vec![ChannelRowData {
+        key: "group".to_string(),
+        label: String::new(), // the UI substitutes the localized group label
+        icon: "💬".to_string(),
+        unread: unread_of("group"),
+    }];
+    for id in patches {
+        let key = format!("patch:{id}");
+        rows.push(ChannelRowData {
+            unread: unread_of(&key),
+            key,
+            label: titles.get(&id).cloned().unwrap_or_else(|| format!("#{id}")),
+            icon: "🗳️".to_string(),
+        });
+    }
+    for name in topics {
+        let key = format!("topic:{name}");
+        rows.push(ChannelRowData {
+            unread: unread_of(&key),
+            key,
+            label: name,
+            icon: "#️⃣".to_string(),
+        });
+    }
+    rows
+}
+
+/// The compose-banner label of the selected channel ("" = group, which
+/// needs no banner). For a fresh topic this is the ONLY visible feedback
+/// until its first message exists (a channel exists because a message
+/// exists), so it must not depend on the sidebar list.
+fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String>) -> String {
+    match c {
+        ChannelRef::Group => String::new(),
+        ChannelRef::Patch { id } => titles
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", id.0)),
+        ChannelRef::Topic { name } => name.clone(),
+    }
+}
+
+/// PRE-B2 FALLBACK: derive the channel list from the messages themselves
+/// while the engine does not yet populate `SurfaceSnapshot.channels`.
+/// Stage C may drop this once B2 lands — `snap.channels` is then
+/// authoritative (this stays correct but redundant).
+fn fallback_channels(msgs: &[ChatMessage]) -> Vec<ChannelInfo> {
+    let mut infos = vec![ChannelInfo {
+        channel: ChannelRef::Group,
+        count: 0,
+        last_ts: 0,
+    }];
+    for m in msgs {
+        if let Some(i) = infos.iter_mut().find(|i| i.channel == m.channel) {
+            i.count += 1;
+            i.last_ts = i.last_ts.max(m.ts);
+        } else {
+            infos.push(ChannelInfo {
+                channel: m.channel.clone(),
+                count: 1,
+                last_ts: m.ts,
+            });
+        }
+    }
+    infos
+}
+
+/// Quote-teaser sources over the FULL chat log, keyed by hex message id.
+fn quote_sources(msgs: &[ChatMessage]) -> HashMap<String, QuoteSrc> {
+    msgs.iter()
+        .filter(|m| !m.id.is_nil())
+        .map(|m| {
+            (
+                m.id.to_string(),
+                QuoteSrc {
+                    lead: m.from.clone(),
+                    text: m.body.clone(),
+                    deleted: m.deleted_by.is_some(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// A UI-synthesized governance line (P8): no author, no id — so the
+/// id-requiring row actions stay hidden by the same guard that protects
+/// legacy rows — rendered quiet via the `system` flag. The text is
+/// deliberately symbols + numbers + user content ("⚖ #4 · title — 2/3"),
+/// so it reads the same in every language and needs no lexicon entry.
+fn system_line_data(text: String) -> LogLineData {
+    LogLineData {
+        id: String::new(),
+        lead: String::new(),
+        text,
+        when: String::new(),
+        quote: -1,
+        quote_id: String::new(),
+        system: true,
+        quote_label: String::new(),
+        deleted_by: String::new(),
+        first: false,
+        own: false,
+        alt: false,
+        mine_emoji: String::new(),
+        reactions: Vec::new(),
+        has_file: false,
+        file_name: String::new(),
+        file_meta: String::new(),
+        file_available: false,
+    }
+}
+
+/// The system lines of one `Patch(id)` channel, synthesized from proposal
+/// state (P8 — a UI-side merge, no engine/wire change). Proposals carry no
+/// timestamp, so lines are stamped with the UI's FIRST-SEEN time — an
+/// approximation that keeps a line stable within a session and near the
+/// governance moment it reports (0 = never seen: sorts to the top). An
+/// unknown id yields a bare `⚖ #id` line and never an error (concept Q4).
+fn patch_system_lines(
+    patch: u64,
+    proposals: &[ProposalView],
+    first_seen: &HashMap<u64, u64>,
+) -> Vec<(u64, LogLineData)> {
+    let text = match proposals.iter().find(|p| p.id.0 == patch) {
+        Some(p) => {
+            let state = match p.state {
+                ProposalState::Applied => " ✓",
+                ProposalState::Rejected => " ✗",
+                ProposalState::Proposed => "",
+            };
+            format!(
+                "⚖ #{patch} · {} — {}/{}{state}",
+                summarize(&p.payload),
+                p.approvals,
+                p.threshold
+            )
+        }
+        None => format!("⚖ #{patch}"),
+    };
+    let ts = first_seen.get(&patch).copied().unwrap_or(0);
+    vec![(ts, system_line_data(text))]
+}
+
+/// Merge the system lines into the chat lines by timestamp. The chat log's
+/// own order is authoritative (it is the engine's log order) and is never
+/// disturbed; a system line ties BEFORE the chat line of the same second.
+fn merge_by_time(
+    chat: Vec<(u64, LogLineData)>,
+    mut system: Vec<(u64, LogLineData)>,
+) -> Vec<LogLineData> {
+    system.sort_by_key(|(ts, _)| *ts); // stable: equal stamps keep their order
+    let mut out = Vec::with_capacity(chat.len() + system.len());
+    let mut sys = system.into_iter().peekable();
+    for (ts, line) in chat {
+        while sys.peek().is_some_and(|(sts, _)| *sts <= ts) {
+            out.push(sys.next().expect("peeked").1);
+        }
+        out.push(line);
+    }
+    out.extend(sys.map(|(_, l)| l));
+    out
+}
+
+impl UnreadLedger {
+    /// Fold one fresh per-channel count set into the ledger and return the
+    /// unread count per channel key. The selected channel is always marked
+    /// read ("reset on channel selection", and messages arriving while a
+    /// channel is on screen are being read); the first observation seeds
+    /// the ledger so an opened workspace starts caught-up.
+    fn observe(&mut self, counts: &[(String, usize)], selected: &str) -> HashMap<String, usize> {
+        if !self.seeded {
+            self.last_seen = counts.iter().cloned().collect();
+            self.seeded = true;
+        }
+        let selected_count = counts
+            .iter()
+            .find(|(k, _)| k == selected)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        self.last_seen.insert(selected.to_string(), selected_count);
+        counts
+            .iter()
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    c.saturating_sub(self.last_seen.get(k).copied().unwrap_or(0)),
+                )
+            })
+            .collect()
     }
 }
 
@@ -2067,6 +2575,11 @@ lexicon! {
     mv_empty_pending: "Nothing awaiting approval.", "Nichts wartet auf Zustimmung.";
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
+    ch_channels: "Channels", "Kanäle";
+    ch_group: "Group", "Gruppe";
+    ch_new_topic: "New topic", "Neues Thema";
+    ch_topic_ph: "Topic name…", "Themenname…";
+    ch_topic_open: "Open topic", "Thema öffnen";
     mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
     toast_download: "Downloading (mock):", "Lade herunter (Mock):";
     toast_file_removed: "Local file deleted — the share is no longer available.", "Lokale Datei gelöscht — die Freigabe ist nicht mehr verfügbar.";
@@ -2097,6 +2610,8 @@ mod tests {
             text: text.to_string(),
             when: String::new(),
             quote: -1,
+            quote_id: String::new(),
+            system: false,
             quote_label: String::new(),
             deleted_by: String::new(),
             first: true,
@@ -2111,17 +2626,40 @@ mod tests {
         }
     }
 
+    /// A deterministic 32-char hex id for tests.
+    fn hex_id(b: u8) -> String {
+        MessageId([b; 16]).to_string()
+    }
+
+    fn qsrc(lead: &str, text: &str, deleted: bool) -> QuoteSrc {
+        QuoteSrc {
+            lead: lead.to_string(),
+            text: text.to_string(),
+            deleted,
+        }
+    }
+
+    /// Rewrite of the pre-chat-bus author-block/teaser tests, meaning
+    /// preserved: header once per block, zebra flips on author change,
+    /// quotes tease "author: body", dangling quotes are dropped — but the
+    /// quotes are now id-addressed, resolve their teaser through the
+    /// full-log map (so a cross-channel quote teases without a jump row)
+    /// and deleted targets tease with an ellipsis.
     #[test]
-    fn annotate_chat_log_author_blocks_and_teasers() {
+    fn annotate_chat_log_resolves_quotes_by_id() {
         let mut log = vec![
             line("me", "first"),
             line("me", "second"),
             line("ashi", "answer"),
             line("me", "back"),
         ];
-        log[2].quote = 0;
-        log[3].quote = 99; // out of range
-        annotate_chat_log(&mut log);
+        for (i, l) in log.iter_mut().enumerate() {
+            l.id = hex_id(u8::try_from(i).expect("tiny") + 1);
+        }
+        log[2].quote_id = hex_id(1); // in view → teaser + jump row
+        log[3].quote_id = hex_id(99); // dangling id → dropped
+        let quotes = HashMap::from([(hex_id(1), qsrc("me", "first", false))]);
+        annotate_chat_log(&mut log, &quotes);
         // the header shows once per author block …
         assert_eq!(
             log.iter().map(|l| l.first).collect::<Vec<_>>(),
@@ -2133,16 +2671,164 @@ mod tests {
             [false, false, true, false]
         );
         assert_eq!(log[2].quote_label, "me: first");
+        assert_eq!(log[2].quote, 0, "the jump target is the quoted row");
         assert_eq!(log[3].quote, -1, "dangling quotes are dropped");
+        assert_eq!(log[3].quote_label, "");
+
+        // a deleted target teases with an ellipsis; a target OUTSIDE the
+        // displayed log (cross-channel quote — the sanctioned cross-post)
+        // teases from the full-log map but offers no jump row
+        let mut log = vec![line("ashi", "reply")];
+        log[0].id = hex_id(2);
+        log[0].quote_id = hex_id(1);
+        let quotes = HashMap::from([(hex_id(1), qsrc("me", "", true))]);
+        annotate_chat_log(&mut log, &quotes);
+        assert_eq!(log[0].quote_label, "me: …");
+        assert_eq!(log[0].quote, -1, "not in view: teaser without a jump");
+
+        // legacy numeric quotes (pre-chat-bus rows) still resolve by row
+        let mut log = vec![line("me", "first"), line("ashi", "answer"), line("me", "back")];
+        log[1].quote = 0;
+        log[2].quote = 99; // out of range
+        annotate_chat_log(&mut log, &HashMap::new());
+        assert_eq!(log[1].quote_label, "me: first");
+        assert_eq!(log[2].quote, -1, "out-of-range legacy quotes are dropped");
     }
 
     #[test]
-    fn annotate_chat_log_teases_deleted_quotes_with_ellipsis() {
-        let mut log = vec![line("me", ""), line("ashi", "reply")];
-        log[0].deleted_by = "me".to_string();
-        log[1].quote = 0;
-        annotate_chat_log(&mut log);
-        assert_eq!(log[1].quote_label, "me: …");
+    fn derive_channels_lists_group_first_then_patches_then_topics_with_unread() {
+        let infos = vec![
+            ChannelInfo {
+                channel: ChannelRef::Topic { name: "zeta".into() },
+                count: 4,
+                last_ts: 40,
+            },
+            ChannelInfo {
+                channel: ChannelRef::Patch { id: ProposalId(7) },
+                count: 1,
+                last_ts: 30,
+            },
+            ChannelInfo {
+                channel: ChannelRef::Topic { name: "Alpha".into() },
+                count: 2,
+                last_ts: 20,
+            },
+            ChannelInfo {
+                channel: ChannelRef::Patch { id: ProposalId(3) },
+                count: 5,
+                last_ts: 10,
+            },
+            ChannelInfo {
+                channel: ChannelRef::Group,
+                count: 9,
+                last_ts: 50,
+            },
+        ];
+        let titles = HashMap::from([(3u64, "raise budget".to_string())]);
+        let unread = HashMap::from([("topic:zeta".to_string(), 4usize), ("group".to_string(), 1)]);
+        let rows = derive_channels(&infos, &titles, &unread);
+        assert_eq!(
+            rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            ["group", "patch:3", "patch:7", "topic:Alpha", "topic:zeta"],
+            "group first, then patches by id, then topics by name"
+        );
+        assert_eq!(rows[1].label, "raise budget", "patch title from proposal state");
+        assert_eq!(rows[2].label, "#7", "unknown proposal → #id fallback, never an error");
+        assert_eq!(rows[3].label, "Alpha");
+        assert_eq!(
+            rows.iter().map(|r| r.unread).collect::<Vec<_>>(),
+            [1, 0, 0, 0, 4]
+        );
+        // group is synthesized even when the engine list lacks it
+        let rows = derive_channels(&[], &HashMap::new(), &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "group");
+    }
+
+    #[test]
+    fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
+        let pv = ProposalView {
+            id: ProposalId(4),
+            surface: Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "title": "budget" }),
+            approvals: 2,
+            threshold: 3,
+            state: ProposalState::Proposed,
+        };
+        let first_seen = HashMap::from([(4u64, 150u64)]);
+        let sys = patch_system_lines(4, &[pv], &first_seen);
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0].0, 150, "stamped with the UI-side first-seen time");
+        assert!(sys[0].1.system, "system lines carry the quiet-style flag");
+        assert!(sys[0].1.lead.is_empty(), "system lines have no author");
+        assert!(sys[0].1.id.is_empty(), "no id → no id-requiring actions");
+        let text = &sys[0].1.text;
+        assert!(
+            text.contains("#4") && text.contains("budget") && text.contains("2/3"),
+            "{text}"
+        );
+
+        // an unknown/already-materialized proposal renders as a bare
+        // handle, never an error (concept Q4)
+        let sys_unknown = patch_system_lines(9, &[], &first_seen);
+        assert!(sys_unknown[0].1.text.contains("#9"), "{}", sys_unknown[0].1.text);
+        assert_eq!(sys_unknown[0].0, 0, "never seen → sorts to the top");
+
+        // merged by time into the chat lines; the chat order itself is
+        // never disturbed and a tie puts the system line first
+        let chat = vec![
+            (100u64, line("me", "a")),
+            (200, line("me", "b")),
+            (300, line("me", "c")),
+        ];
+        let system = vec![
+            (200u64, system_line_data("s2".into())),
+            (150, system_line_data("s1".into())),
+        ];
+        let merged = merge_by_time(chat, system);
+        assert_eq!(
+            merged.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            ["a", "s1", "s2", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn unread_counts_reset_on_channel_selection() {
+        let mut ledger = UnreadLedger::default();
+        let counts = vec![("group".to_string(), 3usize), ("topic:t".to_string(), 2)];
+        // the first sight of a workspace counts as read — no unread wall
+        let unread = ledger.observe(&counts, "group");
+        assert!(unread.values().all(|u| *u == 0), "{unread:?}");
+        // new traffic shows up everywhere but the channel on screen
+        let counts = vec![("group".to_string(), 5), ("topic:t".to_string(), 4)];
+        let unread = ledger.observe(&counts, "group");
+        assert_eq!(unread["group"], 0);
+        assert_eq!(unread["topic:t"], 2);
+        // selecting the topic resets its count …
+        let unread = ledger.observe(&counts, "topic:t");
+        assert_eq!(unread["topic:t"], 0);
+        assert_eq!(unread["group"], 0, "group stays read up to its last viewing");
+        // … and a channel arriving after the seed starts fully unread
+        let counts = vec![
+            ("group".to_string(), 5),
+            ("topic:t".to_string(), 4),
+            ("topic:new".to_string(), 3),
+        ];
+        let unread = ledger.observe(&counts, "topic:t");
+        assert_eq!(unread["topic:new"], 3);
+    }
+
+    #[test]
+    fn channel_keys_round_trip() {
+        for c in [
+            ChannelRef::Group,
+            ChannelRef::Patch { id: ProposalId(42) },
+            ChannelRef::Topic { name: "Budget 2026".into() },
+        ] {
+            assert_eq!(parse_channel_key(&channel_key(&c)), Some(c));
+        }
+        assert_eq!(parse_channel_key("patch:xyz"), None, "junk never panics");
+        assert_eq!(parse_channel_key(""), None);
     }
 
     #[test]

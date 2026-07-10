@@ -356,8 +356,10 @@ export component ChatRow inherits Rectangle {
     x: root.indent ? 22px : 0px;
     width: parent.width - (root.indent ? 22px : 0px);
     height: parent.height;
-    background: root.line.alt ? Theme.zebra : Theme.panel-2;
-    border-width: 1px;
+    // a system line (UI-synthesized governance note in a patch channel)
+    // renders quiet: no card chrome, no author, no actions
+    background: root.line.system ? transparent : (root.line.alt ? Theme.zebra : Theme.panel-2);
+    border-width: root.line.system ? 0px : 1px;
     border-color: Theme.line;
     border-radius: Theme.win95 ? 0px : 8px;
     crow := VerticalLayout {
@@ -367,7 +369,9 @@ export component ChatRow inherits Rectangle {
         padding-bottom: 6px;
         spacing: 0px;
         // quoted message teaser: grey, clickable — jumps to the original
-        if root.line.quote >= 0: HorizontalLayout {
+        // when it is in view (a cross-channel quote has a teaser but no
+        // in-view row to jump to)
+        if root.line.quote-label != "": HorizontalLayout {
             alignment: start;
             Rectangle {
                 height: 18px;
@@ -392,14 +396,16 @@ export component ChatRow inherits Rectangle {
                     }
                 }
                 qt-ta := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
+                    mouse-cursor: root.line.quote >= 0 ? MouseCursor.pointer : MouseCursor.default;
                     clicked => {
-                        root.quote-jump();
+                        if (root.line.quote >= 0) {
+                            root.quote-jump();
+                        }
                     }
                 }
             }
         }
-        if root.line.quote >= 0: Rectangle {
+        if root.line.quote-label != "": Rectangle {
             height: 2px;
         }
         // the author is named once per block (with the grey timestamp) —
@@ -433,8 +439,9 @@ export component ChatRow inherits Rectangle {
             read-only: true;
             single-line: false;
             wrap: word-wrap;
-            color: Theme.text;
-            font-size: Theme.fs-body;
+            color: root.line.system ? Theme.dim : Theme.text;
+            font-size: root.line.system ? Theme.fs-cap : Theme.fs-body;
+            font-italic: root.line.system;
             font-family: "Twemoji Mozilla";
         }
         // the shared-file card: metadata only (name, size · type · date).
@@ -497,8 +504,10 @@ export component ChatRow inherits Rectangle {
         // the reaction row hangs directly off the text. Its height is
         // EXPLICIT: repeated fixed-height pills don't reliably feed the
         // layout's preferred height, and a short row let the next card
-        // paint over the pills.
-        if root.line.deleted-by == "" && (root.line.reactions.length > 0 || root.line.mine-emoji == ""): HorizontalLayout {
+        // paint over the pills. Rows without a real id (legacy entries,
+        // system lines) never offer the "+" — reacting addresses by id and
+        // the UI must not fake success (existing pills still display).
+        if root.line.deleted-by == "" && !root.line.system && (root.line.reactions.length > 0 || (root.line.mine-emoji == "" && root.line.id != "")): HorizontalLayout {
             height: 26px;
             padding-top: 2px;
             padding-bottom: 2px;
@@ -510,7 +519,7 @@ export component ChatRow inherits Rectangle {
                     root.toggle-reaction(r.emoji);
                 }
             }
-            if root.line.mine-emoji == "": Rectangle {
+            if root.line.mine-emoji == "" && root.line.id != "": Rectangle {
                 width: 26px;
                 height: 22px;
                 background: plus-ta.has-hover ? Theme.raised : transparent;
@@ -550,7 +559,10 @@ export component ChatRow inherits Rectangle {
     // delete IN THE SAME SLOT (below) — one trash per entry, always in the
     // same place, so chat lines look uniform. Once the file is removed
     // (card grey), deleting the message becomes available again.
-    if root.line.deleted-by == "" && root.line.has-file && root.line.own && root.line.file-available: Rectangle {
+    // every affordance below requires the row's stable id (delete, quote,
+    // file verbs address by id) — a legacy row without one offers none of
+    // them, so the UI can never fake a success the engine would ignore
+    if root.line.deleted-by == "" && root.line.id != "" && root.line.has-file && root.line.own && root.line.file-available: Rectangle {
         x: parent.width - 82px;
         y: 4px;
         width: 22px;
@@ -572,7 +584,7 @@ export component ChatRow inherits Rectangle {
             }
         }
     }
-    if root.line.deleted-by == "" && !(root.line.has-file && root.line.own && root.line.file-available): Rectangle {
+    if root.line.deleted-by == "" && root.line.id != "" && !(root.line.has-file && root.line.own && root.line.file-available): Rectangle {
         x: parent.width - 82px;
         y: 4px;
         width: 22px;
@@ -594,7 +606,9 @@ export component ChatRow inherits Rectangle {
             }
         }
     }
-    if root.line.deleted-by == "": Rectangle {
+    // copy needs no id (it is a local clipboard verb) but stays off the
+    // synthesized system lines
+    if root.line.deleted-by == "" && !root.line.system: Rectangle {
         x: parent.width - 56px;
         y: 4px;
         width: 22px;
@@ -616,7 +630,7 @@ export component ChatRow inherits Rectangle {
             }
         }
     }
-    if root.line.deleted-by == "": Rectangle {
+    if root.line.deleted-by == "" && root.line.id != "": Rectangle {
         x: parent.width - 30px;
         y: 4px;
         width: 22px;
