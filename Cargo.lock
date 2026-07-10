@@ -3700,6 +3700,7 @@ dependencies = [
  "hex",
  "molt-config",
  "molt-core",
+ "molt-mcp",
  "molt-net",
  "molt-storage",
  "serde_json",

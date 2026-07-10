@@ -418,19 +418,28 @@ fn gated_enum() -> Value {
 /// One MCP tool: name, wire schema and command builder side by side — a
 /// single source of truth, so the schema can never drift from the parser
 /// (that drift class is exactly how `save_settings` once hid `mcp_token`).
-struct ToolDef {
-    name: &'static str,
+///
+/// Public so the cross-frontend integration tests can drive the very same
+/// argument→[`Command`] mapping an MCP agent gets (co-equality is proven
+/// end to end, not assumed) — the servers in this crate remain the only
+/// production callers.
+pub struct ToolDef {
+    /// The MCP-visible tool name.
+    pub name: &'static str,
     /// snake_case name of the [`Command`] variant this tool drives; only
     /// the `co_equality` test reads it — it is the audit trail.
     #[cfg_attr(not(test), allow(dead_code))]
-    command: &'static str,
-    description: &'static str,
-    schema: fn() -> Value,
-    build: fn(&Value) -> Result<Command, String>,
+    pub command: &'static str,
+    /// The operator-facing tool description.
+    pub description: &'static str,
+    /// Builds the JSON-schema advertised for the tool's arguments.
+    pub schema: fn() -> Value,
+    /// Maps validated JSON arguments onto the one command set.
+    pub build: fn(&Value) -> Result<Command, String>,
 }
 
 /// The tool catalogue. Each entry is one verb of the command set.
-fn tools() -> Vec<ToolDef> {
+pub fn tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "chat_send",

@@ -26,3 +26,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# dev-only cycle (cargo allows it): the cross-frontend integration test
+# proves the MCP tool layer builds the SAME filtered reads the engine path
+# serves — co-equality end to end
+molt-mcp.workspace = true
