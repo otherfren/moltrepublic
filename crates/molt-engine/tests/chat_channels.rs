@@ -7,10 +7,10 @@
 //! `Patch(id)` channel AND the all-hands `Group`, the engine-side channel
 //! filter equals the client-side filter of the full read on BOTH engines, a
 //! member reaction in the patch channel converges to the founder over the
-//! mesh, and the same filtered read built through the MCP tool layer
-//! (`molt_mcp::tools()` build closures — the exact argument→Command mapping
-//! an MCP agent gets) matches the engine-direct path. One test, because the
-//! stages build on one another and the founding is the expensive part.
+//! mesh. One test, because the stages build on one another and the founding
+//! is the expensive part. (The MCP-tool-built read equality of §5.2 lives in
+//! `molt-mcp/tests/tool_reads.rs` — mcp → engine is the legal dependency
+//! direction; the engine never depends on a surface crate, not even dev-only.)
 
 mod common;
 
@@ -359,34 +359,6 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // ---- (e) the MCP tool layer builds the SAME filtered read ----------
-    // co-equality, proven end to end: the read an MCP agent gets through
-    // the tool's build closure equals the engine-direct path byte for byte
-    let read_state = molt_mcp::tools()
-        .into_iter()
-        .find(|t| t.name == "read_state")
-        .expect("read_state is in the tool catalogue");
-    for (args, channel) in [
-        (serde_json::json!({ "surface": "chat" }), None),
-        (
-            serde_json::json!({ "surface": "chat", "channel": { "kind": "group" } }),
-            Some(ChannelRef::Group),
-        ),
-        (
-            serde_json::json!({ "surface": "chat", "channel": { "kind": "patch", "id": pid.0 } }),
-            Some(patch.clone()),
-        ),
-    ] {
-        let cmd = (read_state.build)(&args).expect("the tool builds the command");
-        let via_mcp = match a.execute(cmd).await.expect("mcp-built read") {
-            Reply::State(s) => s,
-            other => panic!("unexpected: {other:?}"),
-        };
-        let direct = read_chat_snap(&a, channel.clone()).await;
-        assert_eq!(
-            serde_json::to_value(&via_mcp).expect("snap json"),
-            serde_json::to_value(&direct).expect("snap json"),
-            "MCP-built and engine-direct reads must be identical for {args}"
-        );
-    }
+    // (e) of §5.2 — the MCP-tool-built read equality — lives in
+    // molt-mcp/tests/tool_reads.rs, on the legal side of the crate layering.
 }
