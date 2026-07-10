@@ -1388,6 +1388,9 @@ struct UnreadLedger {
 /// window looks at is presentation, not shared state.
 #[derive(Default)]
 struct ChatUiState {
+    /// The workspace id this state belongs to — a switch resets everything
+    /// (see [`ChatUiState::enter_workspace`]).
+    workspace: String,
     /// The channel the chat pane shows; compose files new messages here.
     selected: ChannelRef,
     /// Per-channel unread counts (reset on selection).
@@ -1396,6 +1399,22 @@ struct ChatUiState {
     /// timestamp, so the patch-channel system lines interleave at this
     /// first-seen approximation (documented in `patch_system_lines`).
     first_seen: HashMap<u64, u64>,
+}
+
+impl ChatUiState {
+    /// Bind the state to the active workspace. On a SWITCH (different id,
+    /// including to/from "no workspace") everything resets: a stale
+    /// Patch/Topic selection from the previous workspace must not filter
+    /// the new one's log, the ledger must re-seed on the new history and
+    /// the first-seen stamps belong to the old proposals. Same id → no-op.
+    fn enter_workspace(&mut self, active: &str) {
+        if self.workspace != active {
+            *self = ChatUiState {
+                workspace: active.to_string(),
+                ..ChatUiState::default()
+            };
+        }
+    }
 }
 struct SurfaceData {
     key: String,
@@ -1448,8 +1467,7 @@ struct ProposalRowData {
 /// quote teasers are whole-log concerns — a quote may point across
 /// channels), and once through the engine's channel filter for the
 /// displayed log. Filtering client-side would break co-equality with MCP,
-/// so the filter deliberately rides `ReadState { channel }` even though it
-/// is a no-op until B2 lands.
+/// so the filter deliberately rides `ReadState { channel }`.
 async fn push_surfaces(
     wallet: &WalletHandle,
     weak: &slint::Weak<AppWindow>,
@@ -1459,10 +1477,19 @@ async fn push_surfaces(
         Ok(Reply::Status(s)) => (s.member, format!("{}-of-{}", s.threshold, s.members.len())),
         _ => return,
     };
+    // the chat-bus UI state is per-workspace: bind it to the active id so
+    // a workspace switch drops the previous selection/unread/first-seen
+    let active_ws = match wallet.execute(Command::ReadSession).await {
+        Ok(Reply::Session(s)) => s.active_workspace.clone(),
+        _ => String::new(),
+    };
     let selected = chat_ui
         .lock()
         .ok()
-        .map(|s| s.selected.clone())
+        .map(|mut s| {
+            s.enter_workspace(&active_ws);
+            s.selected.clone()
+        })
         .unwrap_or_default();
     let full_chat = match wallet
         .execute(Command::ReadState {
@@ -1495,11 +1522,13 @@ async fn push_surfaces(
         .map(|p| (p.id.0, summarize(&p.payload)))
         .collect();
     let full_msgs = full_chat.as_ref().map(chat_messages).unwrap_or_default();
-    let infos = match &full_chat {
-        Some(s) if !s.channels.is_empty() => s.channels.clone(),
-        // PRE-B2 FALLBACK: the engine does not enumerate channels yet
-        _ => fallback_channels(&full_msgs),
-    };
+    // the engine enumerates the channels (P7): every distinct ref in the
+    // log, `Group` always present — authoritative for the chat surface
+    // (empty only when no chat read succeeded, i.e. nothing is open)
+    let infos = full_chat
+        .as_ref()
+        .map(|s| s.channels.clone())
+        .unwrap_or_default();
     let quotes = quote_sources(&full_msgs);
     let counts: Vec<(String, usize)> = infos
         .iter()
@@ -2066,31 +2095,6 @@ fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String>) -> Strin
             .unwrap_or_else(|| format!("#{}", id.0)),
         ChannelRef::Topic { name } => name.clone(),
     }
-}
-
-/// PRE-B2 FALLBACK: derive the channel list from the messages themselves
-/// while the engine does not yet populate `SurfaceSnapshot.channels`.
-/// Stage C may drop this once B2 lands — `snap.channels` is then
-/// authoritative (this stays correct but redundant).
-fn fallback_channels(msgs: &[ChatMessage]) -> Vec<ChannelInfo> {
-    let mut infos = vec![ChannelInfo {
-        channel: ChannelRef::Group,
-        count: 0,
-        last_ts: 0,
-    }];
-    for m in msgs {
-        if let Some(i) = infos.iter_mut().find(|i| i.channel == m.channel) {
-            i.count += 1;
-            i.last_ts = i.last_ts.max(m.ts);
-        } else {
-            infos.push(ChannelInfo {
-                channel: m.channel.clone(),
-                count: 1,
-                last_ts: m.ts,
-            });
-        }
-    }
-    infos
 }
 
 /// Quote-teaser sources over the FULL chat log, keyed by hex message id.
@@ -2816,6 +2820,45 @@ mod tests {
         ];
         let unread = ledger.observe(&counts, "topic:t");
         assert_eq!(unread["topic:new"], 3);
+    }
+
+    /// A workspace switch must not leak the previous workspace's channel
+    /// state into the next one: a stale Patch/Topic selection would filter
+    /// the new workspace's log until manually cleared, the ledger would
+    /// misread its counts and the first-seen stamps would misplace system
+    /// lines. Same workspace → everything is kept.
+    #[test]
+    fn chat_ui_state_resets_on_workspace_switch() {
+        let mut st = ChatUiState::default();
+        st.enter_workspace("ws-1");
+        st.selected = ChannelRef::Topic {
+            name: "budget".to_string(),
+        };
+        st.first_seen.insert(4, 100);
+        let counts = vec![("group".to_string(), 3usize)];
+        let _ = st.ledger.observe(&counts, "topic:budget");
+
+        // the same workspace: selection, ledger and stamps survive
+        st.enter_workspace("ws-1");
+        assert_eq!(
+            st.selected,
+            ChannelRef::Topic {
+                name: "budget".to_string()
+            }
+        );
+        assert_eq!(st.first_seen.get(&4), Some(&100));
+
+        // a switch: back to Group, fresh ledger (the next observation
+        // seeds — no unread wall from the new workspace's history),
+        // stamps gone, and the new identity sticks
+        st.enter_workspace("ws-2");
+        assert_eq!(st.selected, ChannelRef::Group);
+        assert!(st.first_seen.is_empty());
+        let unread = st.ledger.observe(&[("group".to_string(), 9usize)], "topic:x");
+        assert_eq!(unread["group"], 0, "the fresh ledger re-seeds");
+        st.selected = ChannelRef::Group;
+        st.enter_workspace("ws-2");
+        assert!(st.first_seen.is_empty(), "no reset without a switch");
     }
 
     #[test]
