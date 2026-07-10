@@ -646,12 +646,9 @@ impl State {
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
             Command::Approve { proposal } => self.cmd_approve(proposal),
             Command::Decline { proposal } => self.cmd_decline(proposal),
-            // the channel filter is threaded into the snapshot with the
-            // read-contract package (B2); the field is frozen here
-            Command::ReadState {
-                surface,
-                channel: _,
-            } => Ok(Reply::State(self.snapshot(surface))),
+            Command::ReadState { surface, channel } => {
+                Ok(Reply::State(self.snapshot(surface, channel)))
+            }
             Command::ListProposals => {
                 let mut views: Vec<_> = self
                     .proposals

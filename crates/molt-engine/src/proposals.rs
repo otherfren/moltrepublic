@@ -3,9 +3,11 @@
 //! The gated surfaces: propose → threshold approvals → apply. A faithful
 //! but *simulated* stand-in for the real FROST threshold machine.
 
+use std::collections::HashMap;
+
 use molt_core::{
-    Event, MoltError, ProposalId, ProposalRecord, ProposalState, ProposalView, Reply, StatusView,
-    Surface, SurfaceSnapshot, SurfaceStat, WorkspaceEvent,
+    ChannelInfo, ChannelRef, Event, MoltError, ProposalId, ProposalRecord, ProposalState,
+    ProposalView, Reply, StatusView, Surface, SurfaceSnapshot, SurfaceStat, WorkspaceEvent,
 };
 use serde_json::Value;
 
@@ -191,11 +193,16 @@ impl State {
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
-    /// messages into the same JSON shape the log always had.
-    fn applied_values(&self, surface: Surface) -> Vec<Value> {
+    /// messages into the same JSON shape the log always had; a `channel`
+    /// filter (chat only) keeps exactly the messages filing under that
+    /// channel — exact [`ChannelRef`] equality, so Topic names match by
+    /// exact string (pin P3). Filtered rows keep their embedded ids;
+    /// position-in-`applied` is not an addressing scheme.
+    fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
         if surface == Surface::Chat {
             self.chat
                 .iter()
+                .filter(|m| channel.map_or(true, |c| &m.channel == c))
                 .map(|m| serde_json::to_value(m).unwrap_or_default())
                 .collect()
         } else {
@@ -210,7 +217,38 @@ impl State {
         }
     }
 
-    pub(crate) fn snapshot(&self, surface: Surface) -> SurfaceSnapshot {
+    /// Every distinct channel in the chat log, one pass (chat-bus pin P7):
+    /// `Group` is always listed (even when empty); the rest follow in
+    /// first-appearance order, which is deterministic because the log
+    /// order is canonical. Deleted (tombstoned) messages still count for
+    /// their channel — they are rows in the log, and a channel whose only
+    /// message was deleted must not silently vanish from the sidebar.
+    fn chat_channels(&self) -> Vec<ChannelInfo> {
+        let mut infos = vec![ChannelInfo {
+            channel: ChannelRef::Group,
+            count: 0,
+            last_ts: 0,
+        }];
+        let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
+        for m in &self.chat {
+            let at = *pos.entry(m.channel.clone()).or_insert_with(|| {
+                infos.push(ChannelInfo {
+                    channel: m.channel.clone(),
+                    count: 0,
+                    last_ts: 0,
+                });
+                infos.len() - 1
+            });
+            infos[at].count += 1;
+            infos[at].last_ts = infos[at].last_ts.max(m.ts);
+        }
+        infos
+    }
+
+    /// The read contract: the (possibly channel-filtered) applied log plus,
+    /// on the chat surface, the always-unfiltered channel enumeration.
+    /// Other surfaces ignore `channel` and keep `channels` empty.
+    pub(crate) fn snapshot(&self, surface: Surface, channel: Option<ChannelRef>) -> SurfaceSnapshot {
         let pending: Vec<ProposalView> = self
             .proposals
             .iter()
@@ -220,11 +258,13 @@ impl State {
         SurfaceSnapshot {
             surface,
             gated: surface.is_gated(),
-            applied: self.applied_values(surface),
+            applied: self.applied_values(surface, channel.as_ref()),
             pending,
-            // frozen in the contract here; the read-contract package (B2)
-            // enumerates the chat log's channels into it
-            channels: Vec::new(),
+            channels: if surface == Surface::Chat {
+                self.chat_channels()
+            } else {
+                Vec::new()
+            },
         }
     }
 
