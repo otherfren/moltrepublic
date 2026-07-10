@@ -1,10 +1,16 @@
 # Chat bus — implementation plan (multi-agent, maximally parallel)
 
-Status: **plan, not started.** Executes the decided concept in
-`chat_bus.md` (decision log of 2026-07-09). This document is written to be
-handed to multiple coding agents working in parallel worktrees; it pins the
-design decisions the code inventory forced, cuts the work into packages with
-disjoint file ownership, and defines the stage gates.
+Status: **EXECUTED 2026-07-11** (stages A, B1–B4, C — B5 unread-persistence
+remains the stretch package). Deltas from the plan as written: the anchors
+were re-verified first (the tree had moved 19 commits; notably `crosses_wire`
+at net.rs:208, `cmd_net_delivered` at :636, INTERNAL at 24); P6 parking
+landed in Stage C rather than B1 (it needs a `State` field in `lib.rs`,
+which B1 did not own — B1 stopped and escalated per the brief); inbound
+`channel` tags are normalized at the wire (coerce-to-Group for unnormalizable
+topic claims — tags are claims, a mangled tag must not suppress content);
+§5.2's MCP-equality test lives in `molt-mcp/tests/tool_reads.rs` (the legal
+dependency direction — the engine never dev-depends on a surface crate); the
+real-SMP `--ignored` suite was run green. Historical plan text below.
 
 Everything here is grounded in a full code inventory (file:line references are
 to the state at commit `224032b` / master `2bf6566`); if the tree has moved,

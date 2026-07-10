@@ -57,6 +57,20 @@ same pattern as the tickers.
   `verify_seal_proposal`, the tests) together or signatures silently break.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
+- **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat
+  message carries a random 128-bit id minted by the sender's engine
+  (`chat::mint_message_id`; core stays RNG-free); reactions/deletes/quotes/file
+  ops address by id, which is why they can cross the wire and converge. Legacy
+  (pre-id) log entries get deterministic synthetic ids at the two ingest choke
+  points (`events.rs`: `apply`'s Chat arm + `restore_dump` — the
+  `molt-chat-legacy-id` sha256 formula; both must stay identical or the
+  determinism keystones break). The id→position map is `State.chat_pos`
+  (runtime-only, never persisted). Channels (`ChannelRef`) are *views, never
+  boundaries*: exactly one per message, filtering is engine-side on `ReadState`
+  (never client-side — co-equality), tags carry no governance meaning, and the
+  chat surface's byte-identity fixtures in `molt-core` mod tests pin the legacy
+  wire shape — treat a red one as a design stop. Read `documents/chat_bus.md`
+  before touching chat/channel code.
 - **Drain the outbound path, don't `abort()` it.** In the mesh/bootstrap async
   plumbing a node finishes as soon as its *inbound* work is done, but its own
   last outbound frame may still be in the `channel → encrypt task → send task →

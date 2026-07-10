@@ -1,8 +1,13 @@
 # Concept: the chat bus — one ephemeral broadcast, channels as filters
 
-Status: **decided 2026-07-09** — all open questions below were discussed and
-resolved (see the decision log at the end). Not yet scheduled for
-implementation; the phased plan is the blueprint for when it is.
+Status: **IMPLEMENTED 2026-07-11** — all four phases are real (stable
+`MessageId`s + id addressing everywhere, `ChannelRef` on the wire,
+engine-side filter + channel enumeration on `ReadState`, UI channel
+sidebar with unread counts and interleaved governance system lines;
+reactions/deletes/file-removes now cross the wire, converge, and park
+when they outrun their target). Executed per
+`chat_bus_implementation.md` (stages A, B1–B4, C); B5 (persisted unread)
+remains the stretch package. The decision log below is unchanged history.
 
 ## The idea
 
