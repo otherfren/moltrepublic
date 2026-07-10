@@ -21,7 +21,10 @@
 
 use std::net::IpAddr;
 
-use molt_core::{ChannelRef, Command, MessageId, ProposalId, Screen, SessionSettings, Surface};
+use molt_core::{
+    ChannelRef, Command, MessageId, ProposalId, Screen, SessionSettings, Surface,
+    TOPIC_NAME_MAX_CHARS,
+};
 use molt_engine::WalletHandle;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -246,22 +249,107 @@ fn surface_arg(args: &Value) -> Result<Surface, String> {
     Surface::parse(&s).ok_or_else(|| format!("unknown surface `{s}`"))
 }
 
-/// A required chat-message id argument (32-char lowercase hex).
+/// A required chat-message id argument (32-char lowercase hex). A present
+/// argument of the wrong JSON type is its own clear error, not "missing".
 fn id_arg(args: &Value, key: &str) -> Result<MessageId, String> {
-    str_arg(args, key)?
-        .parse()
-        .map_err(|e| format!("argument `{key}`: {e}"))
+    match args.get(key) {
+        None | Some(Value::Null) => Err(format!(
+            "missing argument `{key}` (a message id: 32 lowercase hex chars, from read_state)"
+        )),
+        Some(Value::String(s)) => s.parse().map_err(|e| format!("argument `{key}`: {e}")),
+        Some(other) => Err(format!(
+            "argument `{key}` must be a string message id (32 lowercase hex chars), got {other}"
+        )),
+    }
 }
 
-/// An optional chat-message id argument (32-char lowercase hex).
+/// An optional chat-message id argument (32-char lowercase hex). Only a
+/// truly absent (or `null`) argument is `None`; a PRESENT argument of the
+/// wrong type or shape is an error — it is never silently treated as absent.
 fn opt_id_arg(args: &Value, key: &str) -> Result<Option<MessageId>, String> {
-    match args.get(key).and_then(Value::as_str) {
-        Some(s) => s
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => s
             .parse()
             .map(Some)
             .map_err(|e| format!("argument `{key}`: {e}")),
-        None => Ok(None),
+        Some(other) => Err(format!(
+            "argument `{key}` must be a string message id (32 lowercase hex chars), got {other}"
+        )),
     }
+}
+
+/// The wire schema of the `channel` argument — one shape shared by
+/// `chat_send` and `read_state`, mirroring [`ChannelRef`]'s tagged form.
+fn channel_schema(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "kind": { "type": "string", "enum": ["group", "patch", "topic"] },
+            "id": { "type": "integer", "description": "the proposal id — required for kind \"patch\"" },
+            "name": { "type": "string", "description": format!("the topic name (trimmed, at most {TOPIC_NAME_MAX_CHARS} chars, case-sensitive) — required for kind \"topic\"") }
+        },
+        "required": ["kind"]
+    })
+}
+
+/// The optional `channel` argument: `{kind: "group"|"patch"|"topic", id?,
+/// name?}`. Absent/`null` means "no channel given" (the caller picks its
+/// default); a PRESENT argument of the wrong shape is always an error,
+/// never ignored. Topic names go through the core normalization
+/// ([`ChannelRef::normalized`]) so MCP and engine agree on the channel key.
+fn channel_arg(args: &Value) -> Result<Option<ChannelRef>, String> {
+    let obj = match args.get("channel") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(map)) => map,
+        Some(other) => {
+            return Err(format!(
+                "argument `channel` must be an object {{kind, id?, name?}}, got {other}"
+            ))
+        }
+    };
+    let kind = match obj.get("kind") {
+        Some(Value::String(s)) => s.as_str(),
+        Some(other) => return Err(format!("`channel.kind` must be a string, got {other}")),
+        None => {
+            return Err(
+                "`channel.kind` is required: \"group\", \"patch\" or \"topic\"".to_string(),
+            )
+        }
+    };
+    let channel = match kind {
+        "group" => ChannelRef::Group,
+        "patch" => {
+            let id = match obj.get("id") {
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    format!("`channel.id` must be a non-negative integer proposal id, got {v}")
+                })?,
+                None => {
+                    return Err(
+                        "kind \"patch\" requires `channel.id` (the proposal id, an integer)"
+                            .to_string(),
+                    )
+                }
+            };
+            ChannelRef::Patch { id: ProposalId(id) }
+        }
+        "topic" => match obj.get("name") {
+            Some(Value::String(name)) => ChannelRef::Topic { name: name.clone() }
+                .normalized()
+                .map_err(|e| format!("`channel.name`: {e}"))?,
+            Some(other) => return Err(format!("`channel.name` must be a string, got {other}")),
+            None => {
+                return Err("kind \"topic\" requires `channel.name` (the topic name)".to_string())
+            }
+        },
+        other => {
+            return Err(format!(
+                "unknown `channel.kind` `{other}` (expected \"group\", \"patch\" or \"topic\")"
+            ))
+        }
+    };
+    Ok(Some(channel))
 }
 
 fn screen_arg(args: &Value) -> Result<Screen, String> {
@@ -347,31 +435,30 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "chat_send",
             command: "chat",
-            description: "Post a message to the ungated chat surface; pass `quote` (a message id) to reply to an earlier message.",
+            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream — a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply — and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "body": { "type": "string" },
-                    "quote": { "type": "string", "description": "optional: quoted message id (32-char hex)" }
+                    "quote": { "type": "string", "description": "optional: the quoted message's id (32-char lowercase hex, from read_state)" },
+                    "channel": channel_schema("optional: the channel view this message files under (omit for the all-hands group)")
                 },
                 "required": ["body"]
             }),
             build: |args| Ok(Command::Chat {
                 body: str_arg(args, "body")?,
                 quote: opt_id_arg(args, "quote")?,
-                // the channel parameter joins the schema with the MCP
-                // package (B3); the command field is frozen here
-                channel: ChannelRef::default(),
+                channel: channel_arg(args)?.unwrap_or_default(),
             }),
         },
         ToolDef {
             name: "react_chat",
             command: "react_chat",
-            description: "Toggle this member's emoji reaction on a chat message (by message id). Reacting with the emoji you already picked un-reacts; picking another switches — one reaction per member per message.",
+            description: "Toggle this member's emoji reaction on a chat message, addressed by its stable id (the 32-char lowercase hex `id` every message carries in read_state). Reacting with the emoji you already picked un-reacts; picking another switches — one reaction per member per message.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "message id (32-char hex)" },
+                    "id": { "type": "string", "description": "message id (32-char lowercase hex, from read_state)" },
                     "emoji": { "type": "string", "description": "a short emoji, e.g. 👍" }
                 },
                 "required": ["id", "emoji"]
@@ -405,10 +492,10 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "download_file",
             command: "download_file",
-            description: "Download a shared file from its sharer's disk (by the share message's id). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
+            description: "Download a shared file from its sharer's disk, addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
             schema: || json!({
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "share message id (32-char hex)" } },
+                "properties": { "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" } },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::DownloadFile {
@@ -418,10 +505,10 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "remove_file",
             command: "remove_file",
-            description: "Sharer-only: mark a shared file as deleted from this disk (by the share message's id) — the share becomes permanently unavailable for every participant.",
+            description: "Sharer-only: mark a shared file as deleted from this disk, addressed by the share message's stable id (32-char lowercase hex, from read_state) — the share becomes permanently unavailable for every participant.",
             schema: || json!({
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "share message id (32-char hex)" } },
+                "properties": { "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" } },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::RemoveFile {
@@ -431,10 +518,10 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "delete_chat",
             command: "delete_chat",
-            description: "Delete a chat message (by message id): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",
+            description: "Delete a chat message, addressed by its stable id (32-char lowercase hex, from read_state): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",
             schema: || json!({
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "message id (32-char hex)" } },
+                "properties": { "id": { "type": "string", "description": "message id (32-char lowercase hex, from read_state)" } },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::DeleteChat {
@@ -487,17 +574,18 @@ fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface.",
+            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them.",
             schema: || json!({
                 "type": "object",
-                "properties": { "surface": { "type": "string", "enum": surface_enum() } },
+                "properties": {
+                    "surface": { "type": "string", "enum": surface_enum() },
+                    "channel": channel_schema("optional, chat only: return just this channel's messages (the channel enumeration still lists every channel)")
+                },
                 "required": ["surface"]
             }),
             build: |args| Ok(Command::ReadState {
                 surface: surface_arg(args)?,
-                // the channel filter joins the schema with the MCP package
-                // (B3); the command field is frozen here
-                channel: None,
+                channel: channel_arg(args)?,
             }),
         },
         ToolDef {
@@ -945,6 +1033,244 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(before, names.len(), "duplicate tool names");
+    }
+
+    /// Find one tool in the catalogue by name.
+    fn tool_named(name: &str) -> ToolDef {
+        tools()
+            .into_iter()
+            .find(|t| t.name == name)
+            .expect("tool exists in the catalogue")
+    }
+
+    /// Run a tool's build closure against literal JSON arguments.
+    fn build(name: &str, args: &Value) -> Result<Command, String> {
+        (tool_named(name).build)(args)
+    }
+
+    /// A well-formed message id for the argument-mapping tests.
+    const HEX_ID: &str = "00112233445566778899aabbccddeeff";
+
+    #[test]
+    fn chat_send_accepts_channel_and_quote_id() {
+        // The schema exposes the channel object and the quote id.
+        let schema = (tool_named("chat_send").schema)();
+        let channel = &schema["properties"]["channel"];
+        assert_eq!(channel["type"], "object");
+        assert_eq!(
+            channel["properties"]["kind"]["enum"],
+            json!(["group", "patch", "topic"])
+        );
+        assert!(channel["properties"]["id"].is_object());
+        assert!(channel["properties"]["name"].is_object());
+        assert_eq!(schema["properties"]["quote"]["type"], "string");
+        assert_eq!(schema["required"], json!(["body"]));
+
+        // Omitted channel → the all-hands group (the default view).
+        match build("chat_send", &json!({ "body": "hi" })).expect("plain send builds") {
+            Command::Chat {
+                body,
+                quote,
+                channel,
+            } => {
+                assert_eq!(body, "hi");
+                assert_eq!(quote, None);
+                assert_eq!(channel, ChannelRef::Group);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Explicit group.
+        match build(
+            "chat_send",
+            &json!({ "body": "hi", "channel": { "kind": "group" } }),
+        )
+        .expect("group send builds")
+        {
+            Command::Chat { channel, .. } => assert_eq!(channel, ChannelRef::Group),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Patch channel by proposal id.
+        match build(
+            "chat_send",
+            &json!({ "body": "hi", "channel": { "kind": "patch", "id": 7 } }),
+        )
+        .expect("patch send builds")
+        {
+            Command::Chat { channel, .. } => {
+                assert_eq!(channel, ChannelRef::Patch { id: ProposalId(7) });
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Topic channel — normalized exactly like the engine (trimmed).
+        match build(
+            "chat_send",
+            &json!({ "body": "hi", "channel": { "kind": "topic", "name": "  Budget " } }),
+        )
+        .expect("topic send builds")
+        {
+            Command::Chat { channel, .. } => {
+                assert_eq!(
+                    channel,
+                    ChannelRef::Topic {
+                        name: "Budget".to_string()
+                    }
+                );
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Quote by hex id.
+        match build("chat_send", &json!({ "body": "hi", "quote": HEX_ID }))
+            .expect("quoted send builds")
+        {
+            Command::Chat { quote, .. } => {
+                assert_eq!(quote, Some(HEX_ID.parse().expect("valid id")));
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_state_accepts_a_channel_filter() {
+        // The schema exposes the same channel object, optional.
+        let schema = (tool_named("read_state").schema)();
+        assert_eq!(
+            schema["properties"]["channel"]["properties"]["kind"]["enum"],
+            json!(["group", "patch", "topic"])
+        );
+        assert_eq!(schema["required"], json!(["surface"]));
+
+        // No filter → the whole log.
+        match build("read_state", &json!({ "surface": "chat" })).expect("unfiltered read builds") {
+            Command::ReadState { channel, .. } => assert_eq!(channel, None),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // An explicit null filter is the same as no filter.
+        match build("read_state", &json!({ "surface": "chat", "channel": null }))
+            .expect("null filter builds")
+        {
+            Command::ReadState { channel, .. } => assert_eq!(channel, None),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Filter by patch channel.
+        match build(
+            "read_state",
+            &json!({ "surface": "chat", "channel": { "kind": "patch", "id": 3 } }),
+        )
+        .expect("patch filter builds")
+        {
+            Command::ReadState { channel, .. } => {
+                assert_eq!(channel, Some(ChannelRef::Patch { id: ProposalId(3) }));
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Filter by topic — normalized like the engine, so both sides agree.
+        match build(
+            "read_state",
+            &json!({ "surface": "chat", "channel": { "kind": "topic", "name": " ops " } }),
+        )
+        .expect("topic filter builds")
+        {
+            Command::ReadState { channel, .. } => {
+                assert_eq!(
+                    channel,
+                    Some(ChannelRef::Topic {
+                        name: "ops".to_string()
+                    })
+                );
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Explicit group filter.
+        match build(
+            "read_state",
+            &json!({ "surface": "chat", "channel": { "kind": "group" } }),
+        )
+        .expect("group filter builds")
+        {
+            Command::ReadState { channel, .. } => assert_eq!(channel, Some(ChannelRef::Group)),
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn react_delete_download_remove_take_hex_ids() {
+        // The happy path: each id-addressed tool builds its command.
+        let id: MessageId = HEX_ID.parse().expect("valid id");
+        match build("react_chat", &json!({ "id": HEX_ID, "emoji": "👍" })).expect("react builds") {
+            Command::ReactChat { id: got, emoji } => {
+                assert_eq!(got, id);
+                assert_eq!(emoji, "👍");
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        match build("delete_chat", &json!({ "id": HEX_ID })).expect("delete builds") {
+            Command::DeleteChat { id: got } => assert_eq!(got, id),
+            other => panic!("wrong command: {other:?}"),
+        }
+        match build("download_file", &json!({ "id": HEX_ID })).expect("download builds") {
+            Command::DownloadFile { id: got } => assert_eq!(got, id),
+            other => panic!("wrong command: {other:?}"),
+        }
+        match build("remove_file", &json!({ "id": HEX_ID })).expect("remove builds") {
+            Command::RemoveFile { id: got } => assert_eq!(got, id),
+            other => panic!("wrong command: {other:?}"),
+        }
+
+        // Malformed ids are clean errors on every id tool — never a panic,
+        // never silently treated as absent.
+        let bad_ids = [
+            json!("0011"),                             // wrong length
+            json!("zz112233445566778899aabbccddeeff"), // non-hex
+            json!("00112233445566778899AABBCCDDEEFF"), // uppercase
+            json!(5),                                  // present but not a string
+            json!(null),                               // required, so null is missing
+        ];
+        for bad in &bad_ids {
+            for tool in ["react_chat", "delete_chat", "download_file", "remove_file"] {
+                let args = json!({ "id": bad, "emoji": "👍" });
+                assert!(
+                    build(tool, &args).is_err(),
+                    "{tool} accepted the bad id {bad}"
+                );
+            }
+        }
+
+        // A PRESENT quote of the wrong type or shape is an error — not
+        // silently treated as absent; only absent/null means "no quote".
+        assert!(build("chat_send", &json!({ "body": "x", "quote": 5 })).is_err());
+        assert!(build("chat_send", &json!({ "body": "x", "quote": true })).is_err());
+        assert!(build("chat_send", &json!({ "body": "x", "quote": "ABC" })).is_err());
+        match build("chat_send", &json!({ "body": "x", "quote": null })).expect("null = no quote") {
+            Command::Chat { quote, .. } => assert_eq!(quote, None),
+            other => panic!("wrong command: {other:?}"),
+        }
+
+        // The channel object is equally strict on both tools that take it.
+        let long_name = "x".repeat(65);
+        let bad_channels = [
+            json!({ "kind": "dm" }),                    // unknown kind
+            json!({ "kind": 3 }),                       // kind of the wrong type
+            json!({}),                                  // no kind at all
+            json!({ "kind": "patch" }),                 // missing id
+            json!({ "kind": "patch", "id": "7" }),      // id of the wrong type
+            json!({ "kind": "patch", "id": -1 }),       // negative id
+            json!({ "kind": "topic" }),                 // missing name
+            json!({ "kind": "topic", "name": "   " }),  // empty after trim
+            json!({ "kind": "topic", "name": 3 }),      // name of the wrong type
+            json!({ "kind": "topic", "name": long_name }), // over the 64-char cap
+            json!("group"),                             // not an object
+            json!(7),                                   // not an object
+        ];
+        for bad in &bad_channels {
+            assert!(
+                build("chat_send", &json!({ "body": "x", "channel": bad })).is_err(),
+                "chat_send accepted the bad channel {bad}"
+            );
+            assert!(
+                build("read_state", &json!({ "surface": "chat", "channel": bad })).is_err(),
+                "read_state accepted the bad channel {bad}"
+            );
+        }
     }
 
     #[tokio::test]
