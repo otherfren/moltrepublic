@@ -80,6 +80,16 @@ pub enum NetError {
     /// A cryptographic operation failed (wrap/unwrap, RNG).
     #[error("crypto: {0}")]
     Crypto(String),
+    /// Tor is selected but the circuit could not be reached right now (proxy
+    /// down, circuit build/handshake timed out). A transient runtime state —
+    /// surfaced as the amber/red transport-health pill, retryable.
+    #[error("tor unavailable: {0}")]
+    TorUnavailable(String),
+    /// Tor is selected but misconfigured so no dial is even attempted
+    /// (embedded build missing, unknown mode, `nym` not implemented). A
+    /// fail-closed config error, never a silent clearnet fallback.
+    #[error("tor misconfigured: {0}")]
+    TorMisconfigured(String),
 }
 
 /// A queue id: random, meaningless bytes — no accounts, no user identifiers.

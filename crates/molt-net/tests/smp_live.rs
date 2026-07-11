@@ -29,7 +29,7 @@ const PUBLIC_ED448: &str =
 #[ignore = "makes a real TLS connection to smp.konkin.io"]
 async fn konkin_server_pins_and_connects() {
     let s = SmpServer::parse(KONKIN).expect("parse");
-    tls::test_connection(&s)
+    tls::test_connection(&tls::Dialer::Direct, &s)
         .await
         .expect("TLS+ALPN+pin against smp.konkin.io");
     println!("OK: TLS 1.3 + ALPN smp/1 + fingerprint pin against {}", s.host);
@@ -42,7 +42,7 @@ async fn public_ed448_server_pins_and_connects() {
     // Ed448 verifier (RFC 8032, wired into the rustls provider) now
     // handshakes with them — no C toolchain, every SimpleX server covered.
     let s = SmpServer::parse(PUBLIC_ED448).expect("parse");
-    tls::test_connection(&s)
+    tls::test_connection(&tls::Dialer::Direct, &s)
         .await
         .expect("TLS+ALPN+pin against the official Ed448 server smp8.simplex.im");
     println!("OK: Ed448 official server {} pins and connects", s.host);
@@ -55,7 +55,7 @@ async fn wrong_fingerprint_is_rejected() {
     // must reject it, proving the check has teeth (anti-downgrade/MITM)
     let bad = "smp://bU0K-bRg0FEOTKArHrx40e6L1lDzz6i8kdcKMV-vMWo=@smp.konkin.io";
     let s = SmpServer::parse(bad).expect("parse");
-    let err = tls::test_connection(&s)
+    let err = tls::test_connection(&tls::Dialer::Direct, &s)
         .await
         .expect_err("a mismatched fingerprint must be rejected");
     println!("OK: mismatched pin rejected: {err}");

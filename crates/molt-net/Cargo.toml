@@ -12,6 +12,17 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Embedded in-process Tor via arti (transport concept §4, T4 §P3). Default
+# OFF so the reproducible core build stays lean and the default Cargo.lock is
+# unperturbed. The cfg-gated `Dialer::Arti` scaffolding (smp/tls.rs) compiles
+# under this feature at Stage A; **Stage B (B2)** wires the real dependency
+# link here — `embedded-tor = ["dep:arti-client", "dep:tor-rtcompat"]` with
+# both deps `optional = true` — once it has pinned compatible, pure-Rust
+# (no C toolchain) arti versions. Kept dep-less until then so this pass adds
+# nothing to the default dependency graph.
+embedded-tor = []
+
 [dependencies]
 molt-core.workspace = true
 serde.workspace = true
@@ -44,3 +55,8 @@ openmls_rust_crypto.workspace = true
 openmls_basic_credential.workspace = true
 tls_codec.workspace = true
 bincode.workspace = true
+
+[dev-dependencies]
+# `test-util` (paused-clock auto-advance) drives the bounded-dial-timeout test
+# without a 30 s real wait. Dev-only: the default build graph is unchanged.
+tokio = { workspace = true, features = ["test-util"] }
