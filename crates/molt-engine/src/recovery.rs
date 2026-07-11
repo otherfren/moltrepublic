@@ -15,7 +15,15 @@ use crate::Envelope;
 use molt_core::Command;
 use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::{invite, msg_id, supervisor, QueueId, SndQueueAddr, Transport, WrapKey};
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// How long a rejoiner waits for the coordinator's `Welcome` after sending its
+/// `RecoverRequest`. The window spans the survivors' **human** m-of-n approval
+/// of the restore proposal, hence generous; on expiry the operator's failover
+/// is to mint a fresh recovery link on any survivor and retry (decision
+/// 2026-07-11).
+pub const RECOVERY_WELCOME_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// A recovery link — `molt://recover/<republic>/<member>/<ticket>/<handover>` —
 /// mirroring [`crate::FoundingInvite`], but for an *existing* seat. It carries a
@@ -335,11 +343,31 @@ pub struct RejoinOutcome {
 /// it also re-establishes the runtime mesh ([`rejoin_mesh`], best-effort) after
 /// the chain verified — the engine's production path; tests that only exercise
 /// the crypto/ritual core pass `false`.
+///
+/// The wait for the Welcome is bounded by [`RECOVERY_WELCOME_TIMEOUT`]
+/// (see [`run_rejoin_with_timeout`]) — a coordinator that dies after the
+/// request surfaces as an error instead of hanging the rejoiner forever.
 pub async fn run_rejoin<T: Transport>(
     transport: T,
     inv: RecoveryInvite,
     phrase: &str,
     bootstrap: bool,
+) -> Result<RejoinOutcome, String> {
+    run_rejoin_with_timeout(transport, inv, phrase, bootstrap, RECOVERY_WELCOME_TIMEOUT).await
+}
+
+/// [`run_rejoin`] with an explicit bound on the welcome wait: the ritual fails
+/// with a "timed out" error once `welcome_timeout` elapses without the
+/// coordinator's `Welcome`. The deadline is **absolute** — computed once when
+/// the wait starts — so noise frames on the reply queue (which the loop
+/// ignores) cannot extend it. The operator's failover on expiry is minting a
+/// fresh recovery link on any survivor.
+pub async fn run_rejoin_with_timeout<T: Transport>(
+    transport: T,
+    inv: RecoveryInvite,
+    phrase: &str,
+    bootstrap: bool,
+    welcome_timeout: Duration,
 ) -> Result<RejoinOutcome, String> {
     // per-seat identity, deterministic from the phrase — the SAME key the
     // genesis roster anchors, so the coordinator's seat-proof check passes and
@@ -397,10 +425,21 @@ pub async fn run_rejoin<T: Transport>(
     .map_err(|e| e.to_string())?;
 
     // await the coordinator's Welcome, then rejoin the group. Anything else on
-    // the reply queue is ignored (only the Welcome finishes the rejoin).
+    // the reply queue is ignored (only the Welcome finishes the rejoin). The
+    // deadline is ABSOLUTE — computed once, before the loop — so ignored noise
+    // frames cannot extend the wait.
+    let deadline = tokio::time::Instant::now() + welcome_timeout;
     let mut reasm = molt_net::Reassembler::new();
     loop {
-        let Some(delivery) = rx.recv().await else {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(received) = tokio::time::timeout(remaining, rx.recv()).await else {
+            return Err(format!(
+                "timed out waiting for the coordinator's welcome after {}s — the coordinator \
+                 may be gone; mint a fresh recovery link on any survivor and retry",
+                welcome_timeout.as_secs()
+            ));
+        };
+        let Some(delivery) = received else {
             return Err("recovery reply queue closed before the welcome arrived".to_string());
         };
         let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
@@ -761,6 +800,45 @@ mod tests {
         .await
         .expect("the welcome arrives in time");
         assert_eq!(got, hex::encode(&welcome));
+    }
+
+    /// A coordinator that dies after receiving the `RecoverRequest` must not
+    /// hang the rejoiner forever: the welcome wait is bounded, and expiry
+    /// surfaces as an error telling the operator to mint a fresh link on any
+    /// survivor (decision A1, 2026-07-11).
+    #[tokio::test]
+    async fn a_dead_coordinator_times_the_rejoin_out() {
+        use molt_net::LoopbackHub;
+
+        let hub = LoopbackHub::calm();
+        let transport = hub.transport();
+        // a real queue NOBODY serves — the coordinator "died" after minting it
+        let dead_q = transport.create_queue().await.expect("coordinator queue");
+        let wrap = WrapKey::fresh().expect("wrap");
+        let inv = RecoveryInvite {
+            republic: "Guild".to_string(),
+            member: "walter".to_string(),
+            ticket: "0011223344".to_string(),
+            server: dead_q.snd.server.clone(),
+            queue_id: hex::encode(&dead_q.snd.id.0),
+            wrap: hex::encode(wrap.to_bytes()),
+            // any hex string — the ritual times out before the id matters
+            republic_id: "f00dbabe".to_string(),
+        };
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+
+        // outer guard: the bounded rejoin must return WELL before this trips
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_rejoin_with_timeout(transport, inv, &phrase, false, Duration::from_millis(300)),
+        )
+        .await
+        .expect("the bounded rejoin returns before the outer guard trips");
+        let err = result.expect_err("a dead coordinator must surface as an error");
+        assert!(
+            err.contains("timed out waiting for the coordinator's welcome"),
+            "the error names the timeout and the failover, got: {err}"
+        );
     }
 
     #[test]
