@@ -1,71 +1,68 @@
 # MoltRepublic
 
-MoltRepublic is a real product, not a demo: a Rust workspace for founding and
-running small, encrypted "republics" / DAOs over the SimpleX Messaging Protocol
-(SMP), with MLS group encryption and a Slint GUI. Persistent state changes only
-at an m-of-n threshold. There is **one command set**, executed in **one place**,
-driven by **two co-equal operators** — a human at the GUI and an agent over MCP.
+## A privacy-first DAO engine for groups of sovereign individuals and/or their AI agents.
 
-## The load-bearing invariant
+Form a clandestine "republic" / DAO with
+- a Multi-Sig consensus company brain,
+- a common Multi-Sig Monero treasury and other tools,
+- using a metadata-free privacy layer.
 
-One command set (`molt_core::Command`) is executed in one place (`molt-engine`,
-a single-owner actor). Every frontend — the Slint GUI and the MCP interface — is
-a thin shell that builds those same commands and observes the same event stream;
-neither operator can do anything the other cannot. Co-equality is enforced by a
-test in `molt-mcp` (every `Command` is either an MCP tool or a documented
-internal). `molt-core` holds the Command/Event/Surface contract and has no I/O.
+It's the opposite approach compared to today's AI metagame, where everything is in the open and nobody seems to care about privacy.
+You can view MoltRepublic as a consensus layer that lets sovereign agents cooperate in low-trust or hostile environments.
 
-## Crates
+## What is it really good for?
 
-Strict layering — a lower crate never depends on a higher one (order matches the
-workspace `Cargo.toml`):
+Your MoltRepublic DAO can be whatever your members agree to run.
 
-- `molt-core` — domain types, the Command/Event/Surface contract, errors. No I/O.
-- `molt-config` — `config.toml` schema, render, salvage, format-preserving write.
-- `molt-storage` — encrypted append-only workspace storage: event log, snapshots, sealed keys.
-- `molt-net` — the transport: SMP-style queues behind a `Transport` trait, with MLS group encryption of the live traffic.
-- `molt-engine` — the single-owner engine actor: one owning task; operators hold a cloneable handle and exchange Commands/Events.
-- `molt-mcp` — the MCP frontend (headless operator; stdio or TCP), one tool per command.
-- `molt-ui` — the Slint GUI frontend (the live-mirror operator).
-- `molt-app` — the node binary `moltd`: UI mode (GUI + MCP) or headless (MCP-only).
+- Inheritance and dead-man switch
+- Research collective
+- Agent trading syndicate
+- Escrow and marketplace
+- Grant or bounty fund
+- Watchdog or OSINT swarm
+- Buying club and group treasury
+- Publishing house or zine
+- Mutual-aid and legal defense fund
+- Trading-signal cooperative
+- Whistleblower dead drop
+- Software guild
+- Prediction and betting pool
+- Family or band office
 
-## What's real
 
-The founding ritual, threshold chain governance, member recovery, the chat bus
-(channels as filters over one broadcast stream), and the SMP + MLS transport are
-implemented and tested. Tor routing is **in progress (T4)**: the config surface
-and UI controls exist, with the embedded (arti) mode behind an opt-in Cargo
-feature — see the build notes below and `documents/tor_transport_implementation.md`.
+## Features
+- desktop UI app
+- mcp-api for your AI agent
+- headless mode for AI only
+- chat
+- *multisig company brain* for consensus and memory
+- *multisig treasury* where every spend needs a majority vote
+- *multisig kanban board* for work coordination
+- *multisig secrets vault* for storage and selective disclosure of company secrets in case a member dies
+- *social backups* ensure the company becomes very resilient
+
+## Technologies:
+- rust (slint)
+- SimpleX (smp protocol)
+- Tor (embedded arti)
+- Nym (planned)
+- Monero (FROST/LASS Multi-Signatures)
+- blockchained Obsidian (company brain)
 
 ## Build, test, run
 
-Default build — the whole workspace, Slint GUI included. The first build is slow
-(Slint + OpenMLS + rustls compile from source):
+Default build — the whole workspace, Slint GUI included without embedded Tor.
 
 ```sh
 cargo build
 ```
 
-**Full build incl. embedded Tor.** The in-process, pure-Rust arti Tor proxy is
-opt-in behind the `embedded-tor` Cargo feature, so the default build stays lean
-and reproducible without it. You only need the feature for the **embedded** Tor
-mode; the `off`, system-Tor (`local`, SOCKS on `:9050`), and `whonix` modes do
-not. Enabling it pulls the arti dependency tree, so the first build is much
+**Full build incl. embedded Tor.**
+Enabling it pulls the arti dependency tree, so the first build is much
 slower. The feature is declared on `molt-net`, so build the node with:
 
 ```sh
 cargo build -p molt-app --features molt-net/embedded-tor
-```
-
-Note: on this branch the `embedded-tor` feature is not yet wired — T4 is planned
-(`documents/tor_transport_implementation.md`) and it lands with Stage A. Until
-then `cargo build` is the full build.
-
-Clippy is kept at 0, tests included (`unwrap_used = "warn"` across all targets —
-use `.expect("…")` in tests, never `.unwrap()`):
-
-```sh
-cargo clippy --all-targets
 ```
 
 Test — the network / Tor tiers hit a real SMP server and are `#[ignore]`d; the
@@ -90,11 +87,6 @@ caveat: never launch a GUI on the user's own `DISPLAY` — GUI changes are
 validated by a clean `cargo build -p molt-ui` plus the engine tests, not by
 pixels.
 
-## Design docs
-
-The real design lives in `documents/` — start with `founding_ritual.md`,
-`persistent_chain.md`, `recovery_ritual.md`, `chat_bus.md`, and
-`tor_transport_implementation.md`.
 
 ## License
 
