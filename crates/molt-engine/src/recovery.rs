@@ -13,6 +13,7 @@
 use crate::founding::RitualTransport;
 use crate::Envelope;
 use molt_core::Command;
+use molt_net::smp::tls::Dialer;
 use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::{invite, msg_id, supervisor, QueueId, SndQueueAddr, Transport, WrapKey};
 use std::time::Duration;
@@ -708,9 +709,10 @@ pub async fn rejoin_over_smp(
     link: &str,
     phrase: &str,
     bootstrap: bool,
+    dialer: Dialer,
 ) -> Result<RejoinOutcome, String> {
     let inv = RecoveryInvite::parse(link).ok_or("not an actionable recovery link")?;
-    let transport = transport_for(&inv)?;
+    let transport = transport_for(&inv, dialer)?;
     run_rejoin(transport, inv, phrase, bootstrap).await
 }
 
@@ -719,9 +721,9 @@ pub async fn rejoin_over_smp(
 /// clone in its transport slot BEFORE the rejoin consumes it (the clone's `Arc`
 /// owns the re-established mesh queues' receive credentials the runtime
 /// supervisor must reuse — the SMP subscribe gotcha).
-pub(crate) fn transport_for(inv: &RecoveryInvite) -> Result<RitualTransport, String> {
+pub(crate) fn transport_for(inv: &RecoveryInvite, dialer: Dialer) -> Result<RitualTransport, String> {
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
-    Ok(RitualTransport::Smp(SmpTransport::new(server)))
+    Ok(RitualTransport::Smp(SmpTransport::with_dialer(server, dialer)))
 }
 
 #[cfg(test)]

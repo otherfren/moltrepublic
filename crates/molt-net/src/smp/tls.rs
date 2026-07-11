@@ -12,6 +12,7 @@
 //! so no C toolchain — matches the reproducible-build envelope).
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
@@ -19,6 +20,7 @@ use rustls::pki_types::{alg_id, AlgorithmIdentifier, CertificateDer, InvalidSign
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::{client::TlsStream, TlsConnector};
 
 use crate::smp::ed448;
@@ -27,6 +29,12 @@ use crate::NetError;
 
 /// ALPN protocol identifier for SMP v1.
 const ALPN_SMP: &[u8] = b"smp/1";
+
+/// Deadline for opening the raw socket (TCP connect incl. SOCKS negotiation /
+/// Tor circuit build) — sized for a cold Tor circuit (T4 §P5).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for the TLS 1.3 handshake once the socket is open (T4 §P5).
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Ed448 signature/key OID (1.3.101.113), dotted form for cert dispatch.
 const OID_ED448: &str = "1.3.101.113";
 
@@ -227,10 +235,26 @@ fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
     Ok(config)
 }
 
+/// A handle to an in-process arti Tor client. Only exists under
+/// `--features embedded-tor`; **Stage B fills this** with the bootstrapped
+/// `TorClient` + the per-server isolation-token map. Declared here so the
+/// routing contract ([`Dialer::resolve`]) is complete at Stage A.
+#[cfg(feature = "embedded-tor")]
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct ArtiHandle {
+    // Stage B fills this (bootstrapped arti client + isolation tokens).
+    seam: (),
+}
+
 /// How to reach an SMP server's TCP socket. `Direct` is clearnet/loopback;
-/// `Socks5` routes through a SOCKS5h proxy (Tor `local`/`whonix`), one circuit
-/// per server host (stream isolation, concept §4). Default is `Direct` so the
-/// clearnet path is unchanged until Tor is explicitly configured.
+/// `Socks5` routes through a SOCKS5h proxy (Tor `local`/`whonix`); `Arti`
+/// (embedded build only) routes through an in-process Tor client. `Direct`
+/// is the default so the clearnet path is unchanged until Tor is configured.
+///
+/// The routing decision is fail-closed and lives in exactly one place,
+/// [`Dialer::resolve`]: under `network = tor` there is **no** path to
+/// `Direct` (transport concept §6, T4 §P1).
 #[derive(Clone, Debug, Default)]
 pub enum Dialer {
     /// Direct TCP — no Tor.
@@ -240,40 +264,145 @@ pub enum Dialer {
     Socks5 {
         /// The proxy's `host:port` (a Tor SOCKS listener).
         proxy: String,
+        /// A per-session random isolation prefix. The SOCKS username is
+        /// `molt-<session>-<host>` so each server host gets its own Tor
+        /// circuit (stream isolation) and the circuit set is fresh each run
+        /// (no cross-session linkability). Minted once in [`Dialer::resolve`].
+        session: String,
     },
+    /// In-process arti Tor client (only built with `--features embedded-tor`).
+    #[cfg(feature = "embedded-tor")]
+    #[allow(dead_code)]
+    Arti(ArtiHandle),
+}
+
+/// Mint a per-session random isolation prefix (8 bytes, hex).
+fn session_token() -> Result<String, NetError> {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b)
+        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
+    Ok(hex::encode(b))
 }
 
 impl Dialer {
-    /// Map the transport config to a dialer: `local` → SOCKS5h at
-    /// `127.0.0.1:<tor_port>`, `whonix` → the gateway's SOCKS listener,
-    /// everything else (`off`/`direct`/`embedded`-arti-later/unknown) → direct.
-    /// This is the one place that decides whether SMP goes through Tor; wiring
-    /// it into the engine's `SmpTransport` construction is the enable step.
-    pub fn from_config(tor_mode: &str, tor_port: u16) -> Dialer {
-        match tor_mode {
-            "local" => Dialer::Socks5 {
-                proxy: format!("127.0.0.1:{tor_port}"),
+    /// Resolve the transport config to a dialer — the **single, fail-closed**
+    /// routing decision (T4 §P1):
+    ///
+    /// - `network = none` → [`Dialer::Direct`] (clearnet).
+    /// - `network = tor, mode = local` → SOCKS5h at `127.0.0.1:<port>`.
+    /// - `network = tor, mode = whonix` → SOCKS5h at the gateway `10.152.152.10:9050`.
+    /// - `network = tor, mode = embedded` → the arti dialer with
+    ///   `--features embedded-tor`, else [`NetError::TorMisconfigured`].
+    /// - `network = tor`, unknown mode → [`NetError::TorMisconfigured`].
+    /// - `network = nym` → [`NetError::TorMisconfigured`] (not implemented).
+    /// - unknown network → [`NetError::TorMisconfigured`].
+    ///
+    /// There is **no input under `network = tor` that yields `Direct`** — the
+    /// whole fail-closed guarantee, concentrated here.
+    pub fn resolve(network: &str, mode: &str, port: u16) -> Result<Dialer, NetError> {
+        match network {
+            "none" => Ok(Dialer::Direct),
+            "tor" => match mode {
+                "local" => Dialer::socks5(format!("127.0.0.1:{port}")),
+                "whonix" => Dialer::socks5("10.152.152.10:9050".to_string()),
+                "embedded" => Dialer::resolve_embedded(port),
+                other => Err(NetError::TorMisconfigured(format!(
+                    "unknown tor mode `{other}` (expected local | embedded | whonix)"
+                ))),
             },
-            "whonix" => Dialer::Socks5 {
-                proxy: "10.152.152.10:9050".to_string(),
-            },
-            _ => Dialer::Direct,
+            "nym" => Err(NetError::TorMisconfigured("nym not implemented".into())),
+            other => Err(NetError::TorMisconfigured(format!(
+                "unknown anonymity network `{other}` (expected none | tor | nym)"
+            ))),
         }
     }
 
-    /// Open the raw TCP socket to `server` per this dialer.
-    pub async fn dial(&self, server: &SmpServer) -> Result<TcpStream, NetError> {
+    /// A SOCKS5h dialer with a fresh isolation session.
+    fn socks5(proxy: String) -> Result<Dialer, NetError> {
+        Ok(Dialer::Socks5 {
+            proxy,
+            session: session_token()?,
+        })
+    }
+
+    /// Resolve `mode = embedded` (arti). With the feature, Stage B's
+    /// [`arti_dialer`] takes over; without it, fail closed.
+    #[cfg(feature = "embedded-tor")]
+    fn resolve_embedded(port: u16) -> Result<Dialer, NetError> {
+        arti_dialer(port)
+    }
+
+    /// Without the `embedded-tor` feature, `mode = embedded` is a clean
+    /// config error — never a silent clearnet fallback.
+    #[cfg(not(feature = "embedded-tor"))]
+    fn resolve_embedded(_port: u16) -> Result<Dialer, NetError> {
+        Err(NetError::TorMisconfigured(
+            "embedded Tor not built — rebuild with --features embedded-tor".into(),
+        ))
+    }
+
+    /// Whether this dialer routes over Tor (so `.onion` alternates are
+    /// preferred and local DNS never happens).
+    fn tor_on(&self) -> bool {
         match self {
-            Dialer::Direct => TcpStream::connect(server.addr())
-                .await
-                .map_err(|e| NetError::Unreachable(format!("tcp {}: {e}", server.addr()))),
-            Dialer::Socks5 { proxy } => {
-                // one Tor circuit per server host: the isolation token is the host
-                let isolation = format!("molt-{}", server.host);
-                crate::socks5::socks5h_connect(proxy, &server.host, server.port, &isolation).await
-            }
+            Dialer::Direct => false,
+            Dialer::Socks5 { .. } => true,
+            #[cfg(feature = "embedded-tor")]
+            Dialer::Arti(_) => true,
         }
     }
+
+    /// Open the raw TCP socket to `server` per this dialer, honouring the
+    /// onion-preferred [`SmpServer::dial_target`] and a Tor-sized connect
+    /// deadline (T4 §P5).
+    pub async fn dial(&self, server: &SmpServer) -> Result<TcpStream, NetError> {
+        let (host, port) = server.dial_target(self.tor_on());
+        match self {
+            Dialer::Direct => {
+                // a resolver-less direct dial can never reach an .onion — fail
+                // closed with a clear reason instead of a DNS error / hang.
+                if host.ends_with(".onion") {
+                    return Err(NetError::TorMisconfigured(format!(
+                        "server {host} is onion-only but Tor is off — enable Tor to reach it"
+                    )));
+                }
+                let addr = format!("{host}:{port}");
+                timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+                    .await
+                    .map_err(|_| NetError::Unreachable(format!("tcp {addr}: connect timed out")))?
+                    .map_err(|e| NetError::Unreachable(format!("tcp {addr}: {e}")))
+            }
+            Dialer::Socks5 { proxy, session } => {
+                // one Tor circuit per server host: molt-<session>-<host>
+                let isolation = format!("molt-{session}-{host}");
+                timeout(
+                    CONNECT_TIMEOUT,
+                    crate::socks5::socks5h_connect(proxy, host, port, &isolation),
+                )
+                .await
+                .map_err(|_| {
+                    NetError::TorUnavailable(format!(
+                        "tor circuit to {host} via {proxy} timed out"
+                    ))
+                })?
+            }
+            #[cfg(feature = "embedded-tor")]
+            Dialer::Arti(_handle) => Err(NetError::TorUnavailable(
+                // Stage B fills this — dial `host:port` through the arti client.
+                "embedded arti dial not yet built".into(),
+            )),
+        }
+    }
+}
+
+/// Stage B fills this: bootstrap an in-process arti client (to a state dir,
+/// reused, isolation per server) and return [`Dialer::Arti`]. Until then it
+/// fails closed so `network = tor, mode = embedded` never silently leaks.
+#[cfg(feature = "embedded-tor")]
+fn arti_dialer(_port: u16) -> Result<Dialer, NetError> {
+    Err(NetError::TorMisconfigured(
+        "embedded arti not yet built".into(),
+    ))
 }
 
 /// Dial `server` over TCP+TLS 1.3 (through `dialer`), verifying the pinned
@@ -289,9 +418,11 @@ pub async fn connect_tls(
     // rustls requires a valid ServerName
     let sni = ServerName::try_from(server.host.clone())
         .map_err(|_| NetError::Framing(format!("invalid host for SNI: {}", server.host)))?;
-    let tls = connector
-        .connect(sni, tcp)
+    let tls = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, tcp))
         .await
+        .map_err(|_| {
+            NetError::TorUnavailable(format!("tls handshake with {} timed out", server.host))
+        })?
         .map_err(|e| NetError::Crypto(format!("tls handshake with {}: {e}", server.host)))?;
     // confirm the server actually spoke smp/1
     let (_, conn) = tls.get_ref();
@@ -303,11 +434,128 @@ pub async fn connect_tls(
     }
 }
 
-/// A one-shot connectivity check for the settings "Test connection"
-/// button: dial, pin, ALPN — report success or the concrete reason. Does
-/// not run any SMP commands.
-pub async fn test_connection(server: &SmpServer) -> Result<(), NetError> {
-    // the settings probe dials directly; testing over Tor is a later toggle
-    let _tls = connect_tls(&Dialer::Direct, server).await?;
+/// A one-shot connectivity check for the settings "Test connection" button:
+/// dial (through the resolved `dialer`, honouring onion-preferred routing),
+/// pin, ALPN — report success or the concrete reason. Does not run any SMP
+/// commands. An onion-only target under a `Direct` dialer fails closed with a
+/// "requires Tor" reason instead of a clearnet dial (T4 §P7).
+pub async fn test_connection(dialer: &Dialer, server: &SmpServer) -> Result<(), NetError> {
+    let _tls = connect_tls(dialer, server).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FP: &str = "f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=";
+
+    #[test]
+    fn resolve_maps_every_mode_and_fails_closed() {
+        // none -> Direct (clearnet).
+        assert!(matches!(
+            Dialer::resolve("none", "local", 9050).expect("none"),
+            Dialer::Direct
+        ));
+        // tor + local -> SOCKS at 127.0.0.1:<port>.
+        assert!(matches!(
+            Dialer::resolve("tor", "local", 9050).expect("local"),
+            Dialer::Socks5 { proxy, .. } if proxy == "127.0.0.1:9050"
+        ));
+        assert!(matches!(
+            Dialer::resolve("tor", "local", 9150).expect("local port"),
+            Dialer::Socks5 { proxy, .. } if proxy == "127.0.0.1:9150"
+        ));
+        // tor + whonix -> the gateway SOCKS listener.
+        assert!(matches!(
+            Dialer::resolve("tor", "whonix", 9050).expect("whonix"),
+            Dialer::Socks5 { proxy, .. } if proxy == "10.152.152.10:9050"
+        ));
+        // tor + embedded WITHOUT the feature -> fail closed.
+        #[cfg(not(feature = "embedded-tor"))]
+        assert!(matches!(
+            Dialer::resolve("tor", "embedded", 9050),
+            Err(NetError::TorMisconfigured(_))
+        ));
+        // tor + unknown mode, nym, and unknown network all fail closed.
+        assert!(matches!(
+            Dialer::resolve("tor", "nonsense", 9050),
+            Err(NetError::TorMisconfigured(_))
+        ));
+        assert!(matches!(
+            Dialer::resolve("nym", "local", 9050),
+            Err(NetError::TorMisconfigured(_))
+        ));
+        assert!(matches!(
+            Dialer::resolve("bogus", "local", 9050),
+            Err(NetError::TorMisconfigured(_))
+        ));
+
+        // THE fail-closed guarantee: no input under network=tor yields Direct.
+        for mode in ["local", "whonix", "embedded", "", "nonsense"] {
+            if let Ok(d) = Dialer::resolve("tor", mode, 9050) {
+                assert!(
+                    !matches!(d, Dialer::Direct),
+                    "network=tor mode={mode} must never resolve to Direct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn isolation_token_is_session_random() {
+        // two resolves mint distinct isolation sessions (no cross-session
+        // circuit linkability).
+        let a = Dialer::resolve("tor", "local", 9050).expect("a");
+        let b = Dialer::resolve("tor", "local", 9050).expect("b");
+        let (Dialer::Socks5 { session: sa, .. }, Dialer::Socks5 { session: sb, .. }) = (a, b)
+        else {
+            panic!("expected socks dialers");
+        };
+        assert_ne!(sa, sb, "session token must be random per resolve");
+    }
+
+    #[test]
+    fn direct_never_targets_onion() {
+        // an onion-only server dialed Direct fails closed (no clearnet dial,
+        // no hang) — the resolver-less path cannot reach .onion.
+        let onion = SmpServer::parse(&format!("smp://{FP}@abcd.onion")).expect("onion");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let res = rt.block_on(Dialer::Direct.dial(&onion));
+        assert!(
+            matches!(res, Err(NetError::TorMisconfigured(_))),
+            "got {res:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dial_timeout_is_bounded() {
+        use tokio::net::TcpListener;
+        // a black-hole SOCKS proxy: accepts the connection and never replies.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s); // hold open, never respond
+            }
+        });
+        let dialer = Dialer::Socks5 {
+            proxy: addr.to_string(),
+            session: "test".to_string(),
+        };
+        let server = SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server");
+        let started = tokio::time::Instant::now();
+        let res = dialer.dial(&server).await;
+        let elapsed = started.elapsed();
+        // returns cleanly (never an infinite await), bounded by the deadline.
+        assert!(matches!(res, Err(NetError::TorUnavailable(_))), "got {res:?}");
+        assert!(
+            elapsed <= CONNECT_TIMEOUT + Duration::from_secs(5),
+            "elapsed {elapsed:?} exceeds the connect deadline"
+        );
+    }
 }

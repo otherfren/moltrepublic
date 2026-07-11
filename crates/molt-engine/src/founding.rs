@@ -17,6 +17,7 @@
 //! Every leg lands in the wizard's live log as a real event.
 
 use molt_core::{Command, MemberId, MemberIdentity, RosterAttestation};
+use molt_net::smp::tls::Dialer;
 use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::supervisor;
 use molt_net::{
@@ -43,9 +44,10 @@ pub(crate) const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Durati
 pub(crate) fn reopen_transport(
     mesh: &[molt_core::MeshLink],
     creds: &[u8],
+    dialer: Dialer,
 ) -> Option<RitualTransport> {
     let server = mesh.iter().map(|l| l.snd_server.trim()).find(|s| !s.is_empty())?;
-    let t = SmpTransport::new(SmpServer::parse(server).ok()?);
+    let t = SmpTransport::with_dialer(SmpServer::parse(server).ok()?, dialer);
     t.import_creds(creds);
     Some(RitualTransport::Smp(t))
 }
@@ -360,7 +362,16 @@ impl State {
                 molt_config::default_public_smp()
             };
             let server = SmpServer::parse(url.trim()).map_err(|e| e.to_string())?;
-            let transport = RitualTransport::Smp(SmpTransport::new(server));
+            // fail-closed: resolve the dialer from settings; a TorMisconfigured
+            // aborts the founding with the reason and sets the health pill.
+            let dialer = match self.resolve_dialer() {
+                Ok(dialer) => dialer,
+                Err(reason) => {
+                    self.emit_session(molt_core::SessionScope::Full);
+                    return Err(reason);
+                }
+            };
+            let transport = RitualTransport::Smp(SmpTransport::with_dialer(server, dialer));
             // SMP queue creation is async: provision off the actor, wire each
             // seat's recv loop, then hand the material out
             spawn_smp_provisioning(
@@ -923,6 +934,7 @@ pub async fn ritual_join_over_smp(
     bootstrap: bool,
     ratify: Option<Ratifier>,
     cancel: Option<mpsc::Receiver<()>>,
+    dialer: Dialer,
 ) -> Result<JoinResult, String> {
     let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
@@ -931,11 +943,12 @@ pub async fn ritual_join_over_smp(
         .try_into()
         .map_err(|_| "bad wrap key length".to_string())?;
     let queue_id = hex::decode(&inv.queue_id).map_err(|e| e.to_string())?;
-    // our OWN transport to the founder's server — not the founder's. Keep a
-    // clone (SMP clones share the recipient-key store) to hand back for the
-    // runtime supervisor: it must reuse THIS instance to subscribe to the
-    // inbound queues the bootstrap created.
-    let transport = RitualTransport::Smp(SmpTransport::new(server.clone()));
+    // our OWN transport to the founder's server — not the founder's, routed
+    // through the resolved `dialer` (Tor when configured). Keep a clone (SMP
+    // clones share the recipient-key store) to hand back for the runtime
+    // supervisor: it must reuse THIS instance to subscribe to the inbound
+    // queues the bootstrap created.
+    let transport = RitualTransport::Smp(SmpTransport::with_dialer(server.clone(), dialer));
     let material = InviteMaterial {
         seat: inv.seat,
         transport: transport.clone(),
@@ -983,12 +996,14 @@ pub async fn join_founding_over_smp(
     name: String,
     phrase: String,
     root: &std::path::Path,
+    dialer: Dialer,
 ) -> Result<molt_core::WorkspaceId, String> {
     // bootstrap=false: this standalone one-shot writes a workspace and returns
     // (no running engine to host a runtime supervisor); the live product join is
     // cmd_join_start, which bootstraps. A future CLI that keeps a node running
     // would pass true and persist the mesh (the plumbing below already handles it).
-    let result = ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None).await?;
+    let result =
+        ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None, dialer).await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;

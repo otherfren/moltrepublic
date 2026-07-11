@@ -19,8 +19,11 @@
 //! unsigned `PING`→`PONG` round-trip need no queue crypto, so they pin the
 //! framing before `NEW` (which needs signing) is attempted.
 
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::client::TlsStream;
 
 use crate::smp::server::SmpServer;
@@ -29,6 +32,9 @@ use crate::NetError;
 
 /// One SMP transport block.
 pub const BLOCK_LEN: usize = 16384;
+/// Deadline for reading or writing one transport block — sized for Tor so a
+/// stalled circuit becomes a clean error, never an infinite await (T4 §P5).
+const BLOCK_IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Padding byte SMP fills blocks with.
 const PAD: u8 = b'#';
 /// corrId marker for a present 24-byte id.
@@ -377,9 +383,9 @@ impl SmpConn {
     /// Read one 16 384-byte block and return its `content` slice (unpadded).
     async fn read_block(&mut self) -> Result<Vec<u8>, NetError> {
         let mut buf = vec![0u8; BLOCK_LEN];
-        self.tls
-            .read_exact(&mut buf)
+        timeout(BLOCK_IO_TIMEOUT, self.tls.read_exact(&mut buf))
             .await
+            .map_err(|_| NetError::TorUnavailable("smp read timed out".into()))?
             .map_err(|e| NetError::Unreachable(format!("smp read: {e}")))?;
         let len = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
         if 2 + len > BLOCK_LEN {
@@ -401,13 +407,13 @@ impl SmpConn {
         );
         block.extend_from_slice(content);
         block.resize(BLOCK_LEN, PAD);
-        self.tls
-            .write_all(&block)
+        timeout(BLOCK_IO_TIMEOUT, self.tls.write_all(&block))
             .await
+            .map_err(|_| NetError::TorUnavailable("smp write timed out".into()))?
             .map_err(|e| NetError::Unreachable(format!("smp write: {e}")))?;
-        self.tls
-            .flush()
+        timeout(BLOCK_IO_TIMEOUT, self.tls.flush())
             .await
+            .map_err(|_| NetError::TorUnavailable("smp flush timed out".into()))?
             .map_err(|e| NetError::Unreachable(format!("smp flush: {e}")))?;
         Ok(())
     }

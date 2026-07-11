@@ -260,7 +260,7 @@ impl Default for SessionSettings {
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
-            anonymity: "tor".to_string(),
+            anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: 9050,
             smp_server: "public".to_string(),
@@ -1762,6 +1762,31 @@ pub struct RestoreState {
     pub target: String,
 }
 
+/// Transport-health state surfaced on the header "chat" pill (transport
+/// concept §4, T4 §P6). The engine sets it from the last dial/resolve
+/// outcome; the UI reads `tone` for the pill colour and `reason` for the
+/// tooltip. Additive and defaults to [`NetHealth::Ok`], so an older reader
+/// meeting a view without it is unaffected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tone", rename_all = "snake_case")]
+pub enum NetHealth {
+    /// Transport is nominal (or unconfigured/clearnet) — green pill.
+    #[default]
+    Ok,
+    /// Reachable but impaired (e.g. a Tor circuit timed out, retrying) — amber
+    /// pill with the reason as tooltip.
+    Degraded {
+        /// Human-readable reason for the degraded state.
+        reason: String,
+    },
+    /// Transport is down / fail-closed (e.g. Tor misconfigured, no dial
+    /// attempted) — red pill with the reason as tooltip.
+    Down {
+        /// Human-readable reason for the down state.
+        reason: String,
+    },
+}
+
 /// The whole shared app/session state: which screen, which language, the last
 /// wizard outcome, a transient notice (e.g. the settings-save toast) and the
 /// settings. Both operators read and mutate this through the command set.
@@ -1809,6 +1834,10 @@ pub struct SessionView {
     pub create: CreateState,
     /// The join-via-invite lifecycle (real over SMP).
     pub join: JoinState,
+    /// Transport-health state for the header pill (set by the engine from the
+    /// last dial/resolve outcome). Additive; defaults to [`NetHealth::Ok`].
+    #[serde(default)]
+    pub net_health: NetHealth,
 }
 
 impl Default for SessionView {
@@ -1829,6 +1858,7 @@ impl Default for SessionView {
             restore: RestoreState::default(),
             create: CreateState::default(),
             join: JoinState::default(),
+            net_health: NetHealth::default(),
         }
     }
 }

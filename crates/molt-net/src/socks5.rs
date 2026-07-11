@@ -179,20 +179,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_maps_tor_mode_to_a_dialer() {
-        use crate::smp::tls::Dialer;
-        assert!(matches!(
-            Dialer::from_config("local", 9150),
-            Dialer::Socks5 { proxy } if proxy == "127.0.0.1:9150"
-        ));
-        assert!(matches!(Dialer::from_config("whonix", 9050), Dialer::Socks5 { .. }));
-        // off / direct / unknown / arti-later all dial direct
-        for m in ["off", "direct", "embedded", "", "nonsense"] {
-            assert!(matches!(Dialer::from_config(m, 9050), Dialer::Direct), "{m}");
-        }
-    }
-
-    #[test]
     fn greeting_offers_userpass_then_none() {
         assert_eq!(greeting(), [0x05, 2, 0x02, 0x00]);
     }

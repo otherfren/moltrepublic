@@ -154,11 +154,23 @@ impl State {
                 return Ok(Reply::Ack);
             }
         };
+        // route the probe through the resolved dialer (T4 §P7): over Tor it
+        // uses the same routing the app will, and an onion-only target under a
+        // Direct dialer reports "requires Tor" instead of leaking a clearnet
+        // dial. A misconfigured Tor setting is itself the test failure.
+        let dialer = match self.dialer_for() {
+            Ok(dialer) => dialer,
+            Err(e) => {
+                self.session.smp_test = format!("error: {e}");
+                self.emit_session(SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
+        };
         self.session.smp_test = "testing".to_string();
         self.emit_session(SessionScope::Full);
         if let Some(cmd_tx) = self.cmd_tx.upgrade() {
             tokio::spawn(async move {
-                let result = match molt_net::smp::test_connection(&server).await {
+                let result = match molt_net::smp::test_connection(&dialer, &server).await {
                     Ok(()) => "ok".to_string(),
                     Err(e) => format!("error: {e}"),
                 };
@@ -236,6 +248,37 @@ impl State {
         molt_storage::expand_tilde(&self.session.settings.workspace_dir)
     }
 
+    /// The config→dialer bridge (T4 §P1): resolve the SMP dialer from the live
+    /// anonymity settings. `network=none`→Direct, `network=tor`→SOCKS/arti,
+    /// and every misconfiguration (`embedded` without the feature, unknown
+    /// mode, `nym`) is a fail-closed [`molt_net::NetError::TorMisconfigured`] —
+    /// never a silent clearnet fallback.
+    pub(crate) fn dialer_for(&self) -> Result<molt_net::smp::tls::Dialer, molt_net::NetError> {
+        let s = &self.session.settings;
+        molt_net::smp::tls::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
+    }
+
+    /// Resolve the dialer for a flow about to open SMP connections, updating
+    /// the transport-health pill (T4 §P6): success clears it to `Ok`, a
+    /// fail-closed error sets it `Down` with the reason and returns that reason
+    /// so the caller aborts the flow (fail-closed). Does **not** emit — the
+    /// caller's own `emit_session` carries the new health state.
+    pub(crate) fn resolve_dialer(&mut self) -> Result<molt_net::smp::tls::Dialer, String> {
+        match self.dialer_for() {
+            Ok(dialer) => {
+                self.session.net_health = molt_core::NetHealth::Ok;
+                Ok(dialer)
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                self.session.net_health = molt_core::NetHealth::Down {
+                    reason: reason.clone(),
+                };
+                Err(reason)
+            }
+        }
+    }
+
     pub(crate) fn cmd_open_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
@@ -271,9 +314,13 @@ impl State {
         // it can subscribe AND send) and load the advanced MLS ratchet. A
         // workspace never cleanly closed (crash, or founded on another node) has
         // no `smp_queues` → falls through to the demo/sim mesh.
-        let resumed = match (&transport_state.mls, &transport_state.smp_queues) {
-            (Some(mls), Some(creds)) if !transport_state.mesh.is_empty() => {
-                crate::founding::reopen_transport(&transport_state.mesh, creds)
+        // fail-closed resume: resolve the dialer first. A misconfigured Tor
+        // setting sets the health pill Down and skips the real mesh rather
+        // than resuming over an unintended clearnet path.
+        let dialer = self.resolve_dialer().ok();
+        let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
+            (Some(mls), Some(creds), Some(dialer)) if !transport_state.mesh.is_empty() => {
+                crate::founding::reopen_transport(&transport_state.mesh, creds, dialer.clone())
                     .and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
             }
             _ => None,

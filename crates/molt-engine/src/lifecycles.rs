@@ -701,6 +701,16 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Join("engine stopped".to_string()));
         };
+        // fail-closed: resolve the SMP dialer from settings before spawning the
+        // join task. A TorMisconfigured aborts the join with the reason and
+        // sets the transport-health pill (T4 §P1/§P6).
+        let dialer = match self.resolve_dialer() {
+            Ok(dialer) => dialer,
+            Err(reason) => {
+                self.emit_session(SessionScope::Full);
+                return Err(MoltError::Join(reason));
+            }
+        };
         // the ratification gate: the join task surfaces the founder's proposed
         // charter on `prop` and blocks on `conf` for the joiner's confirm
         // before signing. A forwarder turns the surfaced charter into an
@@ -755,7 +765,7 @@ impl State {
             }
         });
         tokio::spawn(async move {
-            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None).await {
+            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None, dialer).await {
                 Ok(result) => match serde_json::to_string(&result.sealed) {
                     Ok(json) => {
                         // hand the ritual transport back BEFORE reporting the
@@ -943,10 +953,20 @@ impl State {
         // join_transport twin)
         self.recover_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
         let transport_slot = self.recover_transport.clone();
+        // fail-closed: resolve the SMP dialer before spawning the rejoin task.
+        // A TorMisconfigured aborts the recovery with the reason and sets the
+        // transport-health pill (T4 §P1/§P6).
+        let dialer = match self.resolve_dialer() {
+            Ok(dialer) => dialer,
+            Err(reason) => {
+                self.emit_session(SessionScope::Full);
+                return Err(MoltError::Recover(reason));
+            }
+        };
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
-            let cmd = match crate::recovery::transport_for(&inv) {
+            let cmd = match crate::recovery::transport_for(&inv, dialer) {
                 Ok(transport) => {
                     if let Ok(mut slot) = transport_slot.lock() {
                         *slot = Some(transport.clone());
