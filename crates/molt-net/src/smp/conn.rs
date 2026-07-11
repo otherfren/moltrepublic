@@ -32,8 +32,12 @@ use crate::NetError;
 
 /// One SMP transport block.
 pub const BLOCK_LEN: usize = 16384;
-/// Deadline for reading or writing one transport block — sized for Tor so a
-/// stalled circuit becomes a clean error, never an infinite await (T4 §P5).
+/// Deadline for a *request/response* read or write of one transport block —
+/// sized for Tor so a stalled circuit becomes a clean error, never an infinite
+/// await (T4 §P5). Deliberately NOT applied to the subscription idle long-poll
+/// ([`SmpConn::recv_next`]), which legitimately waits unbounded for the server
+/// to push the next `MSG` (a quiet republic pushes nothing) — bounding it would
+/// tear a subscription down after 30 s of normal quiet.
 const BLOCK_IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Padding byte SMP fills blocks with.
 const PAD: u8 = b'#';
@@ -299,7 +303,11 @@ impl SmpConn {
             }
             let block = match self.pending_block.take() {
                 Some(b) => b,
-                None => self.read_block().await?,
+                // the subscription idle wait: block until the server pushes the
+                // next MSG. NO deadline — a quiet queue is normal, and the read
+                // (`read_exact`) is cancel-unsafe, so a fired timeout mid-block
+                // would corrupt framing. Liveness/reconnect is Stage B.
+                None => self.read_block_waiting().await?,
             };
             let (_corr, _entity, command) = parse_first_response(&block)?;
             if command.starts_with(b"MSG ") {
@@ -380,18 +388,29 @@ impl SmpConn {
         c
     }
 
-    /// Read one 16 384-byte block and return its `content` slice (unpadded).
+    /// Read one 16 384-byte block (request/response) and return its `content`
+    /// slice (unpadded), bounded by [`BLOCK_IO_TIMEOUT`].
     async fn read_block(&mut self) -> Result<Vec<u8>, NetError> {
         let mut buf = vec![0u8; BLOCK_LEN];
         timeout(BLOCK_IO_TIMEOUT, self.tls.read_exact(&mut buf))
             .await
             .map_err(|_| NetError::TorUnavailable("smp read timed out".into()))?
             .map_err(|e| NetError::Unreachable(format!("smp read: {e}")))?;
-        let len = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
-        if 2 + len > BLOCK_LEN {
-            return Err(NetError::Framing("block content length overflows block".into()));
-        }
-        Ok(buf[2..2 + len].to_vec())
+        parse_block_content(&buf)
+    }
+
+    /// Read one block with NO deadline — the subscription idle long-poll
+    /// (see [`Self::recv_next`]). A quiet subscribed queue may push nothing for
+    /// minutes; a fatal deadline here would silently kill the subscription and
+    /// make the node deaf (breaks recovery / runtime delivery / late joins,
+    /// clearnet included). This restores the pre-T4 idle-read behaviour.
+    async fn read_block_waiting(&mut self) -> Result<Vec<u8>, NetError> {
+        let mut buf = vec![0u8; BLOCK_LEN];
+        self.tls
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| NetError::Unreachable(format!("smp read: {e}")))?;
+        parse_block_content(&buf)
     }
 
     /// Frame `content` into a padded 16 384-byte block and send it.
@@ -417,6 +436,16 @@ impl SmpConn {
             .map_err(|e| NetError::Unreachable(format!("smp flush: {e}")))?;
         Ok(())
     }
+}
+
+/// Extract the unpadded `content` slice from one raw 16 384-byte block:
+/// a big-endian `u16` length prefix followed by that many content bytes.
+fn parse_block_content(buf: &[u8]) -> Result<Vec<u8>, NetError> {
+    let len = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
+    if 2 + len > BLOCK_LEN {
+        return Err(NetError::Framing("block content length overflows block".into()));
+    }
+    Ok(buf[2..2 + len].to_vec())
 }
 
 /// Encode one transmission (v7+ wire form, sessionId not on the wire):

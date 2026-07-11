@@ -44,3 +44,32 @@ async fn smp_transport_over_ed25519() { trait_round_trip(KONKIN, "konkin").await
 #[tokio::test]
 #[ignore = "live network"]
 async fn smp_transport_over_ed448() { trait_round_trip(SMP8, "smp8 official").await; }
+
+/// Regression (T4 review): a subscription's idle long-poll must NOT be killed
+/// by the per-block request/response deadline (30 s). Subscribe, stay quiet
+/// well past that deadline, THEN send — the message must still arrive, proving
+/// the subscription survived the idle window (else the node goes deaf after
+/// 30 s of quiet — breaking recovery / runtime delivery / late joins).
+async fn subscription_survives_idle_past_the_deadline(url: &str) {
+    let s = SmpServer::parse(url).expect("parse");
+    let recipient = SmpTransport::new(s.clone());
+    let pair = recipient.create_queue().await.expect("create_queue");
+    let mut rx = recipient.subscribe(&pair.rcv).await.expect("subscribe");
+    // idle for longer than BLOCK_IO_TIMEOUT (30 s) with nothing pushed
+    tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+    // only now does a sender enqueue — the subscription must still be alive
+    let sender = SmpTransport::new(s.clone());
+    sender.send(&pair.snd, block(5)).await.expect("send after idle");
+    let d = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("subscription still delivers after a >30s idle")
+        .expect("delivery");
+    assert_eq!(d.block.as_slice()[10], 5, "block content after idle");
+    println!("OK: subscription survived a 40s idle and still delivered");
+}
+
+#[tokio::test]
+#[ignore = "live network (slow: 40s idle)"]
+async fn subscription_survives_idle_ed25519() {
+    subscription_survives_idle_past_the_deadline(KONKIN).await;
+}
