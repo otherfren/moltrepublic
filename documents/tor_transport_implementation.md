@@ -318,6 +318,23 @@ call — surface it, don't silently pick.**
 
 ## 4. Stage B — four parallel packages
 
+> **Status: LANDED 2026-07-11** (master). B1 pooling (one connection/circuit per
+> server, reused across ops; prebuild under a Semaphore of 4), B3 UI (health pill
+> ← `net_health`; embedded greyed unless built `--features embedded-tor`), B4
+> tests (deterministic `tor_no_leak.rs` proving zero direct egress via a
+> blackhole SOCKS proxy + `#[ignore]`d `tor_e2e.rs`). B2 arti: FIRST attempt
+> correctly blocked (arti forces `libsqlite3-sys`, a C dep); after the user
+> accepted that C dep for the **opt-in** `embedded-tor` feature only (2026-07-11),
+> B2 landed — `DialStream` enum unifies `TcpStream`/arti `DataStream` through one
+> TLS handshake, lazy bootstrap, one `TorClient` reused, per-server
+> `IsolationToken`. Default build stays pure-of-arti (feature off). Review found
+> one minor (fixed): B1's blanket retry could double-allocate a queue — non-
+> idempotent ops now retry only to heal a stale reused connection. All gates
+> green both feature ways; `resolve` is fail-closed (verified by `tor_no_leak`
+> both ways). Remaining before "T4 done": Stage C polish (this section's items are
+> all in), and the §7 follow-ups (S3-over-Tor, MCP hardening, the ring/x509
+> cleanup) stay deferred.
+
 ### B1 — pooling + circuit prebuild + isolation (molt-net)
 Failing tests first: a loopback/mock-proxy test that a second `send` reuses the
 first connection (count dials); prebuild opens N connections under the

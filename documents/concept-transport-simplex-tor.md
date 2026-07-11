@@ -1,18 +1,27 @@
 # Concept: communication — SimpleX (SMP) over Tor
 
 Status: **T1 + founding ritual + T2 (MLS, incl. the live runtime mesh) + T3
-(real SMP)** (2026-07-08). MLS (OpenMLS 0.8, pure-Rust) is integrated into the
-founding ritual AND the **running post-founding traffic is now real MLS
+(real SMP) + T4 (Tor)** (T4: 2026-07-11). MLS (OpenMLS 0.8) is integrated into
+the founding ritual AND the **running post-founding traffic is real MLS
 ciphertext over a live direct mesh**: after founding, members bootstrap a
 per-pair-queue full mesh in-band over MLS and chat peer-to-peer, encrypt-once
 fanned out; a clean close persists the advancing ratchet + the SMP queue
 credentials so a reopen **resumes** the mesh (concept §6, clean-close variant;
 per-drain write-ahead is the remaining crash-safety hardening). Fan-out privacy
-jitter is on. **Still open in T2: recovery rejoin + the recovery-invite/approval
-UI.** **T4 (Tor) is entirely open — SMP currently dials clearnet TCP directly,
-not through Tor.** T5–T6 open (queue rotation, arti/whonix, multi-server,
-ack-after-fsync, fuzz/CI tiers). See the milestone notes below for exact
-real-vs-open.
+jitter is on.
+**T4 (Tor) is IMPLEMENTED** (`documents/tor_transport_implementation.md`): a
+fail-closed dialer (`Dialer::resolve` — no direct dial ever under
+`network=tor`) with four modes — off (clearnet, the shipped default), system
+Tor (SOCKS5h `127.0.0.1:9050`), whonix (gateway SOCKS), and embedded (in-process
+arti, opt-in `--features embedded-tor`; that build accepts a `libsqlite3-sys` C
+dep). Onion-preferred multi-host addressing, per-server circuit isolation,
+connection pooling + circuit prebuild, connect/handshake/rw timeouts, and a
+`net_health` health pill. Proven by a deterministic egress no-leak harness.
+**Still open in T2: recovery rejoin is done; the recovery UI is done.**
+**T4 follow-ups (deferred):** S3 backup/restore over Tor (UI controls greyed),
+MCP listener hardening, removing the pre-existing `ring`/C dep from the default
+build. T5–T6 open (queue rotation, multi-server, ack-after-fsync, fuzz/CI
+tiers). See the milestone notes below for exact real-vs-open.
 What exists: `molt-net` (Transport trait, uniform-block framing with
 named-constant budget math, mandatory per-queue wrapping,
 chunker/reassembler with `(msg id, chunk idx)` dedup, `LoopbackTransport`
