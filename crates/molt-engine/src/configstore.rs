@@ -676,12 +676,12 @@ mod tests {
             // well-formed TOML, but a value the engine's validation rejects
             let broken = std::fs::read_to_string(&path)
                 .expect("read")
-                .replace("network = \"tor\"", "network = \"bogus\"");
+                .replace("network = \"none\"", "network = \"bogus\"");
             std::fs::write(&path, broken).expect("write");
             store.poll_now().await;
             let sv = session(&wallet).await;
             assert_eq!(sv.notice, "config-conflict");
-            assert_eq!(sv.settings.anonymity, "tor", "session must keep last good");
+            assert_eq!(sv.settings.anonymity, "none", "session must keep last good");
         });
     }
 

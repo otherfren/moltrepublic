@@ -150,12 +150,14 @@ pub struct AnonymityConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnonymityNetwork {
-    /// Route over Tor (the documented default).
-    #[default]
+    /// Route over Tor. Explicit opt-in — a fail-closed dialer refuses every
+    /// direct SMP dial once this is selected (transport concept §6).
     Tor,
     /// Route over the Nym mixnet.
     Nym,
-    /// No anonymity network (clearnet).
+    /// No anonymity network (clearnet) — the shipped default; the user opts
+    /// into Tor.
+    #[default]
     None,
 }
 
@@ -365,7 +367,7 @@ impl Default for Settings {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval_min(),
-            anonymity: "tor".to_string(),
+            anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
             smp_server: default_smp_server(),
@@ -469,7 +471,8 @@ allow = {mcp_allow}
 token = {mcp_token}
 
 [transport.anonymity]
-# network = "tor" | "nym" | "none". Validated + logged; transport not wired yet.
+# network = "tor" | "nym" | "none" (default "none" = clearnet). "tor" routes
+# every SMP dial through Tor, fail-closed (no silent clearnet fallback).
 network = {anonymity}
 
 [transport.anonymity.tor]
@@ -792,7 +795,7 @@ mod tests {
         let text = render(&Settings::default());
         let config: Config = parse(&text).expect("default config must parse");
         assert!(!config.node.headless);
-        assert_eq!(config.transport.anonymity.network, AnonymityNetwork::Tor);
+        assert_eq!(config.transport.anonymity.network, AnonymityNetwork::None);
         assert_eq!(config.transport.anonymity.tor.mode, TorMode::Local);
         assert_eq!(config.transport.anonymity.tor.port, default_tor_port());
         assert_eq!(config.mcp.port, default_mcp_port());
@@ -812,7 +815,7 @@ mod tests {
     #[test]
     fn salvage_fills_defaults_for_garbage() {
         let s = salvage("this is not::: toml");
-        assert_eq!(s.anonymity, "tor");
+        assert_eq!(s.anonymity, "none");
         assert_eq!(s.tor_mode, "local");
         assert_eq!(s.tor_port, default_tor_port());
         assert_eq!(s.mcp_port, default_mcp_port());
@@ -832,9 +835,40 @@ mod tests {
         assert_eq!(s.tor_mode, "embedded");
         assert_eq!(s.tor_port, 9150);
         assert_eq!(
-            s.anonymity, "tor",
-            "an invalid anonymity network falls back to default"
+            s.anonymity, "none",
+            "an invalid anonymity network falls back to the shipped default"
         );
+    }
+
+    #[test]
+    fn default_anonymity_is_none() {
+        // The shipped default is clearnet (network = "none"): a fresh install
+        // preserves today's behaviour and the user opts into Tor explicitly.
+        assert_eq!(AnonymityNetwork::default(), AnonymityNetwork::None);
+        assert_eq!(Settings::default().anonymity, "none");
+        let config = parse(&render(&Settings::default())).expect("parse default");
+        assert_eq!(config.transport.anonymity.network, AnonymityNetwork::None);
+    }
+
+    #[test]
+    fn config_round_trips_onion_and_tor_mode() {
+        // A comma-host onion smp_url and every tor_mode survive the full
+        // render -> salvage -> update round-trip (molt-config keeps `url`
+        // opaque, so the onion slot rides through unchanged).
+        for mode in ["local", "embedded", "whonix"] {
+            let mut original = Settings::default();
+            original.anonymity = "tor".to_string();
+            original.tor_mode = mode.to_string();
+            original.smp_server = "custom".to_string();
+            original.smp_url = "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@\
+                 smp8.simplex.im,beccx4yfxxbvyhqypaavemqurytl6hozr47wfc7uuecacjqdvwpw2xid.onion"
+                .to_string();
+            let salvaged = salvage(&render(&original));
+            assert_eq!(original, salvaged, "mode {mode} round-trips through salvage");
+            let updated = update(&render(&Settings::default()), &original).expect("update");
+            let config = parse(&updated).expect("updated text stays strictly parseable");
+            assert_eq!(Settings::from(&config), original, "mode {mode} round-trips through update");
+        }
     }
 
     #[test]

@@ -260,7 +260,7 @@ impl Default for SessionSettings {
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
-            anonymity: "tor".to_string(),
+            anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: 9050,
             smp_server: "public".to_string(),
