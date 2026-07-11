@@ -584,7 +584,11 @@ export component ChatRow inherits Rectangle {
             }
         }
     }
-    if root.line.deleted-by == "" && root.line.id != "" && !(root.line.has-file && root.line.own && root.line.file-available): Rectangle {
+    // deleting a message is the AUTHOR'S verb only (the engine rejects a
+    // foreign delete — there is no moderation concept), so the trash is
+    // offered solely on OWN rows: an affordance that can only ever produce
+    // an error toast would be a lie
+    if root.line.deleted-by == "" && root.line.id != "" && root.line.own && !(root.line.has-file && root.line.file-available): Rectangle {
         x: parent.width - 82px;
         y: 4px;
         width: 22px;

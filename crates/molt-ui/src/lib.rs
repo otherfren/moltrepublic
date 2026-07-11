@@ -37,9 +37,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
 use molt_core::{
-    ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, ProposalState,
-    ProposalView, Reply, Screen, SessionScope, SessionSettings, SessionView, Surface,
-    SurfaceSnapshot,
+    ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, ProposalView,
+    Reply, Screen, SessionScope, SessionSettings, SessionView, Surface, SurfaceSnapshot,
 };
 use molt_engine::WalletHandle;
 use slint::{Model, ModelRc, VecModel};
@@ -648,7 +647,9 @@ pub fn run_app(
                 );
             }
             if let Ok(mut st) = chat_ui.lock() {
-                st.selected = ch;
+                // bumps the push generation: every in-flight push read
+                // for the previous selection is stale from this moment
+                st.select(ch);
             }
             // re-read through the engine filter (the point of the bus)
             let w = w.clone();
@@ -1399,6 +1400,17 @@ struct ChatUiState {
     /// timestamp, so the patch-channel system lines interleave at this
     /// first-seen approximation (documented in `patch_system_lines`).
     first_seen: HashMap<u64, u64>,
+    /// Everything this UI ever learned about a proposal from `pending` —
+    /// the read contract's `pending` is Proposed-only, so a sealed/closed
+    /// proposal vanishes from every read and only this cache keeps its
+    /// patch channel titled and stated (see [`update_known_proposals`]).
+    proposals: HashMap<u64, KnownProposal>,
+    /// Push/selection generation. Concurrent `push_surfaces` runs race
+    /// last-write-wins on the Slint event loop; every selection change and
+    /// every push start bumps this, and a push whose captured generation
+    /// is no longer current must neither apply its bundle nor touch the
+    /// unread ledger (see [`ChatUiState::begin_push`]).
+    generation: u64,
 }
 
 impl ChatUiState {
@@ -1406,14 +1418,43 @@ impl ChatUiState {
     /// including to/from "no workspace") everything resets: a stale
     /// Patch/Topic selection from the previous workspace must not filter
     /// the new one's log, the ledger must re-seed on the new history and
-    /// the first-seen stamps belong to the old proposals. Same id → no-op.
+    /// the first-seen stamps + proposal cache belong to the old
+    /// proposals. Same id → no-op.
     fn enter_workspace(&mut self, active: &str) {
         if self.workspace != active {
             *self = ChatUiState {
                 workspace: active.to_string(),
+                // the push generation survives the reset: an in-flight
+                // push from the previous workspace must never match a
+                // freshly zeroed counter
+                generation: self.generation,
                 ..ChatUiState::default()
             };
         }
+    }
+
+    /// Start one `push_surfaces` pass: bind to the active workspace, then
+    /// stamp this push's generation. The bump makes every earlier
+    /// in-flight push stale, so concurrent pushes resolve newest-wins
+    /// instead of last-write-wins.
+    fn begin_push(&mut self, active: &str) -> u64 {
+        self.enter_workspace(active);
+        self.generation += 1;
+        self.generation
+    }
+
+    /// Select a channel. The bump invalidates every in-flight push: a
+    /// bundle read for the previous selection must not land on — or mark
+    /// read — the fresh one.
+    fn select(&mut self, channel: ChannelRef) {
+        self.selected = channel;
+        self.generation += 1;
+    }
+
+    /// Whether the push stamped `gen` is still the newest observer; a
+    /// stale push skips its ledger bookkeeping and its apply closure.
+    fn is_current(&self, gen: u64) -> bool {
+        self.generation == gen
     }
 }
 struct SurfaceData {
@@ -1483,14 +1524,17 @@ async fn push_surfaces(
         Ok(Reply::Session(s)) => s.active_workspace.clone(),
         _ => String::new(),
     };
-    let selected = chat_ui
+    // stamp this push BEFORE the surface reads: any selection change or
+    // newer push from here on makes this pass stale, and a stale pass must
+    // neither touch the ledger nor land its bundle (concurrent pushes
+    // otherwise race last-write-wins and can revert a fresh selection)
+    let Some((my_gen, selected)) = chat_ui
         .lock()
         .ok()
-        .map(|mut s| {
-            s.enter_workspace(&active_ws);
-            s.selected.clone()
-        })
-        .unwrap_or_default();
+        .map(|mut s| (s.begin_push(&active_ws), s.selected.clone()))
+    else {
+        return;
+    };
     let full_chat = match wallet
         .execute(Command::ReadState {
             surface: Surface::Chat,
@@ -1517,9 +1561,13 @@ async fn push_surfaces(
         .iter()
         .flat_map(|(_, s)| s.pending.iter().cloned())
         .collect();
-    let titles: HashMap<u64, String> = all_pending
+    // the gated surfaces' applied logs — the proposal cache resolves a
+    // vanished proposal's fate against them (the applied values ARE the
+    // raw proposal payloads, for the chain and the legacy path alike)
+    let applied_by_surface: HashMap<Surface, Vec<serde_json::Value>> = snaps
         .iter()
-        .map(|p| (p.id.0, summarize(&p.payload)))
+        .filter(|(sf, _)| *sf != Surface::Chat)
+        .map(|(sf, s)| (*sf, s.applied.clone()))
         .collect();
     let full_msgs = full_chat.as_ref().map(chat_messages).unwrap_or_default();
     // the engine enumerates the channels (P7): every distinct ref in the
@@ -1536,18 +1584,32 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
-    let (unread, first_seen) = {
+    let (unread, first_seen, known) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
+        if !st.is_current(my_gen) {
+            // a newer selection/push owns the state — observing now would
+            // mis-mark the fresh channel read, and the bundle is stale
+            return;
+        }
         for p in &all_pending {
             st.first_seen.entry(p.id.0).or_insert(now);
         }
-        (st.ledger.observe(&counts, &selected_key), st.first_seen.clone())
+        update_known_proposals(&mut st.proposals, &all_pending, &applied_by_surface);
+        (
+            st.ledger.observe(&counts, &selected_key),
+            st.first_seen.clone(),
+            st.proposals.clone(),
+        )
     };
+    // titles come from the cache, so a patch channel keeps its name (and
+    // its ✓/⊘ state line) after the proposal left the Proposed-only read
+    let titles = known_titles(&known);
     let channels = derive_channels(&infos, &titles, &unread);
     let selected_label = channel_display_label(&selected, &titles);
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
+        known,
         first_seen,
         quotes,
     };
@@ -1566,7 +1628,14 @@ async fn push_surfaces(
         selected_label,
     };
     let weak = weak.clone();
+    let chat_ui = chat_ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
+        // the generation may have moved between the bundle build and this
+        // closure running on the UI thread — a stale bundle must not land
+        // (it would revert the visible pane until the next engine event)
+        if !chat_ui.lock().map(|st| st.is_current(my_gen)).unwrap_or(false) {
+            return;
+        }
         if let Some(ui) = weak.upgrade() {
             apply_surfaces(&ui, &bundle);
         }
@@ -1741,6 +1810,9 @@ fn view_icon(key: &str) -> &'static str {
 struct ChatViewCtx {
     selected: ChannelRef,
     proposals: Vec<ProposalView>,
+    /// The per-workspace proposal cache (title + fate survive a proposal
+    /// leaving the Proposed-only `pending` window).
+    known: HashMap<u64, KnownProposal>,
     first_seen: HashMap<u64, u64>,
     quotes: HashMap<String, QuoteSrc>,
 }
@@ -1769,7 +1841,7 @@ fn surface_data(
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
                 let ctx = chat_ctx.expect("checked above");
-                patch_system_lines(id.0, &ctx.proposals, &ctx.first_seen)
+                patch_system_lines(id.0, &ctx.proposals, &ctx.known, &ctx.first_seen)
             }
             _ => Vec::new(),
         };
@@ -2097,6 +2169,92 @@ fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String>) -> Strin
     }
 }
 
+/// What the UI remembers about a proposal beyond the read contract's
+/// Proposed-only `pending` window. The engine never re-exposes a terminal
+/// proposal (a sealed block's `applied` value is the bare payload, without
+/// the proposal id), so title and governance state would vanish from the
+/// patch channel the moment a block seals — this cache keeps them.
+#[derive(Clone)]
+struct KnownProposal {
+    /// `summarize(&payload)` at the last sighting — the sidebar/banner title.
+    title: String,
+    /// The full payload; the fate probe matches it against the applied log.
+    payload: serde_json::Value,
+    /// The gated surface the proposal targets (whose applied log to probe).
+    surface: Surface,
+    /// Approvals at the last sighting in `pending`.
+    approvals: usize,
+    /// The threshold at the last sighting.
+    threshold: usize,
+    /// The lifecycle as this UI resolved it (see [`KnownFate`]).
+    fate: KnownFate,
+}
+
+/// The UI-side proposal lifecycle, resolved from the data the read
+/// contract exposes (the contract itself is frozen — no engine change).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KnownFate {
+    /// Still in the engine's Proposed-only `pending` read.
+    Pending,
+    /// Vanished from `pending` and its payload appeared in the surface's
+    /// applied log — the block sealed.
+    Applied,
+    /// Vanished without an applied trace. The read contract cannot
+    /// distinguish Rejected from expired/otherwise closed, so the UI
+    /// renders a neutral closed marker — never a fabricated verdict.
+    Closed,
+}
+
+/// Fold one read pass into the proposal cache: every pending proposal is
+/// (re-)cached, and every cached proposal that vanished from the
+/// Proposed-only window resolves its fate by probing the applied log of
+/// its surface. Applied values are the raw proposal payloads (both the
+/// chain projection and the legacy simulation push `payload` verbatim, and
+/// neither embeds the proposal id), so payload equality is the only match
+/// the read contract allows — two byte-identical proposals are therefore
+/// indistinguishable here, which at worst upgrades a closed twin to ✓.
+/// `Applied` is sticky; `Closed` re-probes, so an out-of-order read that
+/// briefly missed the applied value corrects itself on the next pass. A
+/// surface missing from `applied` (failed read) resolves nothing.
+fn update_known_proposals(
+    known: &mut HashMap<u64, KnownProposal>,
+    pending: &[ProposalView],
+    applied: &HashMap<Surface, Vec<serde_json::Value>>,
+) {
+    for p in pending {
+        known.insert(
+            p.id.0,
+            KnownProposal {
+                title: summarize(&p.payload),
+                payload: p.payload.clone(),
+                surface: p.surface,
+                approvals: p.approvals,
+                threshold: p.threshold,
+                fate: KnownFate::Pending,
+            },
+        );
+    }
+    for (id, k) in known.iter_mut() {
+        if pending.iter().any(|p| p.id.0 == *id) || k.fate == KnownFate::Applied {
+            continue;
+        }
+        let Some(vals) = applied.get(&k.surface) else {
+            continue;
+        };
+        k.fate = if vals.contains(&k.payload) {
+            KnownFate::Applied
+        } else {
+            KnownFate::Closed
+        };
+    }
+}
+
+/// The lazy patch-channel titles (sidebar rows + compose banner), from the
+/// proposal cache — so a title survives the proposal leaving `pending`.
+fn known_titles(known: &HashMap<u64, KnownProposal>) -> HashMap<u64, String> {
+    known.iter().map(|(id, k)| (*id, k.title.clone())).collect()
+}
+
 /// Quote-teaser sources over the FULL chat log, keyed by hex message id.
 fn quote_sources(msgs: &[ChatMessage]) -> HashMap<String, QuoteSrc> {
     msgs.iter()
@@ -2146,28 +2304,37 @@ fn system_line_data(text: String) -> LogLineData {
 /// state (P8 — a UI-side merge, no engine/wire change). Proposals carry no
 /// timestamp, so lines are stamped with the UI's FIRST-SEEN time — an
 /// approximation that keeps a line stable within a session and near the
-/// governance moment it reports (0 = never seen: sorts to the top). An
-/// unknown id yields a bare `⚖ #id` line and never an error (concept Q4).
+/// governance moment it reports (0 = never seen: sorts to the top). A
+/// proposal no longer in the Proposed-only `pending` window renders from
+/// the [`KnownProposal`] cache: sealed shows `m/m ✓` (the engine seals a
+/// block at exactly the threshold), vanished-without-apply shows the
+/// neutral `⊘` (Rejected vs expired is not distinguishable from the read
+/// contract). An id known nowhere yields a bare `⚖ #id` line and never an
+/// error (concept Q4).
 fn patch_system_lines(
     patch: u64,
-    proposals: &[ProposalView],
+    pending: &[ProposalView],
+    known: &HashMap<u64, KnownProposal>,
     first_seen: &HashMap<u64, u64>,
 ) -> Vec<(u64, LogLineData)> {
-    let text = match proposals.iter().find(|p| p.id.0 == patch) {
-        Some(p) => {
-            let state = match p.state {
-                ProposalState::Applied => " ✓",
-                ProposalState::Rejected => " ✗",
-                ProposalState::Proposed => "",
-            };
-            format!(
-                "⚖ #{patch} · {} — {}/{}{state}",
-                summarize(&p.payload),
-                p.approvals,
-                p.threshold
-            )
-        }
-        None => format!("⚖ #{patch}"),
+    let text = match pending.iter().find(|p| p.id.0 == patch) {
+        Some(p) => format!(
+            "⚖ #{patch} · {} — {}/{}",
+            summarize(&p.payload),
+            p.approvals,
+            p.threshold
+        ),
+        None => match known.get(&patch) {
+            Some(k) => {
+                let progress = match k.fate {
+                    KnownFate::Applied => format!("{}/{} ✓", k.threshold, k.threshold),
+                    KnownFate::Closed => "⊘".to_string(),
+                    KnownFate::Pending => format!("{}/{}", k.approvals, k.threshold),
+                };
+                format!("⚖ #{patch} · {} — {progress}", k.title)
+            }
+            None => format!("⚖ #{patch}"),
+        },
     };
     let ts = first_seen.get(&patch).copied().unwrap_or(0);
     vec![(ts, system_line_data(text))]
@@ -2606,6 +2773,7 @@ lexicon! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use molt_core::ProposalState;
 
     fn line(lead: &str, text: &str) -> LogLineData {
         LogLineData {
@@ -2760,7 +2928,7 @@ mod tests {
             state: ProposalState::Proposed,
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
-        let sys = patch_system_lines(4, &[pv], &first_seen);
+        let sys = patch_system_lines(4, &[pv], &HashMap::new(), &first_seen);
         assert_eq!(sys.len(), 1);
         assert_eq!(sys[0].0, 150, "stamped with the UI-side first-seen time");
         assert!(sys[0].1.system, "system lines carry the quiet-style flag");
@@ -2774,7 +2942,7 @@ mod tests {
 
         // an unknown/already-materialized proposal renders as a bare
         // handle, never an error (concept Q4)
-        let sys_unknown = patch_system_lines(9, &[], &first_seen);
+        let sys_unknown = patch_system_lines(9, &[], &HashMap::new(), &first_seen);
         assert!(sys_unknown[0].1.text.contains("#9"), "{}", sys_unknown[0].1.text);
         assert_eq!(sys_unknown[0].0, 0, "never seen → sorts to the top");
 
@@ -2794,6 +2962,117 @@ mod tests {
             merged.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             ["a", "s1", "s2", "b", "c"]
         );
+    }
+
+    /// Review finding: the read contract's `pending` is Proposed-only, so
+    /// the moment a proposal seals (or closes) it vanishes from every read
+    /// and the patch channel degraded to "#id" with no state line. The
+    /// UI-side cache must keep the title and resolve the fate from the
+    /// applied log the UI already reads.
+    #[test]
+    fn patch_title_and_state_survive_the_proposal_leaving_pending() {
+        let pv = ProposalView {
+            id: ProposalId(4),
+            surface: Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "title": "budget" }),
+            approvals: 2,
+            threshold: 3,
+            state: ProposalState::Proposed,
+        };
+        let mut known = HashMap::new();
+        // while pending: cached with title + progress
+        update_known_proposals(&mut known, std::slice::from_ref(&pv), &HashMap::new());
+        assert_eq!(known[&4].title, "add_note · budget");
+        assert_eq!(known[&4].fate, KnownFate::Pending);
+
+        // the proposal leaves the Proposed-only window and its payload
+        // shows up in the surface's applied log → Applied
+        let applied = HashMap::from([(Surface::Memory, vec![pv.payload.clone()])]);
+        update_known_proposals(&mut known, &[], &applied);
+        assert_eq!(known[&4].fate, KnownFate::Applied);
+
+        // the system line keeps the title and renders the sealed state
+        let first_seen = HashMap::from([(4u64, 150u64)]);
+        let sys = patch_system_lines(4, &[], &known, &first_seen);
+        let text = &sys[0].1.text;
+        assert!(text.contains("budget") && text.contains('✓'), "{text}");
+        assert!(text.contains("3/3"), "sealed at the threshold: {text}");
+
+        // the sidebar label survives via the cache-derived titles
+        let titles = known_titles(&known);
+        let infos = vec![ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(4) },
+            count: 1,
+            last_ts: 10,
+        }];
+        let rows = derive_channels(&infos, &titles, &HashMap::new());
+        assert_eq!(rows[1].label, "add_note · budget", "title survives Applied");
+
+        // vanished WITHOUT an applied trace: the read contract cannot tell
+        // Rejected from expired — neutral closed marker, title kept, no
+        // fabricated verdict
+        let pv9 = ProposalView {
+            id: ProposalId(9),
+            payload: serde_json::json!({ "title": "drop the fee" }),
+            ..pv.clone()
+        };
+        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &applied);
+        update_known_proposals(&mut known, &[], &applied);
+        assert_eq!(known[&9].fate, KnownFate::Closed);
+        let sys = patch_system_lines(9, &[], &known, &first_seen);
+        let text = &sys[0].1.text;
+        assert!(text.contains("drop the fee") && text.contains('⊘'), "{text}");
+        assert!(!text.contains('✓') && !text.contains('✗'), "{text}");
+
+        // an id never seen anywhere still tolerates (concept Q4)
+        let sys = patch_system_lines(77, &[], &known, &first_seen);
+        assert_eq!(sys[0].1.text, "⚖ #77");
+
+        // a Closed verdict corrects itself when the applied value shows up
+        // in a later read (an out-of-order pass must not stick a wrong fate)
+        let applied9 = HashMap::from([(
+            Surface::Memory,
+            vec![serde_json::json!({ "title": "drop the fee" })],
+        )]);
+        update_known_proposals(&mut known, &[], &applied9);
+        assert_eq!(known[&9].fate, KnownFate::Applied);
+        // … while an already-Applied fate is sticky even if the surface
+        // read is missing this pass
+        update_known_proposals(&mut known, &[], &HashMap::new());
+        assert_eq!(known[&4].fate, KnownFate::Applied);
+        assert_eq!(known[&9].fate, KnownFate::Applied);
+    }
+
+    /// Review finding: concurrent pushes raced last-write-wins — a stale
+    /// bundle could land after a fresh selection and revert the visible
+    /// pane (mis-marking unread on the way). Every selection change and
+    /// every newer push start must invalidate the in-flight pushes.
+    #[test]
+    fn push_generation_guard_invalidates_stale_pushes() {
+        let mut st = ChatUiState::default();
+        let g1 = st.begin_push("ws-1");
+        assert!(st.is_current(g1), "the newest push is current");
+        // a newer push start supersedes the older one
+        let g2 = st.begin_push("ws-1");
+        assert!(!st.is_current(g1));
+        assert!(st.is_current(g2));
+        // a selection change invalidates every in-flight push …
+        st.select(ChannelRef::Topic {
+            name: "budget".into(),
+        });
+        assert!(!st.is_current(g2));
+        assert_eq!(
+            st.selected,
+            ChannelRef::Topic {
+                name: "budget".into()
+            }
+        );
+        // … and the counter survives the workspace-switch reset, so an old
+        // push can never match a freshly reset state
+        let g3 = st.begin_push("ws-2");
+        assert!(g3 > g2, "monotonic across enter_workspace resets");
+        assert!(st.is_current(g3));
+        assert!(!st.is_current(g2));
     }
 
     #[test]
