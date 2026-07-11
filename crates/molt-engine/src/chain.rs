@@ -115,7 +115,16 @@ fn apply_membership(
             let Some(id) = identities.iter_mut().find(|i| i.member == member) else {
                 return Err(format!("cannot restore unknown member {member}"));
             };
-            id.identity_pk = identity_pk.to_string();
+            // recovery re-derives the SAME identity: a Restored block re-keys
+            // the MLS leaf, never the roster identity (`recovery_ritual.md`
+            // §6). A block that presents a different key would let m-of-n
+            // survivors hijack a seat — hard-reject it here, at the verifier,
+            // not only at the coordinator's propose step.
+            if id.identity_pk != identity_pk {
+                return Err(format!(
+                    "a Restored block must keep {member}'s anchored identity key"
+                ));
+            }
         }
     }
     Ok(())
@@ -685,12 +694,15 @@ impl State {
                 }
                 // 3) announce the rejoin in the group chat — AFTER the commit, so
                 // the survivors have advanced to the epoch this notice is
-                // encrypted at (ephemeral, best-effort like all chat).
-                if let Err(e) = self.post_message(
+                // encrypted at (ephemeral, best-effort like all chat). A
+                // System-kind message: every frontend renders it as a quiet
+                // system line, not as the coordinator speaking.
+                if let Err(e) = self.post_message_with_kind(
                     me,
                     format!("🔑 {member} rejoined the republic after recovery"),
                     None,
                     molt_core::ChannelRef::Group,
+                    molt_core::ChatKind::System,
                 ) {
                     // best-effort, like all chat — never blocks the re-key
                     tracing::warn!(error = %e, "could not post the rejoin notice");
@@ -1387,6 +1399,107 @@ mod tests {
             !coord.pending_recovery.contains_key("walter"),
             "the coordinator consumed the pending recovery on the Restored commit"
         );
+    }
+
+    /// **Re-mint failover (decision A1, 2026-07-11), chain level.** When the
+    /// recovery coordinator dies, any survivor mints a NEW recovery link and a
+    /// complete second recovery round runs — producing a SECOND `Restored`
+    /// block for the SAME seat. The chain must accept it: same anchored
+    /// `identity_pk` at two consecutive heights (only the MLS leaf re-keys
+    /// again; the roster identity never moves). Counter-assertion: a `Restored`
+    /// block that re-keys the roster identity to a DIFFERENT key is rejected
+    /// (`recovery_ritual.md` §6 — rotation is out of scope; the coordinator's
+    /// refusal to *propose* such a change is pinned separately in
+    /// `a_coordinator_re_admits_only_a_valid_seat_proof`).
+    #[test]
+    fn a_second_restored_block_for_the_same_seat_verifies() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let walter_pk = b.pk("walter");
+        let restored = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "walter".to_string(),
+            identity_pk: walter_pk.clone(),
+        };
+        // round 1: the first recovery attempt's Restored block commits …
+        let block = b.seal(1, restored.clone(), &["petra", "walter"]);
+        b.push(block);
+        // … then the coordinator dies; the re-mint failover runs a COMPLETE
+        // second round: a second Restored block for the same seat, same key
+        let block = b.seal(2, restored, &["petra", "walter"]);
+        b.push(block);
+        let head = verify_chain(&b.blocks).expect("two Restored blocks for one seat verify");
+        assert_eq!(head.height, 2);
+        assert_eq!(
+            head.identities
+                .iter()
+                .find(|i| i.member == "walter")
+                .expect("walter stays anchored")
+                .identity_pk,
+            walter_pk,
+            "recovery re-keys the MLS leaf, never the roster identity"
+        );
+
+        // counter: a threshold of survivors must NOT be able to swap the seat
+        // to a different identity key via a Restored block — hard-reject
+        let (_, other_pk) = derive_identity_key(&[42u8; 32], "walter");
+        let hijack = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "walter".to_string(),
+            identity_pk: other_pk,
+        };
+        let block = b.seal(3, hijack, &["petra", "walter"]);
+        b.push(block);
+        assert!(
+            verify_chain(&b.blocks).is_err(),
+            "a Restored block with a non-anchored identity key must be rejected"
+        );
+    }
+
+    /// **Re-mint failover, engine level: a survivor (or a restarted, amnesiac
+    /// coordinator) adopting a committed `Restored` block it holds NO pending
+    /// recovery for is inert.** The chain extends normally, but
+    /// `coordinator_rekey` never runs: nothing is recorded (no
+    /// `WorkspaceEvent::MlsCommit` broadcast), the mesh window is not armed,
+    /// and a pending recovery for a DIFFERENT member is left untouched. This
+    /// is the crash-before-re-key case: the block committed, the coordinator
+    /// died, and the re-mint failover's second round supplies the re-key.
+    #[test]
+    fn a_restored_commit_without_a_pending_recovery_is_inert() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let walter_pk = b.pk("walter");
+        let mut node = chain_signer("petra", &b, b.blocks.clone());
+        // a pending recovery for ANOTHER member must survive walter's commit
+        node.pending_recovery.insert(
+            "dora".to_string(),
+            PendingRecovery {
+                member: "dora".to_string(),
+                key_package: "beef".to_string(),
+                reply: String::new(),
+            },
+        );
+        let seq_before = node.next_seq;
+
+        // a Restored block for walter — committed elsewhere — arrives; this
+        // node holds no pending recovery for walter
+        let change = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "walter".to_string(),
+            identity_pk: walter_pk,
+        };
+        let block = b.seal(1, change, &["petra", "walter"]);
+        node.receive_block(block);
+
+        // the chain extends …
+        assert_eq!(node.chain_head.as_ref().expect("head").height, 1);
+        // … but the re-key trigger stayed inert: no envelope of any kind was
+        // recorded (make_env is the only seq stamp, so an MlsCommit broadcast
+        // or a chat notice would have advanced next_seq) …
+        assert_eq!(node.next_seq, seq_before, "no MlsCommit/notice was recorded");
+        // … the recovery mesh window was never armed …
+        assert!(node.recovery_mesh_window.is_empty());
+        // … and only walter's (absent) entry was consulted — dora's pending
+        // recovery is untouched
+        assert!(node.pending_recovery.contains_key("dora"));
     }
 
     /// A rejoiner that lost everything (no chain, no head) bootstraps from the

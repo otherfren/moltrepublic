@@ -10,11 +10,11 @@ It is the total-loss twin of `founding_ritual.md` (a member *joins* a new
 republic) and the recovery half of `persistent_chain.md` (a member *catches up*
 the chain). Read both first.
 
-> **Status (2026-07-08).** Spec. The primitives are built and unit-tested
-> (`make_seat_proof`/`verify_seat_proof`, `restore_member`, the
-> `ChainChange::Membership{Restored}` verifier, catch-up + headless
-> genesis-adoption); the ritual that assembles them is the work this spec
-> drives, test-first.
+> **Status (2026-07-11).** Implemented and proven end to end (§8). The one
+> remaining open surface is the **recovery UI** (in progress). Ticket
+> persistence and coordinator failover are **decided**, not open work: the
+> ticket set stays deliberately in-memory (fail-closed, §6) and failover is
+> re-mint — any survivor runs a fresh round (§6).
 
 ---
 
@@ -137,7 +137,11 @@ advances past the same commit before any new-epoch traffic — one coordinator,
 all apply, like the founder at founding); the **Welcome** goes to `R` on `Qᵣ`.
 
 **❻ Rejoin the group.** `R` processes the Welcome and is back inside the
-encrypted group — it can decrypt live traffic again.
+encrypted group — it can decrypt live traffic again. Its wait for the Welcome
+is bounded by `RECOVERY_WELCOME_TIMEOUT` (15 minutes — generous, because the
+window spans the survivors' **human** m-of-n approval in ❹). On expiry the
+rejoin fails visibly (a `recover-failed` notice); the retry is a fresh
+`RecoverStart` with a fresh link (§6, failover).
 
 **❼–❽ Catch up (option A: over the recovery channel).** The Welcome carries the
 coordinator's **whole chain from genesis** — `R` has no mesh links yet, so the
@@ -189,6 +193,12 @@ The group gets the complementary guarantees:
 - **Ticket-bound, single-use, ephemeral.** The recovery link's ticket binds the
   request (seat proof) and is spent on first use; an abandoned recovery leaves no
   trace and re-uses nothing.
+- **Deliberately never persisted (decided 2026-07-11: won't-do).** The
+  spend-once ticket set and `pending_recovery` stay **in-memory on purpose**.
+  This fails closed: after a coordinator crash or restart no old ticket
+  verifies and nothing is replayable — the cost is availability, never
+  security. A minted link dies with the coordinator's session; after a
+  restart, mint again.
 - **Verify-from-genesis.** `R` re-verifies the whole chain from block 0 before
   trusting any state — a survivor that served a doctored chain is caught by the
   signatures and links, so an untrusted deliverer is safe.
@@ -196,6 +206,20 @@ The group gets the complementary guarantees:
   group operation every member must apply in the same order; `S` produces it and
   distributes it, exactly as the founder builds the group once at founding —
   never two members re-keying the same seat concurrently (that forks the group).
+- **Coordinator failover is re-mint, not persistence or gossip (decided
+  2026-07-11).** If the coordinator dies — before *or* after the Restored block
+  commits — any survivor mints a fresh link and a complete second round runs.
+  This is safe because a **second** `Membership{Restored}` block for the same
+  seat is valid (the same anchored `identity_pk` — only the MLS leaf re-keys
+  again), and a committed Restored block whose re-key never ran is inert and
+  harmless (the commit trigger requires a pending recovery entry). Pinned by
+  `a_second_restored_block_for_the_same_seat_verifies` and
+  `a_restored_commit_without_a_pending_recovery_is_inert` (engine chain tests)
+  and `a_second_recovery_round_after_a_dead_first_attempt_succeeds`
+  (`two_instances.rs`). On the rejoiner side, the wait for the Welcome is
+  bounded by `RECOVERY_WELCOME_TIMEOUT` (15 minutes, §4 ❻); on expiry the
+  rejoin fails visibly and the retry is a fresh `RecoverStart` with a fresh
+  link.
 
 **MLS distribution — RE-decided (2026-07-09, supersedes the 2026-07-08 star):
 the commit rides the RUNTIME MESH.** `S` broadcasts `restore_member`'s commit to
@@ -226,7 +250,7 @@ The product never uses the seam.
 
 ---
 
-## 8. Implementation map (status as of 2026-07-09)
+## 8. Implementation map (status as of 2026-07-11)
 
 - **Seat-proof crypto** — ✅ `crates/molt-engine/src/founding.rs`
   (`make_seat_proof`, `verify_seat_proof`, `seat_proof_bytes`).
@@ -236,6 +260,12 @@ The product never uses the seam.
   `Membership{Restored}` producer (`propose_membership`), the coordinator's
   seat-proof→propose decision (`verify_and_propose_restore`), and the commit
   trigger that runs the re-key on a committed Restored block (`coordinator_rekey`).
+  Since 2026-07-11 the §6 verifier claim is enforced in `verify_chain` itself
+  (`apply_membership`): a Restored block that presents a non-anchored
+  `identity_pk` is hard-rejected — before, only the coordinator's propose step
+  checked it, so a threshold subset could have committed a seat-hijacking
+  block every honest verifier accepted. Pinned by the counter-assertion in
+  `a_second_restored_block_for_the_same_seat_verifies`.
 - **Catch-up + genesis adoption** — ✅ `crates/molt-engine/src/chain.rs`
   (`receive_block` headless-genesis, `request_catchup`, `serve_chain_from`) +
   `recovery.rs::sealed_roster_from_genesis`.
@@ -299,14 +329,35 @@ The product never uses the seam.
   `an_old_epoch_message_is_rejected_after_a_rekey`). Chat is ephemeral; chain
   blocks have catch-up.
 
-**Still open (deferred, not recovery-blocking):**
-- **Recovery UI** — the minted link surfaces only as `session.notice`
-  (`recovery-link:…`), the rejoin flow as `recover-started:` / `recovered:` /
-  `recover-failed:` notices; a real GUI surface + a distinct system-message
-  style for the rejoin notice are open.
-- **Ticket persistence + coordinator failover** — the spend-once ticket set and
-  `pending_recovery` are in-memory; a coordinator crash after the Restored block
-  commits leaves no one to re-key.
+- **Ticket persistence** — ✅ decided **won't-do** (2026-07-11): the spend-once
+  ticket set and `pending_recovery` stay deliberately in-memory (§6) —
+  fail-closed after a coordinator crash/restart, at the cost of availability
+  only; a minted link dies with the coordinator's session (mint again).
+- **Coordinator failover** — ✅ decided **re-mint** (2026-07-11): any survivor
+  mints a fresh link and a complete second round runs (§6). Pinned by
+  `a_second_restored_block_for_the_same_seat_verifies` and
+  `a_restored_commit_without_a_pending_recovery_is_inert` (engine chain tests)
+  and `a_second_recovery_round_after_a_dead_first_attempt_succeeds`
+  (`two_instances.rs`).
+- **Welcome timeout** — ✅ the rejoiner's wait for the Welcome is bounded by
+  `RECOVERY_WELCOME_TIMEOUT` = 15 minutes (`recovery.rs`; generous — the window
+  spans the survivors' human m-of-n approval). On expiry the rejoin fails
+  visibly (`recover-failed`); the retry is a fresh `RecoverStart` with a fresh
+  link.
+
+- **Recovery UI** — ✅ (2026-07-11) both surfaces in `molt-ui`, driving the
+  same co-equal commands. Coordinator: a per-member "Create recovery link"
+  action (Organization → Members) sends `RecoverInviteStart`; the
+  `recovery-link:` notice opens a copyable dialog carrying the
+  off-band/single-use/dies-with-the-session caution. Rejoiner: a "Recover"
+  first-run path (link + phrase → `RecoverStart`), progress rendered from the
+  `recover-started:` / `recover-failed:` / `recovered:` notices. The rejoin
+  notice is a real system line: `ChatMessage.kind = ChatKind::System` —
+  additive (`#[serde(default)]` + skip-if-user keeps the legacy wire shape
+  byte-identical), threaded through the one engine read projection (GUI and
+  MCP see the same rows), rendered via the UI's existing quiet system-line
+  style. `Command::Chat` always posts `User`, so no operator can dress a
+  message up as a system line.
 
 The state model this completes is `persistent_chain.md` (Phase 4); the founding
 it mirrors is `founding_ritual.md`.

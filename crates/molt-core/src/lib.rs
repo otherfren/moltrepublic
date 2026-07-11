@@ -778,12 +778,38 @@ impl ChannelRef {
     }
 }
 
+/// What kind of chat message this is. An **enum, not a bool** — future
+/// kinds stay open (`WorkspaceEvent` rule: additive-only evolution). `User`
+/// is the default and stays invisible on the wire (`skip_serializing_if`),
+/// so a pre-kind message serializes byte-identically; `System` marks
+/// engine-authored notices (first use: the recovery rejoin announcement)
+/// that render as quiet system lines, never as member speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatKind {
+    /// A human message — the default every legacy entry decodes to.
+    #[default]
+    User,
+    /// An engine-authored notice, rendered as a quiet system line.
+    System,
+}
+
+impl ChatKind {
+    /// Whether this is the default [`ChatKind::User`] (the
+    /// `skip_serializing_if` guard that keeps a legacy-shaped message
+    /// byte-identical on the wire).
+    pub fn is_user(&self) -> bool {
+        matches!(self, ChatKind::User)
+    }
+}
+
 impl ChatMessage {
     /// A plain text message — the one constructor chat posts and test
     /// builders share, so the default-field shape cannot drift. The id is
     /// minted by the caller (the engine's CSPRNG; [`MessageId::NIL`] only
     /// for pre-id fixtures); the channel defaults to `Group` — set it via
-    /// [`ChatMessage::with_channel`].
+    /// [`ChatMessage::with_channel`]; the kind defaults to `User` — set it
+    /// via [`ChatMessage::with_kind`].
     pub fn text(
         id: MessageId,
         from: impl Into<MemberId>,
@@ -798,6 +824,7 @@ impl ChatMessage {
             quote: None,
             quote_id: None,
             channel: ChannelRef::Group,
+            kind: ChatKind::User,
             reactions: BTreeMap::new(),
             deleted_by: None,
             file: None,
@@ -807,6 +834,12 @@ impl ChatMessage {
     /// The same message filed under `channel` (builder-style).
     pub fn with_channel(mut self, channel: ChannelRef) -> ChatMessage {
         self.channel = channel;
+        self
+    }
+
+    /// The same message carrying `kind` (builder-style).
+    pub fn with_kind(mut self, kind: ChatKind) -> ChatMessage {
+        self.kind = kind;
         self
     }
 }
@@ -841,6 +874,11 @@ pub struct ChatMessage {
     /// every legacy message.
     #[serde(default, skip_serializing_if = "ChannelRef::is_group")]
     pub channel: ChannelRef,
+    /// What kind of message this is; `User` for every legacy message and
+    /// invisible on the wire while it is (the byte-identity fixtures pin
+    /// that a User message serializes exactly as before this field).
+    #[serde(default, skip_serializing_if = "ChatKind::is_user")]
+    pub kind: ChatKind,
     /// Emoji → the members who picked it (one reaction per member; a
     /// BTreeMap keeps the pill order stable across re-renders).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2896,6 +2934,33 @@ mod tests {
         assert_eq!(msg.channel, ChannelRef::Group);
         assert_eq!(msg.reactions["👍"], vec!["walter".to_string()]);
         assert_eq!(msg.file.as_ref().map(|f| f.size), Some(48_000));
+    }
+
+    #[test]
+    fn chat_kind_is_additive_user_is_invisible_system_roundtrips() {
+        // (a) legacy JSON without `kind` decodes as the User default
+        let legacy = r#"{"from":"walter","body":"re: gm","ts":103}"#;
+        let msg: ChatMessage = serde_json::from_str(legacy).expect("decode");
+        assert_eq!(msg.kind, ChatKind::User);
+        assert!(msg.kind.is_user());
+
+        // (b) a User-kind message emits NO "kind" key — byte-identical to
+        // the pre-kind wire shape (the skip_serializing_if is load-bearing)
+        let plain = ChatMessage::text(MessageId::NIL, "petra", "gm", 102);
+        assert_eq!(plain.kind, ChatKind::User);
+        let wire = serde_json::to_string(&plain).expect("encode");
+        assert!(!wire.contains("kind"), "User kind must stay invisible: {wire}");
+        assert_eq!(wire, r#"{"from":"petra","body":"gm","ts":102}"#);
+
+        // (c) a System message round-trips through JSON, snake_case tag
+        let sys =
+            ChatMessage::text(MessageId::NIL, "petra", "rejoined", 104).with_kind(ChatKind::System);
+        assert!(!sys.kind.is_user());
+        let wire = serde_json::to_string(&sys).expect("encode");
+        assert!(wire.contains(r#""kind":"system""#), "system tag on the wire: {wire}");
+        let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
+        assert_eq!(back.kind, ChatKind::System);
+        assert_eq!(back, sys);
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //! mesh, whose peers answer through their own engines.
 
 use molt_core::{
-    ChannelRef, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError, Reply,
+    ChannelRef, ChatKind, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError, Reply,
     WorkspaceEvent,
 };
 
@@ -70,11 +70,27 @@ impl State {
         quote_id: Option<MessageId>,
         channel: ChannelRef,
     ) -> Result<MessageId, MoltError> {
+        self.post_message_with_kind(from, body, quote_id, channel, ChatKind::User)
+    }
+
+    /// [`State::post_message`], carrying an explicit [`ChatKind`]. Only the
+    /// engine mints non-`User` messages (first use: the recovery rejoin
+    /// notice in `chain.rs`) — `Command::Chat` always posts `User`, so no
+    /// operator can dress a message up as a system line.
+    pub(crate) fn post_message_with_kind(
+        &mut self,
+        from: MemberId,
+        body: String,
+        quote_id: Option<MessageId>,
+        channel: ChannelRef,
+        kind: ChatKind,
+    ) -> Result<MessageId, MoltError> {
         let id = mint_message_id()?;
         // a quote only sticks when it points at a known message
         let quote_id = quote_id.filter(|q| self.chat_pos.contains_key(q));
-        let mut msg =
-            ChatMessage::text(id, from.clone(), body.clone(), now_secs()).with_channel(channel.clone());
+        let mut msg = ChatMessage::text(id, from.clone(), body.clone(), now_secs())
+            .with_channel(channel.clone())
+            .with_kind(kind);
         msg.quote_id = quote_id;
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
