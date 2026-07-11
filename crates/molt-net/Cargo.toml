@@ -16,11 +16,24 @@ workspace = true
 # Embedded in-process Tor via arti (transport concept §4, T4 §P3). Default
 # OFF so the reproducible core build stays lean and the default Cargo.lock is
 # unperturbed. The cfg-gated `Dialer::Arti` scaffolding (smp/tls.rs) compiles
-# under this feature at Stage A; **Stage B (B2)** wires the real dependency
-# link here — `embedded-tor = ["dep:arti-client", "dep:tor-rtcompat"]` with
-# both deps `optional = true` — once it has pinned compatible, pure-Rust
-# (no C toolchain) arti versions. Kept dep-less until then so this pass adds
-# nothing to the default dependency graph.
+# under this feature dep-lessly (the stub fails closed).
+#
+# **B2 BLOCKED (2026-07-11): arti is NOT pure-Rust here — do not wire it.**
+# Wiring `embedded-tor = ["dep:arti-client","dep:tor-rtcompat"]` with
+# `arti-client 0.42 { default-features = false, features = ["tokio","rustls"] }`
+# (defaults off drops native-tls=OpenSSL and compression=zstd-sys/lzma-sys)
+# STILL forces a C dependency the CLAUDE.md no-C-toolchain posture forbids:
+#   arti-client 0.42 → tor-dirmgr 0.42 → rusqlite 0.39 → libsqlite3-sys 0.37
+#     (+ a `cc` build-dep)
+# `rusqlite` is a NON-optional dependency of tor-dirmgr (arti's persistent
+# directory-cache store) — no arti/tor-dirmgr feature removes it, and the only
+# related flag (`static`/`static-sqlite`) makes it worse (`rusqlite/bundled`
+# compiles SQLite from C via cc). Verified with
+# `cargo tree -p molt-net --features embedded-tor -e no-dev`. Per the B2 brief
+# ("if arti pulls a *-sys C dep that can't be turned off, STOP") the feature
+# stays dep-less and `mode = embedded` keeps failing closed (UI greys the row).
+# (Separately: `ring` — C+asm — is already in the DEFAULT graph via
+# `x509-parser`'s `verify` feature; that is pre-existing, not from arti.)
 embedded-tor = []
 
 [dependencies]
@@ -55,6 +68,8 @@ openmls_rust_crypto.workspace = true
 openmls_basic_credential.workspace = true
 tls_codec.workspace = true
 bincode.workspace = true
+# NOTE: the arti embedded-Tor deps are deliberately NOT declared — see the
+# `embedded-tor` note under [features] (B2 blocked: arti forces libsqlite3-sys).
 
 [dev-dependencies]
 # `test-util` (paused-clock auto-advance) drives the bounded-dial-timeout test
