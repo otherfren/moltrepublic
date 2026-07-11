@@ -8,6 +8,12 @@ user could mistake for real.
 
 ## Working style
 
+- **Work directly on master.** The user relies on the session's result being on
+  master — other sessions build on it there. Branches/worktrees are short-lived
+  tooling only (e.g. isolating parallel agents); merge back to master and delete
+  them BEFORE reporting done, and never leave the deliverable on a side branch.
+  If a plan document prescribes a branch workflow, this rule wins — raise the
+  contradiction with the user instead of silently following the document.
 - **Plan first, then act.** For anything non-trivial, lay out the plan (and for
   a security-critical flow, the design doc) before writing code — don't code your
   way into the design.
