@@ -132,9 +132,12 @@ rejoiner that trusted a prefix could fork the republic's state. The checks:
   predecessor's link hash; at least *m* **distinct** roster members have a valid
   signature over the block's approval bytes (a repeated or unknown signer never
   inflates the count); and no proposal id is `Applied` twice.
-- **Roster evolution.** A `Membership` block grows (`Joined`) or re-keys
-  (`Restored`) the roster, so the newcomer's or rekeyed member's signatures count
-  on the blocks that follow.
+- **Roster evolution.** A `Membership` block grows the roster (`Joined`) or
+  re-admits an existing seat (`Restored`). `Restored` never moves the anchored
+  identity key — the verifier hard-rejects a block that presents a different
+  one (recovery re-keys the MLS leaf, not the roster identity;
+  `recovery_ritual.md` §6) — so a newcomer's signatures count on the blocks
+  that follow and a restored member's keep counting unchanged.
 
 ## 7. Ordering — single branch, re-base = new sequence number + re-sign
 
@@ -154,9 +157,9 @@ far each member has advanced along the same line.
   "counted approvals" simulation — see `events.rs`.)
 - **Recovery = catch-up.** A returning member fetches the linear chain from any
   peer, verifies it here from the genesis, and is current — no live
-  reintegration. Re-keying its seat is a `Membership{Restored}` block, itself
-  threshold-approved, so the recovery is recorded in the same tamper-evident
-  line. (Confidentiality/transport is MLS's job; the chain owns authenticity.)
+  reintegration. Re-keying its seat (the MLS leaf — the identity key stays the
+  anchored one) is a `Membership{Restored}` block, itself threshold-approved,
+  so the recovery is recorded in the same tamper-evident line. (Confidentiality/transport is MLS's job; the chain owns authenticity.)
 - **Checkpointing (later).** A long chain will eventually be compacted —
   squashing settled history into a signed checkpoint so newcomers need not replay
   everything. Out of scope until the chain is wired; noted so the format leaves
