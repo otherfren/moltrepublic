@@ -2568,7 +2568,12 @@ export component AppWindow inherits Window {
                                                     root.show-toast(Strings.toast-copied);
                                                 }
                                                 delete-requested => {
-                                                    if (l.id != "") {
+                                                    // own rows only: the engine
+                                                    // rejects a foreign delete,
+                                                    // so the modal must never
+                                                    // open for one (the icon is
+                                                    // gated the same way)
+                                                    if (l.id != "" && l.own) {
                                                         root.delmsg-id = l.id;
                                                         root.confirm-delmsg-open = true;
                                                     }
