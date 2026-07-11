@@ -249,18 +249,13 @@ fn surface_arg(args: &Value) -> Result<Surface, String> {
     Surface::parse(&s).ok_or_else(|| format!("unknown surface `{s}`"))
 }
 
-/// A required chat-message id argument (32-char lowercase hex). A present
-/// argument of the wrong JSON type is its own clear error, not "missing".
+/// A required chat-message id argument (32-char lowercase hex): the
+/// optional parse ([`opt_id_arg`]) plus a missing-argument error, so the
+/// malformed cases read identically on both paths by construction.
 fn id_arg(args: &Value, key: &str) -> Result<MessageId, String> {
-    match args.get(key) {
-        None | Some(Value::Null) => Err(format!(
-            "missing argument `{key}` (a message id: 32 lowercase hex chars, from read_state)"
-        )),
-        Some(Value::String(s)) => s.parse().map_err(|e| format!("argument `{key}`: {e}")),
-        Some(other) => Err(format!(
-            "argument `{key}` must be a string message id (32 lowercase hex chars), got {other}"
-        )),
-    }
+    opt_id_arg(args, key)?.ok_or_else(|| {
+        format!("missing argument `{key}` (a message id: 32 lowercase hex chars, from read_state)")
+    })
 }
 
 /// An optional chat-message id argument (32-char lowercase hex). Only a
@@ -527,7 +522,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "delete_chat",
             command: "delete_chat",
-            description: "Delete a chat message, addressed by its stable id (32-char lowercase hex, from read_state): the text is wiped for everyone and replaced by a deletion notice naming the deleter.",
+            description: "Delete one of YOUR OWN chat messages, addressed by its stable id (32-char lowercase hex, from read_state): the text is wiped for everyone and replaced by a deletion notice naming the deleter. Author-only — there is no moderation; the engine rejects the id of another member's message.",
             schema: || json!({
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "message id (32-char lowercase hex, from read_state)" } },
@@ -1242,6 +1237,28 @@ mod tests {
                     "{tool} accepted the bad id {bad}"
                 );
             }
+        }
+
+        // The required and optional id paths emit the SAME error for the
+        // same malformed input — only the missing case may differ (required
+        // errors, optional yields None).
+        for bad in [json!(5), json!(true), json!([1])] {
+            let args = json!({ "id": bad });
+            let required = id_arg(&args, "id").expect_err("wrong type errors on required");
+            let optional = opt_id_arg(&args, "id").expect_err("wrong type errors on optional");
+            assert_eq!(
+                required, optional,
+                "wrong-type message diverged between required and optional for {bad}"
+            );
+        }
+        for bad in ["0011", "zz112233445566778899aabbccddeeff"] {
+            let args = json!({ "id": bad });
+            let required = id_arg(&args, "id").expect_err("malformed id errors on required");
+            let optional = opt_id_arg(&args, "id").expect_err("malformed id errors on optional");
+            assert_eq!(
+                required, optional,
+                "malformed-id message diverged between required and optional for {bad}"
+            );
         }
 
         // A PRESENT quote of the wrong type or shape is an error — not
