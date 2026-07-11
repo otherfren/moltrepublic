@@ -2682,6 +2682,8 @@ lexicon! {
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
+    field_s3_tor: "Route over Tor (onion endpoint)", "Über Tor (Onion-Endpoint)";
+    field_s3_onion: "Onion endpoint", "Onion-Endpoint";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
     field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";

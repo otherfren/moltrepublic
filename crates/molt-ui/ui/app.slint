@@ -23,7 +23,7 @@ import "assets/fonts/Twemoji.Mozilla.ttf";
 import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
     AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, DotLabel
+    ConfirmModal, DotLabel, DisabledTorRow
 } from "components.slint";
 import {
     ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView
@@ -2332,6 +2332,12 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // greyed placeholder: restoring from an onion endpoint over
+                    // Tor is a later step (not wired yet)
+                    DisabledTorRow {
+                        label: Strings.field-s3-tor;
+                        onion-label: Strings.field-s3-onion;
+                    }
                 }
 
                 }
@@ -3594,6 +3600,12 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+                            // greyed placeholder: routing backups over Tor to an
+                            // onion endpoint is a later step (not wired yet)
+                            DisabledTorRow {
+                                label: Strings.field-s3-tor;
+                                onion-label: Strings.field-s3-onion;
                             }
                             Rectangle {
                                 height: 1px;
