@@ -4,9 +4,10 @@
 (rejoiner `rejoin_mesh`; coordinator window + relay; survivor extension +
 supervisor rebuild + grown-mesh persist; rejoiner engine standup). Proven live
 in `two_instances.rs` (`recovery_completes_…`, `recovery_distributes_…`,
-`a_survivor_folds_…` — the last also pins the §4 queue-rotation shape). The
-general "add a new seat" case reuses this machinery once seat-adding itself
-exists.*
+`a_survivor_folds_…` — the last also pins the §4 queue-rotation shape).
+Seat-adding is a **won't-do** (product decision 2026-07-11): membership and
+threshold are fixed at founding, forever — the recovered-seat case is the ONLY
+mesh-membership change.*
 
 ## 1. Problem
 
@@ -110,13 +111,18 @@ Key decisions (and why):
   LIVE (non-sealing) `MergeCrypto`, and cursor saves merge **only** the
   cursor maps — a stale supervisor clone can never revert the grown mesh.
 
-## 4. What this deliberately does not do (yet)
+## 4. What this deliberately does not do
 
-- **Adding brand-new seats** — needs the seat-adding governance flow first;
-  the announce/extend machinery here is what it will reuse.
+- **Adding brand-new seats** — **won't-do, permanently** (product decision
+  2026-07-11): a republic's membership and threshold are fixed at founding
+  and never change. `Membership` chain changes cover only the `Restored`
+  re-admission of an EXISTING seat; do not design or build a seat-adding
+  governance flow.
 - **Queue rotation for existing members** — same mechanics, different guard;
   out of scope.
-- **Removing seats** — MLS removal + link teardown; separate design.
+- **Removing seats** — MLS removal + link teardown; separate design (note:
+  removal would not change n or the threshold — a removed seat is a dead
+  seat, not a smaller republic).
 
 The recovery flow this completes is `recovery_ritual.md`; the founding
 bootstrap it mirrors is in `crates/molt-net/src/mesh.rs` + `founding.rs`.
