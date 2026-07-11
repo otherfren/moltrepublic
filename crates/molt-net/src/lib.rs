@@ -41,6 +41,11 @@ pub mod mls;
 pub mod smp;
 pub mod socks5;
 pub mod supervisor;
+/// Embedded in-process Tor via arti — only built with `--features embedded-tor`
+/// (the default build never pulls arti). See the module docs and the
+/// `Cargo.toml` `[features]` note.
+#[cfg(feature = "embedded-tor")]
+pub mod tor_embedded;
 pub mod wrap;
 
 use std::future::Future;

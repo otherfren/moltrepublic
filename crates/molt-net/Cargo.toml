@@ -15,26 +15,27 @@ workspace = true
 [features]
 # Embedded in-process Tor via arti (transport concept §4, T4 §P3). Default
 # OFF so the reproducible core build stays lean and the default Cargo.lock is
-# unperturbed. The cfg-gated `Dialer::Arti` scaffolding (smp/tls.rs) compiles
-# under this feature dep-lessly (the stub fails closed).
+# unperturbed. The cfg-gated `Dialer::Arti` scaffolding (smp/tls.rs) + the
+# arti bootstrap (tor_embedded.rs) compile ONLY under this feature.
 #
-# **B2 BLOCKED (2026-07-11): arti is NOT pure-Rust here — do not wire it.**
-# Wiring `embedded-tor = ["dep:arti-client","dep:tor-rtcompat"]` with
-# `arti-client 0.42 { default-features = false, features = ["tokio","rustls"] }`
-# (defaults off drops native-tls=OpenSSL and compression=zstd-sys/lzma-sys)
-# STILL forces a C dependency the CLAUDE.md no-C-toolchain posture forbids:
+# **B2 RESOLVED (2026-07-11): the C dependency is ACCEPTED, opt-in only.**
+# The user decided (2026-07-11) to accept a C toolchain for the OPT-IN
+# `embedded-tor` feature — the DEFAULT build stays pure-Rust and its Cargo
+# graph is unperturbed (optional-off deps never compile). Honest record of
+# what turning the feature ON pulls, unchanged from the first attempt's audit:
 #   arti-client 0.42 → tor-dirmgr 0.42 → rusqlite 0.39 → libsqlite3-sys 0.37
 #     (+ a `cc` build-dep)
 # `rusqlite` is a NON-optional dependency of tor-dirmgr (arti's persistent
-# directory-cache store) — no arti/tor-dirmgr feature removes it, and the only
-# related flag (`static`/`static-sqlite`) makes it worse (`rusqlite/bundled`
-# compiles SQLite from C via cc). Verified with
-# `cargo tree -p molt-net --features embedded-tor -e no-dev`. Per the B2 brief
-# ("if arti pulls a *-sys C dep that can't be turned off, STOP") the feature
-# stays dep-less and `mode = embedded` keeps failing closed (UI greys the row).
+# directory-cache store) — no arti/tor-dirmgr feature removes it, and
+# `static`/`static-sqlite` (`rusqlite/bundled`) would only make it worse
+# (compiles SQLite from C via cc, rather than linking the system lib). We take
+# the minimal feature set that builds: `arti-client { default-features = false,
+# features = ["tokio","rustls"] }` drops native-tls (OpenSSL) and the
+# compression codecs (zstd-sys/lzma-sys), leaving libsqlite3-sys as the only
+# C dep. Verify with `cargo tree -p molt-net --features embedded-tor -e no-dev`.
 # (Separately: `ring` — C+asm — is already in the DEFAULT graph via
 # `x509-parser`'s `verify` feature; that is pre-existing, not from arti.)
-embedded-tor = []
+embedded-tor = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [dependencies]
 molt-core.workspace = true
@@ -68,10 +69,18 @@ openmls_rust_crypto.workspace = true
 openmls_basic_credential.workspace = true
 tls_codec.workspace = true
 bincode.workspace = true
-# NOTE: the arti embedded-Tor deps are deliberately NOT declared — see the
-# `embedded-tor` note under [features] (B2 blocked: arti forces libsqlite3-sys).
+# Embedded-Tor (opt-in `embedded-tor` feature only) — see the [features] note.
+# Both optional: the DEFAULT build never compiles them, so the pure-Rust core
+# graph is unperturbed. Minimal feature set: `tokio` + `rustls` (drops
+# native-tls/OpenSSL and the zstd/xz compression C deps); libsqlite3-sys (via
+# tor-dirmgr) is the accepted C dep.
+arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls"], optional = true }
+tor-rtcompat = { version = "0.42", optional = true }
 
 [dev-dependencies]
 # `test-util` (paused-clock auto-advance) drives the bounded-dial-timeout test
 # without a 30 s real wait. Dev-only: the default build graph is unchanged.
 tokio = { workspace = true, features = ["test-util"] }
+# `tempfile` backs the embedded-tor config-to-state-dir unit test (feature-gated,
+# dev-only — the default non-dev graph is unchanged).
+tempfile = { workspace = true }
