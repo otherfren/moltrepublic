@@ -443,6 +443,7 @@ mod tests {
                 quote: None,
                 quote_id: None,
                 channel: molt_core::ChannelRef::Group,
+                kind: molt_core::ChatKind::User,
                 reactions: Default::default(),
                 deleted_by: None,
                 file: None,

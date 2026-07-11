@@ -1710,11 +1710,20 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     // the coordinator announced the rejoin in the group chat (recorded
     // synchronously when the block committed, before the welcome went out)
     let chat = common::read_chat(&a).await;
-    assert!(
-        chat.iter().any(|m| m["body"]
-            .as_str()
-            .is_some_and(|b| b.contains("member-b rejoined the republic after recovery"))),
-        "the rejoin notice is in the coordinator's chat: {chat:?}"
+    let notice = chat
+        .iter()
+        .find(|m| {
+            m["body"]
+                .as_str()
+                .is_some_and(|b| b.contains("member-b rejoined the republic after recovery"))
+        })
+        .unwrap_or_else(|| panic!("the rejoin notice is in the coordinator's chat: {chat:?}"));
+    // ... and it carries the system kind through the read surface, so every
+    // frontend renders it as a quiet system line, never as member speech
+    assert_eq!(
+        notice["kind"].as_str(),
+        Some("system"),
+        "the rejoin notice is a ChatKind::System row: {notice:?}"
     );
 
     // DYNAMIC MESH: the rejoiner assembled a fresh per-pair link to the

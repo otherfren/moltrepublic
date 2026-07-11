@@ -694,12 +694,15 @@ impl State {
                 }
                 // 3) announce the rejoin in the group chat — AFTER the commit, so
                 // the survivors have advanced to the epoch this notice is
-                // encrypted at (ephemeral, best-effort like all chat).
-                if let Err(e) = self.post_message(
+                // encrypted at (ephemeral, best-effort like all chat). A
+                // System-kind message: every frontend renders it as a quiet
+                // system line, not as the coordinator speaking.
+                if let Err(e) = self.post_message_with_kind(
                     me,
                     format!("🔑 {member} rejoined the republic after recovery"),
                     None,
                     molt_core::ChannelRef::Group,
+                    molt_core::ChatKind::System,
                 ) {
                     // best-effort, like all chat — never blocks the re-key
                     tracing::warn!(error = %e, "could not post the rejoin notice");

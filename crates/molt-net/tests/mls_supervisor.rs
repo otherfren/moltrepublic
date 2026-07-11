@@ -66,6 +66,7 @@ fn chat_env(seq: u64, by: &str, body: &str) -> EventEnvelope {
             quote: None,
             quote_id: None,
             channel: molt_core::ChannelRef::Group,
+            kind: molt_core::ChatKind::User,
             reactions: std::collections::BTreeMap::new(),
             deleted_by: None,
             file: None,

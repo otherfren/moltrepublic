@@ -1984,7 +1984,10 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
             -1
         },
         quote_id: m.quote_id.map(|q| q.to_string()).unwrap_or_default(),
-        system: false,
+        // an engine-authored notice (ChatKind::System, e.g. the recovery
+        // rejoin announcement) rides the same quiet-line rendering as the
+        // UI-synthesized governance rows — one flag, no second style
+        system: !m.kind.is_user(),
         quote_label: String::new(), // teaser, filled in by annotate_chat_log
         deleted_by: m.deleted_by.clone().unwrap_or_default(),
         first: true, // author-block start, filled in by annotate_chat_log
@@ -2754,6 +2757,18 @@ mod tests {
             text: text.to_string(),
             deleted,
         }
+    }
+
+    /// An engine-authored System-kind message maps onto the same per-line
+    /// `system` flag the governance rows use — one quiet rendering path,
+    /// never a second style; a User message stays a normal card.
+    #[test]
+    fn a_system_kind_message_maps_onto_the_quiet_line_flag() {
+        let user = ChatMessage::text(MessageId([1; 16]), "petra", "gm", 100);
+        assert!(!chat_line(&user, "me").system);
+        let notice = ChatMessage::text(MessageId([2; 16]), "petra", "🔑 back", 101)
+            .with_kind(molt_core::ChatKind::System);
+        assert!(chat_line(&notice, "me").system);
     }
 
     /// The recovery flow rides the transient session notice (the engine's
