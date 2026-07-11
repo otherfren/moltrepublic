@@ -220,17 +220,30 @@ impl<C: PooledConn> ConnPool<C> {
     }
 
     /// Run one pooled operation, reusing the live connection (opening one
-    /// lazily via `dialer`/`server`). On an error from `op` — a broken
-    /// connection — the connection is dropped and `op` retried ONCE on a freshly
-    /// dialed one, so a stale pooled connection heals transparently. The retry is
-    /// safe because the transport is at-least-once (the peer's dedup absorbs a
-    /// re-sent request) and each op re-reads the securing-key state, so a
-    /// reconnect never double-`SKEY`s. A *dial* failure is returned straight away
-    /// (the outbox backs off + retries).
+    /// lazily via `dialer`/`server`). On an error the broken connection is
+    /// dropped; whether `op` is retried once on a fresh dial depends on
+    /// `idempotent`:
+    ///
+    /// - `idempotent = true` (e.g. `send`): retry on any failure. Safe because
+    ///   the transport is at-least-once (the peer dedups a re-sent block by its
+    ///   message id) and the op re-reads the securing-key state, so a reconnect
+    ///   never double-`SKEY`s.
+    /// - `idempotent = false` (`NEW`/`DEL` — a queue create/delete the server
+    ///   does NOT dedup): retry ONLY when the failed connection was *reused*
+    ///   from the pool, i.e. a stale connection whose write fails fast before
+    ///   the request reaches the server — healing it is safe. A failure on a
+    ///   *freshly dialed* connection is returned as-is, so a lost response after
+    ///   the server already applied the op is never retried into a second queue
+    ///   (the double-allocation this used to cause). Residual: a reused
+    ///   connection whose write reached the server but whose response was lost
+    ///   can still re-issue — a narrow window, benign to node state.
+    ///
+    /// A *dial* failure is returned straight away (the outbox backs off).
     async fn with_conn<R, F>(
         &self,
         dialer: &Dialer,
         server: &SmpServer,
+        idempotent: bool,
         mut op: F,
     ) -> Result<R, NetError>
     where
@@ -239,6 +252,7 @@ impl<C: PooledConn> ConnPool<C> {
         let mut slot = self.slot.lock().await;
         let mut last: Option<NetError> = None;
         for _ in 0..2 {
+            let reused = slot.is_some();
             if slot.is_none() {
                 *slot = Some(self.open(dialer, server).await?);
             }
@@ -249,8 +263,15 @@ impl<C: PooledConn> ConnPool<C> {
             match result {
                 Ok(r) => return Ok(r),
                 Err(e) => {
-                    *slot = None; // drop the broken connection; the retry re-dials
+                    *slot = None; // drop the broken connection
                     last = Some(e);
+                    // a non-idempotent op only retries to heal a *stale reused*
+                    // connection (write fails before the server sees it); after
+                    // a fresh dial the request may have been applied — do not
+                    // re-issue it.
+                    if !idempotent && !reused {
+                        break;
+                    }
                 }
             }
         }
@@ -269,7 +290,7 @@ impl Transport for SmpTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
         let q = self
             .pool
-            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+            .with_conn(&self.dialer, &self.server, false, |c: &mut SmpConn| {
                 Box::pin(async move { c.new_queue(false).await })
             })
             .await?;
@@ -290,7 +311,7 @@ impl Transport for SmpTransport {
         let sender_id = addr.id.0.clone();
         let state = self.state.clone();
         self.pool
-            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+            .with_conn(&self.dialer, &self.server, true, |c: &mut SmpConn| {
                 let sender_id = sender_id.clone();
                 let state = state.clone();
                 let block = block.clone();
@@ -368,7 +389,7 @@ impl Transport for SmpTransport {
         let recipient_id = queue.recipient_id.clone();
         let auth_sk = queue.auth_sk.clone();
         self.pool
-            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+            .with_conn(&self.dialer, &self.server, false, |c: &mut SmpConn| {
                 let recipient_id = recipient_id.clone();
                 let auth_sk = auth_sk.clone();
                 Box::pin(async move { c.delete(&recipient_id, &auth_sk).await })
@@ -419,7 +440,7 @@ mod pool_tests {
         let ops = Arc::new(AtomicU64::new(0));
         for _ in 0..2 {
             let ops = ops.clone();
-            pool.with_conn(&dialer, &server, move |_c: &mut TestConn| {
+            pool.with_conn(&dialer, &server, true, move |_c: &mut TestConn| {
                 let ops = ops.clone();
                 Box::pin(async move {
                     ops.fetch_add(1, SeqCst);
@@ -444,7 +465,7 @@ mod pool_tests {
     async fn a_broken_pooled_connection_reconnects_transparently() {
         let pool: ConnPool<TestConn> = ConnPool::new();
         let (dialer, server) = (Dialer::Direct, dummy_server());
-        pool.with_conn(&dialer, &server, |_c: &mut TestConn| {
+        pool.with_conn(&dialer, &server, true, |_c: &mut TestConn| {
             Box::pin(async { Ok::<(), NetError>(()) })
         })
         .await
@@ -454,7 +475,7 @@ mod pool_tests {
         let fail_once = Arc::new(AtomicBool::new(true));
         let calls = Arc::new(AtomicU64::new(0));
         let res = pool
-            .with_conn(&dialer, &server, |_c: &mut TestConn| {
+            .with_conn(&dialer, &server, true, |_c: &mut TestConn| {
                 let fail_once = fail_once.clone();
                 let calls = calls.clone();
                 Box::pin(async move {
@@ -470,5 +491,63 @@ mod pool_tests {
         assert!(res.is_ok(), "reconnects rather than erroring out: {res:?}");
         assert_eq!(calls.load(SeqCst), 2, "op retried once after the break");
         assert_eq!(pool.dials(), 2, "reconnected on a fresh dial");
+    }
+
+    /// Review fix: a NON-idempotent op (queue create/delete) that fails on a
+    /// *freshly dialed* connection must NOT be retried — a lost response after
+    /// the server already applied it would otherwise allocate a second queue.
+    #[tokio::test]
+    async fn a_fresh_dial_failure_is_not_retried_for_a_non_idempotent_op() {
+        let pool: ConnPool<TestConn> = ConnPool::new();
+        let (dialer, server) = (Dialer::Direct, dummy_server());
+        let calls = Arc::new(AtomicU64::new(0));
+        let res = pool
+            .with_conn(&dialer, &server, false, |_c: &mut TestConn| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, SeqCst);
+                    Err::<(), NetError>(NetError::TorUnavailable("response lost".into()))
+                })
+            })
+            .await;
+        assert!(res.is_err(), "the failure is surfaced, not retried away");
+        assert_eq!(calls.load(SeqCst), 1, "a non-idempotent op must run only once on a fresh dial");
+        assert_eq!(pool.dials(), 1, "no second dial / no second queue allocation");
+    }
+
+    /// ...but a non-idempotent op still heals a *stale reused* connection: the
+    /// first (reused) attempt failing fast re-dials once, so a create/delete
+    /// after the pool went stale doesn't spuriously fail.
+    #[tokio::test]
+    async fn a_non_idempotent_op_heals_a_stale_reused_connection() {
+        let pool: ConnPool<TestConn> = ConnPool::new();
+        let (dialer, server) = (Dialer::Direct, dummy_server());
+        // warm the pool so the next op reuses the connection
+        pool.with_conn(&dialer, &server, true, |_c: &mut TestConn| {
+            Box::pin(async { Ok::<(), NetError>(()) })
+        })
+        .await
+        .expect("warm");
+        assert_eq!(pool.dials(), 1);
+
+        let fail_once = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicU64::new(0));
+        let res = pool
+            .with_conn(&dialer, &server, false, |_c: &mut TestConn| {
+                let fail_once = fail_once.clone();
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, SeqCst);
+                    if fail_once.swap(false, SeqCst) {
+                        Err(NetError::Unreachable("stale reused connection".into()))
+                    } else {
+                        Ok::<(), NetError>(())
+                    }
+                })
+            })
+            .await;
+        assert!(res.is_ok(), "a stale reused connection is healed: {res:?}");
+        assert_eq!(calls.load(SeqCst), 2, "retried once on the reused-then-broken connection");
+        assert_eq!(pool.dials(), 2);
     }
 }

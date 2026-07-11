@@ -148,10 +148,28 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   member handle gives the WRONG key (the ritual salts identity with a
   workspace-id string). Phases 3–4 (catch-up sync, recovery) are still open.
 
+## Pure-Rust posture — aspirational, with two known C exceptions
+
+The crypto stack aims for **pure-Rust, no C toolchain** (rustls-rustcrypto, the
+pure-Rust Ed448/Ed25519, OpenMLS), and MLS/TLS/signatures hold to it. But the
+claim is **not literally true of the current build** — two C dependencies exist:
+
+- **`ring` (C + assembly, pulls `cc`) is in the DEFAULT build** via
+  `x509-parser`'s `verify = ["ring"]` feature, used by the SMP cert-pin
+  verifier (`crates/molt-net/src/smp/tls.rs`). So a C compiler is already
+  required to build `molt-net` today. (Open follow-up: swap the leaf-cert verify
+  for a rustcrypto path to remove it — not yet done.)
+- **`libsqlite3-sys` (C) rides the OPT-IN `embedded-tor` feature** only: arti's
+  `tor-dirmgr` depends on `rusqlite` non-optionally, and no arti feature removes
+  it. Accepted (2026-07-11 decision) for that opt-in build; the **default build
+  never pulls it** (the feature is off by default). See
+  `crates/molt-net/Cargo.toml` `[features]`.
+
+Keep new code pure-Rust where you can; these two are the sanctioned exceptions.
+
 ## MLS / OpenMLS reference (crates/molt-net/src/mls.rs)
 
-Pure-Rust only (no C toolchain — same posture as the pure-Rust TLS/Ed448). Facts
-that cost time to (re)discover:
+Facts that cost time to (re)discover:
 
 - Version pairing (they version independently): `openmls 0.8.1`,
   `openmls_traits 0.5.0`, `openmls_rust_crypto 0.5.1`,
