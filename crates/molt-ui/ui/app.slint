@@ -307,6 +307,32 @@ export component AppWindow inherits Window {
     in property <string> jw-proposed-agenda;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
+    // recovery (total-loss rejoin over a molt://recover/… link):
+    // coordinator side — mint a single-use link for an anchored seat
+    // (RecoverInviteStart); the link arrives as a "recovery-link:" notice
+    callback recover-invite(string);
+    // rejoiner side — rejoin from link + phrase (RecoverStart)
+    callback recover-start(string, string);
+    // the last notice the recovery flow handled (edge-trigger mirror so a
+    // re-pushed unchanged session cannot re-fire a dialog; Rust-owned)
+    in-out property <string> recover-notice-seen;
+    // the minted link and its presentation dialog (opened from Rust when the
+    // engine's notice arrives); which seat it was minted for is UI-local
+    in-out property <string> recovery-link;
+    in-out property <bool> recover-link-open: false;
+    property <string> recover-link-member;
+    // the rejoiner modal (UI-local overlay on the choice screen, like the
+    // other drafts) …
+    in-out property <bool> rv-open: false;
+    property <string> rv-link;
+    property <string> rv-phrase;
+    // … and its lifecycle, driven by the engine notices (pushed from Rust):
+    // running from "recover-started:", error from "recover-failed:"; on
+    // success the engine flips to Main by itself
+    in-out property <bool> rv-running: false;
+    in-out property <string> rv-member;
+    in-out property <string> rv-error;
+
     property <string> rw-seed;
     property <string> rw-endpoint;
     // restore: chosen backup file + picker modal (continues gate themselves
@@ -500,7 +526,13 @@ export component AppWindow inherits Window {
     // clickable (never during a running engine mock-run). An open modal is
     // closed first, like a click on its scrim.
     function handle-escape() {
-        if (root.confirm-quit-open) {
+        if (root.recover-link-open) {
+            root.recover-link-open = false;
+        } else if (root.rv-open) {
+            // hides the panel only — a running recovery keeps going in the
+            // engine, and re-opening the panel shows its state again
+            root.rv-open = false;
+        } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
         } else if (root.confirm-leave-open) {
             root.confirm-leave-open = false;
@@ -915,6 +947,21 @@ export component AppWindow inherits Window {
                                         root.jw-invite = "";
                                         root.jw-member = "";
                                         root.navigate(AppScreen.join);
+                                    }
+                                }
+                                ChoiceCard {
+                                    title: Strings.choice-recover-title;
+                                    sub: Strings.choice-recover-sub;
+                                    icon: @image-url("assets/key.svg");
+                                    chosen => {
+                                        // a recovery already in flight keeps
+                                        // its state; a fresh visit starts clean
+                                        if (!root.rv-running) {
+                                            root.rv-link = "";
+                                            root.rv-phrase = "";
+                                            root.rv-error = "";
+                                        }
+                                        root.rv-open = true;
                                     }
                                 }
                             }
@@ -3125,6 +3172,23 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
+                                                // mint a single-use recovery
+                                                // link for a member who lost
+                                                // their device (never for the
+                                                // own seat — this node IS its
+                                                // device); the engine answers
+                                                // with a "recovery-link:"
+                                                // notice that opens the dialog
+                                                if m.name != root.node-member: AppButton {
+                                                    height: 28px;
+                                                    pad: 10px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    label: Strings.om-recover-link;
+                                                    clicked => {
+                                                        root.recover-link-member = m.name;
+                                                        root.recover-invite(m.name);
+                                                    }
+                                                }
                                                 Text {
                                                     text: m.last;
                                                     color: Theme.faint;
@@ -4447,6 +4511,144 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.ws-dir-draft;
             placeholder: "~/.moltrepublic/workspaces";
+        }
+    }
+
+    // =================================================================
+    // Modal: a coordinator-minted recovery link (opened from Rust when the
+    // engine's "recovery-link:" notice arrives). Monospace + copy; the
+    // caution stays visible: off-band, single-use, dies with this session.
+    // =================================================================
+    if root.recover-link-open: ConfirmModal {
+        dialog-width: 460px;
+        title: root.recover-link-member == "" ? Strings.rlk-title
+            : "\{Strings.rlk-title} · \{root.recover-link-member}";
+        body: Strings.rlk-body;
+        cancel-label: Strings.set-close;
+        confirm-label: Strings.ow-copy;
+        dismissed => {
+            root.recover-link-open = false;
+        }
+        confirmed => {
+            // copy, but keep the dialog open — the link stays readable
+            // until the coordinator explicitly closes it
+            root.copy-text(root.recovery-link);
+            root.show-toast(Strings.toast-copied);
+        }
+        Rectangle {
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            height: rlk-text.preferred-height + 20px;
+            rlk-text := Text {
+                x: 10px;
+                y: 10px;
+                width: parent.width - 20px;
+                text: root.recovery-link;
+                color: Theme.text;
+                font-family: "monospace";
+                font-size: Theme.fs-cap;
+                // one long unbreakable token — break anywhere, lose nothing
+                wrap: char-wrap;
+            }
+        }
+        Text {
+            text: Strings.rlk-caution;
+            color: Theme.warn;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+    }
+
+    // =================================================================
+    // Modal: recover a lost seat (the rejoiner side of the recovery
+    // ritual): link + phrase → recover-start. The engine notices drive the
+    // running / failed states; on success the engine flips to Main by
+    // itself — the modal is gated on the choice screen, so it steps aside
+    // without standing in the way.
+    // =================================================================
+    if root.rv-open && root.screen == AppScreen.choice: ConfirmModal {
+        dialog-width: 480px;
+        title: Strings.rv-title;
+        body: Strings.rv-body;
+        cancel-label: Strings.set-close;
+        confirm-label: Strings.rv-go;
+        confirm-enabled: !root.rv-running && root.rv-link != "" && root.rv-phrase != "";
+        dismissed => {
+            // hides the panel only — a running recovery keeps going in the
+            // engine, and re-opening the panel shows its state again
+            root.rv-open = false;
+        }
+        confirmed => {
+            root.recover-start(root.rv-link, root.rv-phrase);
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.rv-link;
+                placeholder: "molt://recover/…";
+                horizontal-stretch: 1;
+            }
+            AppButton {
+                height: 38px;
+                pad: 10px;
+                icon: @image-url("assets/paste.svg");
+                icon-set: true;
+                label: Strings.rw-paste;
+                clicked => {
+                    root.rv-link = root.paste-clipboard();
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.rv-phrase;
+                placeholder: Strings.ph-seed;
+                horizontal-stretch: 1;
+            }
+            AppButton {
+                height: 38px;
+                pad: 10px;
+                icon: @image-url("assets/paste.svg");
+                icon-set: true;
+                label: Strings.rw-paste;
+                clicked => {
+                    root.rv-phrase = root.paste-clipboard();
+                }
+            }
+        }
+        // in flight: the wait spans the survivors' human approval — say so
+        if root.rv-running: VerticalLayout {
+            spacing: 4px;
+            DotLabel {
+                tone: Theme.warn;
+                label: root.rv-member;
+                label-color: Theme.text;
+            }
+            Text {
+                text: Strings.rv-running-note;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+        }
+        // failed: the raw engine reason + the retry hint (fresh link)
+        if root.rv-error != "": VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: root.rv-error;
+                color: Theme.bad;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+            Text {
+                text: Strings.rv-failed-hint;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
         }
     }
 

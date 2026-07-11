@@ -546,6 +546,40 @@ pub fn run_app(
             issue(&rt, &w, &weak, Command::JoinCancel);
         });
     }
+    // recovery (total-loss rejoin): the coordinator mints a link for an
+    // anchored seat; the returning member rejoins from link + phrase. Both
+    // are human decisions — tools on both surfaces, co-equal with MCP.
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_recover_invite(move |member| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RecoverInviteStart {
+                    member: member.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_recover_start(move |link, phrase| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RecoverStart {
+                    link: link.to_string(),
+                    phrase: phrase.to_string(),
+                },
+            );
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -1019,6 +1053,41 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
     }
 }
 
+/// The recovery-flow reading of the transient session notice — the engine's
+/// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's
+/// minted link, and the rejoiner's started/failed/done lifecycle.
+#[derive(Debug, PartialEq, Eq)]
+enum RecoverNotice {
+    /// Not a recovery notice (every other notice, e.g. "saved").
+    None,
+    /// Coordinator: the engine minted a single-use `molt://recover/…` link.
+    Link(String),
+    /// Rejoiner: the engine accepted link + phrase; the rejoin runs off the
+    /// actor (it can span the survivors' human approval).
+    Started(String),
+    /// Rejoiner: the rejoin failed with this reason (retry = a fresh start,
+    /// usually with a freshly minted link).
+    Failed(String),
+    /// Rejoiner: the seat is recovered — the engine flips to Main itself.
+    Done(String),
+}
+
+/// Split a session notice into its recovery reading (verbatim payload —
+/// an error may itself contain colons).
+fn parse_recover_notice(notice: &str) -> RecoverNotice {
+    if let Some(link) = notice.strip_prefix("recovery-link:") {
+        RecoverNotice::Link(link.to_string())
+    } else if let Some(member) = notice.strip_prefix("recover-started:") {
+        RecoverNotice::Started(member.to_string())
+    } else if let Some(error) = notice.strip_prefix("recover-failed:") {
+        RecoverNotice::Failed(error.to_string())
+    } else if let Some(member) = notice.strip_prefix("recovered:") {
+        RecoverNotice::Done(member.to_string())
+    } else {
+        RecoverNotice::None
+    }
+}
+
 /// Gather the config-tab draft properties into a [`SessionSettings`].
 fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
     SessionSettings {
@@ -1196,6 +1265,39 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
         }
         .into(),
     );
+    // The recovery flow rides the same transient notice, but EDGE-triggered:
+    // the notice lingers in the session until something replaces it, and the
+    // link dialog / rejoin state must react once per NEW notice — a re-push of
+    // an unchanged session must not re-open a dismissed link dialog. The
+    // last-handled notice is mirrored into the window (like the settings
+    // draft cache) and compared before acting.
+    if ui.get_recover_notice_seen() != sv.notice.as_str() {
+        ui.set_recover_notice_seen(sv.notice.clone().into());
+        match parse_recover_notice(&sv.notice) {
+            RecoverNotice::Link(link) => {
+                // coordinator: present the freshly minted single-use link
+                ui.set_recovery_link(link.into());
+                ui.set_recover_link_open(true);
+            }
+            RecoverNotice::Started(member) => {
+                ui.set_rv_member(member.into());
+                ui.set_rv_running(true);
+                ui.set_rv_error("".into());
+            }
+            RecoverNotice::Failed(error) => {
+                ui.set_rv_running(false);
+                ui.set_rv_error(error.into());
+            }
+            RecoverNotice::Done(_) => {
+                // the engine flips to Main itself — just clear the modal so a
+                // later return to the choice screen starts clean
+                ui.set_rv_running(false);
+                ui.set_rv_error("".into());
+                ui.set_rv_open(false);
+            }
+            RecoverNotice::None => {}
+        }
+    }
     // persistent restart warning: which changed keys only apply on restart
     ui.set_restart_keys(sv.restart_required.join(", ").into());
     // the SMP connection-test status is transient and lives outside the
@@ -2505,6 +2607,17 @@ lexicon! {
     jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     jw_failed: "Failed — invite rejected", "Fehlgeschlagen — Einladung abgelehnt";
+    choice_recover_title: "Recover", "Wieder beitreten";
+    choice_recover_sub: "Rejoin with a recovery link", "Nach Geräteverlust, mit Recovery-Link";
+    om_recover_link: "Create recovery link", "Recovery-Link erstellen";
+    rlk_title: "Recovery link", "Recovery-Link";
+    rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
+    rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
+    rv_title: "Recover your seat", "Deinen Sitz wiederherstellen";
+    rv_body: "Paste the recovery link a surviving member minted for you, plus your recovery phrase.", "Füge den Recovery-Link ein, den ein verbliebenes Mitglied für dich erstellt hat, dazu deine Wiederherstellungs-Phrase.";
+    rv_go: "Recover", "Wiederherstellen";
+    rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
+    rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "Restore", "Wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
@@ -2641,6 +2754,39 @@ mod tests {
             text: text.to_string(),
             deleted,
         }
+    }
+
+    /// The recovery flow rides the transient session notice (the engine's
+    /// contract: `recovery-link:` / `recover-started:` / `recover-failed:` /
+    /// `recovered:`); the parser must split each prefix off verbatim and
+    /// treat everything else — including the existing notices — as none.
+    #[test]
+    fn recover_notices_parse_into_their_ui_effects() {
+        assert_eq!(
+            parse_recover_notice("recovery-link:molt://recover/abc"),
+            RecoverNotice::Link("molt://recover/abc".to_string())
+        );
+        assert_eq!(
+            parse_recover_notice("recover-started:ashi"),
+            RecoverNotice::Started("ashi".to_string())
+        );
+        assert_eq!(
+            parse_recover_notice("recover-failed:the survivors declined"),
+            RecoverNotice::Failed("the survivors declined".to_string())
+        );
+        assert_eq!(
+            parse_recover_notice("recovered:ashi"),
+            RecoverNotice::Done("ashi".to_string())
+        );
+        // the non-recovery notices stay untouched by this path
+        assert_eq!(parse_recover_notice("saved"), RecoverNotice::None);
+        assert_eq!(parse_recover_notice("save-failed: disk"), RecoverNotice::None);
+        assert_eq!(parse_recover_notice(""), RecoverNotice::None);
+        // an error that itself contains a colon survives whole
+        assert_eq!(
+            parse_recover_notice("recover-failed:transport: queue gone"),
+            RecoverNotice::Failed("transport: queue gone".to_string())
+        );
     }
 
     /// Rewrite of the pre-chat-bus author-block/teaser tests, meaning
