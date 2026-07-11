@@ -242,6 +242,15 @@ forward into A and let B1 own only `transport.rs` + `supervisor.rs`.
 
 ## 3. Stage A — contract + fail-closed wiring (serial, 1 agent)
 
+> **Status: LANDED 2026-07-11** (master). Default flipped to `none`;
+> fail-closed `resolve`; onion slot; timeouts; `net_health`; `embedded-tor`
+> feature skeleton (dep-less until B2). Adversarial review found one **critical**
+> (verified, fixed): the 30 s block deadline was also killing the subscription
+> idle long-poll — a node went deaf after 30 s of quiet (recovery / runtime
+> delivery / late joins, clearnet included). Fixed: `recv_next`'s idle read is
+> deadline-free (`read_block_waiting`); request/response reads keep the 30 s
+> deadline. Pinned by the live-SMP `subscription_survives_idle_ed25519`.
+
 **Goal:** the full new contract exists; the workspace builds (feature off),
 clippy 0, all existing tests pass; **off** behaves exactly as today, **tor+local**
 now actually dials SOCKS `127.0.0.1:9050`, **embedded/unknown** is a clean
