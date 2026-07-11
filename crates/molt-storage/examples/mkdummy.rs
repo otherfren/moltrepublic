@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: Some(id_survives),
             emoji: "👍".to_string(),
             by: "peer-1".to_string(),
+            op: Some(molt_core::ReactOp::Add),
         },
     })?;
     ws.append(&chat_env(6, t + 240, id_try, "me", "try sending a message, then restart moltd", None))?;

@@ -25,20 +25,22 @@ const SNAPSHOT_EVERY: u64 = 1000;
 /// Domain-separation tag of the P4 legacy-id synthesis (chat bus). The
 /// formula is a **cross-node contract** — every node must derive the same
 /// id for the same legacy message, or id-addressed events stop converging:
-/// `sha256(TAG ‖ le64(position) ‖ from ‖ le64(ts) ‖ body)[..16]`. Pinned by
-/// a literal in `legacy_log_replay_synthesizes_stable_ids`.
+/// `sha256(TAG ‖ le64(sender_ordinal) ‖ from ‖ le64(ts) ‖ body)[..16]`.
+/// Pinned by literals in `legacy_log_replay_synthesizes_stable_ids`.
 const LEGACY_ID_TAG: &[u8] = b"molt-chat-legacy-id\0";
 
 /// Synthesize the stable id of a legacy (pre-chat-bus, nil-id) chat message
-/// at its ingest `position` (index in the chat log at insertion). Both
-/// ingest choke points — [`State::apply`]'s `Chat` arm and
-/// [`State::restore_dump`] — see the same positions and the same
-/// at-insertion fields, so full replay and snapshot+tail agree on every id
-/// (the determinism keystone).
-fn legacy_message_id(position: usize, from: &str, ts: u64, body: &str) -> molt_core::MessageId {
+/// from its **per-sender ordinal** — how many messages from the same `from`
+/// preceded it at insertion. Pre-chat-bus delivery is in-order **per sender
+/// only**, so the GLOBAL log position of a cross-sender interleaving differs
+/// between nodes and must never enter the hash; the per-sender ordinal is
+/// identical everywhere. Both ingest choke points — [`State::apply`]'s
+/// `Chat` arm and [`State::restore_dump`] — count the same prefix, so full
+/// replay and snapshot+tail agree on every id (the determinism keystone).
+fn legacy_message_id(ordinal: usize, from: &str, ts: u64, body: &str) -> molt_core::MessageId {
     let mut h = Sha256::new();
     h.update(LEGACY_ID_TAG);
-    h.update(u64::try_from(position).unwrap_or(u64::MAX).to_le_bytes());
+    h.update(u64::try_from(ordinal).unwrap_or(u64::MAX).to_le_bytes());
     h.update(from.as_bytes());
     h.update(ts.to_le_bytes());
     h.update(body.as_bytes());
@@ -139,13 +141,15 @@ impl State {
             WorkspaceEvent::Chat(msg) => {
                 let mut msg = msg.clone();
                 // P4: a legacy message (pre-chat-bus, nil id) gets its
-                // stable id synthesized deterministically from its ingest
-                // position — the same formula as restore_dump, so replay
+                // stable id synthesized deterministically from its
+                // PER-SENDER ordinal (cross-node stable — global positions
+                // are not) — the same formula as restore_dump, so replay
                 // and snapshot+tail agree. After this line no message in
                 // state carries a nil id, and chat_pos indexes the whole
                 // log (the pre-B1 nil-skip is obsolete).
                 if msg.id.is_nil() {
-                    msg.id = legacy_message_id(self.chat.len(), &msg.from, msg.ts, &msg.body);
+                    let ordinal = self.chat.iter().filter(|m| m.from == msg.from).count();
+                    msg.id = legacy_message_id(ordinal, &msg.from, msg.ts, &msg.body);
                 }
                 // a legacy numeric quote resolves to the (possibly just
                 // synthesized) id of the message it pointed at — the index
@@ -167,16 +171,36 @@ impl State {
                 id,
                 emoji,
                 by,
+                op,
             } => {
                 let Some(msg) = self.chat_target(id, *index) else {
                     return;
                 };
-                let had_this = msg.reactions.get(emoji).is_some_and(|who| who.contains(by));
+                // a reaction never lands on a tombstone (delete clears
+                // reactions) — otherwise a concurrent react/delete pair
+                // would converge differently per arrival order
+                if msg.deleted_by.is_some() {
+                    return;
+                }
+                let has_this = msg.reactions.get(emoji).is_some_and(|who| who.contains(by));
+                // `Some(op)` is an idempotent set/unset — the SENDER already
+                // resolved the toggle, so a redelivered duplicate is a
+                // no-op. `None` is a legacy (pre-op) event and replays with
+                // the original toggle semantics, bit-identically.
+                let want_this = match op {
+                    Some(molt_core::ReactOp::Add) => true,
+                    Some(molt_core::ReactOp::Remove) => false,
+                    None => !has_this,
+                };
+                if want_this == has_this {
+                    return;
+                }
+                // one reaction per member: any previous emoji of theirs goes
                 for who in msg.reactions.values_mut() {
                     who.retain(|w| w != by);
                 }
                 msg.reactions.retain(|_, who| !who.is_empty());
-                if !had_this {
+                if want_this {
                     msg.reactions.entry(emoji.clone()).or_default().push(by.clone());
                 }
             }
@@ -329,18 +353,30 @@ impl State {
         // P4, the second ingest choke point: a LEGACY snapshot (written by
         // pre-chat-bus code) may still carry nil-id messages and unresolved
         // numeric quotes — synthesize/resolve exactly like apply's Chat arm,
-        // over the same positions, so snapshot+tail equals full replay.
-        // (Snapshots written after B1 already carry the synthesized ids and
-        // pass through untouched. One inherent legacy edge: a pre-chat-bus
-        // snapshot of an already-deleted legacy message hashes the wiped
-        // body, so such a tombstone's id can differ from the full-replay
-        // id — bounded to unaddressable legacy tombstones.)
+        // over the same per-sender ordinals (the count of earlier messages
+        // from the same sender — what apply saw at insertion), so
+        // snapshot+tail equals full replay. (Snapshots written after B1
+        // already carry the synthesized ids and pass through untouched. One
+        // inherent legacy edge: a pre-chat-bus snapshot of an
+        // already-deleted legacy message hashes the wiped body, so such a
+        // tombstone's id can differ from the full-replay id — bounded to
+        // unaddressable legacy tombstones. `from` survives deletion, so
+        // tombstones still count toward later ordinals, exactly as at
+        // apply time.)
         for i in 0..self.chat.len() {
             if self.chat.get(i).is_some_and(|m| m.id.is_nil()) {
+                let ordinal = self.chat.get(i).map(|m| {
+                    self.chat
+                        .iter()
+                        .take(i)
+                        .filter(|p| p.from == m.from)
+                        .count()
+                });
                 let id = self
                     .chat
                     .get(i)
-                    .map(|m| legacy_message_id(i, &m.from, m.ts, &m.body));
+                    .zip(ordinal)
+                    .map(|(m, o)| legacy_message_id(o, &m.from, m.ts, &m.body));
                 if let (Some(m), Some(id)) = (self.chat.get_mut(i), id) {
                     m.id = id;
                 }
@@ -473,6 +509,7 @@ mod tests {
                     id: None,
                     emoji: "👍".to_string(),
                     by: "walter".to_string(),
+                    op: None,
                 },
             ),
             e(
@@ -634,6 +671,7 @@ mod tests {
                 id: Some(new_id),
                 emoji: "🔥".to_string(),
                 by: "petra".to_string(),
+                op: None,
             },
         });
         all
@@ -661,10 +699,13 @@ mod tests {
             assert!(!m.id.is_nil(), "message {i} kept a nil id after ingest");
             assert_eq!(st.chat_pos.get(&m.id), Some(&i), "chat_pos indexes message {i}");
         }
-        // the P4 formula is a cross-node contract: pin the synthesized id of
-        // message 0 (position 0, from "petra", ts 102, body "gm") as a literal
-        // so a formula change can never slip through silently
+        // the P4 formula is a cross-node contract: pin the synthesized ids as
+        // literals so a formula change can never slip through silently.
+        // Message 0: petra's FIRST message (sender ordinal 0, ts 102, "gm").
         assert_eq!(st.chat[0].id.to_string(), LEGACY_ID_OF_MSG_0);
+        // Message 1: walter's FIRST message (sender ordinal 0 — NOT its
+        // global position 1, which differs between nodes; ts 103, "re: gm").
+        assert_eq!(st.chat[1].id.to_string(), LEGACY_ID_OF_MSG_1);
         // the legacy numeric quote resolved to message 0's synthesized id;
         // the legacy field itself stays readable, untouched
         assert_eq!(st.chat[1].quote_id, Some(st.chat[0].id));
@@ -705,9 +746,175 @@ mod tests {
         }
     }
 
-    /// The P4 pin for `legacy_log_replay_synthesizes_stable_ids`:
+    /// The P4 pins for `legacy_log_replay_synthesizes_stable_ids` — the
+    /// hashed ordinal is the **per-sender** one (cross-node stable), so both
+    /// pins hash `le64(0)`:
     /// `sha256("molt-chat-legacy-id\0" ‖ le64(0) ‖ "petra" ‖ le64(102) ‖ "gm")[..16]`.
     const LEGACY_ID_OF_MSG_0: &str = "bbb7bc990b87cf10ecf6ed59f31e8ce2";
+    /// `sha256("molt-chat-legacy-id\0" ‖ le64(0) ‖ "walter" ‖ le64(103) ‖ "re: gm")[..16]`.
+    const LEGACY_ID_OF_MSG_1: &str = "a69dfac27e835b034302877efee908ea";
+
+    /// Explicit react ops are **idempotent** (an at-least-once transport
+    /// may deliver the same frame twice — SMP redelivers un-acked frames
+    /// after a hard crash, the MLS path has no wire-seq cursor), while a
+    /// legacy op-less event keeps its original toggle semantics on replay.
+    #[test]
+    fn explicit_react_ops_are_idempotent_but_legacy_toggles() {
+        let mut st = plain_state();
+        let id = molt_core::MessageId([9u8; 16]);
+        st.apply(&EventEnvelope {
+            seq: 1,
+            ts: 101,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage::text(id, "petra", "hi", 101)),
+        });
+        let mut seq = 1u64;
+        let mut react = |st: &mut crate::State, emoji: &str, op: Option<molt_core::ReactOp>| {
+            seq += 1;
+            st.apply(&EventEnvelope {
+                seq,
+                ts: 100 + seq,
+                by: "walter".to_string(),
+                body: WorkspaceEvent::ChatReacted {
+                    index: 0,
+                    id: Some(id),
+                    emoji: emoji.to_string(),
+                    by: "walter".to_string(),
+                    op,
+                },
+            });
+        };
+
+        // a duplicated Add must NOT invert the state
+        react(&mut st, "👍", Some(molt_core::ReactOp::Add));
+        react(&mut st, "👍", Some(molt_core::ReactOp::Add));
+        assert_eq!(
+            st.chat[0].reactions["👍"],
+            vec!["walter".to_string()],
+            "Add twice stays reacted once"
+        );
+        // Add of another emoji switches (one reaction per member)
+        react(&mut st, "🔥", Some(molt_core::ReactOp::Add));
+        assert!(!st.chat[0].reactions.contains_key("👍"), "the old emoji is gone");
+        assert_eq!(st.chat[0].reactions["🔥"], vec!["walter".to_string()]);
+        // a duplicated Remove must NOT re-add anything
+        react(&mut st, "🔥", Some(molt_core::ReactOp::Remove));
+        react(&mut st, "🔥", Some(molt_core::ReactOp::Remove));
+        assert!(
+            st.chat[0].reactions.is_empty(),
+            "Remove twice stays removed: {:?}",
+            st.chat[0].reactions
+        );
+        // a LEGACY op-less event still toggles: on, then off again
+        react(&mut st, "🎉", None);
+        assert_eq!(st.chat[0].reactions["🎉"], vec!["walter".to_string()]);
+        react(&mut st, "🎉", None);
+        assert!(st.chat[0].reactions.is_empty(), "the legacy toggle un-reacts");
+    }
+
+    /// A concurrent react/delete pair must **commute**: whichever order the
+    /// two events arrive in, both nodes end on the identical tombstone
+    /// without reactions (a reaction never lands on a tombstone).
+    #[test]
+    fn react_and_delete_commute_to_a_tombstone_without_reactions() {
+        let id = molt_core::MessageId([0x0bu8; 16]);
+        let chat = EventEnvelope {
+            seq: 1,
+            ts: 101,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage::text(id, "petra", "fleeting", 101)),
+        };
+        let react = EventEnvelope {
+            seq: 2,
+            ts: 102,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::ChatReacted {
+                index: 0,
+                id: Some(id),
+                emoji: "👍".to_string(),
+                by: "walter".to_string(),
+                op: Some(molt_core::ReactOp::Add),
+            },
+        };
+        let delete = EventEnvelope {
+            seq: 3,
+            ts: 103,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::ChatDeleted {
+                index: 0,
+                id: Some(id),
+                by: "petra".to_string(),
+            },
+        };
+        let run = |order: [&EventEnvelope; 3]| {
+            let mut st = plain_state();
+            for env in order {
+                st.apply(env);
+            }
+            st.dump()
+        };
+        let react_then_delete = run([&chat, &react, &delete]);
+        let delete_then_react = run([&chat, &delete, &react]);
+        assert_eq!(
+            react_then_delete, delete_then_react,
+            "the pair must converge independent of arrival order"
+        );
+        assert_eq!(react_then_delete.chat[0].deleted_by.as_deref(), Some("petra"));
+        assert!(
+            react_then_delete.chat[0].reactions.is_empty(),
+            "no reaction survives on the tombstone"
+        );
+    }
+
+    /// P4 across NODES: pre-chat-bus delivery is in-order **per sender
+    /// only**, so two nodes hold the same legacy messages at different
+    /// global positions. The id synthesis must still agree — it hashes the
+    /// per-sender ordinal, which IS identical everywhere.
+    #[test]
+    fn legacy_ids_are_stable_across_cross_sender_interleavings() {
+        let msg = |from: &str, body: &str, ts: u64| ChatMessage {
+            id: molt_core::MessageId::NIL,
+            from: from.to_string(),
+            body: body.to_string(),
+            ts,
+            quote: None,
+            quote_id: None,
+            channel: molt_core::ChannelRef::Group,
+            reactions: Default::default(),
+            deleted_by: None,
+            file: None,
+        };
+        let env = |seq: u64, m: &ChatMessage| EventEnvelope {
+            seq,
+            ts: m.ts,
+            by: m.from.clone(),
+            body: WorkspaceEvent::Chat(m.clone()),
+        };
+        let p1 = msg("petra", "p first", 101);
+        let p2 = msg("petra", "p second", 102);
+        let w1 = msg("walter", "w first", 103);
+        let w2 = msg("walter", "w second", 104);
+        let run = |order: [&ChatMessage; 4]| {
+            let mut st = plain_state();
+            for (i, m) in order.iter().enumerate() {
+                st.apply(&env(u64::try_from(i).expect("tiny") + 1, m));
+            }
+            st.chat
+                .iter()
+                .map(|m| ((m.from.clone(), m.body.clone()), m.id))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        // node A interleaves the senders; node B sees petra's burst first —
+        // both respect the per-sender order (p1<p2, w1<w2)
+        let node_a = run([&p1, &w1, &p2, &w2]);
+        let node_b = run([&p1, &p2, &w1, &w2]);
+        assert_eq!(
+            node_a, node_b,
+            "the same legacy message must synthesize the same id on every node"
+        );
+        let distinct: std::collections::BTreeSet<_> = node_a.values().collect();
+        assert_eq!(distinct.len(), 4, "all synthesized ids stay distinct");
+    }
 
     /// Envelopes that no longer match the state (corrupted log) are ignored,
     /// never a panic.
