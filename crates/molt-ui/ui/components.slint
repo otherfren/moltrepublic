@@ -160,8 +160,15 @@ export component AppField inherits Rectangle {
 // Select-from-list via a popup.
 export component AppDropdown inherits Rectangle {
     in property <[string]> model;
+    // Parallel to `model`: a false entry greys the row and blocks selection
+    // (e.g. a "not implemented yet" option). Empty = every row enabled.
+    in property <[bool]> enabled;
     in-out property <int> current-index: 0;
     callback changed(int);
+
+    pure function row-enabled(i: int) -> bool {
+        root.enabled.length == 0 || root.enabled[i]
+    }
 
     height: 38px;
     background: Theme.panel;
@@ -206,21 +213,32 @@ export component AppDropdown inherits Rectangle {
                 for opt[i] in root.model: Rectangle {
                     height: 30px;
                     border-radius: Theme.win95 ? 0px : 4px;
-                    background: i == root.current-index ? Theme.accent-soft : (row-ta.has-hover ? Theme.raised : transparent);
+                    background: !root.row-enabled(i) ? transparent : (i == root.current-index ? Theme.accent-soft : (row-ta.has-hover ? Theme.raised : transparent));
                     HorizontalLayout {
                         padding-left: 10px;
+                        spacing: 6px;
                         Text {
                             text: opt;
-                            color: Theme.text;
+                            color: root.row-enabled(i) ? Theme.text : Theme.dim;
                             font-size: Theme.fs-body;
                             vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.row-enabled(i) ? "" : Strings.not-implemented-yet;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: right;
                         }
                     }
                     row-ta := TouchArea {
                         clicked => {
-                            root.current-index = i;
-                            root.changed(i);
-                            pop.close();
+                            if (root.row-enabled(i)) {
+                                root.current-index = i;
+                                root.changed(i);
+                                pop.close();
+                            }
                         }
                     }
                 }

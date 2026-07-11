@@ -3766,7 +3766,9 @@ export component AppWindow inherits Window {
                                 label: Strings.field-network;
                                 AppDropdown {
                                     width: 200px;
-                                    model: ["tor", "none"];
+                                    model: ["tor", "nym", "none"];
+                                    // nym is not implemented yet — greyed, non-selectable
+                                    enabled: [true, false, true];
                                     current-index <=> root.cfg-network-index;
                                 }
                             }

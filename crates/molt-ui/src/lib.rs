@@ -2589,20 +2589,25 @@ fn theme_name(i: i32) -> String {
     .to_string()
 }
 
-/// Map an anonymity-network name to its ComboBox index. The settings
-/// dropdown offers only tor and none; a lingering "nym" from an old
-/// config displays as tor.
+/// Map an anonymity-network name to its ComboBox index. The dropdown offers
+/// tor, nym (greyed — not implemented yet), and none; a lingering "nym" from
+/// an old config still displays on its own row rather than masquerading as
+/// tor.
 fn net_index(s: &str) -> i32 {
     match s {
-        "none" => 1,
+        "nym" => 1,
+        "none" => 2,
         _ => 0,
     }
 }
 
-/// Map a ComboBox index back to an anonymity-network name.
+/// Map a ComboBox index back to an anonymity-network name. Index 1 (nym) is
+/// non-selectable in the UI, so it is only ever produced by round-tripping an
+/// existing nym config.
 fn net_name(i: i32) -> String {
     match i {
-        1 => "none",
+        1 => "nym",
+        2 => "none",
         _ => "tor",
     }
     .to_string()
@@ -2676,6 +2681,7 @@ lexicon! {
     choice_restore_sub: "Seed phrase + backup", "Seed-Phrase + Backup";
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
+    not_implemented_yet: "not yet", "noch nicht";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
     field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";
