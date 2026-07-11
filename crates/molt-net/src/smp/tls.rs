@@ -11,7 +11,9 @@
 //! Pure-Rust posture: rustls with the RustCrypto provider (no ring/aws-lc,
 //! so no C toolchain — matches the reproducible-build envelope).
 
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -19,6 +21,7 @@ use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{alg_id, AlgorithmIdentifier, CertificateDer, InvalidSignature, ServerName, SignatureVerificationAlgorithm, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{client::TlsStream, TlsConnector};
@@ -235,16 +238,97 @@ fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
     Ok(config)
 }
 
-/// A handle to an in-process arti Tor client. Only exists under
-/// `--features embedded-tor`; **Stage B fills this** with the bootstrapped
-/// `TorClient` + the per-server isolation-token map. Declared here so the
-/// routing contract ([`Dialer::resolve`]) is complete at Stage A.
+/// A handle to the process-global in-process arti Tor client. Only exists under
+/// `--features embedded-tor`. Holds a shared reference to the lazily-bootstrapped
+/// [`TorClient`](arti_client::TorClient) and its per-server-host isolation-token
+/// map (`crate::tor_embedded::ArtiShared`); cloning it is cheap (an `Arc`).
 #[cfg(feature = "embedded-tor")]
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[derive(Clone)]
 pub struct ArtiHandle {
-    // Stage B fills this (bootstrapped arti client + isolation tokens).
-    seam: (),
+    /// The shared, lazily-bootstrapped arti client + isolation map (§4).
+    shared: Arc<crate::tor_embedded::ArtiShared>,
+}
+
+#[cfg(feature = "embedded-tor")]
+impl std::fmt::Debug for ArtiHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the arti client/isolation map are not Debug; a stable tag is enough.
+        f.write_str("ArtiHandle(embedded arti)")
+    }
+}
+
+#[cfg(feature = "embedded-tor")]
+impl ArtiHandle {
+    /// A handle to the process-global embedded arti client (concept §4). Cheap:
+    /// no bootstrap happens here — that is deferred to the first dial.
+    fn new() -> ArtiHandle {
+        ArtiHandle {
+            shared: crate::tor_embedded::shared(),
+        }
+    }
+}
+
+/// A dialed byte stream to an SMP server: a direct / SOCKS5h `TcpStream`, or
+/// (only on the `embedded-tor` build) an in-process arti
+/// [`DataStream`](arti_client::DataStream). Both concrete streams are
+/// `AsyncRead + AsyncWrite + Unpin + Send`; unifying them here lets
+/// [`connect_tls`] TLS-handshake over either without boxing, and keeps the
+/// non-Tor path byte-identical (`Tcp` is a zero-cost `TcpStream` wrapper).
+#[derive(Debug)]
+pub enum DialStream {
+    /// A direct or SOCKS5h-tunnelled TCP stream (clearnet / system Tor / whonix).
+    Tcp(TcpStream),
+    /// An in-process arti Tor data stream (embedded build only). Boxed: an arti
+    /// `DataStream` is ~700 bytes, and un-boxed it would bloat every `Tcp`
+    /// variant (the common clearnet path) to that size (clippy
+    /// `large_enum_variant`). An arti dial is rare and pooled, so the extra
+    /// allocation is negligible.
+    #[cfg(feature = "embedded-tor")]
+    Arti(Box<arti_client::DataStream>),
+}
+
+impl AsyncRead for DialStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            DialStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "embedded-tor")]
+            DialStream::Arti(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for DialStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            DialStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "embedded-tor")]
+            DialStream::Arti(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            DialStream::Tcp(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "embedded-tor")]
+            DialStream::Arti(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            DialStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "embedded-tor")]
+            DialStream::Arti(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
 }
 
 /// How to reach an SMP server's TCP socket. `Direct` is clearnet/loopback;
@@ -272,7 +356,6 @@ pub enum Dialer {
     },
     /// In-process arti Tor client (only built with `--features embedded-tor`).
     #[cfg(feature = "embedded-tor")]
-    #[allow(dead_code)]
     Arti(ArtiHandle),
 }
 
@@ -325,11 +408,13 @@ impl Dialer {
         })
     }
 
-    /// Resolve `mode = embedded` (arti). With the feature, Stage B's
-    /// [`arti_dialer`] takes over; without it, fail closed.
+    /// Resolve `mode = embedded` (arti). With the feature, route to the
+    /// process-global embedded arti client (bootstrapped lazily on the first
+    /// dial); without it, fail closed. The SOCKS `port` is irrelevant to the
+    /// in-process client, so it is ignored here.
     #[cfg(feature = "embedded-tor")]
-    fn resolve_embedded(port: u16) -> Result<Dialer, NetError> {
-        arti_dialer(port)
+    fn resolve_embedded(_port: u16) -> Result<Dialer, NetError> {
+        Ok(Dialer::Arti(ArtiHandle::new()))
     }
 
     /// Without the `embedded-tor` feature, `mode = embedded` is a clean
@@ -352,10 +437,12 @@ impl Dialer {
         }
     }
 
-    /// Open the raw TCP socket to `server` per this dialer, honouring the
+    /// Open the raw byte stream to `server` per this dialer, honouring the
     /// onion-preferred [`SmpServer::dial_target`] and a Tor-sized connect
-    /// deadline (T4 §P5).
-    pub async fn dial(&self, server: &SmpServer) -> Result<TcpStream, NetError> {
+    /// deadline (T4 §P5). Returns a [`DialStream`] so the caller handshakes TLS
+    /// over a `TcpStream` (Direct/Socks5) or an arti `DataStream` (embedded)
+    /// uniformly.
+    pub async fn dial(&self, server: &SmpServer) -> Result<DialStream, NetError> {
         let (host, port) = server.dial_target(self.tor_on());
         match self {
             Dialer::Direct => {
@@ -367,15 +454,16 @@ impl Dialer {
                     )));
                 }
                 let addr = format!("{host}:{port}");
-                timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+                let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
                     .await
                     .map_err(|_| NetError::Unreachable(format!("tcp {addr}: connect timed out")))?
-                    .map_err(|e| NetError::Unreachable(format!("tcp {addr}: {e}")))
+                    .map_err(|e| NetError::Unreachable(format!("tcp {addr}: {e}")))?;
+                Ok(DialStream::Tcp(tcp))
             }
             Dialer::Socks5 { proxy, session } => {
                 // one Tor circuit per server host: molt-<session>-<host>
                 let isolation = format!("molt-{session}-{host}");
-                timeout(
+                let tcp = timeout(
                     CONNECT_TIMEOUT,
                     crate::socks5::socks5h_connect(proxy, host, port, &isolation),
                 )
@@ -384,25 +472,21 @@ impl Dialer {
                     NetError::TorUnavailable(format!(
                         "tor circuit to {host} via {proxy} timed out"
                     ))
-                })?
+                })??;
+                Ok(DialStream::Tcp(tcp))
             }
             #[cfg(feature = "embedded-tor")]
-            Dialer::Arti(_handle) => Err(NetError::TorUnavailable(
-                // Stage B fills this — dial `host:port` through the arti client.
-                "embedded arti dial not yet built".into(),
-            )),
+            Dialer::Arti(handle) => {
+                // No outer connect deadline here: the FIRST embedded dial also
+                // bootstraps the Tor directory (slow — minutes on a cold cache),
+                // and arti applies its own per-circuit/connect timeouts, so a
+                // 30 s cap would abort a legitimate first-run bootstrap. Later
+                // dials reuse the client and are fast. Isolation is per host.
+                let stream = handle.shared.connect(host, port).await?;
+                Ok(DialStream::Arti(Box::new(stream)))
+            }
         }
     }
-}
-
-/// Stage B fills this: bootstrap an in-process arti client (to a state dir,
-/// reused, isolation per server) and return [`Dialer::Arti`]. Until then it
-/// fails closed so `network = tor, mode = embedded` never silently leaks.
-#[cfg(feature = "embedded-tor")]
-fn arti_dialer(_port: u16) -> Result<Dialer, NetError> {
-    Err(NetError::TorMisconfigured(
-        "embedded arti not yet built".into(),
-    ))
 }
 
 /// Dial `server` over TCP+TLS 1.3 (through `dialer`), verifying the pinned
@@ -410,15 +494,15 @@ fn arti_dialer(_port: u16) -> Result<Dialer, NetError> {
 pub async fn connect_tls(
     dialer: &Dialer,
     server: &SmpServer,
-) -> Result<TlsStream<TcpStream>, NetError> {
+) -> Result<TlsStream<DialStream>, NetError> {
     let config = pinned_config(server)?;
     let connector = TlsConnector::from(Arc::new(config));
-    let tcp = dialer.dial(server).await?;
+    let stream = dialer.dial(server).await?;
     // the SNI name is the host; cert verification ignores it (we pin), but
     // rustls requires a valid ServerName
     let sni = ServerName::try_from(server.host.clone())
         .map_err(|_| NetError::Framing(format!("invalid host for SNI: {}", server.host)))?;
-    let tls = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, tcp))
+    let tls = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, stream))
         .await
         .map_err(|_| {
             NetError::TorUnavailable(format!("tls handshake with {} timed out", server.host))

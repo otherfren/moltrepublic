@@ -22,7 +22,6 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::client::TlsStream;
 
@@ -73,7 +72,7 @@ pub struct NewQueue {
 
 /// An open, handshaked SMP connection to one server.
 pub struct SmpConn {
-    tls: TlsStream<TcpStream>,
+    tls: TlsStream<tls::DialStream>,
     /// The server's pinned CA fingerprint (echoed in the clientHello as
     /// the `keyHash` — the server rejects a mismatch with IDENTITY).
     key_hash: [u8; 32],
