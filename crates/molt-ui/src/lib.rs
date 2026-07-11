@@ -37,8 +37,9 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
 use molt_core::{
-    ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, ProposalId, ProposalView,
-    Reply, Screen, SessionScope, SessionSettings, SessionView, Surface, SurfaceSnapshot,
+    ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, NetHealth, ProposalId,
+    ProposalView, Reply, Screen, SessionScope, SessionSettings, SessionView, Surface,
+    SurfaceSnapshot,
 };
 use molt_engine::WalletHandle;
 use slint::{Model, ModelRc, VecModel};
@@ -50,15 +51,24 @@ slint::include_modules!();
 /// Open the GUI and run the Slint event loop on the calling (main) thread.
 ///
 /// `config_path` is shown in the settings panel as the location a real save
-/// *would* target. Returns when the window closes, or an error if the GUI cannot
-/// start (e.g. no display) — in which case the caller falls back to headless.
+/// *would* target. `embedded_tor_available` is the compile-time truth of the
+/// binary's `embedded-tor` feature (P3): when false, the tor-mode dropdown greys
+/// its "embedded" row (the in-process arti dialer was not built in). Returns
+/// when the window closes, or an error if the GUI cannot start (e.g. no display)
+/// — in which case the caller falls back to headless.
 pub fn run_app(
     wallet: WalletHandle,
     rt: Handle,
     config_path: PathBuf,
+    embedded_tor_available: bool,
 ) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_config_path(config_path.display().to_string().into());
+    // Surface the compile-time embedded-tor availability into the tor-mode
+    // dropdown's per-row enabled flags (a constant for the process lifetime).
+    ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(
+        tor_mode_enabled(embedded_tor_available).to_vec(),
+    )));
 
     // Clipboard (copy the seed out, paste a phrase in). arboard's X11 backend
     // serves the selection only while the `Clipboard` object is alive, and
@@ -1315,6 +1325,13 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // settings draft, so push it on every update — even while the user has
     // an unsaved URL open and `settings_changed` is suppressed
     ui.set_cfg_smp_test(sv.smp_test.clone().into());
+
+    // transport health for the header "chat" pill: tone (green/amber/red) plus
+    // the engine's reason string as the hover tooltip (P6). Pushed on every
+    // update so a dial outcome repaints the pill regardless of settings edits.
+    let (net_tone, net_reason) = net_health_pill(&sv.net_health);
+    ui.set_net_health_tone(net_tone);
+    ui.set_net_health_reason(net_reason.into());
 
     if !settings_changed {
         apply_strings(ui, lang);
@@ -2632,6 +2649,28 @@ fn mode_name(i: i32) -> String {
     .to_string()
 }
 
+/// The tor-mode dropdown's per-row `enabled` flags (parallel to the model
+/// `["local", "embedded", "whonix"]`). `local` and `whonix` route to a system
+/// SOCKS proxy and are always available; `embedded` needs the in-process arti
+/// dialer, which only exists when the binary was built with the `embedded-tor`
+/// feature — so it is greyed (like nym) unless `embedded_available` is true
+/// (the compile-time truth crossing the app→ui seam, P3).
+fn tor_mode_enabled(embedded_available: bool) -> [bool; 3] {
+    [true, embedded_available, true]
+}
+
+/// Map the transport-health state onto the header "chat" pill's tone index and
+/// hover tooltip (P6). Tone index: `0` = good/green, `1` = warn/amber,
+/// `2` = bad/red. The nominal `Ok` state carries no tooltip; the impaired and
+/// down states carry the engine's reason string.
+fn net_health_pill(health: &NetHealth) -> (i32, String) {
+    match health {
+        NetHealth::Ok => (0, String::new()),
+        NetHealth::Degraded { reason } => (1, reason.clone()),
+        NetHealth::Down { reason } => (2, reason.clone()),
+    }
+}
+
 /// Declare the whole localized string table in ONE place: the macro
 /// generates the `Lexicon` struct, its English and German tables, and
 /// `apply_strings` (which pushes every entry into the Slint `Strings`
@@ -2691,6 +2730,7 @@ lexicon! {
     smp_custom: "Custom server", "Eigener Server";
     field_smp_url: "Server URL", "Server-URL";
     smp_test: "Test connection", "Verbindung testen";
+    smp_test_tip: "Dials over the configured transport — Tor when it is enabled, the server's onion host if it advertises one.", "Verbindet über den konfigurierten Transport — via Tor, wenn aktiviert, und über den Onion-Host des Servers, falls vorhanden.";
     smp_untested: "not tested yet", "noch nicht getestet";
     smp_testing: "testing…", "teste…";
     smp_ok: "reachable ✓", "erreichbar ✓";
@@ -3443,5 +3483,37 @@ mod tests {
                 assert_ne!(view_icon(key), "▪️", "view `{key}` has no icon");
             }
         }
+    }
+
+    /// The tor-mode dropdown greys "embedded" unless the binary was built with
+    /// the `embedded-tor` feature (P3). local + whonix are always selectable;
+    /// only the middle (embedded) row tracks the compile-time truth passed
+    /// through the app→ui seam.
+    #[test]
+    fn embedded_row_is_disabled_when_feature_off() {
+        // model is ["local", "embedded", "whonix"]
+        assert_eq!(tor_mode_enabled(false), [true, false, true]);
+        assert_eq!(tor_mode_enabled(true), [true, true, true]);
+    }
+
+    /// The header "chat" pill mirrors transport health (P6): Ok → good/green
+    /// with no tooltip; Degraded → warn/amber; Down → bad/red — the latter two
+    /// carrying the engine's reason string as the hover tooltip.
+    #[test]
+    fn net_health_maps_to_pill_tone() {
+        // tone index: 0 = good (green), 1 = warn (amber), 2 = bad (red)
+        assert_eq!(net_health_pill(&NetHealth::Ok), (0, String::new()));
+        assert_eq!(
+            net_health_pill(&NetHealth::Degraded {
+                reason: "Tor circuit timed out".to_string(),
+            }),
+            (1, "Tor circuit timed out".to_string()),
+        );
+        assert_eq!(
+            net_health_pill(&NetHealth::Down {
+                reason: "embedded Tor not built into this binary".to_string(),
+            }),
+            (2, "embedded Tor not built into this binary".to_string()),
+        );
     }
 }

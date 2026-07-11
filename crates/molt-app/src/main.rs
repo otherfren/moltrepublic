@@ -200,7 +200,15 @@ fn main() -> anyhow::Result<()> {
         // UI mode (default): GUI on main thread; fall back to headless stdio
         // MCP if it can't start.
         tracing::info!("mode: UI (GUI on main thread)");
-        match molt_ui::run_app(wallet.clone(), rt.handle().clone(), config_path.clone()) {
+        // The GUI greys the embedded tor-mode row unless this binary was built
+        // with the in-process arti dialer (the `embedded-tor` feature, P3).
+        let embedded_tor_available = cfg!(feature = "embedded-tor");
+        match molt_ui::run_app(
+            wallet.clone(),
+            rt.handle().clone(),
+            config_path.clone(),
+            embedded_tor_available,
+        ) {
             Ok(()) => Ok(()),
             Err(e) => {
                 tracing::warn!(error = %e, "GUI unavailable; falling back to headless MCP");

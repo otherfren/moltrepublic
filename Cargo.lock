@@ -3664,6 +3664,7 @@ dependencies = [
  "molt-core",
  "molt-engine",
  "molt-mcp",
+ "molt-net",
  "molt-storage",
  "molt-ui",
  "tokio",
