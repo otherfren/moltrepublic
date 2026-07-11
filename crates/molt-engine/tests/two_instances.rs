@@ -709,28 +709,6 @@ impl EngineSink for RecordSink {
     async fn send_failed(&self, _m: &MemberId, _r: &str) {}
 }
 
-/// A deterministic non-nil message id for hand-built test envelopes (the
-/// engine mints real random ids; this stands in for a peer's minting).
-fn test_msg_id(seq: u64) -> molt_core::MessageId {
-    let mut b = [0xa5u8; 16];
-    b[..8].copy_from_slice(&seq.to_le_bytes());
-    molt_core::MessageId(b)
-}
-
-fn member_chat(seq: u64, body: &str) -> EventEnvelope {
-    EventEnvelope {
-        seq,
-        ts: 1_751_000_000 + seq,
-        by: "member-b".to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(
-            test_msg_id(seq),
-            "member-b",
-            body,
-            1_751_000_000 + seq,
-        )),
-    }
-}
-
 /// Part B — after founding, the founder engine stands a **real runtime
 /// supervisor** up from its persisted mesh + MLS group (no founding star, no
 /// demo mesh) and chats peer-to-peer over MLS with the joined member, both
@@ -863,7 +841,7 @@ async fn founding_chats_over_the_direct_mesh() {
 
     // --- member → founder: the member chats; the founder engine records it
     // into its real chat log through the same direct mesh ---
-    member_feed.push(member_chat(2, "aye, received"));
+    member_feed.push(common::chat_env(2, "member-b", "aye, received"));
     let _ = member_wake.send(2);
     let chat = common::await_chat_len(&a, 2, 15).await;
     assert!(
@@ -979,14 +957,14 @@ async fn reactions_and_deletes_converge_across_two_instances() {
     })
     .await
     .expect("founder chat");
-    member_feed.push(member_chat(2, "aye"));
+    member_feed.push(common::chat_env(2, "member-b", "aye"));
     let _ = member_wake.send(2);
     common::await_chat_len(&a, 2, 15).await;
 
     // --- the founder reacts to the MEMBER's message; the reaction crosses
     // the wire addressed by the stable id ---
     a.execute(Command::ReactChat {
-        id: test_msg_id(2),
+        id: common::test_msg_id(2),
         emoji: "👍".to_string(),
     })
     .await
@@ -999,7 +977,7 @@ async fn reactions_and_deletes_converge_across_two_instances() {
                 && matches!(
                     &env.body,
                     WorkspaceEvent::ChatReacted { id: Some(id), by, emoji, .. }
-                        if *id == test_msg_id(2) && by == "founder-a" && emoji == "👍"
+                        if *id == common::test_msg_id(2) && by == "founder-a" && emoji == "👍"
                 )
         }) {
             break;
@@ -1027,7 +1005,7 @@ async fn reactions_and_deletes_converge_across_two_instances() {
         by: "member-b".to_string(),
         body: WorkspaceEvent::ChatDeleted {
             index: 0, // the member's sender-local idea of the position
-            id: Some(test_msg_id(2)),
+            id: Some(common::test_msg_id(2)),
             by: "member-b".to_string(),
         },
     });
@@ -1162,7 +1140,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
         );
 
         // chi's reaction to ada's (not yet sent!) message goes out FIRST
-        let target = test_msg_id(42);
+        let target = common::test_msg_id(42);
         chi_feed.push(EventEnvelope {
             seq: 1,
             ts: 1_751_000_001,
@@ -1172,6 +1150,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
                 id: Some(target),
                 emoji: "🎉".to_string(),
                 by: "chi".to_string(),
+                op: Some(molt_core::ReactOp::Add),
             },
         });
         let _ = wake_chi.send(1);
@@ -1763,7 +1742,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         "the coordinator's chat to reach the rejoiner over the NEW link",
     )
     .await;
-    r_feed.push(ev_chat("member-b", 1, "alive on fresh queues"));
+    r_feed.push(common::chat_env(1, "member-b", "alive on fresh queues"));
     let _ = r_wake.send(1);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -2288,7 +2267,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         "the survivor's chat to arrive over the ROTATED link",
     )
     .await;
-    feed2.push(ev_chat("member-b", 1, "rotation complete"));
+    feed2.push(common::chat_env(1, "member-b", "rotation complete"));
     let _ = wake2.send(1);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -2649,20 +2628,6 @@ async fn a_doctored_recovery_link_id_is_rejected() {
     ));
 }
 
-fn ev_chat(by: &str, seq: u64, body: &str) -> EventEnvelope {
-    EventEnvelope {
-        seq,
-        ts: 1_751_000_000 + seq,
-        by: by.to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(
-            test_msg_id(seq),
-            by,
-            body,
-            1_751_000_000 + seq,
-        )),
-    }
-}
-
 fn ev_mls_commit(by: &str, seq: u64, commit_hex: &str) -> EventEnvelope {
     EventEnvelope {
         seq,
@@ -2762,7 +2727,7 @@ async fn a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch() {
 
     // 1) the base mesh works at the current epoch — a → b — and we WAIT for it,
     // so this pre-re-key message is encrypted (and read) before the epoch moves
-    a_log.push(ev_chat("a", 1, "before the re-key"));
+    a_log.push(common::chat_env(1, "a", "before the re-key"));
     let _ = a_wake.send(1);
     wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 1, "b gets the pre-re-key chat").await;
 
@@ -2785,7 +2750,7 @@ async fn a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch() {
     let _ = a_wake.send(2);
     tokio::time::sleep(Duration::from_millis(500)).await;
     // 4) a post-re-key chat (encrypted at epoch N+1)
-    a_log.push(ev_chat("a", 3, "after the re-key"));
+    a_log.push(common::chat_env(3, "a", "after the re-key"));
     let _ = a_wake.send(3);
 
     // b can only decrypt+deliver the epoch-N+1 chat if it applied the commit —
@@ -2798,7 +2763,7 @@ async fn a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch() {
     );
 
     // 5) the group stayed coherent both ways: b → a still decrypts at N+1
-    b_log.push(ev_chat("b", 1, "b is still here"));
+    b_log.push(common::chat_env(1, "b", "b is still here"));
     let _ = b_wake.send(1);
     wait_for(&a_sink, |(from, e)| from == "b" && e.seq == 1, "a gets b's post-re-key chat").await;
 }
@@ -2866,7 +2831,7 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
     );
 
     // the base mesh works at the current epoch, settled before the race
-    a_log.push(ev_chat("a", 1, "before the re-key"));
+    a_log.push(common::chat_env(1, "a", "before the re-key"));
     let _ = a_wake.send(1);
     wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 1, "b gets the pre-re-key chat").await;
 
@@ -2879,7 +2844,7 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
         .expect("re-key zoe");
 
     // THE RACE: the post-re-key chat goes out FIRST …
-    a_log.push(ev_chat("a", 2, "raced ahead of the commit"));
+    a_log.push(common::chat_env(2, "a", "raced ahead of the commit"));
     let _ = a_wake.send(2);
     // … and reaches b while b is still at epoch N — held, not delivered
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -3426,7 +3391,7 @@ async fn a_commit_on_one_link_releases_messages_held_on_another() {
 
     // b chats at the NEW epoch — it reaches c on the b→c link while c is
     // still at N (a's commit has not been sent yet): held on the b link
-    b_log.push(ev_chat("b", 1, "crossed the epoch on another link"));
+    b_log.push(common::chat_env(1, "b", "crossed the epoch on another link"));
     let _ = b_wake.send(1);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -3513,7 +3478,7 @@ async fn a_shed_future_epoch_message_survives_via_redelivery() {
         Some(MlsChannel::from_shared(b_mls.clone())),
     );
 
-    a_log.push(ev_chat("a", 1, "before the re-key"));
+    a_log.push(common::chat_env(1, "a", "before the re-key"));
     let _ = a_wake.send(1);
     wait_for(&b_sink, |(from, e)| from == "a" && e.seq == 1, "b gets the pre-re-key chat").await;
 
@@ -3528,7 +3493,7 @@ async fn a_shed_future_epoch_message_survives_via_redelivery() {
     // 65 chats race ahead of the commit — one more than the hold buffer, so
     // the LAST one is shed onto transport redelivery while b is still at N
     for i in 0..65u64 {
-        a_log.push(ev_chat("a", 2 + i, &format!("racing #{i}")));
+        a_log.push(common::chat_env(2 + i, "a", &format!("racing #{i}")));
     }
     let _ = a_wake.send(66);
     // let the burst arrive and the shed happen (b holds 64, sheds #64)

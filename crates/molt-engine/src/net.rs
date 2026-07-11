@@ -91,12 +91,14 @@ const PARKED_REFS_PER_TARGET: usize = 64;
 /// trusted data only — never against a claim inside the parked event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PendingRef {
-    /// A reaction toggle; the emoji passed the wire sanity check at park time.
+    /// A reaction; the emoji passed the wire sanity check at park time.
     React {
         /// The reacting member (the link identity).
         by: MemberId,
         /// The sanitized emoji.
         emoji: String,
+        /// The sender's explicit direction (`None` = legacy toggle).
+        op: Option<molt_core::ReactOp>,
     },
     /// A message deletion — honored at drain only if `by` turns out to be
     /// the target's author (no moderation concept).
@@ -798,8 +800,20 @@ impl State {
                     tracing::warn!(%from, "dropping a wire chat message without a stable id");
                     return Ok(Reply::Ack);
                 }
-                if self.chat_pos.contains_key(&msg.id) {
-                    tracing::debug!(%from, id = %msg.id, "dropping a wire chat message with a duplicate id");
+                if let Some(pos) = self.chat_pos.get(&msg.id) {
+                    match self.chat.get(*pos).map(|stored| stored.from.clone()) {
+                        // documented v1 limitation ("id squatting"): whoever
+                        // lands an id first keeps it — but a cross-AUTHOR
+                        // collision is either a bug or an attempt to occupy
+                        // a foreign id, so leave an audit trail at WARN
+                        Some(stored_author) if stored_author != from => tracing::warn!(
+                            %from,
+                            %stored_author,
+                            id = %msg.id,
+                            "dropping a wire chat message whose duplicate id belongs to another author"
+                        ),
+                        _ => tracing::debug!(%from, id = %msg.id, "dropping a wire chat message with a duplicate id"),
+                    }
                     return Ok(Reply::Ack);
                 }
                 let id = msg.id;
@@ -822,7 +836,7 @@ impl State {
                 // live arrival takes.
                 for r in self.parked.drain(&id) {
                     match r {
-                        PendingRef::React { by, emoji } => self.wire_react(id, by, emoji),
+                        PendingRef::React { by, emoji, op } => self.wire_react(id, by, emoji, op),
                         PendingRef::Delete { by } => self.wire_delete(id, by),
                         PendingRef::FileRemove { by } => self.wire_file_remove(id, by),
                     }
@@ -836,18 +850,17 @@ impl State {
             // event writes the LOCAL position into the legacy `index` field
             // for older readers. An unknown target parks (P6) and re-applies
             // when its message lands — see the Chat arm's drain.
-            WorkspaceEvent::ChatReacted { id, emoji, .. } => {
+            WorkspaceEvent::ChatReacted { id, emoji, op, .. } => {
                 let Some(id) = id else {
                     tracing::debug!(%from, "dropping a wire reaction without a message id");
                     return Ok(Reply::Ack);
                 };
                 // the local-send sanity check (cmd_react_chat's twin)
-                let emoji = emoji.trim().to_string();
-                if emoji.is_empty() || emoji.chars().count() > 4 {
+                let Some(emoji) = crate::chat::sanitize_emoji(&emoji) else {
                     tracing::warn!(%from, "dropping a wire reaction with a malformed emoji");
                     return Ok(Reply::Ack);
-                }
-                self.wire_react(id, from, emoji);
+                };
+                self.wire_react(id, from, emoji, op);
             }
             WorkspaceEvent::ChatDeleted { id, .. } => {
                 let Some(id) = id else {
@@ -1271,68 +1284,53 @@ impl State {
     // checks below never trust event-claimed data. A drain runs right
     // after the target's `Chat` was inserted, so it cannot re-park.
 
-    /// Apply (or park) a link-authenticated wire reaction.
-    fn wire_react(&mut self, id: MessageId, from: MemberId, emoji: String) {
-        let Some(index) = self.chat_pos.get(&id).and_then(|p| u64::try_from(*p).ok()) else {
+    /// Apply (or park) a link-authenticated wire reaction. The sender's
+    /// explicit `op` passes through unchanged (`None` only from a legacy
+    /// peer — that records the old toggle semantics, accepted Q3-style
+    /// degradation while versions are mixed).
+    fn wire_react(
+        &mut self,
+        id: MessageId,
+        from: MemberId,
+        emoji: String,
+        op: Option<molt_core::ReactOp>,
+    ) {
+        let Ok((index, msg)) = self.chat_by_id(&id) else {
             tracing::debug!(%from, %id, "a wire reaction arrived before its message — parked (P6)");
-            self.parked.park(id, PendingRef::React { by: from, emoji });
+            self.parked.park(id, PendingRef::React { by: from, emoji, op });
             return;
         };
-        let env = self.make_env(
-            from.clone(),
-            WorkspaceEvent::ChatReacted {
-                index,
-                id: Some(id),
-                emoji: emoji.clone(),
-                by: from.clone(),
-            },
-        );
-        self.record(env);
-        self.emit(molt_core::Event::Reacted { id, emoji, by: from });
+        // a KNOWN but tombstoned target: skip entirely — recording would
+        // put a dead event in the log (the applier ignores reactions on
+        // tombstones so that react/delete commute)
+        if msg.deleted_by.is_some() {
+            tracing::debug!(%from, %id, "skipping a wire reaction on a tombstoned message");
+            return;
+        }
+        self.record_react(index, id, from, emoji, op);
     }
 
     /// Apply (or park) a link-authenticated wire delete. Honored only if
     /// `from` is the target's author in OUR log (no moderation concept).
     fn wire_delete(&mut self, id: MessageId, from: MemberId) {
-        let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
-        let Some((index, author)) = self
-            .chat_pos
-            .get(&id)
-            .and_then(|p| u64::try_from(*p).ok())
-            .zip(target.map(|m| m.from.clone()))
-        else {
+        let Ok((index, msg)) = self.chat_by_id(&id) else {
             tracing::debug!(%from, %id, "a wire delete arrived before its message — parked (P6)");
             self.parked.park(id, PendingRef::Delete { by: from });
             return;
         };
         // no moderation concept: only the author wipes its own message —
         // and the author is what OUR log says, never a claim in the event
-        if author != from {
+        if msg.from != from {
             tracing::warn!(%from, %id, "dropping a wire delete from a non-author");
             return;
         }
-        let env = self.make_env(
-            from.clone(),
-            WorkspaceEvent::ChatDeleted {
-                index,
-                id: Some(id),
-                by: from.clone(),
-            },
-        );
-        self.record(env);
-        self.emit(molt_core::Event::Deleted { id, by: from });
+        self.record_delete(index, id, from);
     }
 
     /// Apply (or park) a link-authenticated wire file-removal. Honored only
     /// if `from` is the sharer (the share message's author in OUR log).
     fn wire_file_remove(&mut self, id: MessageId, from: MemberId) {
-        let target = self.chat_pos.get(&id).and_then(|p| self.chat.get(*p));
-        let Some((index, msg)) = self
-            .chat_pos
-            .get(&id)
-            .and_then(|p| u64::try_from(*p).ok())
-            .zip(target)
-        else {
+        let Ok((index, msg)) = self.chat_by_id(&id) else {
             tracing::debug!(%from, %id, "a wire file-removal arrived before its message — parked (P6)");
             self.parked.park(id, PendingRef::FileRemove { by: from });
             return;
@@ -1343,16 +1341,7 @@ impl State {
             tracing::warn!(%from, %id, "dropping a wire file-removal from a non-sharer");
             return;
         }
-        let env = self.make_env(
-            from.clone(),
-            WorkspaceEvent::FileRemoved {
-                index,
-                id: Some(id),
-                by: from.clone(),
-            },
-        );
-        self.record(env);
-        self.emit(molt_core::Event::FileRemoved { id, by: from });
+        self.record_file_remove(index, id, from);
     }
 
     /// Passive presence: mark the member's pill live.
@@ -1546,7 +1535,43 @@ fn spawn_brain(
 #[cfg(test)]
 mod tests {
     use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
-    use molt_core::MessageId;
+    use molt_core::{ChatMessage, EventEnvelope, MessageId, WorkspaceEvent};
+
+    /// A wire reaction whose known target is already a tombstone is skipped
+    /// ENTIRELY — no event recorded (the log gets no dead entry), nothing
+    /// parked, no reaction on the tombstone. The commuting twin of the
+    /// applier-side guard: react/delete converge independent of order.
+    #[test]
+    fn a_wire_reaction_on_a_tombstone_records_no_event() {
+        let mut st = crate::tests::plain_state();
+        let id = MessageId([0x2au8; 16]);
+        st.apply(&EventEnvelope {
+            seq: 1,
+            ts: 101,
+            by: "peer-1".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage::text(id, "peer-1", "soon gone", 101)),
+        });
+        st.apply(&EventEnvelope {
+            seq: 2,
+            ts: 102,
+            by: "peer-1".to_string(),
+            body: WorkspaceEvent::ChatDeleted {
+                index: 0,
+                id: Some(id),
+                by: "peer-1".to_string(),
+            },
+        });
+        let seq_before = st.next_seq;
+        st.wire_react(
+            id,
+            "peer-2".to_string(),
+            "🔥".to_string(),
+            Some(molt_core::ReactOp::Add),
+        );
+        assert_eq!(st.next_seq, seq_before, "no event was recorded");
+        assert!(st.chat[0].reactions.is_empty(), "no reaction on the tombstone");
+        assert!(!st.parked.holds(&id), "a KNOWN tombstoned target parks nothing");
+    }
 
     fn id(n: usize) -> MessageId {
         let mut b = [0u8; 16];
@@ -1558,6 +1583,7 @@ mod tests {
         PendingRef::React {
             by: by.to_string(),
             emoji: "🎉".to_string(),
+            op: Some(molt_core::ReactOp::Add),
         }
     }
 

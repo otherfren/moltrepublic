@@ -340,6 +340,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
             id: Some(founder_patch_id),
             emoji: "👍".to_string(),
             by: "member-b".to_string(),
+            op: Some(molt_core::ReactOp::Add),
         },
     });
     let _ = member_wake.send(5);

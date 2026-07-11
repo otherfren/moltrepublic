@@ -59,28 +59,6 @@ fn genesis(member: &str) -> EventEnvelope {
     }
 }
 
-/// A deterministic non-nil message id for hand-built test envelopes (the
-/// engine mints real random ids; this stands in for a peer's minting).
-fn test_msg_id(seq: u64) -> molt_core::MessageId {
-    let mut b = [0xa5u8; 16];
-    b[..8].copy_from_slice(&seq.to_le_bytes());
-    molt_core::MessageId(b)
-}
-
-fn chat_env(seq: u64, body: &str) -> EventEnvelope {
-    EventEnvelope {
-        seq,
-        ts: 1_751_000_000 + seq,
-        by: "ada".to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(
-            test_msg_id(seq),
-            "ada",
-            body,
-            1_751_000_000 + seq,
-        )),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -150,8 +128,8 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
 
     // ada writes history: the genesis (a non-chat event B must ignore
     // without wedging) is already in the log; two chat messages follow
-    assert!(handle_a.append(chat_env(2, "hi ben")));
-    assert!(handle_a.append(chat_env(3, "log-backed outbox speaking")));
+    assert!(handle_a.append(common::chat_env(2, "ada", "hi ben")));
+    assert!(handle_a.append(common::chat_env(3, "ada", "log-backed outbox speaking")));
     let _ = wake_a.send(3);
 
     let chat = await_chat_len(&w_b, 2, 20).await;
@@ -192,7 +170,7 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
         wake_a2_rx,
         None,
     );
-    assert!(handle_a2.append(chat_env(4, "back after the crash")));
+    assert!(handle_a2.append(common::chat_env(4, "ada", "back after the crash")));
     let _ = wake_a2.send(4);
 
     let chat = await_chat_len(&w_b, 3, 20).await;
@@ -289,7 +267,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
     let (w_b, ada_feed, wake_a, _sups) = wire_pair(&tmp.path().join("node-b")).await;
 
     // ada's message arrives exactly once
-    ada_feed.push(chat_env(2, "hello"));
+    ada_feed.push(common::chat_env(2, "ada", "hello"));
     let _ = wake_a.send(2);
     await_chat_len(&w_b, 1, 20).await;
 
@@ -329,7 +307,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
         ts: 1_751_000_003,
         by: "ada".to_string(),
         body: WorkspaceEvent::Chat(ChatMessage::text(
-            test_msg_id(2),
+            common::test_msg_id(2),
             "ada",
             "hello",
             1_751_000_002,
@@ -361,7 +339,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
         by: "ada".to_string(),
         body: WorkspaceEvent::ChatDeleted {
             index: 0,
-            id: Some(test_msg_id(2)),
+            id: Some(common::test_msg_id(2)),
             by: "ada".to_string(),
         },
     });
@@ -403,9 +381,9 @@ async fn a_wire_quote_resolves_on_the_receiver() {
     let tmp = tempfile::tempdir().expect("tmp");
     let (w_b, ada_feed, wake_a, _sups) = wire_pair(&tmp.path().join("node-b")).await;
 
-    ada_feed.push(chat_env(2, "original"));
-    let mut reply = ChatMessage::text(test_msg_id(3), "ada", "quoting you", 1_751_000_003);
-    reply.quote_id = Some(test_msg_id(2));
+    ada_feed.push(common::chat_env(2, "ada", "original"));
+    let mut reply = ChatMessage::text(common::test_msg_id(3), "ada", "quoting you", 1_751_000_003);
+    reply.quote_id = Some(common::test_msg_id(2));
     reply.quote = Some(999); // a bogus sender-local index: must not transfer
     ada_feed.push(EventEnvelope {
         seq: 3,
@@ -418,7 +396,7 @@ async fn a_wire_quote_resolves_on_the_receiver() {
     let chat = await_chat_len(&w_b, 2, 20).await;
     assert_eq!(
         chat[1]["quote_id"],
-        serde_json::json!(test_msg_id(2).to_string()),
+        serde_json::json!(common::test_msg_id(2).to_string()),
         "the global quote_id survives the wire: {:?}",
         chat[1]
     );

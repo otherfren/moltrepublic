@@ -1197,6 +1197,26 @@ pub fn roster_canonical_bytes(
     out
 }
 
+/// The explicit direction of a reaction event (chat bus). The **sender**
+/// computes the toggle outcome against its own state and puts the result on
+/// the wire; the applier treats it as an idempotent set/unset, so
+/// at-least-once redelivery (SMP redelivers un-acked frames after a hard
+/// crash; the MLS path has no wire-seq cursor) can never invert a reaction.
+///
+/// Mixed-version degradation (accepted, chat-bus Q3 posture): an OLD reader
+/// drops the unknown `op` field on decode and still *toggles*, so a
+/// redelivered duplicate can invert the reaction on that old node only —
+/// acceptable while versions are mixed, gone once it upgrades and replays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactOp {
+    /// Set the member's reaction to this emoji (a no-op when already set —
+    /// one reaction per member, so any other emoji of theirs is cleared).
+    Add,
+    /// Clear the member's reaction of this emoji (a no-op when absent).
+    Remove,
+}
+
 /// What can happen in a workspace. **Additive-only evolution**: new kinds
 /// append variants; an older reader that meets an unknown variant must not
 /// write to that workspace (applying a partial history would fork state).
@@ -1247,7 +1267,7 @@ pub enum WorkspaceEvent {
     },
     /// A chat message was posted (the existing typed schema).
     Chat(ChatMessage),
-    /// A member's emoji reaction on a chat message was toggled.
+    /// A member's emoji reaction on a chat message changed.
     ChatReacted {
         /// Message position in the chat log (0-based). Legacy addressing —
         /// applied only when `id` is absent (pre-chat-bus log entries);
@@ -1259,8 +1279,15 @@ pub enum WorkspaceEvent {
         id: Option<MessageId>,
         /// The reaction emoji.
         emoji: String,
-        /// Who toggled it.
+        /// Who reacted.
         by: MemberId,
+        /// The explicit, idempotent direction (additive — `None` on legacy
+        /// log entries, which replay with the original toggle semantics).
+        /// New senders always resolve the toggle locally and record
+        /// `Some(..)`, so duplicates on the wire are harmless. See
+        /// [`ReactOp`] for the accepted mixed-version degradation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<ReactOp>,
     },
     /// A chat message was wiped; only the deletion notice remains.
     ChatDeleted {
@@ -2628,6 +2655,10 @@ pub enum MoltError {
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
     NotYourFile(MessageId),
+    /// Only the author of a chat message can delete it (there is no
+    /// moderation concept — the same rule every peer enforces on the wire).
+    #[error("only the author of message {0} can delete it")]
+    NotYourMessage(MessageId),
     /// A restore action arrived in the wrong lifecycle state.
     #[error("restore: {0}")]
     Restore(String),
@@ -2727,6 +2758,7 @@ mod tests {
                 id: None,
                 emoji: "🔥".to_string(),
                 by: "mithra".to_string(),
+                op: None,
             },
         };
         let wire = serde_json::to_string(&env).expect("encode");
