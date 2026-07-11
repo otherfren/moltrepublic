@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use molt_core::{mockrand, EventEnvelope, MemberId, TransportState, WorkspaceEvent};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{watch, Notify};
+use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::chunk::{chunk_message, msg_id, PushOutcome, Reassembler};
@@ -353,6 +353,9 @@ where
     tokio::spawn(async move {
         let state = Arc::new(Mutex::new(store.load().await));
         let mut children = JoinSet::new();
+        // Every outbox task first: they park on the wakeup watch and dial
+        // nothing until there is something to send, so spawning them up front
+        // costs no round-trip.
         for (i, peer) in cfg.peers.iter().enumerate() {
             let seed = cfg.seed
                 .wrapping_add(1 + u64::try_from(i).unwrap_or_default())
@@ -369,8 +372,29 @@ where
                 seed,
                 mls.clone(),
             ));
-            match transport.subscribe(&peer.rcv).await {
-                Ok(rx) => {
+        }
+        // Circuit prebuild (concept §5, T4 §P4): open every inbound
+        // subscription in parallel, bounded by PREBUILD_PARALLELISM, so n cold
+        // Tor circuits build concurrently at workspace-open instead of one after
+        // another. Because a node's send + recv connections to one server share
+        // a circuit (the dialer's per-server isolation token), warming the recv
+        // circuit here also warms the circuit the outbox pool will reuse, so the
+        // first send is one round-trip, not a cold circuit build. Drain-don't-
+        // abort is untouched: each recv task still lands in the JoinSet and is
+        // aborted with the rest on stop; only the initial dials go concurrent.
+        let subscribed = {
+            let transport = transport.clone();
+            let peers = cfg.peers.clone();
+            prebuild_circuits(peers.len(), PREBUILD_PARALLELISM, move |i| {
+                let transport = transport.clone();
+                let rcv = peers[i].rcv.clone();
+                async move { transport.subscribe(&rcv).await }
+            })
+            .await
+        };
+        for (peer, sub) in cfg.peers.iter().zip(subscribed) {
+            match sub {
+                Some(Ok(rx)) => {
                     children.spawn(recv_task(
                         peer.clone(),
                         rx,
@@ -380,8 +404,11 @@ where
                         mls.clone(),
                     ));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     tracing::error!(peer = %peer.member, error = %e, "subscribing inbound queue failed");
+                }
+                None => {
+                    tracing::error!(peer = %peer.member, "prebuild subscribe task did not complete");
                 }
             }
         }
@@ -392,6 +419,50 @@ where
     });
     SupervisorHandle { stop }
 }
+
+/// Circuit prebuild (concept §5, T4 §P4): run up to `max_in_flight` dials
+/// concurrently, returning each result in input order (`None` only if that
+/// dial task itself failed to join — a panic). Bounds cold-circuit builds at
+/// workspace-open so the first send is one round-trip, not a serial wait on n
+/// cold Tor circuits. Generic over the dial so the semaphore bound is testable
+/// without a live server; the supervisor passes `Transport::subscribe`.
+async fn prebuild_circuits<F, Fut, R>(
+    count: usize,
+    max_in_flight: usize,
+    dial: F,
+) -> Vec<Option<R>>
+where
+    F: Fn(usize) -> Fut,
+    Fut: std::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    let sem = Arc::new(Semaphore::new(max_in_flight.max(1)));
+    let mut set = JoinSet::new();
+    for i in 0..count {
+        // acquire BEFORE spawning so at most `max_in_flight` dials run at once;
+        // the permit rides into the task and releases when the dial completes.
+        let Ok(permit) = sem.clone().acquire_owned().await else {
+            break; // semaphore closed — never happens (we hold the only handle)
+        };
+        let fut = dial(i);
+        set.spawn(async move {
+            let _permit = permit;
+            (i, fut.await)
+        });
+    }
+    let mut out: Vec<Option<R>> = (0..count).map(|_| None).collect();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((i, r)) = joined {
+            if let Some(slot) = out.get_mut(i) {
+                *slot = Some(r);
+            }
+        }
+    }
+    out
+}
+
+/// How many circuits the prebuild opens at once (concept §5).
+const PREBUILD_PARALLELISM: usize = 4;
 
 /// The per-peer outbox drainer. Never blocks the engine: it waits on the
 /// wakeup watch and reads pending envelopes straight from the log.
@@ -990,5 +1061,46 @@ mod tests {
             rcv_wrap: String::new(),
         };
         assert!(PeerLink::from_mesh(&bad).is_none());
+    }
+
+    /// P4: the prebuild hook dials N servers bounded by a semaphore of 4 — never
+    /// more than four circuits build at once, every server is dialed, and with
+    /// N > 4 the bound is actually saturated (so it is concurrent, not serial).
+    #[tokio::test]
+    async fn prebuild_opens_connections_under_a_semaphore_of_4() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let n = 12usize;
+        let results = {
+            let in_flight = in_flight.clone();
+            let max_seen = max_seen.clone();
+            prebuild_circuits(n, PREBUILD_PARALLELISM, move |i| {
+                let in_flight = in_flight.clone();
+                let max_seen = max_seen.clone();
+                async move {
+                    let cur = in_flight.fetch_add(1, SeqCst) + 1;
+                    max_seen.fetch_max(cur, SeqCst);
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    in_flight.fetch_sub(1, SeqCst);
+                    i
+                }
+            })
+            .await
+        };
+        // every server dialed, results in input order
+        assert_eq!(results.len(), n);
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(*r, Some(i), "result {i} present and in order");
+        }
+        let peak = max_seen.load(SeqCst);
+        assert!(
+            peak <= PREBUILD_PARALLELISM,
+            "peak {peak} in flight exceeded the semaphore bound"
+        );
+        assert_eq!(
+            peak, PREBUILD_PARALLELISM,
+            "prebuild should saturate the semaphore of 4 with n > 4"
+        );
     }
 }

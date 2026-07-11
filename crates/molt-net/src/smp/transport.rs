@@ -8,22 +8,29 @@
 //! `DEL`. So the engine and the founding ritual run over real SMP exactly
 //! as they run over the loopback hub — same trait, same code.
 //!
-//! Connection model (deliberately simple for the ritual's low volume): a
-//! fresh connection per send; one long-lived connection per subscription.
-//! The recipient keys of queues we created, and the sender key each queue
-//! was secured with, are remembered so any later send/subscribe works from
-//! a fresh connection (SMP securing is server-side state, not per
-//! connection). Pooling is a later optimisation.
+//! Connection model: a pooled, persistent connection per server, reused
+//! across `create_queue`/`send`/`delete_queue` (a fresh dial per op is a
+//! whole Tor circuit + TLS handshake — pathological over Tor; T4 §P4). The
+//! `subscribe` path keeps its OWN long-lived connection (its dedicated recv
+//! loop) and never goes through the pool. The recipient keys of queues we
+//! created, and the sender key each queue was secured with, are remembered
+//! so a send/subscribe survives a reconnect (SMP securing is server-side
+//! state, not per connection).
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::block::PADDED_BLOCK_LEN;
 use crate::smp::conn::{NewQueue, SmpConn};
 use crate::smp::server::SmpServer;
+use crate::smp::tls::Dialer;
 use crate::{
     AckToken, Delivery, NetError, PaddedBlock, QueueId, QueuePair, RcvQueue, SndQueueAddr,
     Transport,
@@ -34,8 +41,11 @@ use crate::{
 #[derive(Clone)]
 pub struct SmpTransport {
     server: SmpServer,
-    dialer: crate::smp::tls::Dialer,
+    dialer: Dialer,
     state: Arc<Mutex<SmpState>>,
+    /// The reused connection for `create_queue`/`send`/`delete_queue` (one per
+    /// server; `subscribe` keeps its own). Clones of a transport share it.
+    pool: ConnPool<SmpConn>,
 }
 
 #[derive(Default)]
@@ -50,16 +60,17 @@ impl SmpTransport {
     /// A transport that creates its queues on, and sends through, `server`,
     /// dialing directly (clearnet/loopback).
     pub fn new(server: SmpServer) -> SmpTransport {
-        SmpTransport::with_dialer(server, crate::smp::tls::Dialer::Direct)
+        SmpTransport::with_dialer(server, Dialer::Direct)
     }
 
     /// Like [`new`](SmpTransport::new) but routes every connection through
     /// `dialer` — e.g. a SOCKS5h Tor proxy (concept §4).
-    pub fn with_dialer(server: SmpServer, dialer: crate::smp::tls::Dialer) -> SmpTransport {
+    pub fn with_dialer(server: SmpServer, dialer: Dialer) -> SmpTransport {
         SmpTransport {
             server,
             dialer,
             state: Arc::new(Mutex::new(SmpState::default())),
+            pool: ConnPool::new(),
         }
     }
 
@@ -135,10 +146,133 @@ impl SmpTransport {
     }
 }
 
+/// A connection the [`ConnPool`] can (re)dial. [`SmpConn`] in production; a
+/// stub in the pool's own tests. Only the *dial* is abstracted — each pooled
+/// operation is passed to [`ConnPool::with_conn`] as a closure, so the pool
+/// stays agnostic to the SMP command layer.
+trait PooledConn: Sized + Send + 'static {
+    /// Open (dial + handshake) one fresh connection to `server` via `dialer`.
+    fn dial(dialer: Dialer, server: SmpServer)
+        -> impl Future<Output = Result<Self, NetError>> + Send;
+}
+
+impl PooledConn for SmpConn {
+    async fn dial(dialer: Dialer, server: SmpServer) -> Result<SmpConn, NetError> {
+        SmpConn::connect(&dialer, &server).await
+    }
+}
+
+/// A boxed pooled-operation future borrowing the connection for `'a`.
+type ConnFut<'a, R> = Pin<Box<dyn Future<Output = Result<R, NetError>> + Send + 'a>>;
+
+/// One persistent connection per server, reused across the request/response SMP
+/// operations (`create_queue`/`send`/`delete_queue`) instead of a fresh dial
+/// per op — over Tor a fresh dial is a whole new circuit + TLS handshake, which
+/// is pathological (T4 §P4). The `subscribe` path keeps its own long-lived
+/// connection (its dedicated recv loop) and does NOT go through this pool.
+///
+/// Concurrency tradeoff: the async mutex serialises operations on the one
+/// connection. SMP is request/response with a per-connection correlation
+/// counter and session id, so interleaving two operations on one connection
+/// would corrupt correlation — serialising is *correct*, not merely convenient.
+/// A concurrent op waits, but the wait is bounded (every read/write carries the
+/// 30 s `BLOCK_IO_TIMEOUT` landed in Stage A), so a wedged connection can never
+/// deadlock the transport: the op times out, the broken connection is dropped,
+/// and the next turn re-dials.
+///
+/// The pool holds only the shared slot + dial counter (two `Arc`s); the
+/// `dialer`/`server` needed to (re)dial are passed in by [`SmpTransport`], which
+/// already owns them — no duplication, so wrapping this in the transport keeps
+/// the transport small (it rides inside `RitualTransport`, whose variant sizes
+/// clippy watches).
+struct ConnPool<C> {
+    /// The one live connection (async mutex: held across an op's I/O).
+    slot: Arc<AsyncMutex<Option<C>>>,
+    /// Total dials (circuit builds) — instrumentation the pool tests assert on.
+    dials: Arc<AtomicU64>,
+}
+
+// Manual `Clone`: transport clones share the SAME connection slot (one
+// connection per server for the whole node), independent of whether `C: Clone`
+// (`SmpConn` is not).
+impl<C> Clone for ConnPool<C> {
+    fn clone(&self) -> Self {
+        ConnPool {
+            slot: self.slot.clone(),
+            dials: self.dials.clone(),
+        }
+    }
+}
+
+impl<C: PooledConn> ConnPool<C> {
+    fn new() -> ConnPool<C> {
+        ConnPool {
+            slot: Arc::new(AsyncMutex::new(None)),
+            dials: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Dial one fresh connection and count it.
+    async fn open(&self, dialer: &Dialer, server: &SmpServer) -> Result<C, NetError> {
+        let c = C::dial(dialer.clone(), server.clone()).await?;
+        self.dials.fetch_add(1, Ordering::Relaxed);
+        Ok(c)
+    }
+
+    /// Run one pooled operation, reusing the live connection (opening one
+    /// lazily via `dialer`/`server`). On an error from `op` — a broken
+    /// connection — the connection is dropped and `op` retried ONCE on a freshly
+    /// dialed one, so a stale pooled connection heals transparently. The retry is
+    /// safe because the transport is at-least-once (the peer's dedup absorbs a
+    /// re-sent request) and each op re-reads the securing-key state, so a
+    /// reconnect never double-`SKEY`s. A *dial* failure is returned straight away
+    /// (the outbox backs off + retries).
+    async fn with_conn<R, F>(
+        &self,
+        dialer: &Dialer,
+        server: &SmpServer,
+        mut op: F,
+    ) -> Result<R, NetError>
+    where
+        F: for<'a> FnMut(&'a mut C) -> ConnFut<'a, R>,
+    {
+        let mut slot = self.slot.lock().await;
+        let mut last: Option<NetError> = None;
+        for _ in 0..2 {
+            if slot.is_none() {
+                *slot = Some(self.open(dialer, server).await?);
+            }
+            let result = {
+                let conn = slot.as_mut().expect("just ensured a connection");
+                op(conn).await
+            };
+            match result {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    *slot = None; // drop the broken connection; the retry re-dials
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or(NetError::Closed))
+    }
+
+    /// Total dials so far — the pool tests assert reuse (one dial) vs reconnect
+    /// (two).
+    #[cfg(test)]
+    fn dials(&self) -> u64 {
+        self.dials.load(Ordering::Relaxed)
+    }
+}
+
 impl Transport for SmpTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
-        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
-        let q = conn.new_queue(false).await?;
+        let q = self
+            .pool
+            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+                Box::pin(async move { c.new_queue(false).await })
+            })
+            .await?;
         let rcv = RcvQueue {
             id: QueueId::from_bytes(q.recipient_id.clone()),
         };
@@ -153,22 +287,38 @@ impl Transport for SmpTransport {
     }
 
     async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {
-        let sender_id = &addr.id.0;
-        let existing = self.state.lock().ok().and_then(|s| s.send_keys.get(sender_id).cloned());
-        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
-        let key = match existing {
-            Some(k) => k,
-            None => {
-                // secure the queue as sender the first time (server-side,
-                // so later sends from fresh connections reuse the key)
-                let k = conn.secure_as_sender(sender_id).await?;
-                if let Ok(mut s) = self.state.lock() {
-                    s.send_keys.insert(sender_id.clone(), k.clone());
-                }
-                k
-            }
-        };
-        conn.send_to(sender_id, &key, block.as_slice()).await
+        let sender_id = addr.id.0.clone();
+        let state = self.state.clone();
+        self.pool
+            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+                let sender_id = sender_id.clone();
+                let state = state.clone();
+                let block = block.clone();
+                Box::pin(async move {
+                    // re-read the securing key inside the op so a reconnect
+                    // retry (after a broken connection) never re-`SKEY`s a queue
+                    // already secured on an earlier attempt.
+                    let cached = state
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.send_keys.get(&sender_id).cloned());
+                    let key = match cached {
+                        Some(k) => k,
+                        None => {
+                            // secure the queue as sender the first time
+                            // (server-side, so later sends reuse the key even
+                            // from a reconnected connection)
+                            let k = c.secure_as_sender(&sender_id).await?;
+                            if let Ok(mut s) = state.lock() {
+                                s.send_keys.insert(sender_id.clone(), k.clone());
+                            }
+                            k
+                        }
+                    };
+                    c.send_to(&sender_id, &key, block.as_slice()).await
+                })
+            })
+            .await
     }
 
     async fn subscribe(
@@ -215,8 +365,15 @@ impl Transport for SmpTransport {
         let Some(queue) = self.recv_queue(&q.id.0) else {
             return Ok(());
         };
-        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
-        conn.delete(&queue.recipient_id, &queue.auth_sk).await?;
+        let recipient_id = queue.recipient_id.clone();
+        let auth_sk = queue.auth_sk.clone();
+        self.pool
+            .with_conn(&self.dialer, &self.server, |c: &mut SmpConn| {
+                let recipient_id = recipient_id.clone();
+                let auth_sk = auth_sk.clone();
+                Box::pin(async move { c.delete(&recipient_id, &auth_sk).await })
+            })
+            .await?;
         if let Ok(mut s) = self.state.lock() {
             s.recv.remove(&q.id.0);
         }
@@ -229,5 +386,89 @@ impl Transport for SmpTransport {
 
     fn import_creds(&self, creds: &[u8]) {
         self.adopt_creds(creds);
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+
+    const FP: &str = "f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=";
+
+    fn dummy_server() -> SmpServer {
+        SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server")
+    }
+
+    /// A stub connection: never touches a socket, so the pool's reuse/reconnect
+    /// logic is testable without a live SMP server. Op failures are simulated in
+    /// the op closures the tests pass to [`ConnPool::with_conn`].
+    struct TestConn;
+    impl PooledConn for TestConn {
+        async fn dial(_dialer: Dialer, _server: SmpServer) -> Result<TestConn, NetError> {
+            Ok(TestConn)
+        }
+    }
+
+    /// P4: a second operation reuses the first connection — two sequential ops on
+    /// one pool open exactly ONE connection, not two.
+    #[tokio::test]
+    async fn a_second_send_reuses_the_first_connection() {
+        let pool: ConnPool<TestConn> = ConnPool::new();
+        let (dialer, server) = (Dialer::Direct, dummy_server());
+        let ops = Arc::new(AtomicU64::new(0));
+        for _ in 0..2 {
+            let ops = ops.clone();
+            pool.with_conn(&dialer, &server, move |_c: &mut TestConn| {
+                let ops = ops.clone();
+                Box::pin(async move {
+                    ops.fetch_add(1, SeqCst);
+                    Ok::<(), NetError>(())
+                })
+            })
+            .await
+            .expect("op ok");
+        }
+        assert_eq!(ops.load(SeqCst), 2, "both operations ran");
+        assert_eq!(
+            pool.dials(),
+            1,
+            "two operations must share one dialed connection"
+        );
+    }
+
+    /// P4: a broken pooled connection reconnects transparently — an op that fails
+    /// once (the connection dropped under it) succeeds on the freshly re-dialed
+    /// connection instead of erroring out to the caller.
+    #[tokio::test]
+    async fn a_broken_pooled_connection_reconnects_transparently() {
+        let pool: ConnPool<TestConn> = ConnPool::new();
+        let (dialer, server) = (Dialer::Direct, dummy_server());
+        pool.with_conn(&dialer, &server, |_c: &mut TestConn| {
+            Box::pin(async { Ok::<(), NetError>(()) })
+        })
+        .await
+        .expect("first op opens a connection");
+        assert_eq!(pool.dials(), 1);
+
+        let fail_once = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicU64::new(0));
+        let res = pool
+            .with_conn(&dialer, &server, |_c: &mut TestConn| {
+                let fail_once = fail_once.clone();
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, SeqCst);
+                    if fail_once.swap(false, SeqCst) {
+                        Err(NetError::Unreachable("broken pooled connection".into()))
+                    } else {
+                        Ok::<(), NetError>(())
+                    }
+                })
+            })
+            .await;
+        assert!(res.is_ok(), "reconnects rather than erroring out: {res:?}");
+        assert_eq!(calls.load(SeqCst), 2, "op retried once after the break");
+        assert_eq!(pool.dials(), 2, "reconnected on a fresh dial");
     }
 }
