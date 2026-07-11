@@ -663,6 +663,9 @@ export component ChatRow inherits Rectangle {
 export component StatusPill inherits Rectangle {
     in property <string> label;
     in property <color> tone;
+    // Optional hover hint (e.g. the transport-health reason on the "chat"
+    // pill). Empty = no tooltip and the hover area stays pass-through.
+    in property <string> tooltip;
     height: 24px;
     width: sp-row.preferred-width + 18px;
     background: Theme.panel-2;
@@ -688,6 +691,17 @@ export component StatusPill inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
+    }
+    // disabled (pass-through) when there is no tooltip, so pills without one
+    // never intercept hover/scroll on the surfaces they sit in
+    sp-ta := TouchArea {
+        enabled: root.tooltip != "";
+    }
+    if root.tooltip != "": HoverTip {
+        label: root.tooltip;
+        shown: sp-ta.has-hover;
+        x: (parent.width - self.width) / 2;
+        y: parent.height + 6px;
     }
 }
 

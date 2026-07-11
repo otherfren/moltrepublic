@@ -100,6 +100,11 @@ export component AppWindow inherits Window {
     in property <string> active-workspace;
     in property <string> active-status;
     in property <int> active-state: 0;
+    // transport health for the header "chat" pill (P6), set by Rust from
+    // SessionView.net_health: tone 0 = ok/green, 1 = degraded/amber,
+    // 2 = down/red; the reason is the pill's hover tooltip (empty when ok).
+    in property <int> net-health-tone: 0;
+    in property <string> net-health-reason;
 
     // ---- surfaces (main view), live-mirrored from the engine ----
     in property <string> node-member;
@@ -366,6 +371,10 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-mcp-token;
     in-out property <int> cfg-network-index: 0;
     in-out property <int> cfg-tor-mode-index: 0;
+    // per-row enabled flags for the tor-mode dropdown (["local","embedded",
+    // "whonix"]); Rust greys "embedded" unless the binary was built with the
+    // embedded-tor feature (P3). Default matches feature-off.
+    in property <[bool]> tor-mode-enabled: [true, false, true];
     in-out property <int> cfg-tor-port: 9050;
     // SMP messaging server: false = bundled public server, true = custom url.
     in-out property <bool> cfg-smp-custom: false;
@@ -2480,9 +2489,14 @@ export component AppWindow inherits Window {
                         }
                         VerticalLayout {
                             alignment: center;
+                            // the transport-health surface (concept §4 / P6):
+                            // green nominal, amber degraded, red down — with the
+                            // engine's reason as the hover tooltip
                             StatusPill {
                                 label: "chat";
-                                tone: root.active-state == 2 ? Theme.faint : Theme.good;
+                                tone: root.net-health-tone == 2 ? Theme.bad
+                                    : (root.net-health-tone == 1 ? Theme.warn : Theme.good);
+                                tooltip: root.net-health-reason;
                             }
                         }
                         VerticalLayout {
@@ -3792,6 +3806,9 @@ export component AppWindow inherits Window {
                                 AppDropdown {
                                     width: 200px;
                                     model: ["local", "embedded", "whonix"];
+                                    // "embedded" greys out unless this binary
+                                    // was built with the embedded-tor feature
+                                    enabled: root.tor-mode-enabled;
                                     current-index <=> root.cfg-tor-mode-index;
                                 }
                             }
@@ -3838,6 +3855,11 @@ export component AppWindow inherits Window {
                                 alignment: start;
                                 AppButton {
                                     label: Strings.smp-test;
+                                    // honest copy (P7): the probe dials over the
+                                    // configured transport — Tor when enabled,
+                                    // an onion host if the server advertises one
+                                    tooltip: Strings.smp-test-tip;
+                                    tooltip-below: true;
                                     clicked => {
                                         root.test-smp-server();
                                     }
