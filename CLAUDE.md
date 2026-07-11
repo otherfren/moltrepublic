@@ -8,6 +8,14 @@ user could mistake for real.
 
 ## Working style
 
+- **Never point at a secret in a tracked artifact.** Naming or describing a
+  secret in anything committed — a `.gitignore` comment, a commit message, a
+  code comment, a doc — leaks it: it advertises that the secret exists and what
+  it is, even when the value itself is elsewhere. Ignore secrets via a **generic
+  path with no explanatory comment** (e.g. a bare `/.secrets/` line); keep any
+  commit that touches secret handling **generic** (never name the file or its
+  contents). When removing a secret from history, the rewrite's own commits and
+  messages must not describe what was removed.
 - **Work directly on master.** The user relies on the session's result being on
   master — other sessions build on it there. Branches/worktrees are short-lived
   tooling only (e.g. isolating parallel agents); merge back to master and delete
