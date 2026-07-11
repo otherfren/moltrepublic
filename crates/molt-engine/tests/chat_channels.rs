@@ -360,6 +360,59 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // (e) of §5.2 — the MCP-tool-built read equality — lives in
+    // ---- (e) a file share crosses the wire WITH its channel (Q8) -------
+    // A share IS a chat message, so the member's offer into the patch
+    // channel must arrive at the founder filed under Patch(pid) — not
+    // flattened into Group.
+    b.execute(Command::ShareFile {
+        name: "minutes.pdf".to_string(),
+        size: 48_000,
+        kind: "PDF".to_string(),
+        modified: 1_751_000_400,
+        channel: patch.clone(),
+    })
+    .await
+    .expect("member shares into the patch channel");
+    let b_share = read_chat_snap(&b, Some(patch.clone()))
+        .await
+        .applied
+        .into_iter()
+        .find(|m| m["file"]["name"] == serde_json::json!("minutes.pdf"))
+        .expect("the member's own patch view holds the offer");
+    let share_msg: ChatMessage = serde_json::from_value(b_share).expect("share decodes");
+    assert_eq!(share_msg.channel, patch, "the share is tagged before the wire");
+    member_feed.push(EventEnvelope {
+        seq: 6,
+        ts: share_msg.ts,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Chat(share_msg),
+    });
+    let _ = member_wake.send(6);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let patch_msgs = read_chat_snap(&a, Some(patch.clone())).await.applied;
+        if patch_msgs
+            .iter()
+            .any(|m| m["file"]["name"] == serde_json::json!("minutes.pdf"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the member's patch-channel file offer never reached the founder: {patch_msgs:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // … and the founder's Group view does NOT hold the offer
+    assert!(
+        read_chat_snap(&a, Some(ChannelRef::Group))
+            .await
+            .applied
+            .iter()
+            .all(|m| m.get("file").is_none() || m["file"].is_null()),
+        "no file offer leaks into the founder's group view"
+    );
+
+    // (f) of §5.2 — the MCP-tool-built read equality — lives in
     // molt-mcp/tests/tool_reads.rs, on the legal side of the crate layering.
 }

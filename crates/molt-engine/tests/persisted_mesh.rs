@@ -284,6 +284,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
         size: 12,
         kind: "TXT".to_string(),
         modified: 100,
+        channel: molt_core::ChannelRef::default(),
     })
     .await
     .expect("ben shares");

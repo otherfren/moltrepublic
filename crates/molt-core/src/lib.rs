@@ -1891,16 +1891,21 @@ pub enum Command {
     /// Share a file into the ungated chat. Only the METADATA is posted —
     /// the bytes never leave this node's disk; participants download from
     /// there while the file exists (the fetch is the transport's job, next
-    /// story; mocked today).
+    /// story; mocked today). A share IS a chat message, so it files under
+    /// a channel view like any other (concept Q8).
     ShareFile {
         /// File name (no path).
         name: String,
         /// Size in bytes.
         size: u64,
-        /// Display type, e.g. `"PDF"`.
+        /// Display type, e.g. `"PDF"` — NOT the channel's serde tag.
         kind: String,
         /// The file's own date, unix seconds (0 = stamp now).
         modified: u64,
+        /// The channel view the share files under. `Command` is never
+        /// persisted, so the field is a clean swap (no serde default) —
+        /// every construction site states its channel.
+        channel: ChannelRef,
     },
     /// Download a shared file from the sharer's disk (mock: validates
     /// availability, moves no bytes). Fails once the sharer deleted the

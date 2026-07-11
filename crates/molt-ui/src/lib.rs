@@ -675,9 +675,18 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
         ui.on_share_pick(move || {
             let w = w.clone();
             let weak = weak.clone();
+            // a share files into the channel this window has selected —
+            // captured at click time (the view the sharer was looking at),
+            // same source as compose (concept Q8)
+            let channel = chat_ui
+                .lock()
+                .ok()
+                .map(|s| s.selected.clone())
+                .unwrap_or_default();
             // the native picker runs async (XDG portal) off the UI thread;
             // only the file's METADATA is read and shared — no bytes move
             rt.spawn(async move {
@@ -702,6 +711,7 @@ pub fn run_app(
                     size,
                     kind,
                     modified,
+                    channel,
                 };
                 if let Err(e) = w.execute(cmd).await {
                     let msg = format!("⚠ {e}");

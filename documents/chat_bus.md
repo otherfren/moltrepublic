@@ -237,3 +237,22 @@ All decided 2026-07-09 in discussion (chat-bus concept session):
 | Q4 | Rejoiner gap | Final, by design: ephemerality is a product feature; chat backfill is a permanent non-goal |
 | Q5 | Filter placement | Engine-side: `ReadState` channel filter + enumeration, same parameter on MCP tools; one command set |
 | Q7 | System lines | In the first UI iteration: patch channels interleave `Proposed`/`Approved`/`Committed` as system lines |
+
+## Known v1 limitations
+
+Accepted in the 2026-07-10 review — documented, not fixed:
+
+- **Id squatting (first-wins dedup).** Ids are random but not sender-bound: a
+  malicious AUTHENTICATED roster member that learns a `MessageId` before some
+  peer has the genuine message (from a quote, a parked reaction, a file ref)
+  can race a forged `Chat` carrying that id. First-writer-wins dedup drops the
+  loser; the winner holds the id — divergence is limited to that one message.
+  The receive path (`net.rs`, `Chat` arm) WARN-logs the collision with BOTH
+  identities (`from` and the stored author), which is the audit trail.
+  Accepted because members are rostered, MLS-authenticated humans in small
+  republics and chat is ephemeral; the real fix — sender-bound (signed) ids —
+  is a protocol decision deferred deliberately.
+- **Mixed-version reactions degrade to the legacy toggle.**
+  `WorkspaceEvent::ChatReacted` now carries an additive idempotent `op`
+  (`Add`/`Remove`, `#[serde(default)]`); a peer that does not send it falls
+  back to the old toggle semantics — the accepted Q3 degradation posture.

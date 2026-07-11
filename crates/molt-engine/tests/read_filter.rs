@@ -201,6 +201,56 @@ async fn channels_enumerates_distinct_refs_with_counts_and_group_is_always_prese
     );
 }
 
+/// Concept Q8: a file share IS a chat message, so it files under the
+/// channel it was posted into like any other — the offer appears in that
+/// channel's filtered read, not in the group view, and the enumeration
+/// counts it for its channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_share_files_into_its_channel() {
+    let w = spawn_solo();
+    let papers = ChannelRef::Topic {
+        name: "papers".to_string(),
+    };
+    chat(&w, "group hello", ChannelRef::Group).await;
+    w.execute(Command::ShareFile {
+        name: "charter.pdf".to_string(),
+        size: 48_000,
+        kind: "PDF".to_string(),
+        modified: 1_751_000_000,
+        channel: papers.clone(),
+    })
+    .await
+    .expect("share");
+
+    // the share message carries the real channel, not a hardcoded Group
+    let full = read_chat_snapshot(&w, None).await;
+    let share = as_message(&full.applied[1]);
+    assert_eq!(share.channel, papers, "the share is tagged with its channel");
+    assert!(share.file.is_some(), "…and it is a file offer");
+
+    // the topic's filtered read contains the offer …
+    let filtered = read_chat_snapshot(&w, Some(papers.clone())).await;
+    assert_eq!(filtered.applied.len(), 1, "the topic view holds the share");
+    let offer = as_message(&filtered.applied[0]);
+    assert_eq!(
+        offer.file.as_ref().map(|f| f.name.as_str()),
+        Some("charter.pdf"),
+        "the filtered row is the file offer"
+    );
+
+    // … and the group view does NOT
+    let group = read_chat_snapshot(&w, Some(ChannelRef::Group)).await;
+    assert_eq!(group.applied.len(), 1, "the group view holds only the text");
+    assert!(
+        as_message(&group.applied[0]).file.is_none(),
+        "no file offer leaks into the group view"
+    );
+
+    // the enumeration counts the share for its channel
+    assert_eq!(info_for(&full.channels, &papers).count, 1);
+    assert_eq!(info_for(&full.channels, &ChannelRef::Group).count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filter_by_unknown_patch_id_returns_empty_not_error() {
     let w = spawn_solo();

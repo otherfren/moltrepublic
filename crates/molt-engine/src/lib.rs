@@ -646,7 +646,8 @@ impl State {
                 size,
                 kind,
                 modified,
-            } => self.cmd_share_file(name, size, kind, modified),
+                channel,
+            } => self.cmd_share_file(name, size, kind, modified, channel),
             Command::DownloadFile { id } => self.cmd_download_file(id),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
 
@@ -990,6 +991,7 @@ mod tests {
                 size: 48_000,
                 kind: "PDF".into(),
                 modified: 1_751_000_000,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("share");
@@ -998,6 +1000,7 @@ mod tests {
                 size: 900,
                 kind: "Text".into(),
                 modified: 1_751_000_000,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("share 2");
@@ -1218,6 +1221,7 @@ mod tests {
                 size: 48_000,
                 kind: "PDF".into(),
                 modified: 1_751_000_000,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("share");
@@ -1280,6 +1284,7 @@ mod tests {
                 size: 10,
                 kind: "".into(),
                 modified: 0,
+                channel: molt_core::ChannelRef::default(),
             })
             .await
             .expect("share 2");

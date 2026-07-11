@@ -90,14 +90,18 @@ impl State {
     /// Share a file into the chat: a message carrying only the metadata.
     /// The bytes stay on this node's disk — participants download from
     /// there while the file exists (mocked until the transport story).
+    /// A share IS a chat message (concept Q8), so it files under the given
+    /// channel view exactly like `cmd_chat` — never hardcoded `Group`.
     pub(crate) fn cmd_share_file(
         &mut self,
         name: String,
         size: u64,
         kind: String,
         modified: u64,
+        channel: ChannelRef,
     ) -> Result<Reply, MoltError> {
         self.ensure_demo_net();
+        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err(MoltError::BadPayload(
@@ -107,7 +111,8 @@ impl State {
         let kind = kind.trim().to_string();
         let from = self.member();
         let id = mint_message_id()?;
-        let mut msg = ChatMessage::text(id, from.clone(), String::new(), now_secs());
+        let mut msg = ChatMessage::text(id, from.clone(), String::new(), now_secs())
+            .with_channel(channel.clone());
         msg.file = Some(FileMeta {
             name: name.clone(),
             size,
@@ -125,7 +130,7 @@ impl State {
             id,
             from,
             body: format!("📎 {name}"),
-            channel: ChannelRef::Group,
+            channel,
         });
         Ok(Reply::Ack)
     }

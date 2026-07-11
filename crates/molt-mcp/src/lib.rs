@@ -475,14 +475,15 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "share_file",
             command: "share_file",
-            description: "Share a file into the ungated chat: only the METADATA (name, size, type, date) is posted — the bytes stay on this node's disk, participants download from there while the file exists (mocked until the transport lands).",
+            description: "Share a file into the ungated chat: only the METADATA (name, size, type, date) is posted — the bytes stay on this node's disk, participants download from there while the file exists (mocked until the transport lands). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "file name, no path" },
                     "size": { "type": "integer", "description": "size in bytes" },
                     "kind": { "type": "string", "description": "display type, e.g. PDF" },
-                    "modified": { "type": "integer", "description": "file date, unix seconds (omit = now)" }
+                    "modified": { "type": "integer", "description": "file date, unix seconds (omit = now)" },
+                    "channel": channel_schema("optional: the channel view this share files under (omit for the all-hands group)")
                 },
                 "required": ["name"]
             }),
@@ -491,6 +492,7 @@ pub fn tools() -> Vec<ToolDef> {
                 size: args.get("size").and_then(Value::as_u64).unwrap_or(0),
                 kind: args.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
                 modified: args.get("modified").and_then(Value::as_u64).unwrap_or(0),
+                channel: channel_arg(args)?.unwrap_or_default(),
             }),
         },
         ToolDef {
@@ -1128,6 +1130,54 @@ mod tests {
         {
             Command::Chat { quote, .. } => {
                 assert_eq!(quote, Some(HEX_ID.parse().expect("valid id")));
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    /// Concept Q8: a file share is a chat message, so it takes the same
+    /// optional channel argument as `chat_send` (absent = the group view).
+    #[test]
+    fn share_file_accepts_channel() {
+        // The schema exposes the same channel object as chat_send.
+        let schema = (tool_named("share_file").schema)();
+        assert_eq!(
+            schema["properties"]["channel"]["properties"]["kind"]["enum"],
+            json!(["group", "patch", "topic"])
+        );
+        assert_eq!(schema["required"], json!(["name"]));
+
+        // Omitted channel → the all-hands group (the default view).
+        match build("share_file", &json!({ "name": "a.pdf" })).expect("plain share builds") {
+            Command::ShareFile { channel, .. } => assert_eq!(channel, ChannelRef::Group),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Patch channel by proposal id.
+        match build(
+            "share_file",
+            &json!({ "name": "a.pdf", "channel": { "kind": "patch", "id": 7 } }),
+        )
+        .expect("patch share builds")
+        {
+            Command::ShareFile { channel, .. } => {
+                assert_eq!(channel, ChannelRef::Patch { id: ProposalId(7) });
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Topic channel — normalized exactly like chat_send.
+        match build(
+            "share_file",
+            &json!({ "name": "a.pdf", "channel": { "kind": "topic", "name": "  Budget " } }),
+        )
+        .expect("topic share builds")
+        {
+            Command::ShareFile { channel, .. } => {
+                assert_eq!(
+                    channel,
+                    ChannelRef::Topic {
+                        name: "Budget".to_string()
+                    }
+                );
             }
             other => panic!("wrong command: {other:?}"),
         }
