@@ -163,11 +163,13 @@ async fn engine_founds_over_smp_across_two_instances() {
     let root_b_arg = root_b.clone();
     let b_task = tokio::spawn(async move {
         // the standalone join auto-ratifies the charter (no human gate)
+        // clearnet server (network = none) → the Direct dialer.
         molt_engine::join_founding_over_smp(
             &link_for_b,
             "member-b".to_string(),
             b_phrase,
             &root_b_arg,
+            molt_net::smp::tls::Dialer::Direct,
         )
         .await
         .expect("B joins from the link over SMP and writes its own workspace")

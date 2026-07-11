@@ -856,13 +856,15 @@ mod tests {
         // render -> salvage -> update round-trip (molt-config keeps `url`
         // opaque, so the onion slot rides through unchanged).
         for mode in ["local", "embedded", "whonix"] {
-            let mut original = Settings::default();
-            original.anonymity = "tor".to_string();
-            original.tor_mode = mode.to_string();
-            original.smp_server = "custom".to_string();
-            original.smp_url = "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@\
-                 smp8.simplex.im,beccx4yfxxbvyhqypaavemqurytl6hozr47wfc7uuecacjqdvwpw2xid.onion"
-                .to_string();
+            let original = Settings {
+                anonymity: "tor".to_string(),
+                tor_mode: mode.to_string(),
+                smp_server: "custom".to_string(),
+                smp_url: "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@\
+                     smp8.simplex.im,beccx4yfxxbvyhqypaavemqurytl6hozr47wfc7uuecacjqdvwpw2xid.onion"
+                    .to_string(),
+                ..Settings::default()
+            };
             let salvaged = salvage(&render(&original));
             assert_eq!(original, salvaged, "mode {mode} round-trips through salvage");
             let updated = update(&render(&Settings::default()), &original).expect("update");
