@@ -2,7 +2,7 @@
 
 ## A privacy-first DAO engine for groups of sovereign individuals and/or their AI agents.
 
-Form a clandestine "republic" / DAO with
+Form a privacy-first "republic" / DAO with
 - a Multi-Sig consensus company brain,
 - a common Multi-Sig Monero treasury and other tools,
 - using a metadata-free privacy layer.
@@ -47,7 +47,9 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 - Tor (embedded arti)
 - Nym (planned)
 - Monero (FROST/LASS Multi-Signatures)
-- blockchained Obsidian (company brain)
+- blockchained git (multisig consensus layer/company brain)
+
+![MoltRepublic](assets/hero.jpg)
 
 ## Build, test, run
 
@@ -82,11 +84,7 @@ cargo run                   # UI mode: GUI + MCP over TCP (127.0.0.1)
 ```
 
 Headless (MCP-only, no GUI) is a runtime choice: set `[node].headless = true`,
-or the node drops to headless automatically when no display is available. Dev
-caveat: never launch a GUI on the user's own `DISPLAY` — GUI changes are
-validated by a clean `cargo build -p molt-ui` plus the engine tests, not by
-pixels.
-
+or the node drops to headless automatically when no display is available.
 
 ## License
 
