@@ -386,6 +386,37 @@ pub fn run_app(
             );
         });
     }
+    // the (mock) at-rest encryption toggle — same commands as the MCP
+    // encrypt_/decrypt_workspace tools
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_encrypt_workspace(move |id| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::EncryptWorkspace { id: id.to_string() },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_decrypt_workspace(move |id, phrase| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::DecryptWorkspace {
+                    id: id.to_string(),
+                    phrase: phrase.to_string(),
+                },
+            );
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -984,6 +1015,8 @@ fn workspace_item(w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
         state: i32::from(w.state),
         last_sync_min: w.last_sync_min as i32,
         s3: w.s3,
+        backup: backup_when_label(w.last_backup_min).into(),
+        encrypted: w.encrypted,
         seed: w.seed.as_str().into(),
         net: w.net.as_str().into(),
         members: ModelRc::new(VecModel::from(members)),
@@ -3116,12 +3149,19 @@ lexicon! {
     ow_change_folder: "Change folder", "Ordner wechseln";
     ow_col_name: "Name", "Name";
     ow_col_sync: "Last sync", "Letzter Sync";
+    ow_col_backup: "Backup", "Backup";
+    ow_col_status: "Status", "Status";
+    ow_enc: "encrypted", "verschlüsselt";
+    ow_unenc: "unencrypted", "entschlüsselt";
+    ow_encrypt: "Encrypt", "Verschlüsseln";
+    ow_decrypt: "Decrypt", "Entschlüsseln";
+    dw_title: "Decrypt workspace", "Workspace entschlüsseln";
+    dw_body: "Enter the recovery phrase to decrypt this workspace on disk; it can then be opened again. (Mock — the phrase is not verified yet.)", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu entschlüsseln; danach lässt er sich wieder öffnen. (Mock — die Phrase wird noch nicht geprüft.)";
     ow_open: "Open", "Öffnen";
     ow_delete: "Delete", "Löschen";
     ow_select_hint: "Select a republic to see its status.", "Wähle eine Republik, um ihren Status zu sehen.";
     ow_s3_on: "S3 active", "S3 aktiv";
     ow_s3_off: "No S3", "Kein S3";
-    ow_grp_sync: "Sync", "Sync";
     ow_grp_backup: "Backup", "Backup";
     ow_grp_net: "Network", "Netzwerk";
     ow_members: "Members", "Mitglieder";
@@ -3783,6 +3823,8 @@ mod tests {
             state: 0,
             last_sync_min: minutes,
             s3: false,
+            backup: "".into(),
+            encrypted: false,
             seed: "".into(),
             net: "".into(),
             members: ModelRc::new(VecModel::from(Vec::new())),

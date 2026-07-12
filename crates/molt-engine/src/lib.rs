@@ -706,6 +706,8 @@ impl State {
             Command::OpenWorkspace { id } => self.cmd_open_workspace(id),
             Command::CloseWorkspace => self.cmd_close_workspace(),
             Command::DeleteWorkspace { id } => self.cmd_delete_workspace(id),
+            Command::EncryptWorkspace { id } => self.cmd_encrypt_workspace(id),
+            Command::DecryptWorkspace { id, phrase } => self.cmd_decrypt_workspace(id, phrase),
             Command::SetWorkspaceBackup { id, enabled } => {
                 self.cmd_set_workspace_backup(id, enabled)
             }
@@ -1601,6 +1603,57 @@ mod tests {
                 Reply::Uploads(rows) => assert_eq!(rows[0].checksum, again),
                 other => panic!("unexpected: {other:?}"),
             }
+        });
+    }
+
+    /// The (mock) at-rest encryption toggle: an encrypted workspace cannot
+    /// be opened until a decrypt (with a phrase) flips it back — the Open
+    /// screen's buttons and the MCP encrypt_/decrypt_workspace tools drive
+    /// the same commands. Mock: the phrase is required, not yet verified.
+    #[test]
+    fn encrypted_workspaces_refuse_to_open_until_decrypted() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let id = demo_workspace_id("Family Office");
+            w.execute(Command::EncryptWorkspace { id: id.clone() })
+                .await
+                .expect("encrypt");
+            let entry = |s: &SessionView| {
+                s.workspaces
+                    .iter()
+                    .find(|ws| ws.id == id)
+                    .map(|ws| ws.encrypted)
+                    .expect("entry")
+            };
+            assert!(entry(&*read_session(&w).await), "flag set in the session");
+            assert!(
+                matches!(
+                    w.execute(Command::OpenWorkspace { id: id.clone() }).await,
+                    Err(MoltError::WorkspaceEncrypted(_))
+                ),
+                "an encrypted workspace refuses to open"
+            );
+            assert!(
+                w.execute(Command::DecryptWorkspace {
+                    id: id.clone(),
+                    phrase: String::new(),
+                })
+                .await
+                .is_err(),
+                "decrypting needs a phrase"
+            );
+            w.execute(Command::DecryptWorkspace {
+                id: id.clone(),
+                phrase: "word1 word2 word3".into(),
+            })
+            .await
+            .expect("decrypt");
+            assert!(!entry(&*read_session(&w).await));
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("open decrypted");
+            // the ACTIVE workspace cannot be encrypted from under itself
+            assert!(w.execute(Command::EncryptWorkspace { id }).await.is_err());
         });
     }
 

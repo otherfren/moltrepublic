@@ -117,6 +117,8 @@ export struct WorkspaceItem {
     state: int, // 0 = synced, 1 = syncing, 2 = offline
     last-sync-min: int, // minutes since the last completed sync (sort key)
     s3: bool, // automatic S3 backup configured
+    backup: string, // human "last backup" label, e.g. "30 min ago" / "never"
+    encrypted: bool, // at-rest encrypted (mock): inactive until decrypted
     seed: string, // recovery seed all secret keys derive from (mock)
     net: string, // transport: "tor" | "nym" | "clearnet"
     members: [MemberSync], // who is in the DAO + when they last synced
@@ -455,12 +457,19 @@ export global Strings {
     in property <string> ow-change-folder;
     in property <string> ow-col-name;
     in property <string> ow-col-sync;
+    in property <string> ow-col-backup;
+    in property <string> ow-col-status;
+    in property <string> ow-enc;
+    in property <string> ow-unenc;
+    in property <string> ow-encrypt;
+    in property <string> ow-decrypt;
+    in property <string> dw-title;
+    in property <string> dw-body;
     in property <string> ow-open;
     in property <string> ow-delete;
     in property <string> ow-select-hint;
     in property <string> ow-s3-on;
     in property <string> ow-s3-off;
-    in property <string> ow-grp-sync;
     in property <string> ow-grp-backup;
     in property <string> ow-grp-net;
     in property <string> ow-members;

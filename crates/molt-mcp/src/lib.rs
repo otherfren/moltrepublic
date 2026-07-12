@@ -795,6 +795,36 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "encrypt_workspace",
+            command: "encrypt_workspace",
+            description: "Encrypt a workspace at rest (mock flag today — real at-rest crypto comes with the storage encryption story): it becomes inactive and open_workspace refuses until decrypt_workspace. The active workspace cannot be encrypted.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::EncryptWorkspace {
+                id: str_arg(args, "id")?,
+            }),
+        },
+        ToolDef {
+            name: "decrypt_workspace",
+            command: "decrypt_workspace",
+            description: "Decrypt an at-rest-encrypted workspace so it can be opened again. Mock: the recovery phrase is required but not yet verified.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "phrase": { "type": "string", "description": "the workspace's recovery phrase" }
+                },
+                "required": ["id", "phrase"]
+            }),
+            build: |args| Ok(Command::DecryptWorkspace {
+                id: str_arg(args, "id")?,
+                phrase: str_arg(args, "phrase")?,
+            }),
+        },
+        ToolDef {
             name: "restore_start",
             command: "restore_start",
             description: "Begin the (mock) restore from a backup. The engine ticks progress and a live log by itself; read_session shows both. Implausible targets fail (~45%). Rejoining via another member is not a restore way — that is the recovery ritual (recover_start).",

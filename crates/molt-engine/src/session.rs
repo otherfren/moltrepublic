@@ -283,6 +283,10 @@ impl State {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
         }
+        // an at-rest-encrypted workspace is inactive until decrypted
+        if self.session.workspaces.iter().any(|w| w.id == id && w.encrypted) {
+            return Err(MoltError::WorkspaceEncrypted(id));
+        }
         // reopening the already-open workspace is a navigation no-op — a
         // second open would collide with our own flock and report Busy, and a
         // running mesh (real or demo) must not be torn down under it
@@ -470,6 +474,43 @@ impl State {
         // back on the boot group: its mesh stands up for the next chat
         self.ensure_demo_net();
         self.session.screen = Screen::Choice;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Encrypt a workspace at rest (mock flag flip — real at-rest crypto is
+    /// the storage encryption story). The ACTIVE workspace refuses: it would
+    /// be encrypted from under its own open storage/mesh.
+    pub(crate) fn cmd_encrypt_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
+        if self.session.active_workspace == id {
+            return Err(MoltError::WorkspaceBusy(
+                "close the workspace before encrypting it".to_string(),
+            ));
+        }
+        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) else {
+            return Err(MoltError::UnknownWorkspace(id));
+        };
+        ws.encrypted = true;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Decrypt an at-rest-encrypted workspace. Mock: the phrase is required
+    /// but not yet verified against the workspace key.
+    pub(crate) fn cmd_decrypt_workspace(
+        &mut self,
+        id: WorkspaceId,
+        phrase: String,
+    ) -> Result<Reply, MoltError> {
+        if phrase.trim().is_empty() {
+            return Err(MoltError::BadPayload(
+                "a recovery phrase is required to decrypt".to_string(),
+            ));
+        }
+        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) else {
+            return Err(MoltError::UnknownWorkspace(id));
+        };
+        ws.encrypted = false;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

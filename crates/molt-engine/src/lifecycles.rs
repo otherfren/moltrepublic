@@ -182,6 +182,7 @@ impl State {
             seed,
             net,
             agenda,
+            encrypted: false,
             members,
         });
     }

@@ -1248,6 +1248,7 @@ impl ScanEntry {
             last_backup_min,
             seed: String::new(),
             net: "tor".to_string(),
+            encrypted: false,
             members: Vec::new(),
             // the charter is in the encrypted genesis — filled in on open
             // (refresh_active_entry), like the roster

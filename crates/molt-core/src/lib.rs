@@ -357,6 +357,10 @@ pub struct WorkspaceInfo {
     pub seed: String,
     /// Transport: `"tor" | "nym" | "clearnet"`.
     pub net: String,
+    /// Encrypted at rest (mock): an encrypted workspace is inactive —
+    /// opening requires a decrypt with the recovery phrase.
+    #[serde(default)]
+    pub encrypted: bool,
     /// Members and when each of them last synced.
     pub members: Vec<MemberInfo>,
     /// The ratified founding charter (free-text agenda) from the genesis —
@@ -475,6 +479,7 @@ impl WorkspaceInfo {
                 last_backup_min,
                 seed: seed.to_string(),
                 net: net.to_string(),
+                encrypted: false,
                 members,
                 agenda: String::new(),
             }
@@ -2106,6 +2111,22 @@ pub enum Command {
         /// New auto-backup state.
         enabled: bool,
     },
+    /// Encrypt a workspace at rest (mock): it becomes inactive — opening
+    /// requires [`Command::DecryptWorkspace`] first. The ACTIVE workspace
+    /// cannot be encrypted from under itself.
+    EncryptWorkspace {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+    },
+    /// Decrypt an at-rest-encrypted workspace so it can be opened again.
+    /// Mock: the phrase is required but not yet verified (real crypto
+    /// comes with the storage encryption story).
+    DecryptWorkspace {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+        /// The workspace's recovery phrase.
+        phrase: String,
+    },
     /// Begin the (mock) restore: moves its lifecycle to the run view; the
     /// engine ticks the progress and the live log by itself.
     RestoreStart {
@@ -2821,6 +2842,9 @@ pub enum MoltError {
     /// The workspace is already open (locally or by another process).
     #[error("workspace is busy: {0}")]
     WorkspaceBusy(String),
+    /// The workspace is encrypted at rest — decrypt it first.
+    #[error("workspace `{0}` is encrypted — decrypt it first")]
+    WorkspaceEncrypted(String),
     /// A storage operation failed (I/O, corruption, wrong key, …).
     #[error("storage: {0}")]
     Storage(String),

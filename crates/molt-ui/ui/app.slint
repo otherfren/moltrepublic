@@ -170,6 +170,15 @@ export component AppWindow inherits Window {
     callback delete-chat(string);
     // workspace verbs (engine-backed, co-equal with MCP)
     callback open-workspace(string);
+    // (mock) at-rest encryption: flag flips in the engine session — the
+    // same commands the MCP encrypt_/decrypt_workspace tools drive
+    callback encrypt-workspace(string);
+    callback decrypt-workspace(string, string);
+    // the decrypt dialog (seed-phrase entry) for one encrypted workspace
+    property <bool> decrypt-modal-open: false;
+    property <string> decrypt-id;
+    property <string> decrypt-name;
+    property <string> decrypt-phrase;
     callback close-workspace();
     // restore verbs (engine-backed; the engine ticks progress + log)
     callback restore-start(string, string);
@@ -596,6 +605,8 @@ export component AppWindow inherits Window {
             root.charter-view-open = false;
         } else if (root.org-retention-modal-open) {
             root.org-retention-modal-open = false;
+        } else if (root.decrypt-modal-open) {
+            root.decrypt-modal-open = false;
         } else if (root.screen == AppScreen.open) {
             root.navigate(AppScreen.choice);
         } else if (root.screen == AppScreen.restore && !root.restore-running) {
@@ -1675,8 +1686,26 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        Text {
+                            text: Strings.ow-col-backup;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            font-weight: 700;
+                            width: 150px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: Strings.ow-col-status;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            font-weight: 700;
+                            width: 100px;
+                            vertical-alignment: center;
+                        }
                         Rectangle {
-                            width: 184px; // Open/Delete buttons zone (86+12+86)
+                            // Open / Encrypt-Decrypt / Delete buttons zone
+                            // (86 + 12 + 120 + 12 + 86)
+                            width: 316px;
                         }
                     }
                     Rectangle {
@@ -1748,15 +1777,70 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
+                                    // last backup + the jump into the S3
+                                    // backup settings
+                                    HorizontalLayout {
+                                        width: 150px;
+                                        spacing: 6px;
+                                        Text {
+                                            text: w.backup;
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        AppButton {
+                                            width: 26px;
+                                            height: 26px;
+                                            pad: 0px;
+                                            y: (parent.height - self.height) / 2;
+                                            icon: @image-url("assets/gear.svg");
+                                            icon-set: true;
+                                            tooltip: Strings.ow-backup-cfg;
+                                            clicked => {
+                                                root.settings-return = AppScreen.open;
+                                                root.set-tab = 2;
+                                                root.navigate(AppScreen.settings);
+                                            }
+                                        }
+                                    }
+                                    // at-rest state (mock): encrypted = the
+                                    // workspace is inactive until decrypted
+                                    Text {
+                                        width: 100px;
+                                        text: w.encrypted ? Strings.ow-enc : Strings.ow-unenc;
+                                        color: w.encrypted ? Theme.warn : Theme.good;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
                                     AppButton {
                                         width: 86px;
                                         height: 32px;
                                         y: (parent.height - self.height) / 2;
                                         label: Strings.ow-open;
                                         primary: true;
+                                        enabled: !w.encrypted;
                                         clicked => {
                                             root.select-workspace(i, w);
                                             root.open-workspace(w.id);
+                                        }
+                                    }
+                                    AppButton {
+                                        width: 120px;
+                                        height: 32px;
+                                        y: (parent.height - self.height) / 2;
+                                        label: w.encrypted ? Strings.ow-decrypt : Strings.ow-encrypt;
+                                        clicked => {
+                                            if (w.encrypted) {
+                                                root.decrypt-id = w.id;
+                                                root.decrypt-name = w.name;
+                                                root.decrypt-phrase = "";
+                                                root.decrypt-modal-open = true;
+                                            } else {
+                                                root.encrypt-workspace(w.id);
+                                            }
                                         }
                                     }
                                     AppButton {
@@ -1840,49 +1924,13 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
                         }
-                        // one row of themed groups, so status and action pair
-                        // up visibly: sync + seed | backup + its actions | net
+                        // one row of themed groups: backup (+ seed reveal —
+                        // the sync status lives in the table now) | net
                         HorizontalLayout {
                             spacing: 10px;
                             DetailGroup {
-                                title: Strings.ow-grp-sync;
-                                horizontal-stretch: 1;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 9px;
-                                        height: 9px;
-                                        border-radius: 4.5px;
-                                        y: (parent.height - self.height) / 2;
-                                        background: root.open-state == 0 ? Theme.good : (root.open-state == 2 ? Theme.faint : Theme.warn);
-                                    }
-                                    Text {
-                                        text: root.open-status;
-                                        color: root.open-state == 0 ? Theme.good : (root.open-state == 2 ? Theme.dim : Theme.warn);
-                                        font-size: Theme.fs-body;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        overflow: elide;
-                                    }
-                                }
-                                HorizontalLayout {
-                                    alignment: start;
-                                    AppButton {
-                                        height: 30px;
-                                        pad: 10px;
-                                        icon: @image-url("assets/eye.svg");
-                                        icon-set: true;
-                                        label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
-                                        clicked => {
-                                            root.seed-shown = !root.seed-shown;
-                                        }
-                                    }
-                                }
-                            }
-                            DetailGroup {
                                 title: Strings.ow-grp-backup;
-                                // fit-to-content: only the sync group stretches
-                                horizontal-stretch: 0;
+                                horizontal-stretch: 1;
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Rectangle {
@@ -1904,6 +1952,16 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     alignment: start;
                                     spacing: 8px;
+                                    AppButton {
+                                        height: 30px;
+                                        pad: 10px;
+                                        icon: @image-url("assets/eye.svg");
+                                        icon-set: true;
+                                        label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
+                                        clicked => {
+                                            root.seed-shown = !root.seed-shown;
+                                        }
+                                    }
                                     AppButton {
                                         height: 30px;
                                         pad: 10px;
@@ -5261,6 +5319,44 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.org-logo-draft;
             placeholder: "~/Pictures/republic.png";
+        }
+    }
+
+    // =================================================================
+    // Modal: decrypt an at-rest-encrypted workspace (Open screen). The
+    // phrase is required; verifying it is the real-crypto story (mock).
+    // =================================================================
+    if root.decrypt-modal-open: ConfirmModal {
+        dialog-width: 480px;
+        title: "\{Strings.dw-title} — \{root.decrypt-name}";
+        body: Strings.dw-body;
+        confirm-label: Strings.ow-decrypt;
+        confirm-enabled: root.decrypt-phrase != "";
+        dismissed => {
+            root.decrypt-modal-open = false;
+        }
+        confirmed => {
+            root.decrypt-modal-open = false;
+            root.decrypt-workspace(root.decrypt-id, root.decrypt-phrase);
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.decrypt-phrase;
+                placeholder: Strings.ph-seed;
+                secret: true;
+                horizontal-stretch: 1;
+            }
+            AppButton {
+                height: 38px;
+                pad: 10px;
+                icon: @image-url("assets/paste.svg");
+                icon-set: true;
+                label: Strings.rw-paste;
+                clicked => {
+                    root.decrypt-phrase = root.paste-clipboard();
+                }
+            }
         }
     }
 
