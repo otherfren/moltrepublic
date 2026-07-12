@@ -1311,6 +1311,25 @@ async fn founding_governs_over_the_direct_mesh() {
         common::read_applied(&a, Surface::Memory).await.is_empty(),
         "the founder's own signature alone must not commit a 2-of-2 change"
     );
+    // the pending view reflects the reader's own signature: the founder
+    // co-signed at propose (self_cosign), so it is not waiting on this node
+    match a
+        .execute(Command::ReadState {
+            surface: Surface::Memory,
+            channel: None,
+        })
+        .await
+        .expect("read pending")
+    {
+        molt_core::Reply::State(s) => {
+            assert_eq!(s.pending.len(), 1);
+            assert!(
+                s.pending[0].approved_by_me,
+                "the founder's chain co-signature must reflect in approved_by_me"
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 
     // --- the member co-signs the SAME change with its own key, over the mesh ---
     // derive member-b's identity EXACTLY as run_ritual_member did (its own

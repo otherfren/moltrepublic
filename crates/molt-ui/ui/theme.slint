@@ -60,6 +60,8 @@ export struct ProposalRow {
     text: string,
     approvals: int,
     threshold: int,
+    current: string, // Ist-Stand ("" = unknown → line hidden)
+    proposed: string, // Soll-Stand ("" = no value → line hidden)
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -67,6 +69,34 @@ export struct MemberSync {
     name: string,
     last: string, // human "last synced" label, e.g. "2 min ago"
     state: int, // 0 = synced, 1 = syncing, 2 = offline
+}
+
+// One row of the Organization → Members table (engine ReadMembers — the
+// same projection the MCP read_members tool serves).
+export struct MemberRow {
+    name: string,
+    id: string, // identity-key fingerprint ("" on demo/unanchored workspaces)
+    pk: string, // full anchored identity key, lowercase hex ("" unanchored)
+    last: string, // human "last seen" label (mock)
+    state: int, // 0 = synced, 1 = syncing, 2 = offline (mock presence)
+    open-proposals: int, // pending proposals awaiting THIS member's vote
+    uploads: int, // files this member shared into the chat
+}
+
+// One row of the Organization → Uploads table (engine ReadUploads — the
+// same projection the MCP read_uploads tool serves). Labels arrive
+// pre-rendered from Rust.
+export struct UploadRow {
+    id: string, // the carrying chat message id (what download-file takes)
+    user: string,
+    date: string,
+    name: string,
+    kind: string,
+    size: string,
+    available: bool,
+    online: bool, // sharer reachable (user-to-user transfer needs them)
+    checksum: string, // shortened mock sha256 (full value via MCP)
+    expires: string, // "in 13 days" · "expired" · "—" (unavailable)
 }
 
 // One row of the founding-ritual member list: the founder plus one per
@@ -132,6 +162,11 @@ export struct SurfaceTab {
     gated: bool,
     applied-count: int,
     pending-count: int,
+    // the approvals table splits pending by the reader's own vote
+    // (engine-derived: ProposalView.approved_by_me / snapshot.denied)
+    pending-voted-count: int,
+    pending-my-vote-count: int,
+    denied-count: int,
     log: [LogLine],
     pending: [ProposalRow],
     views: [ViewItem], // its nav sub-views, default first
@@ -353,7 +388,52 @@ export global Strings {
     in property <string> enter-republic;
     // Organization → Status / Members
     in property <string> org-reachable;
-    in property <string> org-surfaces;
+    // Organization → Status: the approvals table (per-surface governance
+    // counts) and the mock logo/charter edit modals
+    in property <string> org-approvals;
+    in property <string> oa-col-surface;
+    in property <string> oa-pending-voted;
+    in property <string> oa-denied;
+    in property <string> oa-pending-mine;
+    in property <string> oa-list-pending;
+    in property <string> org-edit;
+    in property <string> ol-title;
+    in property <string> ol-body;
+    in property <string> ol-remove;
+    in property <string> oc-title;
+    in property <string> oc-body;
+    in property <string> oc-propose;
+    in property <string> op-change-charter;
+    in property <string> op-change-logo;
+    in property <string> op-remove-logo;
+    in property <string> toast-proposed;
+    // Organization → Members table columns
+    in property <string> om-col-id;
+    in property <string> om-col-pk;
+    in property <string> om-col-last;
+    in property <string> om-col-open;
+    in property <string> om-col-uploads;
+    in property <string> om-col-recovery;
+    // Organization → Uploads table
+    in property <string> ou-col-user;
+    in property <string> ou-col-date;
+    in property <string> ou-col-file;
+    in property <string> ou-col-type;
+    in property <string> ou-col-size;
+    in property <string> ou-col-checksum;
+    in property <string> ou-col-download;
+    in property <string> ou-col-expires;
+    in property <string> ou-download;
+    in property <string> ou-offline;
+    in property <string> ou-empty;
+    in property <string> ou-note;
+    // rename-republic modal + pending-card Ist/Soll + discussion jump
+    in property <string> orn-title;
+    in property <string> orn-body;
+    in property <string> op-change-name;
+    in property <string> pc-current;
+    in property <string> pc-proposed;
+    in property <string> pc-discuss;
 
     // open / join / restore
     in property <string> ow-title;
@@ -400,17 +480,12 @@ export global Strings {
     in property <string> jw-ph2;
     in property <string> jw-ph3;
     in property <string> jw-failed;
-    // recovery (total-loss rejoin): the choice card, the coordinator's
-    // link-mint action + dialog, and the rejoiner's modal
-    in property <string> choice-recover-title;
-    in property <string> choice-recover-sub;
+    // recovery (total-loss rejoin): the coordinator's link-mint action +
+    // dialog; the rejoiner side lives on the Restore screen's peer way
     in property <string> om-recover-link;
     in property <string> rlk-title;
     in property <string> rlk-body;
     in property <string> rlk-caution;
-    in property <string> rv-title;
-    in property <string> rv-body;
-    in property <string> rv-go;
     in property <string> rv-running-note;
     in property <string> rv-failed-hint;
     in property <string> rw-title;

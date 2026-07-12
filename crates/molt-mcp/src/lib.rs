@@ -151,8 +151,9 @@ async fn handle_rpc(
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "moltrepublic", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": "MoltRepublic node. Every tool maps to one Command on the shared engine; \
-                                 the GUI (when present) drives the same commands. Chat is ungated; memory, \
-                                 quests, vault and wallet change only via propose + threshold approve."
+                                 the GUI (when present) drives the same commands. Chat is ungated; \
+                                 organization, memory, quests, vault and wallet change only via \
+                                 propose + threshold approve."
             }),
         ));
     }
@@ -609,6 +610,20 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::Status),
         },
         ToolDef {
+            name: "read_members",
+            command: "read_members",
+            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), mock last-seen/presence, how many pending proposals still await that member's vote, and how many files it shared into the chat.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ReadMembers),
+        },
+        ToolDef {
+            name: "read_uploads",
+            command: "read_uploads",
+            description: "The Organization → Uploads table: every file shared into the chat (metadata only — bytes move user-to-user via the share link), with sharer, timestamp, availability, and the mock 14-day link expiry. The `id` is the chat message id `download_file` takes.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ReadUploads),
+        },
+        ToolDef {
             name: "read_session",
             command: "read_session",
             description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings.",
@@ -646,7 +661,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_view",
             command: "select_view",
-            description: "Select a surface and one of its sub-views (organization: status/members/statistics · chat: today/archive · memory: brain/proposals/accepted/denied/archive · quests: board/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
+            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending · chat: today/archive · memory: brain/proposals/accepted/denied/archive · quests: board/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -782,12 +797,12 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "restore_start",
             command: "restore_start",
-            description: "Begin the (mock) restore. The engine ticks progress and a live log by itself; read_session shows both. Implausible targets fail (~45%).",
+            description: "Begin the (mock) restore from a backup. The engine ticks progress and a live log by itself; read_session shows both. Implausible targets fail (~45%). Rejoining via another member is not a restore way — that is the recovery ritual (recover_start).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "way": { "type": "string", "enum": ["peer", "s3", "file"] },
-                    "target": { "type": "string", "description": "smp:// endpoint, http(s) S3 URL, or a *.molt.enc path" }
+                    "way": { "type": "string", "enum": ["s3", "file"] },
+                    "target": { "type": "string", "description": "http(s) S3 URL or a *.molt.enc path" }
                 },
                 "required": ["way", "target"]
             }),

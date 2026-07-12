@@ -37,14 +37,15 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
-/// The shared surfaces. [`Surface::Organization`] is a read-only info area (it
-/// carries the ratified charter + roster) and [`Surface::Chat`] is ungated; the
-/// other four change the shared state only through a threshold-approved proposal.
+/// The shared surfaces. [`Surface::Chat`] is ungated (a message changes no
+/// shared state); every other surface — Organization included — changes the
+/// shared state only through a threshold-approved proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
-    /// Who this republic is: status (with the ratified charter), roster,
-    /// statistics. Read-only.
+    /// Who this republic is: status (with the ratified charter) and roster.
+    /// Changing it (charter, name, image, plugins) is gated like any other
+    /// state change.
     Organization,
     /// Free conversation. Ungated: a message changes no shared state.
     Chat,
@@ -82,12 +83,9 @@ impl Surface {
     }
 
     /// Whether changes to this surface require a threshold of approvals.
-    /// Chat is ungated; Organization is read-only (nothing to propose).
+    /// Chat is the only ungated surface — a message changes no shared state.
     pub fn is_gated(self) -> bool {
-        !matches!(
-            self,
-            Surface::Chat | Surface::Organization
-        )
+        !matches!(self, Surface::Chat)
     }
 
     /// Parse a surface from its lowercase name.
@@ -103,7 +101,11 @@ impl Surface {
             Surface::Organization => &[
                 ("status", "Status"),
                 ("members", "Members"),
-                ("statistics", "Statistics"),
+                // every file shared into the chat (the uploads table)
+                ("uploads", "Uploads"),
+                // in-voting organization changes (charter / name / image /
+                // plugins); the GUI shows this entry only while non-empty
+                ("pending", "Pending"),
             ],
             Surface::Chat => &[("today", "Today"), ("archive", "Archive")],
             Surface::Memory => &[
@@ -1756,9 +1758,10 @@ pub struct RestoreState {
     /// The shared run lifecycle (step / progress / outcome / log).
     #[serde(flatten)]
     pub run: RunCore,
-    /// `"peer" | "s3" | "file"` (empty while idle).
+    /// `"s3" | "file"` (empty while idle). Rejoining via another member is
+    /// not a restore way — that is the recovery ritual (`RecoverStart`).
     pub way: String,
-    /// The way-specific target (endpoint / bucket URL / file path).
+    /// The way-specific target (bucket URL / file path).
     pub target: String,
 }
 
@@ -2002,6 +2005,12 @@ pub enum Command {
     ListProposals,
     /// Read a one-shot status summary of the group and surfaces.
     Status,
+    /// Read the member table of the open workspace (Organization → Members):
+    /// one [`MemberView`] per roster member.
+    ReadMembers,
+    /// Read every file shared into the chat (Organization → Uploads): one
+    /// [`UploadView`] per share, newest last (log order).
+    ReadUploads,
 
     // --- session / app-level commands (co-equal with the GUI) ---
     /// Read the whole shared session state (screen, language, settings, …).
@@ -2092,9 +2101,9 @@ pub enum Command {
     /// Begin the (mock) restore: moves its lifecycle to the run view; the
     /// engine ticks the progress and the live log by itself.
     RestoreStart {
-        /// `"peer" | "s3" | "file"`.
+        /// `"s3" | "file"` (rejoining via another member is [`Command::RecoverStart`]).
         way: String,
-        /// The way-specific target (endpoint / bucket URL / file path).
+        /// The way-specific target (bucket URL / file path).
         target: String,
     },
     /// Advance the (mock) restore one step. Sent by the engine's own ticker;
@@ -2478,6 +2487,10 @@ pub enum Reply {
     },
     /// A status summary.
     Status(StatusView),
+    /// The member table (Organization → Members).
+    Members(Vec<MemberView>),
+    /// Every file shared into the chat (Organization → Uploads).
+    Uploads(Vec<UploadView>),
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
 }
@@ -2510,6 +2523,20 @@ pub struct ProposalView {
     pub threshold: usize,
     /// Current lifecycle state.
     pub state: ProposalState,
+    /// Whether the READING node already approved (reader-relative: the same
+    /// proposal reads differently on different nodes). Additive with a
+    /// default, so an older writer's view stays deserializable.
+    #[serde(default)]
+    pub approved_by_me: bool,
+    /// Ist-Stand: what the targeted state is NOW (engine-derived for the
+    /// Organization edit ops, e.g. the ratified charter before a
+    /// `set_charter`). Display data, never consensus input; "" = unknown.
+    #[serde(default)]
+    pub current: String,
+    /// Soll-Stand: what the change would make it (the payload's `value`).
+    /// Display data; "" = the payload carries no value.
+    #[serde(default)]
+    pub proposed: String,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -2538,6 +2565,9 @@ pub struct SurfaceSnapshot {
     pub applied: Vec<Value>,
     /// Proposals still pending against this surface.
     pub pending: Vec<ProposalView>,
+    /// Number of declined (denied) proposals against this surface.
+    #[serde(default)]
+    pub denied: usize,
     /// Chat only: every channel in the log (always the full list, even on
     /// a filtered read; `Group` is always present). Empty on other surfaces.
     #[serde(default)]
@@ -2555,6 +2585,65 @@ pub struct SurfaceStat {
     pub applied: usize,
     /// Number of pending proposals.
     pub pending: usize,
+}
+
+/// One row of the Organization → Members table. The identity anchor
+/// (`id` / `identity_pk`) is real on a ritual-founded workspace and empty
+/// on demo/legacy ones; presence (`last_seen` / `presence`) is still the
+/// session's mock label — real presence is transport work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberView {
+    /// Display handle (the member id).
+    pub member: MemberId,
+    /// Short fingerprint of the anchored identity key, for humans
+    /// ("" when unanchored).
+    pub id: String,
+    /// The anchored Ed25519 identity public key, lowercase hex
+    /// ("" when unanchored).
+    pub identity_pk: String,
+    /// Human "last seen" label (mock), e.g. `"just now"`.
+    pub last_seen: String,
+    /// 0 = synced, 1 = syncing, 2 = offline (mock presence).
+    pub presence: u8,
+    /// Pending proposals still awaiting THIS member's approval.
+    pub open_proposals: usize,
+    /// Files this member shared into the chat.
+    pub uploads: usize,
+}
+
+/// One file shared into the chat (Organization → Uploads). Only metadata
+/// travels — the bytes stay on the sharer's disk and move user-to-user
+/// when a member follows the share link ([`FileMeta`]; the fetch itself is
+/// mocked today). The expiry is a mock too: links die 14 days after the
+/// share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadView {
+    /// The carrying chat message — the address `download_file` takes.
+    pub id: MessageId,
+    /// Who shared it.
+    pub member: MemberId,
+    /// When it was shared (unix seconds).
+    pub ts: u64,
+    /// File name.
+    pub name: String,
+    /// Display type, e.g. `"PDF"`.
+    pub kind: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Still present on the sharer's disk.
+    pub available: bool,
+    /// When the share link expires (unix seconds; mock: `ts` + 14 days).
+    pub expires_ts: u64,
+    /// Whether the sharer is reachable right now — a user-to-user transfer
+    /// needs the sharer online (mock presence; the own node is always
+    /// online). Additive with a default.
+    #[serde(default)]
+    pub online: bool,
+    /// Content checksum, lowercase sha256 hex. Mock: no bytes exist yet, so
+    /// it deterministically hashes the share's identity (name, size, file
+    /// date) — stable across reads and nodes. Additive with a default.
+    #[serde(default)]
+    pub checksum: String,
 }
 
 /// A one-shot status summary of the running group.

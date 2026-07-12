@@ -6,12 +6,41 @@
 use std::collections::HashMap;
 
 use molt_core::{
-    ChannelInfo, ChannelRef, Event, MoltError, ProposalId, ProposalRecord, ProposalState,
-    ProposalView, Reply, StatusView, Surface, SurfaceSnapshot, SurfaceStat, WorkspaceEvent,
+    ChannelInfo, ChannelRef, Event, MemberView, MoltError, ProposalId, ProposalRecord,
+    ProposalState, ProposalView, Reply, StatusView, Surface, SurfaceSnapshot, SurfaceStat,
+    UploadView, WorkspaceEvent,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::State;
+use crate::{ReplicaState, State};
+
+/// The "Ist-Stand / Soll-Stand" display pair of a proposal: what the
+/// targeted state is now (from the genesis replica, for the Organization
+/// edit ops) and what the change would make it (the payload's `value`).
+/// Mock-grade display data, never consensus input — "" when unknown.
+pub(crate) fn change_summary(
+    replica: Option<&ReplicaState>,
+    p: &ProposalRecord,
+) -> (String, String) {
+    let proposed = p
+        .payload
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if p.surface != Surface::Organization {
+        return (String::new(), proposed);
+    }
+    let op = p.payload.get("op").and_then(Value::as_str).unwrap_or("");
+    let current = match op {
+        "set_charter" => replica.map(|r| r.agenda.clone()).unwrap_or_default(),
+        "set_name" => replica.map(|r| r.name.clone()).unwrap_or_default(),
+        // no image / plugin state exists yet (mock) — nothing to show
+        _ => String::new(),
+    };
+    (current, proposed)
+}
 
 impl State {
     pub(crate) fn cmd_propose(
@@ -182,6 +211,19 @@ impl State {
         } else {
             p.approvals
         };
+        // reader-relative: chain governance knows exactly who signed; the
+        // legacy counted simulation has one local operator standing in for
+        // the whole group, where the FIRST approval is by definition ours
+        // (self-cosign or the explicit approve) and repeats simulate peers
+        let approved_by_me = if self.is_chain_governed() {
+            let me = self.member();
+            self.pending_sigs
+                .get(&id)
+                .is_some_and(|s| s.sigs.iter().any(|a| a.member == me))
+        } else {
+            p.approvals > 0
+        };
+        let (current, proposed) = change_summary(self.replica.as_ref(), p);
         ProposalView {
             id: ProposalId(id),
             surface: p.surface,
@@ -189,6 +231,9 @@ impl State {
             approvals,
             threshold: self.threshold(),
             state: p.state,
+            approved_by_me,
+            current,
+            proposed,
         }
     }
 
@@ -260,12 +305,134 @@ impl State {
             gated: surface.is_gated(),
             applied: self.applied_values(surface, channel.as_ref()),
             pending,
+            denied: self
+                .proposals
+                .values()
+                .filter(|p| p.surface == surface && p.state == ProposalState::Rejected)
+                .count(),
             channels: if surface == Surface::Chat {
                 self.chat_channels()
             } else {
                 Vec::new()
             },
         }
+    }
+
+    /// Whether a pending proposal still awaits `member`'s approval. Chain
+    /// governance knows exactly who signed; the legacy counted simulation
+    /// (one operator stands in for the group) treats the first approval as
+    /// the local member's and cannot know about the simulated peers — for
+    /// them every pending proposal counts as open (mock).
+    fn waits_on(&self, id: u64, p: &ProposalRecord, member: &str) -> bool {
+        if p.state != ProposalState::Proposed {
+            return false;
+        }
+        if self.is_chain_governed() {
+            !self
+                .pending_sigs
+                .get(&id)
+                .is_some_and(|s| s.sigs.iter().any(|a| a.member == member))
+        } else if member == self.member() {
+            p.approvals == 0
+        } else {
+            true
+        }
+    }
+
+    /// The Organization → Members table: one row per roster member. The
+    /// identity anchor comes from the genesis (real on ritual-founded
+    /// workspaces); presence is the session entry's mock label.
+    pub(crate) fn members_view(&self) -> Vec<MemberView> {
+        let entry = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace);
+        self.roster()
+            .into_iter()
+            .map(|member| {
+                let identity_pk = self
+                    .replica
+                    .as_ref()
+                    .and_then(|r| r.identities.iter().find(|i| i.member == member))
+                    .map(|i| i.identity_pk.clone())
+                    .unwrap_or_default();
+                // a human-scale fingerprint: the key's leading 16 hex chars
+                let id = identity_pk.get(..16).unwrap_or_default().to_string();
+                let (last_seen, presence) = entry
+                    .and_then(|e| e.members.iter().find(|m| m.name == member))
+                    .map(|m| (m.last.clone(), m.state))
+                    .unwrap_or_default();
+                MemberView {
+                    open_proposals: self
+                        .proposals
+                        .iter()
+                        .filter(|(pid, p)| self.waits_on(**pid, p, &member))
+                        .count(),
+                    uploads: self
+                        .chat
+                        .iter()
+                        .filter(|m| m.from == member && m.file.is_some())
+                        .count(),
+                    member,
+                    id,
+                    identity_pk,
+                    last_seen,
+                    presence,
+                }
+            })
+            .collect()
+    }
+
+    /// The Organization → Uploads table: every file shared into the chat,
+    /// in log order. Only metadata — the bytes move user-to-user via the
+    /// share link ([`molt_core::FileMeta`]), which is why a download needs
+    /// the sharer online; the 14-day link expiry and the checksum are mocks
+    /// like the fetch itself.
+    pub(crate) fn uploads_view(&self) -> Vec<UploadView> {
+        const MOCK_LINK_TTL_SECS: u64 = 14 * 86_400;
+        let me = self.member();
+        let entry = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace);
+        let presence = |member: &str| {
+            entry
+                .and_then(|e| e.members.iter().find(|mi| mi.name == member))
+                .map(|mi| mi.state)
+                .unwrap_or(0)
+        };
+        self.chat
+            .iter()
+            .filter_map(|m| {
+                m.file.as_ref().map(|f| {
+                    // deterministic mock checksum: no bytes exist yet, so it
+                    // hashes the share's identity — stable across reads/nodes
+                    let mut h = Sha256::new_with_prefix(b"molt-upload-mock-checksum\0");
+                    h.update(f.name.as_bytes());
+                    h.update(f.size.to_le_bytes());
+                    h.update(f.modified.to_le_bytes());
+                    let checksum = h
+                        .finalize()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>();
+                    UploadView {
+                        id: m.id,
+                        member: m.from.clone(),
+                        ts: m.ts,
+                        name: f.name.clone(),
+                        kind: f.kind.clone(),
+                        size: f.size,
+                        available: f.available,
+                        expires_ts: m.ts + MOCK_LINK_TTL_SECS,
+                        online: m.from == me || presence(&m.from) != 2,
+                        checksum,
+                    }
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn status(&self) -> StatusView {

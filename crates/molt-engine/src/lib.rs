@@ -668,6 +668,8 @@ impl State {
                 Ok(Reply::Proposals { proposals: views })
             }
             Command::Status => Ok(Reply::Status(self.status())),
+            Command::ReadMembers => Ok(Reply::Members(self.members_view())),
+            Command::ReadUploads => Ok(Reply::Uploads(self.uploads_view())),
 
             // net.rs (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {
@@ -1515,6 +1517,233 @@ mod tests {
         });
     }
 
+    /// The Organization read projections behind the Members and Uploads
+    /// tables: every roster member with its identity anchor + governance +
+    /// upload counters, and every file shared into the chat with its (mock)
+    /// share-link expiry. Read-only commands — MCP tools like every read,
+    /// so an agent can auto-test the same tables the GUI renders.
+    #[test]
+    fn members_and_uploads_projections_serve_the_org_tables() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::ShareFile {
+                name: "charter.pdf".into(),
+                size: 48_000,
+                kind: "PDF".into(),
+                modified: 1_751_000_000,
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("share");
+            // a self-cosigned pending proposal: no longer waiting on me,
+            // still waiting on both peers
+            w.execute(Command::Propose {
+                surface: Surface::Memory,
+                payload: json!({"op":"add_note","title":"t"}),
+            })
+            .await
+            .expect("propose");
+            match w.execute(Command::ReadMembers).await.expect("members") {
+                Reply::Members(rows) => {
+                    assert_eq!(rows.len(), 3, "one row per roster member");
+                    let me = rows.iter().find(|m| m.member == "me").expect("me");
+                    assert_eq!(me.uploads, 1, "the share counts as my upload");
+                    assert_eq!(me.open_proposals, 0, "self-cosign → not waiting on me");
+                    assert!(
+                        me.identity_pk.is_empty() && me.id.is_empty(),
+                        "a demo workspace anchors no identities"
+                    );
+                    let peer = rows.iter().find(|m| m.member == "peer-1").expect("peer");
+                    assert_eq!(peer.uploads, 0);
+                    assert_eq!(peer.open_proposals, 1, "the proposal waits on the peer");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+            match w.execute(Command::ReadUploads).await.expect("uploads") {
+                Reply::Uploads(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0].member, "me");
+                    assert_eq!(rows[0].name, "charter.pdf");
+                    assert_eq!(rows[0].kind, "PDF");
+                    assert!(rows[0].available);
+                    assert!(!rows[0].id.is_nil(), "addressable for download_file");
+                    assert_eq!(
+                        rows[0].expires_ts,
+                        rows[0].ts + 14 * 86_400,
+                        "mock share links expire 14 days after the share"
+                    );
+                    assert_eq!(
+                        rows[0].checksum.len(),
+                        64,
+                        "the mock checksum is a full sha256 hex"
+                    );
+                    assert!(
+                        rows[0].online,
+                        "the sharer is this node itself — always online"
+                    );
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+            // the mock checksum is deterministic: a second read serves the
+            // identical value (auto-tests can pin it)
+            let again = match w.execute(Command::ReadUploads).await.expect("uploads 2") {
+                Reply::Uploads(rows) => rows[0].checksum.clone(),
+                other => panic!("unexpected: {other:?}"),
+            };
+            match w.execute(Command::ReadUploads).await.expect("uploads 3") {
+                Reply::Uploads(rows) => assert_eq!(rows[0].checksum, again),
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+    }
+
+    /// The pending cards' "Ist-Stand / Soll-Stand" pair: an Organization
+    /// edit proposal exposes what the state is now (from the genesis
+    /// replica) and what the change would make it (the payload's `value`).
+    /// Display data, never consensus input — empty when unknown.
+    #[test]
+    fn org_pending_cards_carry_current_and_proposed_state() {
+        let replica = ReplicaState {
+            name: "Guild".into(),
+            member: "me".into(),
+            roster: vec!["me".into()],
+            rule_m: 1,
+            identities: Vec::new(),
+            agenda: "alte Satzung".into(),
+            republic_id: String::new(),
+        };
+        let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
+            surface,
+            payload: json!({"op": op, "title": "t", "value": value}),
+            approvals: 0,
+            state: molt_core::ProposalState::Proposed,
+        };
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                &rec(Surface::Organization, "set_charter", "neue Satzung")
+            ),
+            ("alte Satzung".to_string(), "neue Satzung".to_string())
+        );
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                &rec(Surface::Organization, "set_name", "New Guild")
+            ),
+            ("Guild".to_string(), "New Guild".to_string())
+        );
+        // no image state exists yet — the UI hides an empty Ist line
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                &rec(Surface::Organization, "set_image", "~/logo.png")
+            )
+            .0,
+            ""
+        );
+        // a non-organization proposal exposes no pair beyond its value
+        assert_eq!(
+            proposals::change_summary(Some(&replica), &rec(Surface::Memory, "add_note", "")),
+            (String::new(), String::new())
+        );
+    }
+
+    /// Organization is a gated surface like the others: charter / name /
+    /// logo / plugin changes go through propose → threshold → applied — and
+    /// because the MCP `propose` tool derives its surface list from
+    /// `is_gated`, the GUI edit modals and an MCP agent drive the SAME path.
+    #[test]
+    fn organization_changes_are_gated_proposals() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Organization,
+                    payload: json!({"op":"set_charter","title":"Charter ändern","value":"neue Satzung"}),
+                })
+                .await
+                .expect("propose on organization")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            // the pending view carries the Soll-Stand (the payload's value);
+            // the Ist-Stand stays empty on a demo workspace (no genesis)
+            let pending = read_surface(&w, Surface::Organization).await.pending;
+            assert_eq!(pending[0].proposed, "neue Satzung");
+            assert_eq!(pending[0].current, "");
+            // 2-of-3 with self-cosign: one more approval applies the change
+            w.execute(Command::Approve { proposal: id })
+                .await
+                .expect("approve");
+            let snap = read_surface(&w, Surface::Organization).await;
+            assert!(snap.gated, "organization is threshold-gated");
+            assert_eq!(snap.applied.len(), 1, "applied at threshold");
+            assert!(snap.pending.is_empty());
+        });
+    }
+
+    /// The read contract splits a surface's open governance by the reader:
+    /// a pending proposal says whether THIS node already approved it
+    /// (`approved_by_me`), and declined proposals count into `denied` —
+    /// the Organization → Status approvals table renders exactly these.
+    #[test]
+    fn pending_views_split_by_my_vote_and_count_denied() {
+        rt().block_on(async {
+            // no self-cosign: a fresh proposal starts with zero approvals,
+            // so it genuinely waits on this node's vote
+            let cfg = GroupConfig {
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
+            let propose = |title: &str| {
+                let w = &w;
+                let payload = json!({"op":"add_note","title":title});
+                async move {
+                    match w
+                        .execute(Command::Propose {
+                            surface: Surface::Memory,
+                            payload,
+                        })
+                        .await
+                        .expect("propose")
+                    {
+                        Reply::Proposed { id } => id,
+                        other => panic!("unexpected: {other:?}"),
+                    }
+                }
+            };
+            let waiting_on_me = propose("waiting").await;
+            let voted = propose("voted").await;
+            let declined = propose("declined").await;
+            // one approval of two: still pending, but no longer waiting on me
+            w.execute(Command::Approve { proposal: voted })
+                .await
+                .expect("approve");
+            w.execute(Command::Decline { proposal: declined })
+                .await
+                .expect("decline");
+            let snap = read_surface(&w, Surface::Memory).await;
+            assert_eq!(snap.pending.len(), 2);
+            let by_id = |id| {
+                snap.pending
+                    .iter()
+                    .find(|p| p.id == id)
+                    .expect("pending view")
+            };
+            assert!(
+                !by_id(waiting_on_me).approved_by_me,
+                "an untouched proposal waits on this node's vote"
+            );
+            assert!(
+                by_id(voted).approved_by_me,
+                "the own approval must reflect in the pending view"
+            );
+            assert_eq!(snap.denied, 1, "the declined proposal counts as denied");
+        });
+    }
+
     #[test]
     fn workspaces_and_restore_lifecycle_are_shared() {
         rt().block_on(async {
@@ -1546,8 +1775,8 @@ mod tests {
             // a plausible restore ticks to success; finishing lands in the
             // restored workspace (no completion-screen stopover)
             w.execute(Command::RestoreStart {
-                way: "peer".to_string(),
-                target: "smp://node/inbox".to_string(),
+                way: "s3".to_string(),
+                target: "https://backups.example/bucket".to_string(),
             })
             .await
             .expect("start");
@@ -1580,7 +1809,7 @@ mod tests {
 
             // an implausible target fails at ~45 %
             w.execute(Command::RestoreStart {
-                way: "peer".to_string(),
+                way: "s3".to_string(),
                 target: "asd".to_string(),
             })
             .await

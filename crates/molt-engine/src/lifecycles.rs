@@ -288,10 +288,9 @@ impl State {
     }
 
     /// Whether a restore target looks plausible for its way (the mock
-    /// failure rule): peers speak smp://, S3 is http(s), files end .molt.enc.
+    /// failure rule): S3 is http(s), files end .molt.enc.
     fn restore_target_plausible(way: &str, target: &str) -> bool {
         match way {
-            "peer" => target.starts_with("smp://") && target.len() > 8,
             "s3" => target.starts_with("http"),
             _ => target.ends_with(".molt.enc"),
         }
@@ -322,7 +321,6 @@ impl State {
         }
         if r.run.progress_pct < 30 {
             r.run.log.push(match r.way.as_str() {
-                "peer" => format!("→ smp: tor circuit hop {t} · handshake {}", r.target),
                 "s3" => format!(
                     "→ https: GET {}/manifest.enc · 200 OK · rtt {} ms",
                     r.target,

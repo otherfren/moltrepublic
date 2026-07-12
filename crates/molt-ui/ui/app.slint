@@ -20,13 +20,13 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
+import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
     AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel, DisabledTorRow
 } from "components.slint";
 import {
-    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView
+    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard
 } from "parts.slint";
 
 export { Strings, Theme }
@@ -112,6 +112,10 @@ export component AppWindow inherits Window {
     in property <[SurfaceTab]> surfaces;
     // the active workspace's roster (chat members strip: who is online)
     in property <[MemberSync]> active-members;
+    // the Organization tables, mirrored from the engine's ReadMembers /
+    // ReadUploads (the same projections the MCP tools of those names read)
+    in property <[MemberRow]> org-members;
+    in property <[UploadRow]> org-uploads;
     // the ratified founding charter (free-text agenda) for the Constitution surface
     in property <string> active-agenda;
     // Organization → Status/Members: reachable count derived from the roster
@@ -133,6 +137,10 @@ export component AppWindow inherits Window {
     // body + quoted message id ("" = plain message)
     callback send-chat(string, string);
     callback propose(string, string);
+    // an Organization change (charter / image / …): op, display title, and
+    // the drafted value — Rust turns it into the same Command::Propose the
+    // MCP propose tool drives (co-equality)
+    callback org-propose(string, string, string);
     callback approve(int);
     callback decline(int);
     // select the main-view surface (routed to a SelectSurface command; the
@@ -326,11 +334,9 @@ export component AppWindow inherits Window {
     in-out property <string> recovery-link;
     in-out property <bool> recover-link-open: false;
     property <string> recover-link-member;
-    // the rejoiner modal (UI-local overlay on the choice screen, like the
-    // other drafts) …
-    in-out property <bool> rv-open: false;
+    // the rejoiner's recovery link (the peer way on the Restore screen; the
+    // phrase is the shared rw-seed) …
     property <string> rv-link;
-    property <string> rv-phrase;
     // … and its lifecycle, driven by the engine notices (pushed from Rust):
     // running from "recover-started:", error from "recover-failed:"; on
     // success the engine flips to Main by itself
@@ -339,7 +345,6 @@ export component AppWindow inherits Window {
     in-out property <string> rv-error;
 
     property <string> rw-seed;
-    property <string> rw-endpoint;
     // restore: chosen backup file + picker modal (continues gate themselves
     // on the inputs, so there are no attempted-validation flags)
     property <string> rw-file;
@@ -362,6 +367,15 @@ export component AppWindow inherits Window {
     property <bool> ws-dir-modal-open: false;
     property <string> ws-dir-draft;
     property <string> rw-file-draft;
+    // Organization → Status edit drafts (image path + charter). The picker
+    // fields are mocks, but confirming creates a REAL gated proposal on the
+    // Organization surface (org-propose)
+    property <bool> org-logo-modal-open: false;
+    property <string> org-logo-draft;
+    property <bool> org-charter-modal-open: false;
+    property <string> org-charter-draft;
+    property <bool> org-name-modal-open: false;
+    property <string> org-name-draft;
 
     // settings: a local editable draft, seeded from the engine session by Rust.
     in-out property <bool> cfg-headless: false;
@@ -537,10 +551,6 @@ export component AppWindow inherits Window {
     function handle-escape() {
         if (root.recover-link-open) {
             root.recover-link-open = false;
-        } else if (root.rv-open) {
-            // hides the panel only — a running recovery keeps going in the
-            // engine, and re-opening the panel shows its state again
-            root.rv-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
         } else if (root.confirm-leave-open) {
@@ -557,6 +567,12 @@ export component AppWindow inherits Window {
             root.restore-file-modal-open = false;
         } else if (root.ws-dir-modal-open) {
             root.ws-dir-modal-open = false;
+        } else if (root.org-logo-modal-open) {
+            root.org-logo-modal-open = false;
+        } else if (root.org-charter-modal-open) {
+            root.org-charter-modal-open = false;
+        } else if (root.org-name-modal-open) {
+            root.org-name-modal-open = false;
         } else if (root.screen == AppScreen.open) {
             root.navigate(AppScreen.choice);
         } else if (root.screen == AppScreen.restore && !root.restore-running) {
@@ -709,14 +725,20 @@ export component AppWindow inherits Window {
                         }
                         if s.key == root.selected-surface && !root.nav-collapsed: VerticalLayout {
                             spacing: 1px;
-                            for v in s.views: ViewRow {
-                                label: v.name;
-                                icon: v.icon;
-                                selected: v.key == root.selected-view;
-                                pending: v.key == "proposals" ? s.pending-count : 0;
-                                chosen => {
-                                    root.mv-draft = "";
-                                    root.select-view(s.key, v.key);
+                            for v in s.views: VerticalLayout {
+                                // Organization → Pending exists only while
+                                // something is in voting; open decisions of
+                                // THIS node raise the ⚠-badge on the row
+                                if v.key != "pending" || s.pending-count > 0: ViewRow {
+                                    label: v.name;
+                                    icon: v.icon;
+                                    selected: v.key == root.selected-view;
+                                    pending: v.key == "proposals" || v.key == "pending" ? s.pending-count : 0;
+                                    alert: v.key == "pending" ? s.pending-my-vote-count : 0;
+                                    chosen => {
+                                        root.mv-draft = "";
+                                        root.select-view(s.key, v.key);
+                                    }
                                 }
                             }
                         }
@@ -917,8 +939,13 @@ export component AppWindow inherits Window {
                             icon: @image-url("assets/restore.svg");
                             chosen => {
                                 root.rw-seed = "";
-                                root.rw-endpoint = "";
                                 root.rw-file = "";
+                                // a recovery already in flight keeps its
+                                // state; a fresh visit starts clean
+                                if (!root.rv-running) {
+                                    root.rv-link = "";
+                                    root.rv-error = "";
+                                }
                                 root.navigate(AppScreen.restore);
                             }
                         }
@@ -956,21 +983,6 @@ export component AppWindow inherits Window {
                                         root.jw-invite = "";
                                         root.jw-member = "";
                                         root.navigate(AppScreen.join);
-                                    }
-                                }
-                                ChoiceCard {
-                                    title: Strings.choice-recover-title;
-                                    sub: Strings.choice-recover-sub;
-                                    icon: @image-url("assets/key.svg");
-                                    chosen => {
-                                        // a recovery already in flight keeps
-                                        // its state; a fresh visit starts clean
-                                        if (!root.rv-running) {
-                                            root.rv-link = "";
-                                            root.rv-phrase = "";
-                                            root.rv-error = "";
-                                        }
-                                        root.rv-open = true;
                                     }
                                 }
                             }
@@ -2264,7 +2276,11 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // way 1: re-sync from another member over SimpleX
+                // way 1: re-sync from another member — the rejoiner side of
+                // the recovery ritual: a surviving member mints a single-use
+                // molt://recover/… link, phrase + link rebuild the seat. The
+                // engine notices drive the running / failed states; on
+                // success the engine flips to Main by itself.
                 WayBranch {
                     armed: root.rw-seed != "";
                     RestoreWay {
@@ -2275,18 +2291,59 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         AppField {
-                            text <=> root.rw-endpoint;
-                            placeholder: "smp://…";
+                            text <=> root.rv-link;
+                            placeholder: "molt://recover/…";
                             horizontal-stretch: 1;
                         }
                         AppButton {
                             height: 38px;
+                            pad: 10px;
+                            icon: @image-url("assets/paste.svg");
+                            icon-set: true;
+                            label: Strings.rw-paste;
+                            clicked => {
+                                root.rv-link = root.paste-clipboard();
+                            }
+                        }
+                        AppButton {
+                            height: 38px;
                             primary: true;
-                            enabled: root.rw-seed != "" && root.rw-endpoint != "";
+                            enabled: !root.rv-running && root.rw-seed != "" && root.rv-link != "";
                             label: Strings.rw-continue;
                             clicked => {
-                                root.restore-start("peer", root.rw-endpoint);
+                                root.recover-start(root.rv-link, root.rw-seed);
                             }
+                        }
+                    }
+                    // in flight: the wait spans the survivors' human approval
+                    if root.rv-running: VerticalLayout {
+                        spacing: 4px;
+                        DotLabel {
+                            tone: Theme.warn;
+                            label: root.rv-member;
+                            label-color: Theme.text;
+                        }
+                        Text {
+                            text: Strings.rv-running-note;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                    }
+                    // failed: the raw engine reason + the retry hint (fresh link)
+                    if root.rv-error != "": VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: root.rv-error;
+                            color: Theme.bad;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: Strings.rv-failed-hint;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
                         }
                     }
                 }
@@ -3052,6 +3109,21 @@ export component AppWindow inherits Window {
                                                 x: (parent.width - self.width) / 2;
                                                 y: (parent.height - self.height) / 2;
                                             }
+                                            // avatar-style corner edit: opens
+                                            // the (mock) image picker modal
+                                            AppButton {
+                                                width: 22px;
+                                                height: 22px;
+                                                pad: 0px;
+                                                x: parent.width - self.width + 6px;
+                                                y: parent.height - self.height + 6px;
+                                                label: "✎";
+                                                tooltip: Strings.org-edit;
+                                                clicked => {
+                                                    root.org-logo-draft = "~/Pictures/";
+                                                    root.org-logo-modal-open = true;
+                                                }
+                                            }
                                         }
                                         VerticalLayout {
                                             spacing: 6px;
@@ -3077,24 +3149,63 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         Rectangle { horizontal-stretch: 1; }
+                                        // renaming the republic is a gated
+                                        // change — the edit opens a proposal
+                                        // draft, top-right like an app bar
+                                        VerticalLayout {
+                                            alignment: start;
+                                            AppButton {
+                                                width: 26px;
+                                                height: 26px;
+                                                pad: 0px;
+                                                label: "✎";
+                                                tooltip: Strings.org-edit;
+                                                tooltip-left: true;
+                                                clicked => {
+                                                    root.org-name-draft = root.active-workspace;
+                                                    root.org-name-modal-open = true;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 DetailGroup {
                                     title: Strings.const-charter-title;
-                                    Text {
-                                        text: root.active-agenda == "" ? Strings.const-no-agenda : root.active-agenda;
-                                        color: root.active-agenda == "" ? Theme.faint : Theme.text;
-                                        font-size: Theme.fs-body;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                                DetailGroup {
-                                    title: Strings.org-surfaces;
                                     HorizontalLayout {
                                         spacing: 8px;
                                         Text {
-                                            text: "";
+                                            text: root.active-agenda == "" ? Strings.const-no-agenda : root.active-agenda;
+                                            color: root.active-agenda == "" ? Theme.faint : Theme.text;
+                                            font-size: Theme.fs-body;
+                                            wrap: word-wrap;
                                             horizontal-stretch: 1;
+                                        }
+                                        // charter changes are gated — the
+                                        // edit opens a (mock) proposal draft
+                                        AppButton {
+                                            width: 26px;
+                                            height: 26px;
+                                            pad: 0px;
+                                            label: "✎";
+                                            tooltip: Strings.org-edit;
+                                            tooltip-left: true;
+                                            clicked => {
+                                                root.org-charter-draft = root.active-agenda;
+                                                root.org-charter-modal-open = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                DetailGroup {
+                                    title: Strings.org-approvals;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: Strings.oa-col-surface;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: bottom;
                                         }
                                         Text {
                                             text: Strings.mv-applied;
@@ -3102,13 +3213,33 @@ export component AppWindow inherits Window {
                                             font-size: Theme.fs-cap;
                                             width: 64px;
                                             horizontal-alignment: right;
+                                            vertical-alignment: bottom;
                                         }
                                         Text {
-                                            text: Strings.mv-pending;
+                                            text: Strings.oa-pending-voted;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                            width: 96px;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: bottom;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: Strings.oa-denied;
                                             color: Theme.faint;
                                             font-size: Theme.fs-cap;
                                             width: 64px;
                                             horizontal-alignment: right;
+                                            vertical-alignment: bottom;
+                                        }
+                                        Text {
+                                            text: Strings.oa-pending-mine;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                            width: 170px;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: bottom;
+                                            wrap: word-wrap;
                                         }
                                     }
                                     Rectangle {
@@ -3123,6 +3254,7 @@ export component AppWindow inherits Window {
                                             font-size: Theme.fs-body;
                                             horizontal-stretch: 1;
                                             overflow: elide;
+                                            vertical-alignment: center;
                                         }
                                         Text {
                                             text: "\{st.applied-count}";
@@ -3130,14 +3262,51 @@ export component AppWindow inherits Window {
                                             font-size: Theme.fs-body;
                                             width: 64px;
                                             horizontal-alignment: right;
+                                            vertical-alignment: center;
                                         }
                                         Text {
-                                            text: "\{st.pending-count}";
-                                            color: st.pending-count > 0 ? Theme.warn : Theme.dim;
+                                            text: "\{st.pending-voted-count}";
+                                            color: st.pending-voted-count > 0 ? Theme.text : Theme.dim;
                                             font-size: Theme.fs-body;
-                                            font-weight: st.pending-count > 0 ? 700 : 400;
+                                            width: 96px;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "\{st.denied-count}";
+                                            color: st.denied-count > 0 ? Theme.bad : Theme.dim;
+                                            font-size: Theme.fs-body;
                                             width: 64px;
                                             horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        // my open decisions: the count, and a
+                                        // jump straight into the surface's
+                                        // pending list when something waits
+                                        HorizontalLayout {
+                                            width: 170px;
+                                            spacing: 8px;
+                                            alignment: end;
+                                            if st.pending-my-vote-count > 0: AppButton {
+                                                height: 26px;
+                                                pad: 8px;
+                                                label: Strings.oa-list-pending;
+                                                clicked => {
+                                                    root.mv-draft = "";
+                                                    if (st.key == "organization") {
+                                                        root.select-view("organization", "pending");
+                                                    } else {
+                                                        root.select-surface(st.key);
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: "\{st.pending-my-vote-count}";
+                                                color: st.pending-my-vote-count > 0 ? Theme.warn : Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                font-weight: st.pending-my-vote-count > 0 ? 700 : 400;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                     }
                                 }
@@ -3172,7 +3341,74 @@ export component AppWindow inherits Window {
                                         padding: 8px;
                                         spacing: 4px;
                                         alignment: start;
-                                        for m in root.active-members: Rectangle {
+                                        // table header
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 10px;
+                                            Rectangle { width: 9px; }
+                                            // Name outweighs the identity
+                                            // columns: when space gets tight
+                                            // ID and key give way first
+                                            Text {
+                                                text: Strings.ow-col-name;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 3;
+                                                min-width: 100px;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-id;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 1;
+                                                min-width: 40px;
+                                                max-width: 130px;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-pk;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 1;
+                                                min-width: 40px;
+                                                max-width: 130px;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-last;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 100px;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-open;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 100px;
+                                                horizontal-alignment: right;
+                                                wrap: word-wrap;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-uploads;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 70px;
+                                                horizontal-alignment: right;
+                                            }
+                                            Text {
+                                                text: Strings.om-col-recovery;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 180px;
+                                                horizontal-alignment: right;
+                                            }
+                                        }
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Theme.line;
+                                        }
+                                        for m in root.org-members: Rectangle {
                                             height: 40px;
                                             border-radius: Theme.win95 ? 0px : 6px;
                                             background: Theme.panel-2;
@@ -3195,23 +3431,66 @@ export component AppWindow inherits Window {
                                                     font-size: Theme.fs-body;
                                                     font-weight: 700;
                                                     vertical-alignment: center;
+                                                    horizontal-stretch: 3;
+                                                    min-width: 100px;
+                                                    overflow: elide;
                                                 }
-                                                Rectangle { horizontal-stretch: 1; }
-                                                // mint a single-use recovery
-                                                // link for a member who lost
-                                                // their device (never for the
-                                                // own seat — this node IS its
-                                                // device); the engine answers
-                                                // with a "recovery-link:"
-                                                // notice that opens the dialog
-                                                if m.name != root.node-member: AppButton {
-                                                    height: 28px;
-                                                    pad: 10px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    label: Strings.om-recover-link;
-                                                    clicked => {
-                                                        root.recover-link-member = m.name;
-                                                        root.recover-invite(m.name);
+                                                // identity anchor: fingerprint +
+                                                // full key ("—" on a workspace
+                                                // without anchored identities),
+                                                // each with a copy-to-clipboard
+                                                HorizontalLayout {
+                                                    horizontal-stretch: 1;
+                                                    min-width: 40px;
+                                                    max-width: 130px;
+                                                    spacing: 4px;
+                                                    Text {
+                                                        text: m.id == "" ? "—" : m.id;
+                                                        color: Theme.dim;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                        overflow: elide;
+                                                    }
+                                                    if m.id != "": AppButton {
+                                                        width: 24px;
+                                                        height: 22px;
+                                                        pad: 0px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        icon: @image-url("assets/copy.svg");
+                                                        icon-set: true;
+                                                        tooltip: Strings.ow-copy;
+                                                        clicked => {
+                                                            root.copy-text(m.id);
+                                                            root.show-toast(Strings.toast-copied);
+                                                        }
+                                                    }
+                                                }
+                                                HorizontalLayout {
+                                                    horizontal-stretch: 1;
+                                                    min-width: 40px;
+                                                    max-width: 130px;
+                                                    spacing: 4px;
+                                                    Text {
+                                                        text: m.pk == "" ? "—" : m.pk;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                        overflow: elide;
+                                                    }
+                                                    if m.pk != "": AppButton {
+                                                        width: 24px;
+                                                        height: 22px;
+                                                        pad: 0px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        icon: @image-url("assets/copy.svg");
+                                                        icon-set: true;
+                                                        tooltip: Strings.ow-copy;
+                                                        clicked => {
+                                                            root.copy-text(m.pk);
+                                                            root.show-toast(Strings.toast-copied);
+                                                        }
                                                     }
                                                 }
                                                 Text {
@@ -3219,6 +3498,54 @@ export component AppWindow inherits Window {
                                                     color: Theme.faint;
                                                     font-size: Theme.fs-cap;
                                                     vertical-alignment: center;
+                                                    width: 100px;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: "\{m.open-proposals}";
+                                                    color: m.open-proposals > 0 ? Theme.warn : Theme.dim;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: m.open-proposals > 0 ? 700 : 400;
+                                                    vertical-alignment: center;
+                                                    width: 100px;
+                                                    horizontal-alignment: right;
+                                                }
+                                                // only a button when the member
+                                                // shared files — it jumps into
+                                                // the uploads table
+                                                HorizontalLayout {
+                                                    width: 70px;
+                                                    alignment: end;
+                                                    if m.uploads > 0: AppButton {
+                                                        height: 28px;
+                                                        pad: 10px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        label: "📎 \{m.uploads}";
+                                                        clicked => {
+                                                            root.select-view("organization", "uploads");
+                                                        }
+                                                    }
+                                                }
+                                                // mint a single-use recovery
+                                                // link for a member who lost
+                                                // their device (never for the
+                                                // own seat — this node IS its
+                                                // device); the engine answers
+                                                // with a "recovery-link:"
+                                                // notice that opens the dialog
+                                                HorizontalLayout {
+                                                    width: 180px;
+                                                    alignment: end;
+                                                    if m.name != root.node-member: AppButton {
+                                                        height: 28px;
+                                                        pad: 10px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        label: Strings.om-recover-link;
+                                                        clicked => {
+                                                            root.recover-link-member = m.name;
+                                                            root.recover-invite(m.name);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -3233,8 +3560,211 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // gated (board / memory / treasury / vault)
-                        if s.gated: VerticalLayout {
+                        // Organization → Uploads: every file shared into the
+                        // chat. Only metadata lives here — the bytes move
+                        // user-to-user via the share link (mock transfer).
+                        if s.key == "organization" && root.selected-view == "uploads": VerticalLayout {
+                            padding: 8px;
+                            spacing: 8px;
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                clip: true;
+                                ou-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: ou-list.preferred-height + 8px;
+                                    ou-list := VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 4px;
+                                        alignment: start;
+                                        // table header
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 10px;
+                                            Text {
+                                                text: Strings.ou-col-user;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 110px;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-date;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 90px;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-file;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 1;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-type;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 60px;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-size;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 70px;
+                                                horizontal-alignment: right;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-checksum;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 100px;
+                                                horizontal-alignment: right;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-download;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 110px;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: Strings.ou-col-expires;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 90px;
+                                                horizontal-alignment: right;
+                                            }
+                                        }
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Theme.line;
+                                        }
+                                        if root.org-uploads.length == 0: Text {
+                                            text: Strings.ou-empty;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for u in root.org-uploads: Rectangle {
+                                            height: 40px;
+                                            border-radius: Theme.win95 ? 0px : 6px;
+                                            background: Theme.panel-2;
+                                            border-width: 1px;
+                                            border-color: Theme.line;
+                                            opacity: u.available ? 1.0 : 0.55;
+                                            HorizontalLayout {
+                                                padding-left: 12px;
+                                                padding-right: 12px;
+                                                spacing: 10px;
+                                                Text {
+                                                    text: u.user;
+                                                    color: u.user == root.node-member ? Theme.accent : Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                    vertical-alignment: center;
+                                                    width: 110px;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: u.date;
+                                                    color: Theme.dim;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                    width: 90px;
+                                                }
+                                                Text {
+                                                    text: u.name;
+                                                    color: Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: u.kind;
+                                                    color: Theme.dim;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                    width: 60px;
+                                                }
+                                                Text {
+                                                    text: u.size;
+                                                    color: Theme.dim;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                    width: 70px;
+                                                    horizontal-alignment: right;
+                                                }
+                                                Text {
+                                                    text: u.checksum;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                    width: 100px;
+                                                    horizontal-alignment: right;
+                                                    overflow: elide;
+                                                }
+                                                // user-to-user transfer: the
+                                                // button needs the sharer
+                                                // reachable — offline shows
+                                                // the hint instead
+                                                HorizontalLayout {
+                                                    width: 110px;
+                                                    alignment: center;
+                                                    if u.online: AppButton {
+                                                        height: 28px;
+                                                        pad: 10px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        label: Strings.ou-download;
+                                                        enabled: u.available && u.id != "";
+                                                        clicked => {
+                                                            root.download-file(u.id);
+                                                        }
+                                                    }
+                                                    if !u.online: Text {
+                                                        text: Strings.ou-offline;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: u.expires;
+                                                    color: u.available ? Theme.dim : Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
+                                                    width: 90px;
+                                                    horizontal-alignment: right;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: ou-fl.height;
+                                    content-h: ou-fl.viewport-height;
+                                    scroll-y: ou-fl.viewport-y;
+                                }
+                            }
+                            Text {
+                                text: Strings.ou-note;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Organization → Pending: charter / name / image /
+                        // plugin changes in voting — the same proposal cards
+                        // (and the same approve/decline commands) as every
+                        // other gated surface
+                        if s.key == "organization" && root.selected-view == "pending": VerticalLayout {
                             spacing: 8px;
                             Text {
                                 text: Strings.mv-pending;
@@ -3254,59 +3784,64 @@ export component AppWindow inherits Window {
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
                                     }
-                                    for p in s.pending: Rectangle {
-                                        background: Theme.panel-2;
-                                        border-radius: Theme.win95 ? 0px : 8px;
-                                        border-width: Theme.border-w;
-                                        border-color: Theme.line;
-                                        VerticalLayout {
-                                            padding: 10px;
-                                            spacing: 8px;
-                                            Text {
-                                                text: "#\{p.id}  \{p.text}";
-                                                color: Theme.text;
-                                                font-size: Theme.fs-body;
-                                                wrap: word-wrap;
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 10px;
-                                                Rectangle {
-                                                    height: 6px;
-                                                    border-radius: Theme.win95 ? 0px : 3px;
-                                                    background: Theme.line;
-                                                    horizontal-stretch: 1;
-                                                    Rectangle {
-                                                        x: 0;
-                                                        height: parent.height;
-                                                        border-radius: parent.border-radius;
-                                                        width: parent.width * min(1.0, p.approvals * 1.0 / max(p.threshold, 1));
-                                                        background: Theme.accent;
-                                                    }
-                                                }
-                                                Text {
-                                                    text: "\{p.approvals}/\{p.threshold}";
-                                                    color: Theme.dim;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 8px;
-                                                AppButton {
-                                                    label: Strings.mv-approve;
-                                                    primary: true;
-                                                    clicked => {
-                                                        root.approve(p.id);
-                                                    }
-                                                }
-                                                AppButton {
-                                                    label: Strings.mv-decline;
-                                                    clicked => {
-                                                        root.decline(p.id);
-                                                    }
-                                                }
-                                                Rectangle { horizontal-stretch: 1; }
-                                            }
+                                    for p in s.pending: ProposalCard {
+                                        p: p;
+                                        approve => {
+                                            root.approve(p.id);
+                                        }
+                                        decline => {
+                                            root.decline(p.id);
+                                        }
+                                        discuss => {
+                                            // the proposal's discussion is
+                                            // its patch channel on the chat
+                                            // bus — engine-side filter, like
+                                            // the sidebar channel rows
+                                            root.select-view("chat", "today");
+                                            root.select-channel("patch:\{p.id}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // gated (memory / quests / vault / wallet — the
+                        // gated organization has its own views above)
+                        if s.gated && s.key != "organization": VerticalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: Strings.mv-pending;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                VerticalLayout {
+                                    padding: 2px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    if s.pending-count == 0: Text {
+                                        text: Strings.mv-empty-pending;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                    }
+                                    for p in s.pending: ProposalCard {
+                                        p: p;
+                                        approve => {
+                                            root.approve(p.id);
+                                        }
+                                        decline => {
+                                            root.decline(p.id);
+                                        }
+                                        discuss => {
+                                            // the proposal's discussion is
+                                            // its patch channel on the chat
+                                            // bus — engine-side filter, like
+                                            // the sidebar channel rows
+                                            root.select-view("chat", "today");
+                                            root.select-channel("patch:\{p.id}");
                                         }
                                     }
                                 }
@@ -4533,6 +5068,90 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
+    // Modal: the republic's image (Organization → Status). The picker is
+    // a mock path field, but Select / Remove create REAL gated proposals
+    // on the Organization surface — applying them has no visible effect
+    // yet (nothing is read from disk or rendered).
+    // =================================================================
+    if root.org-logo-modal-open: ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.ol-title;
+        body: Strings.ol-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.org-logo-draft != "";
+        alt-label: Strings.ol-remove;
+        dismissed => {
+            root.org-logo-modal-open = false;
+        }
+        confirmed => {
+            root.org-logo-modal-open = false;
+            root.org-propose("set_image", Strings.op-change-logo, root.org-logo-draft);
+            root.show-toast(Strings.toast-proposed);
+        }
+        alted => {
+            root.org-logo-modal-open = false;
+            root.org-propose("remove_image", Strings.op-remove-logo, "");
+            root.show-toast(Strings.toast-proposed);
+        }
+        AppField {
+            text <=> root.org-logo-draft;
+            placeholder: "~/Pictures/republic.png";
+        }
+    }
+
+    // =================================================================
+    // Modal: rename the republic (Organization → Status). The name was
+    // ratified at the founding, so a rename is a GATED change: the draft
+    // becomes a real proposal the members approve by threshold. Applying
+    // it does not yet rename the shown republic (mock effect).
+    // =================================================================
+    if root.org-name-modal-open: ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.orn-title;
+        body: Strings.orn-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.org-name-draft != "" && root.org-name-draft != root.active-workspace;
+        dismissed => {
+            root.org-name-modal-open = false;
+        }
+        confirmed => {
+            root.org-name-modal-open = false;
+            root.org-propose("set_name", Strings.op-change-name, root.org-name-draft);
+            root.show-toast(Strings.toast-proposed);
+        }
+        AppField {
+            text <=> root.org-name-draft;
+            placeholder: Strings.ph-ws-name;
+        }
+    }
+
+    // =================================================================
+    // Modal: edit the charter (Organization → Status). The charter was
+    // ratified at the founding, so an edit is a GATED change: the draft
+    // becomes a real proposal the members approve by threshold. Applying
+    // it does not yet rewrite the shown charter (mock effect).
+    // =================================================================
+    if root.org-charter-modal-open: ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.oc-title;
+        body: Strings.oc-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.org-charter-draft != root.active-agenda;
+        dismissed => {
+            root.org-charter-modal-open = false;
+        }
+        confirmed => {
+            root.org-charter-modal-open = false;
+            root.org-propose("set_charter", Strings.op-change-charter, root.org-charter-draft);
+            root.show-toast(Strings.toast-proposed);
+        }
+        AppField {
+            text <=> root.org-charter-draft;
+            placeholder: Strings.cw-charter-agenda-ph;
+        }
+    }
+
+    // =================================================================
     // Mock folder picker for the settings workspace tab: edits a draft,
     // Select commits it into the workspace-dir config field.
     // =================================================================
@@ -4599,97 +5218,6 @@ export component AppWindow inherits Window {
             color: Theme.warn;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
-        }
-    }
-
-    // =================================================================
-    // Modal: recover a lost seat (the rejoiner side of the recovery
-    // ritual): link + phrase → recover-start. The engine notices drive the
-    // running / failed states; on success the engine flips to Main by
-    // itself — the modal is gated on the choice screen, so it steps aside
-    // without standing in the way.
-    // =================================================================
-    if root.rv-open && root.screen == AppScreen.choice: ConfirmModal {
-        dialog-width: 480px;
-        title: Strings.rv-title;
-        body: Strings.rv-body;
-        cancel-label: Strings.set-close;
-        confirm-label: Strings.rv-go;
-        confirm-enabled: !root.rv-running && root.rv-link != "" && root.rv-phrase != "";
-        dismissed => {
-            // hides the panel only — a running recovery keeps going in the
-            // engine, and re-opening the panel shows its state again
-            root.rv-open = false;
-        }
-        confirmed => {
-            root.recover-start(root.rv-link, root.rv-phrase);
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            AppField {
-                text <=> root.rv-link;
-                placeholder: "molt://recover/…";
-                horizontal-stretch: 1;
-            }
-            AppButton {
-                height: 38px;
-                pad: 10px;
-                icon: @image-url("assets/paste.svg");
-                icon-set: true;
-                label: Strings.rw-paste;
-                clicked => {
-                    root.rv-link = root.paste-clipboard();
-                }
-            }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            AppField {
-                text <=> root.rv-phrase;
-                placeholder: Strings.ph-seed;
-                horizontal-stretch: 1;
-            }
-            AppButton {
-                height: 38px;
-                pad: 10px;
-                icon: @image-url("assets/paste.svg");
-                icon-set: true;
-                label: Strings.rw-paste;
-                clicked => {
-                    root.rv-phrase = root.paste-clipboard();
-                }
-            }
-        }
-        // in flight: the wait spans the survivors' human approval — say so
-        if root.rv-running: VerticalLayout {
-            spacing: 4px;
-            DotLabel {
-                tone: Theme.warn;
-                label: root.rv-member;
-                label-color: Theme.text;
-            }
-            Text {
-                text: Strings.rv-running-note;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                wrap: word-wrap;
-            }
-        }
-        // failed: the raw engine reason + the retry hint (fresh link)
-        if root.rv-error != "": VerticalLayout {
-            spacing: 4px;
-            Text {
-                text: root.rv-error;
-                color: Theme.bad;
-                font-size: Theme.fs-cap;
-                wrap: word-wrap;
-            }
-            Text {
-                text: Strings.rv-failed-hint;
-                color: Theme.faint;
-                font-size: Theme.fs-cap;
-                wrap: word-wrap;
-            }
         }
     }
 

@@ -828,6 +828,31 @@ pub fn run_app(
             issue(&rt, &w, &weak, Command::Propose { surface, payload });
         });
     }
+    // an Organization change from the status screen's edit modals (charter /
+    // image): the same Command::Propose the MCP propose tool drives — the
+    // drafted value rides along under "value", the display title under
+    // "title" (what the pending cards summarize)
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_org_propose(move |op, title, value| {
+            let payload = serde_json::json!({
+                "op": op.as_str(),
+                "title": title.as_str(),
+                "value": value.as_str(),
+            });
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::Propose {
+                    surface: Surface::Organization,
+                    payload,
+                },
+            );
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -1310,11 +1335,10 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
                 ui.set_rv_error(error.into());
             }
             RecoverNotice::Done(_) => {
-                // the engine flips to Main itself — just clear the modal so a
-                // later return to the choice screen starts clean
+                // the engine flips to Main itself — just clear the peer-way
+                // state so a later return to the Restore screen starts clean
                 ui.set_rv_running(false);
                 ui.set_rv_error("".into());
-                ui.set_rv_open(false);
             }
             RecoverNotice::None => {}
         }
@@ -1478,6 +1502,42 @@ struct SurfacesBundle {
     selected_key: String,
     /// Compose-banner label of the selected channel ("" = group).
     selected_label: String,
+    /// Organization → Members table rows (engine `ReadMembers`).
+    members: Vec<MemberRowData>,
+    /// Organization → Uploads table rows (engine `ReadUploads`).
+    uploads: Vec<UploadRowData>,
+}
+
+/// One rendered row of the Organization → Members table.
+struct MemberRowData {
+    name: String,
+    /// Identity-key fingerprint ("" on unanchored/demo workspaces).
+    id: String,
+    /// Full anchored identity key, lowercase hex ("" unanchored).
+    pk: String,
+    last: String,
+    /// 0 = synced, 1 = syncing, 2 = offline (mock presence).
+    state: i32,
+    open: i32,
+    uploads: i32,
+}
+
+/// One rendered row of the Organization → Uploads table (labels are
+/// pre-rendered here; the .slint side only displays).
+struct UploadRowData {
+    /// The carrying chat message id (hex) — what download-file takes.
+    id: String,
+    user: String,
+    date: String,
+    name: String,
+    kind: String,
+    size: String,
+    available: bool,
+    /// Sharer reachable (a user-to-user transfer needs them online).
+    online: bool,
+    /// Shortened mock checksum for the cell (the full hex rides MCP).
+    checksum: String,
+    expires: String,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -1592,6 +1652,11 @@ struct SurfaceData {
     gated: bool,
     log: Vec<LogLineData>,
     pending: Vec<ProposalRowData>,
+    /// Pending proposals this node already approved (the rest of `pending`
+    /// still wait on this node's vote — the approvals table shows the split).
+    pending_voted: usize,
+    /// Declined proposals against this surface.
+    denied: usize,
 }
 struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
@@ -1629,6 +1694,9 @@ struct ProposalRowData {
     text: String,
     approvals: i32,
     threshold: i32,
+    /// Ist-Stand / Soll-Stand display pair ("" = hidden line).
+    current: String,
+    proposed: String,
 }
 
 /// Read status + every surface snapshot and push them into the Slint models.
@@ -1673,6 +1741,46 @@ async fn push_surfaces(
     {
         Ok(Reply::State(snap)) => Some(snap),
         _ => None,
+    };
+    // the Organization tables ride the same push: the engine's ReadMembers /
+    // ReadUploads (the projections the MCP tools of the same name read)
+    let members: Vec<MemberRowData> = match wallet.execute(Command::ReadMembers).await {
+        Ok(Reply::Members(rows)) => rows
+            .into_iter()
+            .map(|m| MemberRowData {
+                name: m.member,
+                id: m.id,
+                pk: m.identity_pk,
+                last: m.last_seen,
+                state: i32::from(m.presence),
+                open: i32::try_from(m.open_proposals).unwrap_or(i32::MAX),
+                uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let upload_now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let uploads: Vec<UploadRowData> = match wallet.execute(Command::ReadUploads).await {
+        Ok(Reply::Uploads(rows)) => rows
+            .into_iter()
+            .map(|u| UploadRowData {
+                id: u.id.to_string(),
+                user: u.member,
+                date: file_date_label(u.ts),
+                name: u.name,
+                kind: u.kind,
+                size: file_size_label(u.size),
+                available: u.available,
+                online: u.online,
+                checksum: u
+                    .checksum
+                    .get(..10)
+                    .map(|s| format!("{s}…"))
+                    .unwrap_or_default(),
+                expires: expires_label(upload_now, u.expires_ts, u.available),
+            })
+            .collect(),
+        _ => Vec::new(),
     };
     let mut snaps: Vec<(Surface, SurfaceSnapshot)> = Vec::new();
     for sf in Surface::ALL {
@@ -1755,6 +1863,8 @@ async fn push_surfaces(
         channels,
         selected_key,
         selected_label,
+        members,
+        uploads,
     };
     let weak = weak.clone();
     let chat_ui = chat_ui.clone();
@@ -1824,6 +1934,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                     text: p.text.clone().into(),
                     approvals: p.approvals,
                     threshold: p.threshold,
+                    current: p.current.clone().into(),
+                    proposed: p.proposed.clone().into(),
                 })
                 .collect();
             // the surface's sub-views come straight from the shared
@@ -1846,6 +1958,9 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 gated: s.gated,
                 applied_count: s.log.len() as i32,
                 pending_count: s.pending.len() as i32,
+                pending_voted_count: s.pending_voted as i32,
+                pending_my_vote_count: (s.pending.len() - s.pending_voted) as i32,
+                denied_count: s.denied as i32,
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
                 views: ModelRc::new(VecModel::from(views)),
@@ -1869,6 +1984,39 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     sync_rows(&ui.get_chat_channels(), channels, |m| ui.set_chat_channels(m));
     ui.set_selected_channel(b.selected_key.as_str().into());
     ui.set_selected_channel_label(b.selected_label.as_str().into());
+
+    // the Organization tables (Members / Uploads)
+    let members: Vec<MemberRow> = b
+        .members
+        .iter()
+        .map(|m| MemberRow {
+            name: m.name.as_str().into(),
+            id: m.id.as_str().into(),
+            pk: m.pk.as_str().into(),
+            last: m.last.as_str().into(),
+            state: m.state,
+            open_proposals: m.open,
+            uploads: m.uploads,
+        })
+        .collect();
+    sync_rows(&ui.get_org_members(), members, |m| ui.set_org_members(m));
+    let uploads: Vec<UploadRow> = b
+        .uploads
+        .iter()
+        .map(|u| UploadRow {
+            id: u.id.as_str().into(),
+            user: u.user.as_str().into(),
+            date: u.date.as_str().into(),
+            name: u.name.as_str().into(),
+            kind: u.kind.as_str().into(),
+            size: u.size.as_str().into(),
+            available: u.available,
+            online: u.online,
+            checksum: u.checksum.as_str().into(),
+            expires: u.expires.as_str().into(),
+        })
+        .collect();
+    sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
 }
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
@@ -1909,7 +2057,8 @@ fn view_icon(key: &str) -> &'static str {
         "charter" => "📜",
         "status" => "📡",
         "members" => "👥",
-        "statistics" => "📊",
+        "uploads" => "📎",
+        "pending" => "🗳️",
         "today" => "💬",
         "archive" => "🗄️",
         "brain" => "🧠",
@@ -2010,6 +2159,8 @@ fn surface_data(
             text: summarize(&p.payload),
             approvals: p.approvals as i32,
             threshold: p.threshold as i32,
+            current: p.current.clone(),
+            proposed: p.proposed.clone(),
         })
         .collect();
     SurfaceData {
@@ -2018,6 +2169,8 @@ fn surface_data(
         gated: snap.gated,
         log,
         pending,
+        pending_voted: snap.pending.iter().filter(|p| p.approved_by_me).count(),
+        denied: snap.denied,
     }
 }
 
@@ -2107,6 +2260,26 @@ fn file_size_label(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         size_label(u32::try_from(bytes / 1024).unwrap_or(u32::MAX))
+    }
+}
+
+/// The uploads table's "expires in" cell: the mock share link dies at
+/// `expires_ts`; an unavailable share has nothing left to expire ("—").
+fn expires_label(now: u64, expires_ts: u64, available: bool) -> String {
+    if !available {
+        return "—".to_string();
+    }
+    if expires_ts <= now {
+        return "expired".to_string();
+    }
+    let left = expires_ts - now;
+    if left < 3600 {
+        format!("in {} min", (left / 60).max(1))
+    } else if left < 86_400 {
+        format!("in {} h", left / 3600)
+    } else {
+        let d = left / 86_400;
+        format!("in {d} day{}", if d == 1 { "" } else { "s" })
     }
 }
 
@@ -2558,7 +2731,8 @@ fn default_op(sf: Surface) -> &'static str {
         Surface::Quests => "add_quest",
         Surface::Vault => "seal_secret",
         Surface::Wallet => "transfer",
-        // read-only / ungated surfaces have nothing to propose
+        // organization changes come from the dedicated edit modals
+        // (org-propose carries the specific op); chat is ungated
         Surface::Chat | Surface::Organization => "note",
     }
 }
@@ -2717,7 +2891,7 @@ lexicon! {
     choice_join_title: "Join", "Beitreten";
     choice_join_sub: "Via an invite link", "Einem Workspace per Einladungslink beitreten";
     choice_restore_title: "Restore", "Wiederherstellen";
-    choice_restore_sub: "Seed phrase + backup", "Seed-Phrase + Backup";
+    choice_restore_sub: "With your phrase — from a backup or after device loss", "Mit deiner Phrase — aus Backup oder nach Geräteverlust";
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
@@ -2790,7 +2964,47 @@ lexicon! {
     const_signatories: "Founding members · ratified by all", "Gründungsmitglieder · von allen ratifiziert";
     enter_republic: "Enter republic", "Republik betreten";
     org_reachable: "reachable", "erreichbar";
-    org_surfaces: "Surfaces", "Bereiche";
+    org_approvals: "Approvals", "Approvals";
+    oa_col_surface: "Surface", "Bereich";
+    oa_pending_voted: "Pending (I voted)", "Offen (ich habe gestimmt)";
+    oa_denied: "Denied", "Abgelehnt";
+    oa_pending_mine: "Pending (my vote required)", "Offen (meine Stimme fehlt)";
+    oa_list_pending: "List pending", "Offene zeigen";
+    org_edit: "Edit", "Bearbeiten";
+    ol_title: "Republic image", "Bild der Republik";
+    ol_body: "Pick an image for this republic, or remove the current one. Either way the change is a gated proposal the members approve by threshold. (The picker is a mock — nothing is read or rendered yet.)", "Wähle ein Bild für diese Republik oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. (Der Datei-Dialog ist ein Mock — es wird noch nichts gelesen oder angezeigt.)";
+    ol_remove: "Remove image", "Bild entfernen";
+    oc_title: "Edit charter", "Satzung bearbeiten";
+    oc_body: "The charter was ratified by everyone at the founding — an edit is a gated change: the draft becomes a proposal the members approve by threshold. (Applying it does not rewrite the shown charter yet.)", "Die Satzung wurde bei der Gründung von allen ratifiziert — eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ersetzt die angezeigte Satzung noch nicht.)";
+    oc_propose: "Propose change", "Änderung vorschlagen";
+    op_change_charter: "Change charter", "Charter ändern";
+    op_change_logo: "Change image", "Logo ändern";
+    op_remove_logo: "Remove image", "Logo entfernen";
+    toast_proposed: "Proposed — awaiting approvals", "Vorgeschlagen — wartet auf Zustimmungen";
+    om_col_id: "ID", "ID";
+    om_col_pk: "Public key", "Public Key";
+    om_col_last: "Last seen", "Zuletzt gesehen";
+    om_col_open: "Open proposals", "Offene Vorschläge";
+    om_col_uploads: "Uploads", "Uploads";
+    om_col_recovery: "Recovery link", "Recovery-Link";
+    ou_col_user: "User", "Nutzer";
+    ou_col_date: "Date", "Datum";
+    ou_col_file: "Filename", "Dateiname";
+    ou_col_type: "Type", "Typ";
+    ou_col_size: "Size", "Größe";
+    ou_col_checksum: "Checksum", "Checksum";
+    ou_col_download: "Download", "Download";
+    ou_col_expires: "Expires in", "Läuft ab in";
+    ou_download: "Download", "Download";
+    ou_offline: "user offline", "Nutzer offline";
+    ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
+    orn_title: "Rename republic", "Republik umbenennen";
+    orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. (Applying it does not rename the shown republic yet.)", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden benennt die angezeigte Republik noch nicht um.)";
+    op_change_name: "Rename", "Name ändern";
+    pc_current: "Current", "Ist-Stand";
+    pc_proposed: "Proposed", "Soll-Stand";
+    pc_discuss: "Discussion", "Diskussion";
+    ou_note: "Only metadata is shared — the bytes move user-to-user via the share link, as long as the sharer keeps the file. (Transfer and expiry are mocks.)", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über den Share-Link, solange der Teilende die Datei behält. (Übertragung und Ablauf sind Mocks.)";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
     ow_change_folder: "Change folder", "Ordner wechseln";
@@ -2835,15 +3049,10 @@ lexicon! {
     jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     jw_failed: "Failed — invite rejected", "Fehlgeschlagen — Einladung abgelehnt";
-    choice_recover_title: "Recover", "Wieder beitreten";
-    choice_recover_sub: "Rejoin with a recovery link", "Nach Geräteverlust, mit Recovery-Link";
     om_recover_link: "Create recovery link", "Recovery-Link erstellen";
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
     rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
-    rv_title: "Recover your seat", "Deinen Sitz wiederherstellen";
-    rv_body: "Paste the recovery link a surviving member minted for you, plus your recovery phrase.", "Füge den Recovery-Link ein, den ein verbliebenes Mitglied für dich erstellt hat, dazu deine Wiederherstellungs-Phrase.";
-    rv_go: "Recover", "Wiederherstellen";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "Restore", "Wiederherstellen";
@@ -2852,7 +3061,7 @@ lexicon! {
     rw_seed_hint: "Needed for every restore path — all keys derive from this phrase.", "Für jeden Weg erforderlich — alle Schlüssel werden aus dieser Phrase abgeleitet.";
     rw_continue: "Continue", "Weiter";
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
-    rw_peer_hint: "Re-syncs the whole workspace from another member.", "Synchronisiert den gesamten Workspace von einem anderen Mitglied.";
+    rw_peer_hint: "Rejoins via another member — paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei — füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
@@ -3145,6 +3354,9 @@ mod tests {
             approvals: 2,
             threshold: 3,
             state: ProposalState::Proposed,
+            approved_by_me: false,
+            current: String::new(),
+            proposed: String::new(),
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(4, &[pv], &HashMap::new(), &first_seen);
@@ -3197,6 +3409,9 @@ mod tests {
             approvals: 2,
             threshold: 3,
             state: ProposalState::Proposed,
+            approved_by_me: false,
+            current: String::new(),
+            proposed: String::new(),
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
@@ -3370,6 +3585,20 @@ mod tests {
         }
         assert_eq!(parse_channel_key("patch:xyz"), None, "junk never panics");
         assert_eq!(parse_channel_key(""), None);
+    }
+
+    #[test]
+    fn expires_labels_render_the_mock_link_ttl() {
+        assert_eq!(expires_label(100, 100 + 13 * 86_400, true), "in 13 days");
+        assert_eq!(expires_label(100, 100 + 86_400, true), "in 1 day");
+        assert_eq!(expires_label(100, 100 + 7_200, true), "in 2 h");
+        assert_eq!(expires_label(100, 100 + 120, true), "in 2 min");
+        assert_eq!(expires_label(500, 100, true), "expired");
+        assert_eq!(
+            expires_label(100, 100 + 86_400, false),
+            "—",
+            "an unavailable share has nothing left to expire"
+        );
     }
 
     #[test]
