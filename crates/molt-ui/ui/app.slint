@@ -22,7 +22,7 @@ import "assets/fonts/Twemoji.Mozilla.ttf";
 
 import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
-    AppButton, AppField, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
+    AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel, DisabledTorRow
 } from "components.slint";
 import {
@@ -118,9 +118,18 @@ export component AppWindow inherits Window {
     in property <[UploadRow]> org-uploads;
     // the ratified founding charter (free-text agenda) for the Constitution surface
     in property <string> active-agenda;
+    // the charter pre-split into up to 3 balanced display columns (Rust
+    // charter-columns; empty = no charter → the no-agenda line shows)
+    in property <[string]> charter-cols;
     // Organization → Status/Members: reachable count derived from the roster
     in property <int> org-online;
     in property <int> org-total;
+    // the status info panel: founding date label ("—" = unknown) and the
+    // mock activity trio, mirrored from the engine's Status reply
+    in property <string> org-founded;
+    in property <int> org-active-1h;
+    in property <int> org-active-24h;
+    in property <int> org-active-7d;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -376,6 +385,12 @@ export component AppWindow inherits Window {
     property <string> org-charter-draft;
     property <bool> org-name-modal-open: false;
     property <string> org-name-draft;
+    // charter reader (click on the charter → full text, scrollable)
+    property <bool> charter-view-open: false;
+    // chat-retention setting (mock current value; a change is a proposal)
+    property <int> org-chat-retention: 7;
+    property <bool> org-retention-modal-open: false;
+    property <int> org-retention-draft: 7;
 
     // settings: a local editable draft, seeded from the engine session by Rust.
     in-out property <bool> cfg-headless: false;
@@ -573,6 +588,10 @@ export component AppWindow inherits Window {
             root.org-charter-modal-open = false;
         } else if (root.org-name-modal-open) {
             root.org-name-modal-open = false;
+        } else if (root.charter-view-open) {
+            root.charter-view-open = false;
+        } else if (root.org-retention-modal-open) {
+            root.org-retention-modal-open = false;
         } else if (root.screen == AppScreen.open) {
             root.navigate(AppScreen.choice);
         } else if (root.screen == AppScreen.restore && !root.restore-running) {
@@ -718,6 +737,10 @@ export component AppWindow inherits Window {
                             s: s;
                             selected: s.key == root.selected-surface;
                             compact: root.nav-collapsed;
+                            // staged out for now: only Organization and Chat
+                            // are live in the GUI — the other surfaces sit
+                            // greyed until their real implementations land
+                            enabled: s.key == "organization" || s.key == "chat";
                             chosen => {
                                 root.mv-draft = "";
                                 root.select-surface(s.key);
@@ -3135,18 +3158,6 @@ export component AppWindow inherits Window {
                                                 font-weight: 700;
                                                 wrap: word-wrap;
                                             }
-                                            HorizontalLayout {
-                                                spacing: 8px;
-                                                alignment: start;
-                                                StatusPill {
-                                                    label: root.threshold-badge;
-                                                    tone: Theme.accent;
-                                                }
-                                                StatusPill {
-                                                    label: "\{root.org-online} / \{root.org-total} \{Strings.org-reachable}";
-                                                    tone: root.org-online == root.org-total ? Theme.good : (root.org-online == 0 ? Theme.faint : Theme.warn);
-                                                }
-                                            }
                                         }
                                         Rectangle { horizontal-stretch: 1; }
                                         // renaming the republic is a gated
@@ -3169,16 +3180,122 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                // untitled info strip: founding date, the
+                                // consensus rule, and the activity trio
+                                // (replaces the pills under the name)
+                                Rectangle {
+                                    background: Theme.panel-2;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    HorizontalLayout {
+                                        padding: 12px;
+                                        spacing: 22px;
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: Strings.os-founded;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            Text {
+                                                text: root.org-founded == "" ? "—" : root.org-founded;
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: Strings.os-consensus;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            Text {
+                                                text: root.threshold-badge;
+                                                color: Theme.accent;
+                                                font-size: Theme.fs-body;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: Strings.os-act-1h;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            Text {
+                                                text: "\{root.org-active-1h} / \{root.org-total}";
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: Strings.os-act-24h;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            Text {
+                                                text: "\{root.org-active-24h} / \{root.org-total}";
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            spacing: 4px;
+                                            Text {
+                                                text: Strings.os-act-7d;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            Text {
+                                                text: "\{root.org-active-7d} / \{root.org-total}";
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
                                 DetailGroup {
                                     title: Strings.const-charter-title;
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        Text {
-                                            text: root.active-agenda == "" ? Strings.const-no-agenda : root.active-agenda;
-                                            color: root.active-agenda == "" ? Theme.faint : Theme.text;
-                                            font-size: Theme.fs-body;
-                                            wrap: word-wrap;
+                                        // up to three balanced display
+                                        // columns; a click opens the full,
+                                        // scrollable charter reader
+                                        Rectangle {
                                             horizontal-stretch: 1;
+                                            height: charter-cols-l.preferred-height;
+                                            charter-cols-l := HorizontalLayout {
+                                                spacing: 16px;
+                                                if root.charter-cols.length == 0: Text {
+                                                    text: Strings.const-no-agenda;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-body;
+                                                }
+                                                for col in root.charter-cols: Text {
+                                                    text: col;
+                                                    color: Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    wrap: word-wrap;
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+                                            TouchArea {
+                                                enabled: root.charter-cols.length > 0;
+                                                mouse-cursor: MouseCursor.pointer;
+                                                clicked => {
+                                                    root.charter-view-open = true;
+                                                }
+                                            }
                                         }
                                         // charter changes are gated — the
                                         // edit opens a (mock) proposal draft
@@ -3192,6 +3309,39 @@ export component AppWindow inherits Window {
                                             clicked => {
                                                 root.org-charter-draft = root.active-agenda;
                                                 root.org-charter-modal-open = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                // settings that are themselves gated changes:
+                                // editing one proposes it to the members
+                                DetailGroup {
+                                    title: Strings.ocs-title;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: Strings.ocs-chat-retention;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-body;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: "\{root.org-chat-retention} \{Strings.ocs-days}";
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-body;
+                                            vertical-alignment: center;
+                                        }
+                                        AppButton {
+                                            width: 26px;
+                                            height: 26px;
+                                            pad: 0px;
+                                            label: "✎";
+                                            tooltip: Strings.org-edit;
+                                            tooltip-left: true;
+                                            clicked => {
+                                                root.org-retention-draft = root.org-chat-retention;
+                                                root.org-retention-modal-open = true;
                                             }
                                         }
                                     }
@@ -5132,7 +5282,7 @@ export component AppWindow inherits Window {
     // it does not yet rewrite the shown charter (mock effect).
     // =================================================================
     if root.org-charter-modal-open: ConfirmModal {
-        dialog-width: 520px;
+        dialog-width: 720px;
         title: Strings.oc-title;
         body: Strings.oc-body;
         confirm-label: Strings.oc-propose;
@@ -5145,9 +5295,95 @@ export component AppWindow inherits Window {
             root.org-propose("set_charter", Strings.op-change-charter, root.org-charter-draft);
             root.show-toast(Strings.toast-proposed);
         }
-        AppField {
+        // the whole charter stays readable while editing: a big, scrolling
+        // multi-line editor instead of a one-line field
+        AppArea {
+            height: 300px;
             text <=> root.org-charter-draft;
             placeholder: Strings.cw-charter-agenda-ph;
+        }
+    }
+
+    // =================================================================
+    // Modal: the charter reader (click on the charter text) — the full
+    // ratified text, scrollable, with a single shrink-back action.
+    // =================================================================
+    if root.charter-view-open: ConfirmModal {
+        dialog-width: 760px;
+        title: Strings.const-charter-title;
+        body: "";
+        cancel-label: "";
+        confirm-label: Strings.cv-shrink;
+        dismissed => {
+            root.charter-view-open = false;
+        }
+        confirmed => {
+            root.charter-view-open = false;
+        }
+        Rectangle {
+            height: 420px;
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            cv-fl := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: max(self.height, cv-text.preferred-height + 24px);
+                cv-text := Text {
+                    x: 14px;
+                    y: 12px;
+                    width: parent.width - 28px;
+                    text: root.active-agenda == "" ? Strings.const-no-agenda : root.active-agenda;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+            }
+            ScrollHint {
+                x: parent.width - 7px;
+                view-h: cv-fl.height;
+                content-h: cv-fl.viewport-height;
+                scroll-y: cv-fl.viewport-y;
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: change the chat deletion period (Organization → Status →
+    // Settings). A gated change like the other organization edits: the
+    // drafted period becomes a real proposal.
+    // =================================================================
+    if root.org-retention-modal-open: ConfirmModal {
+        dialog-width: 460px;
+        title: Strings.ocr-title;
+        body: Strings.ocr-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.org-retention-draft != root.org-chat-retention;
+        dismissed => {
+            root.org-retention-modal-open = false;
+        }
+        confirmed => {
+            root.org-retention-modal-open = false;
+            root.org-propose("set_chat_retention", Strings.op-chat-retention, "\{root.org-retention-draft} days");
+            root.show-toast(Strings.toast-proposed);
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppStepper {
+                value <=> root.org-retention-draft;
+                minimum: 1;
+                maximum: 365;
+            }
+            Text {
+                text: Strings.ocs-days;
+                color: Theme.dim;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
 

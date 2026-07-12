@@ -36,6 +36,9 @@ pub(crate) fn change_summary(
     let current = match op {
         "set_charter" => replica.map(|r| r.agenda.clone()).unwrap_or_default(),
         "set_name" => replica.map(|r| r.name.clone()).unwrap_or_default(),
+        // the chat-retention setting is not yet engine state — its mock
+        // default is the Ist-Stand until the real setting lands
+        "set_chat_retention" => "7 days".to_string(),
         // no image / plugin state exists yet (mock) — nothing to show
         _ => String::new(),
     };
@@ -436,6 +439,24 @@ impl State {
     }
 
     pub(crate) fn status(&self) -> StatusView {
+        // the activity trio is a mock presence projection (real presence is
+        // transport work): synced = hour-active, syncing = day-active, the
+        // whole roster = week-active
+        let entry = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace);
+        let presence = |member: &str| {
+            entry
+                .and_then(|e| e.members.iter().find(|mi| mi.name == member))
+                .map(|mi| mi.state)
+                .unwrap_or(0)
+        };
+        let roster = self.roster();
+        let active_1h = roster.iter().filter(|m| presence(m) == 0).count();
+        let active_24h = roster.iter().filter(|m| presence(m) <= 1).count();
+        let active_7d = roster.len();
         let surfaces = Surface::ALL
             .into_iter()
             .map(|s| {
@@ -460,9 +481,13 @@ impl State {
             .collect();
         StatusView {
             member: self.member(),
-            members: self.roster(),
+            members: roster,
             threshold: self.threshold(),
             surfaces,
+            founded_ts: self.replica.as_ref().map(|r| r.founded_ts).unwrap_or(0),
+            active_1h,
+            active_24h,
+            active_7d,
         }
     }
 }

@@ -732,7 +732,7 @@ export component ConfirmModal inherits Rectangle {
                 font-weight: 700;
                 wrap: word-wrap;
             }
-            Text {
+            if root.body != "": Text {
                 text: root.body;
                 color: Theme.dim;
                 font-size: Theme.fs-body;
@@ -747,7 +747,9 @@ export component ConfirmModal inherits Rectangle {
                 Rectangle {
                     horizontal-stretch: 1;
                 }
-                AppButton {
+                // a read-only dialog blanks the cancel label — the confirm
+                // button is then its single (closing) action
+                if root.cancel-label != "": AppButton {
                     label: root.cancel-label;
                     clicked => {
                         root.dismissed();
@@ -768,6 +770,44 @@ export component ConfirmModal inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+}
+
+// Multi-line text editor (e.g. the charter draft): AppField's skin around
+// a wrapping TextInput inside a scrollable viewport, so a long text stays
+// fully readable and editable.
+export component AppArea inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    height: 240px;
+    background: Theme.panel;
+    border-radius: Theme.radius;
+    border-width: Theme.border-w;
+    border-color: input.has-focus ? Theme.accent : Theme.line;
+    clip: true;
+    fl := Flickable {
+        x: 12px;
+        y: 8px;
+        width: parent.width - 24px;
+        height: parent.height - 16px;
+        viewport-width: self.width;
+        viewport-height: max(self.height, input.preferred-height);
+        if root.text == "": Text {
+            width: 100%;
+            text: root.placeholder;
+            color: Theme.faint;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+        }
+        input := TextInput {
+            width: 100%;
+            height: fl.viewport-height;
+            text <=> root.text;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            single-line: false;
+            wrap: word-wrap;
         }
     }
 }

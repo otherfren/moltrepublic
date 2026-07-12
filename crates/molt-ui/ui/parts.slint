@@ -91,10 +91,13 @@ export component SurfaceRow inherits Rectangle {
     in property <SurfaceTab> s;
     in property <bool> selected;
     in property <bool> compact: false;
+    // staged-out surfaces render greyed and ignore clicks
+    in property <bool> enabled: true;
     callback chosen();
     height: 46px;
     border-radius: Theme.win95 ? 0px : 8px;
-    background: root.selected ? Theme.raised : (ta.has-hover ? Theme.panel-2 : transparent);
+    opacity: root.enabled ? 1.0 : 0.4;
+    background: root.selected ? Theme.raised : (root.enabled && ta.has-hover ? Theme.panel-2 : transparent);
     Rectangle {
         x: 0;
         width: 3px;
@@ -162,6 +165,7 @@ export component SurfaceRow inherits Rectangle {
         }
     }
     ta := TouchArea {
+        enabled: root.enabled;
         clicked => {
             root.chosen();
         }

@@ -129,6 +129,7 @@ impl State {
                     identities: identities.clone(),
                     agenda: agenda.clone(),
                     republic_id: republic_id.clone(),
+                    founded_ts: env.ts,
                 });
             }
             WorkspaceEvent::MemberJoined { member } => {
@@ -312,6 +313,7 @@ impl State {
             identities: replica.identities,
             agenda: replica.agenda,
             republic_id: replica.republic_id,
+            founded_ts: replica.founded_ts,
             chat: self.chat.clone(),
             applied: self
                 .applied
@@ -348,6 +350,7 @@ impl State {
             identities: dump.identities,
             agenda: dump.agenda,
             republic_id: dump.republic_id,
+            founded_ts: dump.founded_ts,
         });
         self.chat = dump.chat;
         // P4, the second ingest choke point: a LEGACY snapshot (written by

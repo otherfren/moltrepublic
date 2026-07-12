@@ -1165,6 +1165,7 @@ mod tests {
             identities: Vec::new(), // adopt_chain fills these from the verified head
             agenda: "play chess".to_string(),
             republic_id: b.republic_id.clone(),
+            founded_ts: 0,
         });
         peer.adopt_chain(genesis);
         assert!(peer.is_chain_governed());
@@ -1209,6 +1210,7 @@ mod tests {
             identities: Vec::new(),
             agenda: "play chess".to_string(),
             republic_id: b.republic_id.clone(),
+            founded_ts: 0,
         });
         peer.adopt_chain(chain);
         peer

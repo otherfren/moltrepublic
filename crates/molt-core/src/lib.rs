@@ -1517,6 +1517,11 @@ pub struct EngineStateDump {
     /// genesis.
     #[serde(default)]
     pub republic_id: String,
+    /// The genesis envelope's timestamp — the founding date `Status` shows;
+    /// carried in the snapshot like the other genesis-derived fields (the
+    /// genesis is before the snapshot and not replayed). 0 = unknown.
+    #[serde(default)]
+    pub founded_ts: u64,
     /// The chat log.
     pub chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface (keyed by surface name).
@@ -2657,6 +2662,20 @@ pub struct StatusView {
     pub threshold: usize,
     /// Per-surface counters.
     pub surfaces: Vec<SurfaceStat>,
+    /// Unix seconds of the founding — the genesis envelope's timestamp
+    /// (real on replayed workspaces; 0 on pre-ritual/demo groups).
+    #[serde(default)]
+    pub founded_ts: u64,
+    /// Members active within the last hour. Mock presence projection until
+    /// real presence lands: synced members count as hour-active.
+    #[serde(default)]
+    pub active_1h: usize,
+    /// Members active within the last 24 h (mock: synced + syncing).
+    #[serde(default)]
+    pub active_24h: usize,
+    /// Members active within the last 7 days (mock: the whole roster).
+    #[serde(default)]
+    pub active_7d: usize,
 }
 
 /// The group configuration the engine runs under.

@@ -1266,8 +1266,14 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     ui.set_active_state(a_state);
     ui.set_active_status(a_status.into());
     // the ratified founding charter for the Constitution surface (empty until a
-    // deliberated workspace is open)
-    ui.set_active_agenda(active.map(|w| w.agenda.as_str()).unwrap_or_default().into());
+    // deliberated workspace is open) — plus its balanced display columns
+    let agenda = active.map(|w| w.agenda.as_str()).unwrap_or_default();
+    ui.set_active_agenda(agenda.into());
+    let cols: Vec<slint::SharedString> = charter_columns(agenda, 3)
+        .into_iter()
+        .map(slint::SharedString::from)
+        .collect();
+    ui.set_charter_cols(ModelRc::new(VecModel::from(cols)));
     let roster: Vec<MemberSync> = active
         .map(|w| {
             w.members
@@ -1506,6 +1512,17 @@ struct SurfacesBundle {
     members: Vec<MemberRowData>,
     /// Organization → Uploads table rows (engine `ReadUploads`).
     uploads: Vec<UploadRowData>,
+    /// The status info strip (founding date + mock activity trio).
+    org_stats: OrgStats,
+}
+
+/// The Organization → Status info strip, from the engine's Status reply.
+struct OrgStats {
+    /// Rendered founding date ("" = unknown → the strip shows "—").
+    founded: String,
+    active_1h: i32,
+    active_24h: i32,
+    active_7d: i32,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -1711,8 +1728,21 @@ async fn push_surfaces(
     weak: &slint::Weak<AppWindow>,
     chat_ui: &Arc<Mutex<ChatUiState>>,
 ) {
-    let (member, threshold_badge) = match wallet.execute(Command::Status).await {
-        Ok(Reply::Status(s)) => (s.member, format!("{}-of-{}", s.threshold, s.members.len())),
+    let (member, threshold_badge, org_stats) = match wallet.execute(Command::Status).await {
+        Ok(Reply::Status(s)) => (
+            s.member,
+            format!("{}-of-{}", s.threshold, s.members.len()),
+            OrgStats {
+                founded: if s.founded_ts == 0 {
+                    String::new()
+                } else {
+                    file_date_label(s.founded_ts)
+                },
+                active_1h: i32::try_from(s.active_1h).unwrap_or(i32::MAX),
+                active_24h: i32::try_from(s.active_24h).unwrap_or(i32::MAX),
+                active_7d: i32::try_from(s.active_7d).unwrap_or(i32::MAX),
+            },
+        ),
         _ => return,
     };
     // the chat-bus UI state is per-workspace: bind it to the active id so
@@ -1865,6 +1895,7 @@ async fn push_surfaces(
         selected_label,
         members,
         uploads,
+        org_stats,
     };
     let weak = weak.clone();
     let chat_ui = chat_ui.clone();
@@ -2017,6 +2048,12 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         })
         .collect();
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
+
+    // the status info strip (founding date + mock activity trio)
+    ui.set_org_founded(b.org_stats.founded.as_str().into());
+    ui.set_org_active_1h(b.org_stats.active_1h);
+    ui.set_org_active_24h(b.org_stats.active_24h);
+    ui.set_org_active_7d(b.org_stats.active_7d);
 }
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
@@ -2261,6 +2298,42 @@ fn file_size_label(bytes: u64) -> String {
     } else {
         size_label(u32::try_from(bytes / 1024).unwrap_or(u32::MAX))
     }
+}
+
+/// Split the charter into up to `max` visually balanced columns at word
+/// boundaries (~320 chars per column) — a DISPLAY split only, the text
+/// itself is untouched: short charters stay single-column, long ones use
+/// the status panel's width. Empty input yields no columns.
+fn charter_columns(text: &str, max: usize) -> Vec<String> {
+    const PER_COL: usize = 320;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let cols = trimmed.len().div_ceil(PER_COL).clamp(1, max.max(1));
+    let target = trimmed.len().div_ceil(cols);
+    let mut out = Vec::new();
+    let mut rest = trimmed;
+    for _ in 0..cols - 1 {
+        if rest.trim().is_empty() {
+            break;
+        }
+        // cut at the first whitespace at/after the balance target
+        // (char_indices keeps every cut on a character boundary); a
+        // whitespace-free tail keeps the remainder in one column
+        let cut = rest
+            .char_indices()
+            .find(|(i, c)| *i >= target && c.is_whitespace())
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let (head, tail) = rest.split_at(cut);
+        out.push(head.trim().to_string());
+        rest = tail;
+    }
+    if !rest.trim().is_empty() {
+        out.push(rest.trim().to_string());
+    }
+    out
 }
 
 /// The uploads table's "expires in" cell: the mock share link dies at
@@ -3004,6 +3077,18 @@ lexicon! {
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
+    os_founded: "Founded", "Gegründet";
+    os_consensus: "Consensus", "Konsens";
+    os_act_1h: "Active · last hour", "Aktiv · letzte Stunde";
+    os_act_24h: "Active · 24 h", "Aktiv · 24 h";
+    os_act_7d: "Active · 7 days", "Aktiv · 7 Tage";
+    cv_shrink: "Shrink", "Verkleinern";
+    ocs_title: "Settings", "Einstellungen";
+    ocs_chat_retention: "Delete chat after", "Chat löschen nach";
+    ocs_days: "days", "Tage";
+    ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
+    ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
+    op_chat_retention: "Change chat deletion", "Chat-Löschfrist ändern";
     ou_note: "Only metadata is shared — the bytes move user-to-user via the share link, as long as the sharer keeps the file. (Transfer and expiry are mocks.)", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über den Share-Link, solange der Teilende die Datei behält. (Übertragung und Ablauf sind Mocks.)";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
@@ -3585,6 +3670,34 @@ mod tests {
         }
         assert_eq!(parse_channel_key("patch:xyz"), None, "junk never panics");
         assert_eq!(parse_channel_key(""), None);
+    }
+
+    #[test]
+    fn charter_splits_into_balanced_columns_at_word_boundaries() {
+        // a short charter stays single-column
+        assert_eq!(
+            charter_columns("kurz und knapp", 3),
+            vec!["kurz und knapp".to_string()]
+        );
+        // empty → no columns (the UI shows its no-agenda line)
+        assert!(charter_columns("   ", 3).is_empty());
+        // ~450 chars → 2 columns; nothing lost, split at word boundaries
+        let mid = "wort ".repeat(90);
+        let cols = charter_columns(&mid, 3);
+        assert_eq!(cols.len(), 2);
+        assert!(
+            cols.join(" ")
+                .split_whitespace()
+                .eq(mid.split_whitespace()),
+            "columns are a display split — every word survives"
+        );
+        // a long charter caps at the column maximum
+        let long = "wort ".repeat(300);
+        assert_eq!(charter_columns(&long, 3).len(), 3);
+        // umlauts near the cut never split a character
+        let umlaut = "ä".repeat(400);
+        let cols = charter_columns(&umlaut, 3);
+        assert_eq!(cols.concat(), umlaut);
     }
 
     #[test]

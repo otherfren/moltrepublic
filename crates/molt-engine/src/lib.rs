@@ -306,6 +306,9 @@ pub(crate) struct ReplicaState {
     /// persistent chain can compute `approval_bytes` at runtime (empty on a
     /// pre-republic genesis).
     pub(crate) republic_id: String,
+    /// The genesis envelope's timestamp — the founding date surfaced by
+    /// `Status` (0 on a pre-ritual/demo genesis).
+    pub(crate) founded_ts: u64,
 }
 
 /// An in-flight founder mesh bootstrap: its ritual generation, the founded
@@ -1047,12 +1050,16 @@ mod tests {
                 Err(MoltError::FileUnavailable(i)) if i == removed_share_id
             ));
 
-            // the roster and rule replayed from the genesis event
+            // the roster, rule, and founding date replayed from the genesis
             match w.execute(Command::Status).await.expect("status") {
                 Reply::Status(st) => {
                     assert_eq!(st.member, "petra");
                     assert_eq!(st.threshold, 2);
                     assert_eq!(st.members.len(), 3);
+                    assert!(
+                        st.founded_ts > 0,
+                        "the genesis envelope's timestamp is the founding date"
+                    );
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -1597,6 +1604,25 @@ mod tests {
         });
     }
 
+    /// The status summary carries the founding date (the genesis envelope's
+    /// timestamp — real on replayed workspaces, 0 on the sessionless demo)
+    /// and the mock activity trio the Organization → Status info panel
+    /// renders (synced = hour-active, syncing = day-active, roster = week).
+    #[test]
+    fn status_carries_founding_date_and_activity() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            match w.execute(Command::Status).await.expect("status") {
+                Reply::Status(st) => {
+                    assert_eq!(st.founded_ts, 0, "the demo group has no genesis event");
+                    assert_eq!(st.active_7d, 3, "mock: the whole roster is week-active");
+                    assert!(st.active_1h <= st.active_24h && st.active_24h <= st.active_7d);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+    }
+
     /// The pending cards' "Ist-Stand / Soll-Stand" pair: an Organization
     /// edit proposal exposes what the state is now (from the genesis
     /// replica) and what the change would make it (the payload's `value`).
@@ -1611,6 +1637,7 @@ mod tests {
             identities: Vec::new(),
             agenda: "alte Satzung".into(),
             republic_id: String::new(),
+            founded_ts: 0,
         };
         let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
             surface,
@@ -1645,6 +1672,14 @@ mod tests {
         assert_eq!(
             proposals::change_summary(Some(&replica), &rec(Surface::Memory, "add_note", "")),
             (String::new(), String::new())
+        );
+        // the chat-retention setting has a mock default as its Ist-Stand
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                &rec(Surface::Organization, "set_chat_retention", "14 days")
+            ),
+            ("7 days".to_string(), "14 days".to_string())
         );
     }
 
