@@ -232,8 +232,12 @@ export component AppWindow inherits Window {
     // (raised from Rust's window close-requested handler)
     in-out property <bool> confirm-quit-open: false;
     // ---- chat channels (chat bus) ----
-    // sidebar rows, pushed from Rust (engine channel enumeration + unread)
+    // sidebar rows, pushed from Rust: the DISCUSSIONS of open votes only
+    // (the group view is the chat surface's "today" nav row)
     in property <[ChannelItem]> chat-channels;
+    // unread count of the group channel — the badge on the Gruppe nav row
+    // (the group has no channel row of its own anymore)
+    in property <int> group-unread;
     // The SELECTED channel is deliberately UI-LOCAL state (like
     // nav-collapsed), NOT part of the shared SessionView: the filter itself
     // runs engine-side (ReadState { channel }), so GUI and MCP stay
@@ -753,22 +757,33 @@ export component AppWindow inherits Window {
                                 // something is in voting; open decisions of
                                 // THIS node raise the ⚠-badge on the row
                                 if v.key != "pending" || s.pending-count > 0: ViewRow {
-                                    label: v.name;
+                                    // chat's "today" IS the group view —
+                                    // localized like the old group channel
+                                    // row it replaces
+                                    label: s.key == "chat" && v.key == "today" ? Strings.ch-group : v.name;
                                     icon: v.icon;
                                     selected: v.key == root.selected-view;
-                                    pending: v.key == "proposals" || v.key == "pending" ? s.pending-count : 0;
+                                    pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
+                                        : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
                                     chosen => {
                                         root.mv-draft = "";
                                         root.select-view(s.key, v.key);
+                                        // the Gruppe row replaces the old
+                                        // group channel row: entering it
+                                        // resets the channel filter
+                                        if (s.key == "chat" && v.key == "today") {
+                                            root.select-channel("group");
+                                        }
                                     }
                                 }
                             }
                         }
-                        // chat channels (chat bus): group first, then patch
-                        // discussions, then topics — views over the ONE log,
-                        // with a per-channel unread pill. Selecting re-reads
-                        // through the engine's channel filter.
+                        // chat discussions (chat bus): the patch channels of
+                        // OPEN votes only — views over the ONE log, with a
+                        // per-channel unread pill; the section exists only
+                        // while something is up for a vote. Selecting
+                        // re-reads through the engine's channel filter.
                         if s.key == "chat" && s.key == root.selected-surface && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
                             spacing: 1px;
                             HorizontalLayout {
@@ -776,14 +791,14 @@ export component AppWindow inherits Window {
                                 padding-top: 6px;
                                 padding-bottom: 2px;
                                 Text {
-                                    text: Strings.ch-channels;
+                                    text: Strings.ch-discussions;
                                     color: Theme.faint;
                                     font-size: Theme.fs-cap;
                                     font-weight: 700;
                                 }
                             }
                             for c in root.chat-channels: ViewRow {
-                                label: c.key == "group" ? Strings.ch-group : c.label;
+                                label: c.label;
                                 icon: c.icon;
                                 selected: c.key == root.selected-channel;
                                 pending: c.unread;

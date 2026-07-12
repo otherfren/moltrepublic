@@ -1514,6 +1514,8 @@ struct SurfacesBundle {
     uploads: Vec<UploadRowData>,
     /// The status info strip (founding date + mock activity trio).
     org_stats: OrgStats,
+    /// Group-channel unread count (badges the Gruppe nav row).
+    group_unread: i32,
 }
 
 /// The Organization → Status info strip, from the engine's Status reply.
@@ -1871,7 +1873,11 @@ async fn push_surfaces(
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(&known);
-    let channels = derive_channels(&infos, &titles, &unread);
+    let channels = derive_channels(&infos, &known, &unread);
+    // the group channel has no sidebar row anymore — its unread count
+    // badges the Gruppe nav row instead
+    let group_unread =
+        i32::try_from(unread.get("group").copied().unwrap_or(0)).unwrap_or(i32::MAX);
     let selected_label = channel_display_label(&selected, &titles);
     let ctx = ChatViewCtx {
         selected,
@@ -1880,10 +1886,17 @@ async fn push_surfaces(
         first_seen,
         quotes,
     };
+    let chat_cutoff = upload_now.saturating_sub(MOCK_CHAT_RETENTION_DAYS * 86_400);
     let surfaces: Vec<SurfaceData> = snaps
         .iter()
         .map(|(sf, snap)| {
-            surface_data(*sf, snap, &member, (*sf == Surface::Chat).then_some(&ctx))
+            surface_data(
+                *sf,
+                snap,
+                &member,
+                (*sf == Surface::Chat).then_some(&ctx),
+                chat_cutoff,
+            )
         })
         .collect();
     let bundle = SurfacesBundle {
@@ -1896,6 +1909,7 @@ async fn push_surfaces(
         members,
         uploads,
         org_stats,
+        group_unread,
     };
     let weak = weak.clone();
     let chat_ui = chat_ui.clone();
@@ -2049,6 +2063,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
 
+    ui.set_group_unread(b.group_unread);
+
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());
     ui.set_org_active_1h(b.org_stats.active_1h);
@@ -2148,11 +2164,18 @@ fn surface_data(
     snap: &SurfaceSnapshot,
     me: &str,
     chat_ctx: Option<&ChatViewCtx>,
+    chat_cutoff: u64,
 ) -> SurfaceData {
     let mut log: Vec<LogLineData> = if sf == Surface::Chat {
         let msgs = chat_messages(snap);
-        // (ts, line) pairs: the patch-channel system lines merge in by time
-        let pairs: Vec<(u64, LogLineData)> = msgs.iter().map(|m| (m.ts, chat_line(m, me))).collect();
+        // the Gruppe view shows the retention window only (mock 7 days —
+        // the Organization → Status setting); a DISPLAY filter: the log,
+        // the engine read, and the unread ledger stay complete
+        let pairs: Vec<(u64, LogLineData)> = msgs
+            .iter()
+            .filter(|m| within_retention(m.ts, chat_cutoff))
+            .map(|m| (m.ts, chat_line(m, me)))
+            .collect();
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
                 let ctx = chat_ctx.expect("checked above");
@@ -2298,6 +2321,17 @@ fn file_size_label(bytes: u64) -> String {
     } else {
         size_label(u32::try_from(bytes / 1024).unwrap_or(u32::MAX))
     }
+}
+
+/// The mock chat-retention period (days) — mirrors the Organization →
+/// Status settings panel's default until the real, gated setting lands.
+const MOCK_CHAT_RETENTION_DAYS: u64 = 7;
+
+/// The Gruppe view's display window: keep a chat message while it is
+/// younger than the (mock) retention period. An unknown age (legacy ts 0)
+/// stays visible — the display fails open, it never silently hides.
+fn within_retention(ts: u64, cutoff: u64) -> bool {
+    ts == 0 || ts >= cutoff
 }
 
 /// Split the charter into up to `max` visually balanced columns at word
@@ -2479,57 +2513,44 @@ fn parse_channel_key(key: &str) -> Option<ChannelRef> {
     })
 }
 
-/// The sidebar's channel rows from the engine enumeration: `group` always
-/// first (synthesized when absent), then patch channels by ascending
-/// proposal id — titles resolved lazily from proposal state with a `#id`
-/// fallback, never an error on an unknown id (concept Q4) — then topics in
-/// byte order (channel equality is exact-string in core, so no case folding
-/// here either).
+/// The sidebar's DISCUSSION rows from the engine enumeration: a discussion
+/// is vote-bound, so only patch channels whose proposal is still OPEN
+/// (something can be voted on — [`KnownFate::Pending`]) appear, by
+/// ascending proposal id with the proposal-state title. No group row (the
+/// Gruppe view above covers it), no sealed/closed votes, no unknown
+/// proposals, no free topics — the engine's channel enumeration itself
+/// stays complete (MCP reads it unfiltered).
 fn derive_channels(
     infos: &[ChannelInfo],
-    titles: &HashMap<u64, String>,
+    known: &HashMap<u64, KnownProposal>,
     unread: &HashMap<String, usize>,
 ) -> Vec<ChannelRowData> {
     let unread_of =
         |key: &str| i32::try_from(unread.get(key).copied().unwrap_or(0)).unwrap_or(i32::MAX);
     let mut patches: Vec<u64> = Vec::new();
-    let mut topics: Vec<String> = Vec::new();
     for i in infos {
-        match &i.channel {
-            ChannelRef::Group => {}
-            ChannelRef::Patch { id } => patches.push(id.0),
-            ChannelRef::Topic { name } => topics.push(name.clone()),
+        if let ChannelRef::Patch { id } = &i.channel {
+            patches.push(id.0);
         }
     }
     patches.sort_unstable();
     patches.dedup();
-    topics.sort();
-    topics.dedup();
-    let mut rows = vec![ChannelRowData {
-        key: "group".to_string(),
-        label: String::new(), // the UI substitutes the localized group label
-        icon: "💬".to_string(),
-        unread: unread_of("group"),
-    }];
-    for id in patches {
-        let key = format!("patch:{id}");
-        rows.push(ChannelRowData {
-            unread: unread_of(&key),
-            key,
-            label: titles.get(&id).cloned().unwrap_or_else(|| format!("#{id}")),
-            icon: "🗳️".to_string(),
-        });
-    }
-    for name in topics {
-        let key = format!("topic:{name}");
-        rows.push(ChannelRowData {
-            unread: unread_of(&key),
-            key,
-            label: name,
-            icon: "#️⃣".to_string(),
-        });
-    }
-    rows
+    patches
+        .into_iter()
+        .filter_map(|id| {
+            let k = known.get(&id)?;
+            if k.fate != KnownFate::Pending {
+                return None;
+            }
+            let key = format!("patch:{id}");
+            Some(ChannelRowData {
+                unread: unread_of(&key),
+                key,
+                label: k.title.clone(),
+                icon: "🗳️".to_string(),
+            })
+        })
+        .collect()
 }
 
 /// The compose-banner label of the selected channel ("" = group, which
@@ -3134,7 +3155,7 @@ lexicon! {
     jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     jw_failed: "Failed — invite rejected", "Fehlgeschlagen — Einladung abgelehnt";
-    om_recover_link: "Create recovery link", "Recovery-Link erstellen";
+    om_recover_link: "Recovery link", "Recovery-Link";
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
     rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
@@ -3214,7 +3235,7 @@ lexicon! {
     mv_empty_pending: "Nothing awaiting approval.", "Nichts wartet auf Zustimmung.";
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
-    ch_channels: "Channels", "Kanäle";
+    ch_discussions: "Discussions", "Diskussionen";
     ch_group: "Group", "Gruppe";
     ch_new_topic: "New topic", "Neues Thema";
     ch_topic_ph: "Topic name…", "Themenname…";
@@ -3381,7 +3402,15 @@ mod tests {
     }
 
     #[test]
-    fn derive_channels_lists_group_first_then_patches_then_topics_with_unread() {
+    fn derive_channels_lists_only_open_vote_discussions() {
+        let known_of = |title: &str, fate: KnownFate| KnownProposal {
+            title: title.to_string(),
+            payload: serde_json::json!({}),
+            surface: Surface::Memory,
+            approvals: 1,
+            threshold: 2,
+            fate,
+        };
         let infos = vec![
             ChannelInfo {
                 channel: ChannelRef::Topic { name: "zeta".into() },
@@ -3394,7 +3423,7 @@ mod tests {
                 last_ts: 30,
             },
             ChannelInfo {
-                channel: ChannelRef::Topic { name: "Alpha".into() },
+                channel: ChannelRef::Patch { id: ProposalId(5) },
                 count: 2,
                 last_ts: 20,
             },
@@ -3409,25 +3438,25 @@ mod tests {
                 last_ts: 50,
             },
         ];
-        let titles = HashMap::from([(3u64, "raise budget".to_string())]);
-        let unread = HashMap::from([("topic:zeta".to_string(), 4usize), ("group".to_string(), 1)]);
-        let rows = derive_channels(&infos, &titles, &unread);
+        let known = HashMap::from([
+            (3u64, known_of("raise budget", KnownFate::Pending)),
+            (5u64, known_of("sealed one", KnownFate::Applied)),
+        ]);
+        let unread = HashMap::from([("patch:3".to_string(), 2usize), ("group".to_string(), 1)]);
+        let rows = derive_channels(&infos, &known, &unread);
+        // a discussion is vote-bound: only OPEN votes (something can still
+        // be voted on) appear — no group row (the Gruppe view covers it),
+        // no sealed/closed votes, no unknown proposals, no free topics
         assert_eq!(
             rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
-            ["group", "patch:3", "patch:7", "topic:Alpha", "topic:zeta"],
-            "group first, then patches by id, then topics by name"
+            ["patch:3"],
+            "only the open vote's discussion survives"
         );
-        assert_eq!(rows[1].label, "raise budget", "patch title from proposal state");
-        assert_eq!(rows[2].label, "#7", "unknown proposal → #id fallback, never an error");
-        assert_eq!(rows[3].label, "Alpha");
-        assert_eq!(
-            rows.iter().map(|r| r.unread).collect::<Vec<_>>(),
-            [1, 0, 0, 0, 4]
-        );
-        // group is synthesized even when the engine list lacks it
+        assert_eq!(rows[0].label, "raise budget", "patch title from proposal state");
+        assert_eq!(rows[0].unread, 2);
+        // nothing open → no rows (the sidebar hides the whole section)
         let rows = derive_channels(&[], &HashMap::new(), &HashMap::new());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key, "group");
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -3517,15 +3546,15 @@ mod tests {
         assert!(text.contains("budget") && text.contains('✓'), "{text}");
         assert!(text.contains("3/3"), "sealed at the threshold: {text}");
 
-        // the sidebar label survives via the cache-derived titles
-        let titles = known_titles(&known);
+        // a sealed vote's discussion leaves the sidebar (discussions exist
+        // to decide something — once decided there is nothing to vote on)
         let infos = vec![ChannelInfo {
             channel: ChannelRef::Patch { id: ProposalId(4) },
             count: 1,
             last_ts: 10,
         }];
-        let rows = derive_channels(&infos, &titles, &HashMap::new());
-        assert_eq!(rows[1].label, "add_note · budget", "title survives Applied");
+        let rows = derive_channels(&infos, &known, &HashMap::new());
+        assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
 
         // vanished WITHOUT an applied trace: the read contract cannot tell
         // Rejected from expired — neutral closed marker, title kept, no
@@ -3670,6 +3699,16 @@ mod tests {
         }
         assert_eq!(parse_channel_key("patch:xyz"), None, "junk never panics");
         assert_eq!(parse_channel_key(""), None);
+    }
+
+    #[test]
+    fn the_group_view_window_keeps_recent_and_unknown_age_messages() {
+        assert!(within_retention(100, 50));
+        assert!(!within_retention(10, 50), "older than the window → hidden");
+        assert!(
+            within_retention(0, 50),
+            "legacy ts-0 messages stay visible — display fails open"
+        );
     }
 
     #[test]

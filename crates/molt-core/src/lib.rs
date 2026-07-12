@@ -107,7 +107,10 @@ impl Surface {
                 // plugins); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
             ],
-            Surface::Chat => &[("today", "Today"), ("archive", "Archive")],
+            // "today" is the group view: everything within the chat
+            // retention window (the key predates the rename and stays —
+            // it is select_view's wire vocabulary)
+            Surface::Chat => &[("today", "Group"), ("archive", "Archive")],
             Surface::Memory => &[
                 ("brain", "Brain"),
                 ("proposals", "Proposals"),
