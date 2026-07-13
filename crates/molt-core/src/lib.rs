@@ -2537,6 +2537,31 @@ pub enum ProposalState {
     Rejected,
 }
 
+/// One member's stance on a pending proposal — what the pending cards'
+/// voting row renders, one entry per roster member in roster order.
+/// Display data, never consensus input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberVote {
+    /// The member.
+    pub member: MemberId,
+    /// The member's stance.
+    pub vote: VoteState,
+}
+
+/// A member's stance on a pending proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoteState {
+    /// Has not voted yet.
+    Open,
+    /// Approved (chain governance: a collected co-signature).
+    Approved,
+    /// Declined. Reserved for the display contract: today a decline closes
+    /// the proposal (it leaves the Proposed-only pending read), so readers
+    /// never see this value yet.
+    Declined,
+}
+
 /// A read-only view of a proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalView {
@@ -2566,6 +2591,13 @@ pub struct ProposalView {
     /// Display data; "" = the payload carries no value.
     #[serde(default)]
     pub proposed: String,
+    /// Per-member stance, one entry per roster member in roster order (the
+    /// pending cards' voting pills). Chain governance reports the collected
+    /// signatures; the legacy counted simulation attributes its anonymous
+    /// counter deterministically (the local member first, then roster
+    /// order), so the pills always agree with `approvals`.
+    #[serde(default)]
+    pub votes: Vec<MemberVote>,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -2700,6 +2732,12 @@ pub struct StatusView {
     /// Members active within the last 7 days (mock: the whole roster).
     #[serde(default)]
     pub active_7d: usize,
+    /// The republic's current image: the file reference of the last applied
+    /// `set_image` Organization change ("" = none, or cleared by an applied
+    /// `remove_image`). Like a chat file share, only the reference travels —
+    /// the bytes stay on the proposer's disk until the transfer story.
+    #[serde(default)]
+    pub image: String,
 }
 
 /// The group configuration the engine runs under.

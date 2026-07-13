@@ -1701,6 +1701,7 @@ mod tests {
         assert_eq!(
             proposals::change_summary(
                 Some(&replica),
+                "",
                 &rec(Surface::Organization, "set_charter", "neue Satzung")
             ),
             ("alte Satzung".to_string(), "neue Satzung".to_string())
@@ -1708,32 +1709,105 @@ mod tests {
         assert_eq!(
             proposals::change_summary(
                 Some(&replica),
+                "",
                 &rec(Surface::Organization, "set_name", "New Guild")
             ),
             ("Guild".to_string(), "New Guild".to_string())
         );
-        // no image state exists yet — the UI hides an empty Ist line
+        // the image ops carry the current image reference as their Ist-Stand
+        // ("" while none is set → the UI hides the empty line)
         assert_eq!(
             proposals::change_summary(
                 Some(&replica),
+                "",
                 &rec(Surface::Organization, "set_image", "~/logo.png")
-            )
-            .0,
-            ""
+            ),
+            (String::new(), "~/logo.png".to_string())
+        );
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                "/tmp/old.png",
+                &rec(Surface::Organization, "set_image", "~/logo.png")
+            ),
+            ("/tmp/old.png".to_string(), "~/logo.png".to_string())
+        );
+        assert_eq!(
+            proposals::change_summary(
+                Some(&replica),
+                "/tmp/old.png",
+                &rec(Surface::Organization, "remove_image", "")
+            ),
+            ("/tmp/old.png".to_string(), String::new())
         );
         // a non-organization proposal exposes no pair beyond its value
         assert_eq!(
-            proposals::change_summary(Some(&replica), &rec(Surface::Memory, "add_note", "")),
+            proposals::change_summary(Some(&replica), "", &rec(Surface::Memory, "add_note", "")),
             (String::new(), String::new())
         );
         // the chat-retention setting has a mock default as its Ist-Stand
         assert_eq!(
             proposals::change_summary(
                 Some(&replica),
+                "",
                 &rec(Surface::Organization, "set_chat_retention", "14 days")
             ),
             ("7 days".to_string(), "14 days".to_string())
         );
+    }
+
+    /// The republic's current image is display-grade state derived from the
+    /// applied Organization log: the last applied `set_image`'s value wins,
+    /// an applied `remove_image` clears it — and the pending image cards
+    /// carry it as their Ist-Stand. Only the file reference travels (like a
+    /// chat file share); the bytes stay on the proposer's disk.
+    #[test]
+    fn current_image_follows_the_applied_org_ops() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let status = |w: &WalletHandle| {
+                let w = w.clone();
+                async move {
+                    match w.execute(Command::Status).await.expect("status") {
+                        Reply::Status(st) => st,
+                        other => panic!("unexpected: {other:?}"),
+                    }
+                }
+            };
+            let propose = |op: &'static str, value: &'static str| {
+                let w = w.clone();
+                async move {
+                    let payload = json!({"op": op, "title": "t", "value": value});
+                    match w
+                        .execute(Command::Propose {
+                            surface: Surface::Organization,
+                            payload,
+                        })
+                        .await
+                        .expect("propose")
+                    {
+                        Reply::Proposed { id } => id,
+                        other => panic!("unexpected: {other:?}"),
+                    }
+                }
+            };
+            assert_eq!(status(&w).await.image, "", "no image before any change");
+            // 2-of-3 with self-cosign: one approval applies the change
+            let id = propose("set_image", "/tmp/team.png").await;
+            w.execute(Command::Approve { proposal: id }).await.expect("approve");
+            assert_eq!(status(&w).await.image, "/tmp/team.png");
+            // a follow-up image proposal shows the applied state as Ist-Stand
+            let next = propose("set_image", "/tmp/new.png").await;
+            let pending = read_surface(&w, Surface::Organization).await.pending;
+            assert_eq!(pending[0].current, "/tmp/team.png");
+            assert_eq!(pending[0].proposed, "/tmp/new.png");
+            w.execute(Command::Approve { proposal: next }).await.expect("approve");
+            assert_eq!(status(&w).await.image, "/tmp/new.png", "last applied wins");
+            // an applied remove_image clears the state again
+            let rm = propose("remove_image", "").await;
+            w.execute(Command::Approve { proposal: rm }).await.expect("approve");
+            assert_eq!(status(&w).await.image, "");
+        });
     }
 
     /// Organization is a gated surface like the others: charter / name /
@@ -1768,6 +1842,54 @@ mod tests {
             assert!(snap.gated, "organization is threshold-gated");
             assert_eq!(snap.applied.len(), 1, "applied at threshold");
             assert!(snap.pending.is_empty());
+        });
+    }
+
+    /// The pending cards render a voting row: per-member stance in roster
+    /// order. The legacy counted simulation attributes its anonymous
+    /// approval counter deterministically (the local member first, then
+    /// roster order), so the pills always agree with the `approvals` count.
+    #[test]
+    fn pending_views_carry_per_member_votes() {
+        rt().block_on(async {
+            let cfg = GroupConfig {
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let roster = cfg.members.clone();
+            let w = spawn(cfg, SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"minutes"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            // fresh proposal, no self-cosign: the whole roster is open
+            let votes = &read_surface(&w, Surface::Memory).await.pending[0].votes;
+            assert_eq!(
+                votes.iter().map(|v| v.member.clone()).collect::<Vec<_>>(),
+                roster,
+                "one entry per roster member, in roster order"
+            );
+            assert!(votes.iter().all(|v| v.vote == molt_core::VoteState::Open));
+            // my approval flips exactly my entry (the demo member is "me")
+            w.execute(Command::Approve { proposal: id })
+                .await
+                .expect("approve");
+            let votes = &read_surface(&w, Surface::Memory).await.pending[0].votes;
+            for v in votes {
+                let expect = if v.member == "me" {
+                    molt_core::VoteState::Approved
+                } else {
+                    molt_core::VoteState::Open
+                };
+                assert_eq!(v.vote, expect, "stance of {}", v.member);
+            }
         });
     }
 

@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use molt_core::{
-    ChannelInfo, ChannelRef, Event, MemberView, MoltError, ProposalId, ProposalRecord,
-    ProposalState, ProposalView, Reply, StatusView, Surface, SurfaceSnapshot, SurfaceStat,
-    UploadView, WorkspaceEvent,
+    ChannelInfo, ChannelRef, Event, MemberView, MemberVote, MoltError, ProposalId,
+    ProposalRecord, ProposalState, ProposalView, Reply, StatusView, Surface, SurfaceSnapshot,
+    SurfaceStat, UploadView, VoteState, WorkspaceEvent,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,7 @@ use crate::{ReplicaState, State};
 /// Mock-grade display data, never consensus input — "" when unknown.
 pub(crate) fn change_summary(
     replica: Option<&ReplicaState>,
+    org_image: &str,
     p: &ProposalRecord,
 ) -> (String, String) {
     let proposed = p
@@ -39,7 +40,9 @@ pub(crate) fn change_summary(
         // the chat-retention setting is not yet engine state — its mock
         // default is the Ist-Stand until the real setting lands
         "set_chat_retention" => "7 days".to_string(),
-        // no image / plugin state exists yet (mock) — nothing to show
+        // the image ops show what they change: the current image reference
+        "set_image" | "remove_image" => org_image.to_string(),
+        // no plugin state exists yet (mock) — nothing to show
         _ => String::new(),
     };
     (current, proposed)
@@ -226,7 +229,51 @@ impl State {
         } else {
             p.approvals > 0
         };
-        let (current, proposed) = change_summary(self.replica.as_ref(), p);
+        let (current, proposed) = change_summary(self.replica.as_ref(), &self.org_image(), p);
+        // the voting row: one stance per roster member, roster order. Chain
+        // governance knows exactly who signed; the legacy counted simulation
+        // attributes its anonymous counter deterministically (the local
+        // member first — matching `approved_by_me` — then roster order), so
+        // the row always agrees with the `approvals` count.
+        let me = self.member();
+        let votes: Vec<MemberVote> = if self.is_chain_governed() {
+            let signed: Vec<String> = self
+                .pending_sigs
+                .get(&id)
+                .map(|s| s.sigs.iter().map(|a| a.member.clone()).collect())
+                .unwrap_or_default();
+            self.roster()
+                .into_iter()
+                .map(|member| MemberVote {
+                    vote: if signed.contains(&member) {
+                        VoteState::Approved
+                    } else {
+                        VoteState::Open
+                    },
+                    member,
+                })
+                .collect()
+        } else {
+            let mut others_left = approvals.saturating_sub(1);
+            self.roster()
+                .into_iter()
+                .map(|member| {
+                    let vote = if member == me {
+                        if approvals > 0 {
+                            VoteState::Approved
+                        } else {
+                            VoteState::Open
+                        }
+                    } else if others_left > 0 {
+                        others_left -= 1;
+                        VoteState::Approved
+                    } else {
+                        VoteState::Open
+                    };
+                    MemberVote { member, vote }
+                })
+                .collect()
+        };
         ProposalView {
             id: ProposalId(id),
             surface: p.surface,
@@ -237,7 +284,30 @@ impl State {
             approved_by_me,
             current,
             proposed,
+            votes,
         }
+    }
+
+    /// The republic's current image: the `value` of the last applied
+    /// `set_image` Organization change, cleared again by an applied
+    /// `remove_image`. Display-grade state derived from the applied log
+    /// (the applied values ARE the raw proposal payloads) — "" when unset.
+    pub(crate) fn org_image(&self) -> String {
+        let mut image = String::new();
+        for v in self.applied_values(Surface::Organization, None) {
+            match v.get("op").and_then(Value::as_str) {
+                Some("set_image") => {
+                    image = v
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                Some("remove_image") => image.clear(),
+                _ => {}
+            }
+        }
+        image
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
@@ -488,6 +558,7 @@ impl State {
             active_1h,
             active_24h,
             active_7d,
+            image: self.org_image(),
         }
     }
 }

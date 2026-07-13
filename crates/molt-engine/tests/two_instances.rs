@@ -1327,6 +1327,18 @@ async fn founding_governs_over_the_direct_mesh() {
                 s.pending[0].approved_by_me,
                 "the founder's chain co-signature must reflect in approved_by_me"
             );
+            // the voting row knows exactly who signed: the founder's collected
+            // co-signature marks it approved, the member is still open
+            let votes = &s.pending[0].votes;
+            assert_eq!(votes.len(), 2, "one stance per roster member: {votes:?}");
+            for v in votes {
+                let expect = if v.member == "founder-a" {
+                    molt_core::VoteState::Approved
+                } else {
+                    molt_core::VoteState::Open
+                };
+                assert_eq!(v.vote, expect, "stance of {}", v.member);
+            }
         }
         other => panic!("unexpected: {other:?}"),
     }
