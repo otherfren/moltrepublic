@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
-// Slint's generated code (via `include_modules!`) is injected into this crate and
-// uses `as` casts, `unwrap`s, float layout math and a `todo!()` embed-stub that
-// our (money-crate-oriented) workspace lints flag. We also cast small ints to
-// Slint's `i32`. These allows are scoped to this UI crate only, so the rest of
-// the workspace keeps the strict posture.
+// The handwritten GUI logic casts small ints to Slint's `i32`, does float
+// label math, and drives Slint APIs that return `Option`s we unwrap; the
+// allows are scoped to this UI crate only, so the rest of the workspace
+// keeps the strict posture. (Slint's GENERATED code lives in molt-ui-window
+// with its own allow header.)
 #![allow(
     clippy::as_conversions,
     clippy::unwrap_used,
@@ -46,7 +46,11 @@ use slint::{Model, ModelRc, VecModel};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast::error::RecvError;
 
-slint::include_modules!();
+// The Slint-generated window (AppWindow, the Strings/Theme globals, every
+// row struct) lives in its own crate as a compile-time firewall — see
+// molt-ui-window's crate docs. The glob keeps this crate's code reading as
+// if the module were still injected here.
+pub use molt_ui_window::*;
 
 /// Open the GUI and run the Slint event loop on the calling (main) thread.
 ///

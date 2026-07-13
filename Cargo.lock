@@ -4597,13 +4597,21 @@ dependencies = [
  "molt-config",
  "molt-core",
  "molt-engine",
+ "molt-ui-window",
  "paste",
  "rfd",
  "serde_json",
  "slint",
- "slint-build",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "molt-ui-window"
+version = "0.0.1"
+dependencies = [
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

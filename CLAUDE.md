@@ -217,16 +217,20 @@ crash-safety) is the remaining hardening.
 
 - `cargo build` builds the whole workspace including the Slint GUI (slow first
   build). Headless vs GUI is a runtime choice, not a separate build.
-- **molt-ui's single rustc peaks at ~4 GiB (incremental) / ~6 GiB (fresh)** —
-  the Slint-generated module's typechecking, NOT debuginfo (measured 2026-07-12:
-  `debug = "line-tables-only"` saves ~2%, don't bother). On this 11-GiB machine
-  a SIGKILL during that compile is the kernel OOM-killer: never run two
-  molt-ui-scale builds concurrently (e.g. an agent's test run next to the
-  user's `cargo build`), and when RAM is tight build with `-j 1`.
+- **The Slint-generated window lives in its own crate, `molt-ui-window`, as a
+  compile-time firewall** (2026-07-13): `ui/app.slint` compiles to a ~400k-line
+  Rust module whose single rustc peaks at ~6 GiB / ~4 min — that cost is now
+  paid ONLY when a `.slint` file changes. GUI-logic edits (`molt-ui`) rebuild
+  in ~2 s at <1 GiB. Debuginfo reduction does NOT help (measured: ~2%), and a
+  SIGKILL during the window compile is the kernel OOM-killer — never run two
+  window-scale builds concurrently (e.g. an agent's test run next to the
+  user's `cargo build`); when RAM is tight build with `-j 1`. GUI changes are
+  validated by a clean `cargo build -p molt-ui-window` (Slint compiler) plus
+  `-p molt-ui` (logic against the generated API).
 - Network tests (real SMP server) are `#[ignore]`d; the founding+join+MLS flow is
   proven fast over loopback in `crates/molt-engine/tests/two_instances.rs` and
   end-to-end over real SMP in `ritual_engine_over_smp.rs` (`-- --ignored`).
 - **Never launch a GUI window on `DISPLAY=:0`** — that is the user's own X
   session. There is no headless display here, so GUI changes are validated by the
-  Slint compiler (a clean `cargo build -p molt-ui`) plus the engine-level tests,
-  not by pixels.
+  Slint compiler (a clean `cargo build -p molt-ui-window -p molt-ui`) plus the
+  engine-level tests, not by pixels.

@@ -15,7 +15,9 @@
 #   molt-net     the transport: SMP-style queues behind a Transport trait (loopback today)
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
-#   molt-ui      Slint GUI frontend (the live-mirror operator)
+#   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
+#                   generated module recompiles only on .slint changes)
+#   molt-ui      Slint GUI frontend logic (the live-mirror operator)
 #   molt-app     the binary: ui-mode (GUI + MCP) | headless (MCP-only)
 #
 # Future surface crates (molt-board / molt-memory / molt-treasury / molt-vault /
@@ -31,6 +33,7 @@ members = [
     "crates/molt-net",
     "crates/molt-engine",
     "crates/molt-mcp",
+    "crates/molt-ui-window",
     "crates/molt-ui",
     "crates/molt-app",
 ]
@@ -46,6 +49,7 @@ molt-storage = { path = "crates/molt-storage" }
 molt-net     = { path = "crates/molt-net" }
 molt-engine  = { path = "crates/molt-engine" }
 molt-mcp     = { path = "crates/molt-mcp" }
+molt-ui-window = { path = "crates/molt-ui-window" }
 molt-ui      = { path = "crates/molt-ui" }
 
 # external
