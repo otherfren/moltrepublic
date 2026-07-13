@@ -888,6 +888,54 @@ pub fn run_app(
             );
         });
     }
+    // pick a new republic image via the native file dialog (async XDG
+    // portal, like the chat share picker) — only the path lands in the
+    // draft; proposing it ships the file REFERENCE, never bytes
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        ui.on_org_logo_pick(move || {
+            let weak = weak.clone();
+            rt.spawn(async move {
+                let picker = rfd::AsyncFileDialog::new()
+                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp"]);
+                let Some(file) = picker.pick_file().await else {
+                    return; // cancelled
+                };
+                let path = file.path().display().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_org_logo_draft(path.into());
+                    }
+                });
+            });
+        });
+    }
+    // the proposed image behind a pending set_image: the chat file-share
+    // mechanism — announce the (mock) download, load from the local path
+    // (real bytes exist only on the proposer's device), open the preview;
+    // elsewhere an honest "not transferred yet" toast
+    {
+        let weak = ui.as_weak();
+        ui.on_download_proposal_image(move |file_ref, title| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            match slint::Image::load_from_path(std::path::Path::new(file_ref.as_str())) {
+                Ok(img) => {
+                    let s = ui.global::<Strings>();
+                    ui.invoke_show_toast(format!("{} {file_ref}", s.get_toast_download()).into());
+                    ui.set_img_preview_title(title);
+                    ui.set_img_preview_src(img);
+                    ui.set_img_preview_open(true);
+                }
+                Err(_) => {
+                    let s = ui.global::<Strings>();
+                    ui.invoke_show_toast(s.get_pc_img_missing());
+                }
+            }
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -1562,6 +1610,10 @@ struct OrgStats {
     active_1h: i32,
     active_24h: i32,
     active_7d: i32,
+    /// The republic's current image (engine `StatusView.image`): a file
+    /// reference; the picture itself loads UI-side where the bytes are
+    /// local (the picking device — mock transfer, like chat shares).
+    image: String,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -1753,6 +1805,13 @@ struct ProposalRowData {
     /// Ist-Stand / Soll-Stand display pair ("" = hidden line).
     current: String,
     proposed: String,
+    /// set_image / remove_image: the card renders the current picture and
+    /// links the proposed file (chat file-share mechanism).
+    image_op: bool,
+    /// set_charter: long Ist/Soll texts render capped + scrollable.
+    charter_op: bool,
+    /// Per-member stance in roster order (0 open · 1 approved · 2 declined).
+    votes: Vec<(String, i32)>,
 }
 
 /// Read status + every surface snapshot and push them into the Slint models.
@@ -1780,6 +1839,7 @@ async fn push_surfaces(
                 active_1h: i32::try_from(s.active_1h).unwrap_or(i32::MAX),
                 active_24h: i32::try_from(s.active_24h).unwrap_or(i32::MAX),
                 active_7d: i32::try_from(s.active_7d).unwrap_or(i32::MAX),
+                image: s.image,
             },
         ),
         _ => return,
@@ -2018,6 +2078,17 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                     threshold: p.threshold,
                     current: p.current.clone().into(),
                     proposed: p.proposed.clone().into(),
+                    image_op: p.image_op,
+                    charter_op: p.charter_op,
+                    votes: ModelRc::new(VecModel::from(
+                        p.votes
+                            .iter()
+                            .map(|(member, vote)| MemberVoteMark {
+                                member: member.as_str().into(),
+                                vote: *vote,
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
                 })
                 .collect();
             // the surface's sub-views come straight from the shared
@@ -2107,6 +2178,19 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_active_1h(b.org_stats.active_1h);
     ui.set_org_active_24h(b.org_stats.active_24h);
     ui.set_org_active_7d(b.org_stats.active_7d);
+
+    // the republic's image: (re)load the picture only when the file
+    // reference changes. The bytes are local only on the device that picked
+    // the file (mock transfer, like chat shares) — elsewhere the load fails
+    // quietly and the placeholder mark stays.
+    if ui.get_org_img_path().as_str() != b.org_stats.image {
+        ui.set_org_img_path(b.org_stats.image.as_str().into());
+        let loaded = (!b.org_stats.image.is_empty())
+            .then(|| slint::Image::load_from_path(std::path::Path::new(&b.org_stats.image)))
+            .and_then(Result::ok);
+        ui.set_org_img_set(loaded.is_some());
+        ui.set_org_img(loaded.unwrap_or_default());
+    }
 }
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
@@ -2251,13 +2335,34 @@ fn surface_data(
     let pending: Vec<ProposalRowData> = snap
         .pending
         .iter()
-        .map(|p| ProposalRowData {
-            id: p.id.0 as i32,
-            text: summarize(&p.payload),
-            approvals: p.approvals as i32,
-            threshold: p.threshold as i32,
-            current: p.current.clone(),
-            proposed: p.proposed.clone(),
+        .map(|p| {
+            let op = p
+                .payload
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            ProposalRowData {
+                id: p.id.0 as i32,
+                text: summarize(&p.payload),
+                approvals: p.approvals as i32,
+                threshold: p.threshold as i32,
+                current: p.current.clone(),
+                proposed: p.proposed.clone(),
+                image_op: matches!(op, "set_image" | "remove_image"),
+                charter_op: op == "set_charter",
+                votes: p
+                    .votes
+                    .iter()
+                    .map(|v| {
+                        let stance = match v.vote {
+                            molt_core::VoteState::Open => 0,
+                            molt_core::VoteState::Approved => 1,
+                            molt_core::VoteState::Declined => 2,
+                        };
+                        (v.member.clone(), stance)
+                    })
+                    .collect(),
+            }
         })
         .collect();
     SurfaceData {
@@ -2825,19 +2930,18 @@ impl UnreadLedger {
     }
 }
 
-/// A short human label for a surface transition payload.
+/// A short human label for a surface transition payload: the human title
+/// alone — the op code stays wire-side (nobody proposes "set_image", they
+/// propose "Logo der Republik ändern"). The op is only the fallback when a
+/// payload (e.g. a minimal MCP proposal) carries no display key at all.
 fn summarize(v: &serde_json::Value) -> String {
     if let Some(obj) = v.as_object() {
-        let op = obj.get("op").and_then(serde_json::Value::as_str);
         for key in ["title", "label", "memo", "note", "text", "name", "summary"] {
             if let Some(s) = obj.get(key).and_then(serde_json::Value::as_str) {
-                return match op {
-                    Some(o) => format!("{o} · {s}"),
-                    None => s.to_string(),
-                };
+                return s.to_string();
             }
         }
-        if let Some(o) = op {
+        if let Some(o) = obj.get("op").and_then(serde_json::Value::as_str) {
             return o.to_string();
         }
     }
@@ -3103,14 +3207,17 @@ lexicon! {
     oa_list_pending: "List pending", "Offene zeigen";
     org_edit: "Edit", "Bearbeiten";
     ol_title: "Republic image", "Bild der Republik";
-    ol_body: "Pick an image for this republic, or remove the current one. Either way the change is a gated proposal the members approve by threshold. (The picker is a mock — nothing is read or rendered yet.)", "Wähle ein Bild für diese Republik oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. (Der Datei-Dialog ist ein Mock — es wird noch nichts gelesen oder angezeigt.)";
+    ol_body: "Pick a new image via the file dialog, or remove the current one. Either way the change is a gated proposal the members approve by threshold. Only the file reference travels — the picture stays on your device, and members fetch it from there (like a chat file share).", "Wähle über den Datei-Dialog ein neues Bild oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. Es reist nur die Datei-Referenz — das Bild bleibt auf deinem Gerät, die Mitglieder holen es dort ab (wie bei einer Chat-Datei).";
     ol_remove: "Remove image", "Bild entfernen";
+    ol_current: "Current image", "Aktuelles Bild";
+    ol_none: "No image set.", "Kein Bild gesetzt.";
+    ol_pick: "Choose…", "Auswählen…";
     oc_title: "Edit charter", "Satzung bearbeiten";
     oc_body: "The charter was ratified by everyone at the founding — an edit is a gated change: the draft becomes a proposal the members approve by threshold. (Applying it does not rewrite the shown charter yet.)", "Die Satzung wurde bei der Gründung von allen ratifiziert — eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ersetzt die angezeigte Satzung noch nicht.)";
     oc_propose: "Propose change", "Änderung vorschlagen";
-    op_change_charter: "Change charter", "Charter ändern";
-    op_change_logo: "Change image", "Logo ändern";
-    op_remove_logo: "Remove image", "Logo entfernen";
+    op_change_charter: "Change the charter", "Satzung ändern";
+    op_change_logo: "Change the republic's image", "Logo der Republik ändern";
+    op_remove_logo: "Remove the republic's image", "Logo der Republik entfernen";
     toast_proposed: "Proposed — awaiting approvals", "Vorgeschlagen — wartet auf Zustimmungen";
     om_col_id: "ID", "ID";
     om_col_pk: "Public key", "Public Key";
@@ -3135,6 +3242,9 @@ lexicon! {
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
+    pc_proposal: "Proposal:", "Vorschlag:";
+    pc_img_hint: "Click to download & view (from the proposer's device)", "Klicken zum Herunterladen & Anzeigen (vom Gerät des Vorschlagenden)";
+    pc_img_missing: "Image not available locally — the user-to-user transfer is not built yet.", "Bild lokal nicht verfügbar — die Übertragung von Gerät zu Gerät ist noch nicht gebaut.";
     os_founded: "Founded", "Gegründet";
     os_consensus: "Consensus", "Konsens";
     os_act_1h: "Active · last hour", "Aktiv · letzte Stunde";
@@ -3146,7 +3256,7 @@ lexicon! {
     ocs_days: "days", "Tage";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
-    op_chat_retention: "Change chat deletion", "Chat-Löschfrist ändern";
+    op_chat_retention: "Change when chat logs are deleted", "Löschfrist für Chat-Logs ändern";
     ou_note: "Only metadata is shared — the bytes move user-to-user via the share link, as long as the sharer keeps the file. (Transfer and expiry are mocks.)", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über den Share-Link, solange der Teilende die Datei behält. (Übertragung und Ablauf sind Mocks.)";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
@@ -3270,7 +3380,7 @@ lexicon! {
     mv_propose: "Propose", "Vorschlagen";
     mv_approve: "Approve", "Zustimmen";
     mv_decline: "Decline", "Ablehnen";
-    mv_pending: "Pending", "Ausstehend";
+    mv_pending: "Pending decisions", "Offene Entscheidungen";
     mv_applied: "Applied", "Angewandt";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
@@ -3515,6 +3625,7 @@ mod tests {
             approved_by_me: false,
             current: String::new(),
             proposed: String::new(),
+            votes: Vec::new(),
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(4, &[pv], &HashMap::new(), &first_seen);
@@ -3570,11 +3681,12 @@ mod tests {
             approved_by_me: false,
             current: String::new(),
             proposed: String::new(),
+            votes: Vec::new(),
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
         update_known_proposals(&mut known, std::slice::from_ref(&pv), &HashMap::new());
-        assert_eq!(known[&4].title, "add_note · budget");
+        assert_eq!(known[&4].title, "budget", "human title, no op-code prefix");
         assert_eq!(known[&4].fate, KnownFate::Pending);
 
         // the proposal leaves the Proposed-only window and its payload

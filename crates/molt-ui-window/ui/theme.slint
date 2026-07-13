@@ -54,14 +54,23 @@ export struct ChannelItem {
     unread: int, // messages since last seen (0 = caught up)
 }
 
+// One member's stance on a pending proposal (the voting row's pills).
+export struct MemberVoteMark {
+    member: string,
+    vote: int, // 0 = not voted yet, 1 = approved, 2 = declined
+}
+
 // A pending proposal on a gated surface, with its approval progress.
 export struct ProposalRow {
     id: int,
-    text: string,
+    text: string, // human title (the op codes stay wire-side)
     approvals: int,
     threshold: int,
     current: string, // Ist-Stand ("" = unknown → line hidden)
     proposed: string, // Soll-Stand ("" = no value → line hidden)
+    image-op: bool, // set_image / remove_image → picture + download link
+    charter-op: bool, // set_charter → long text, capped + scrollable
+    votes: [MemberVoteMark], // per-member stance, roster order
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -402,6 +411,9 @@ export global Strings {
     in property <string> ol-title;
     in property <string> ol-body;
     in property <string> ol-remove;
+    in property <string> ol-current; // "Current image" caption in the modal
+    in property <string> ol-none; // shown while no image is set
+    in property <string> ol-pick; // "Choose file…" (real rfd picker)
     in property <string> oc-title;
     in property <string> oc-body;
     in property <string> oc-propose;
@@ -436,6 +448,9 @@ export global Strings {
     in property <string> pc-current;
     in property <string> pc-proposed;
     in property <string> pc-discuss;
+    in property <string> pc-proposal; // title prefix ("Vorschlag:")
+    in property <string> pc-img-hint; // the proposed-image link's hint line
+    in property <string> pc-img-missing; // toast: bytes not local (mock transfer)
     // Status info panel (founding date, consensus, activity), the charter
     // reader, and the settings panel (chat retention)
     in property <string> os-founded;

@@ -840,32 +840,113 @@ export component RestoreWay inherits Rectangle {
     }
 }
 
-// One pending proposal: id + summary, approval progress toward the
-// threshold, and the operator's approve / decline decision. Shared by the
-// generic gated panes and Organization → Pending.
+// A labeled long-text state row of a proposal card (charter Ist/Soll):
+// the text sits in its own bordered panel, capped at roughly five lines —
+// anything longer scrolls inside the panel instead of flooding the card.
+component CappedStateRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> emphasized: false;
+    spacing: 8px;
+    Text {
+        text: root.label;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        width: 76px;
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+        height: min(cs-txt.preferred-height + 12px, 96px);
+        background: Theme.panel;
+        border-radius: Theme.win95 ? 0px : 6px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        clip: true;
+        cs-fl := Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: self.width;
+            viewport-height: cs-txt.preferred-height + 12px;
+            cs-txt := Text {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 24px;
+                text: root.value;
+                color: root.emphasized ? Theme.text : Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+        }
+        ScrollHint {
+            x: parent.width - 7px;
+            view-h: cs-fl.height;
+            content-h: cs-fl.viewport-height;
+            scroll-y: cs-fl.viewport-y;
+        }
+    }
+}
+
+// One pending proposal: human title ("Vorschlag: …" — the op codes stay
+// wire-side), the Ist/Soll pair, the voting row (one pill per roster
+// member: ? open · 👍 approved · 👎 declined) and the operator's approve /
+// decline decision. Shared by the generic gated panes and Organization →
+// Pending. Image changes render the current image and link the proposed
+// one like a chat file share: click = (mock-)download from the proposer's
+// device, then view.
 export component ProposalCard inherits Rectangle {
     in property <ProposalRow> p;
+    // the republic's CURRENT image, when one is set and locally loadable —
+    // the image ops' Ist-Stand renders it (loaded by the Rust side)
+    in property <image> org-img;
+    in property <bool> org-img-set;
     callback approve();
     callback decline();
     // jump into the proposal's discussion — its patch channel on the chat
     // bus (channels are views over the ONE log, chat_bus.md)
     callback discuss();
+    // image op only: download the proposed image from the proposer (the
+    // chat file-share mechanism) and show it
+    callback view-image();
     background: Theme.panel-2;
-    border-radius: Theme.win95 ? 0px : 8px;
+    border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
     border-color: Theme.line;
+    // lift the card off the pane background (the bevel theme keeps its
+    // flat look — shadows are foreign there)
+    drop-shadow-blur: Theme.win95 ? 0px : 12px;
+    drop-shadow-offset-y: Theme.win95 ? 0px : 2px;
+    drop-shadow-color: #00000026;
     VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
-        Text {
-            text: "#\{root.p.id}  \{root.p.text}";
-            color: Theme.text;
-            font-size: Theme.fs-body;
-            wrap: word-wrap;
+        padding: 14px;
+        spacing: 10px;
+        // title row: "Vorschlag: <human title>", the id tucked at the end
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: Strings.pc-proposal;
+                color: Theme.accent;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+            }
+            Text {
+                text: root.p.text;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 600;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "#\{root.p.id}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+            }
         }
         // Ist-Stand / Soll-Stand, when the engine knows them (the
-        // Organization edit ops fill both; a plain proposal shows neither)
-        if root.p.current != "": HorizontalLayout {
+        // Organization edit ops fill both; a plain proposal shows neither).
+        // Short values sit inline; the charter pair is capped + scrollable;
+        // an image change renders the Ist image and links the Soll file.
+        if root.p.current != "" && !root.p.charter-op && !root.p.image-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-current;
@@ -881,7 +962,7 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        if root.p.proposed != "": HorizontalLayout {
+        if root.p.proposed != "" && !root.p.charter-op && !root.p.image-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-proposed;
@@ -897,24 +978,156 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        HorizontalLayout {
+        if root.p.charter-op && root.p.current != "": CappedStateRow {
+            label: Strings.pc-current;
+            value: root.p.current;
+        }
+        if root.p.charter-op && root.p.proposed != "": CappedStateRow {
+            label: Strings.pc-proposed;
+            value: root.p.proposed;
+            emphasized: true;
+        }
+        if root.p.image-op && root.p.current != "": HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: Strings.pc-current;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                width: 76px;
+            }
+            VerticalLayout {
+                spacing: 4px;
+                alignment: start;
+                if root.org-img-set: Rectangle {
+                    width: 72px;
+                    height: 72px;
+                    border-radius: Theme.win95 ? 0px : 6px;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    clip: true;
+                    Image {
+                        source: root.org-img;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+                }
+                Text {
+                    text: root.p.current;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    overflow: elide;
+                }
+            }
+        }
+        if root.p.image-op && root.p.proposed != "": HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: Strings.pc-proposed;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                width: 76px;
+            }
+            // the proposed image, as a chat-style share card: only the
+            // file reference travels with the proposal — clicking fetches
+            // from the proposer's device (mock) and shows the picture
+            Rectangle {
+                horizontal-stretch: 1;
+                height: pi-row.preferred-height + 16px;
+                border-radius: Theme.win95 ? 0px : 6px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                background: pi-ta.has-hover ? Theme.raised : Theme.zebra;
+                pi-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.view-image();
+                    }
+                }
+                pi-row := HorizontalLayout {
+                    x: 10px;
+                    y: 8px;
+                    width: parent.width - 20px;
+                    spacing: 8px;
+                    Text {
+                        text: "🖼";
+                        font-size: 20px;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        spacing: 1px;
+                        Text {
+                            text: root.p.proposed;
+                            color: Theme.text;
+                            font-size: Theme.fs-cap;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: Strings.pc-img-hint;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                        }
+                    }
+                }
+            }
+        }
+        // the voting row: one pill per roster member with their stance —
+        // a big ? while open, 👍 approved (green), 👎 declined (red); the
+        // tally caption keeps the threshold visible
+        if root.p.votes.length > 0: HorizontalLayout {
             spacing: 10px;
             Rectangle {
-                height: 6px;
-                border-radius: Theme.win95 ? 0px : 3px;
-                background: Theme.line;
                 horizontal-stretch: 1;
-                Rectangle {
-                    x: 0;
-                    height: parent.height;
-                    border-radius: parent.border-radius;
-                    width: parent.width * min(1.0, root.p.approvals * 1.0 / max(root.p.threshold, 1));
-                    background: Theme.accent;
+                height: 30px;
+                clip: true;
+                vp-fl := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: max(self.width, vp-row.preferred-width);
+                    viewport-height: self.height;
+                    vp-row := HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for v in root.p.votes: Rectangle {
+                            height: 28px;
+                            y: 1px;
+                            width: vp-pill.preferred-width + 20px;
+                            border-radius: Theme.win95 ? 0px : 14px;
+                            border-width: 1px;
+                            border-color: v.vote == 1 ? Theme.good.transparentize(0.45)
+                                : (v.vote == 2 ? Theme.bad.transparentize(0.45) : Theme.line);
+                            background: v.vote == 1 ? Theme.good.transparentize(0.86)
+                                : (v.vote == 2 ? Theme.bad.transparentize(0.86) : Theme.panel);
+                            vp-pill := HorizontalLayout {
+                                x: 10px;
+                                height: 100%;
+                                spacing: 5px;
+                                alignment: start;
+                                Text {
+                                    text: v.vote == 1 ? "👍" : (v.vote == 2 ? "👎" : "?");
+                                    color: v.vote == 2 ? Theme.bad : (v.vote == 1 ? Theme.good : Theme.warn);
+                                    font-size: v.vote == 0 ? 17px : 13px;
+                                    font-weight: 800;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: v.member;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Text {
                 text: "\{root.p.approvals}/\{root.p.threshold}";
-                color: Theme.dim;
+                color: Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
             }

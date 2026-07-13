@@ -389,11 +389,27 @@ export component AppWindow inherits Window {
     property <bool> ws-dir-modal-open: false;
     property <string> ws-dir-draft;
     property <string> rw-file-draft;
-    // Organization → Status edit drafts (image path + charter). The picker
-    // fields are mocks, but confirming creates a REAL gated proposal on the
-    // Organization surface (org-propose)
+    // Organization → Status edit drafts (image path + charter). Confirming
+    // creates a REAL gated proposal on the Organization surface (org-propose)
     property <bool> org-logo-modal-open: false;
-    property <string> org-logo-draft;
+    // in-out: the native picker (Rust, org-logo-pick) writes the chosen path
+    in-out property <string> org-logo-draft;
+    // the republic's CURRENT image (engine StatusView.image): the file
+    // reference, plus the picture when the file is locally loadable — the
+    // Rust side loads it (bytes stay with the sharer; mock transfer)
+    in property <string> org-img-path;
+    in property <image> org-img;
+    in property <bool> org-img-set: false;
+    // pick a new image via the real (rfd) file dialog — fills org-logo-draft
+    callback org-logo-pick();
+    // image preview overlay: a proposed image after its (mock) download —
+    // the chat file-share mechanism (download from the proposer's device)
+    in-out property <bool> img-preview-open: false;
+    in property <string> img-preview-title;
+    in property <image> img-preview-src;
+    // (mock-)download the proposed image behind a pending set_image and
+    // open the preview; Rust toasts if the bytes are not local
+    callback download-proposal-image(string /* file ref */, string /* title */);
     property <bool> org-charter-modal-open: false;
     property <string> org-charter-draft;
     property <bool> org-name-modal-open: false;
@@ -577,7 +593,9 @@ export component AppWindow inherits Window {
     // clickable (never during a running engine mock-run). An open modal is
     // closed first, like a click on its scrim.
     function handle-escape() {
-        if (root.recover-link-open) {
+        if (root.img-preview-open) {
+            root.img-preview-open = false;
+        } else if (root.recover-link-open) {
             root.recover-link-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
@@ -3197,7 +3215,11 @@ export component AppWindow inherits Window {
                                             background: Theme.accent-soft;
                                             border-width: 1px;
                                             border-color: Theme.accent;
-                                            Image {
+                                            clip: true;
+                                            // the ratified image once one is
+                                            // set (and locally loadable) —
+                                            // the placeholder mark otherwise
+                                            if !root.org-img-set: Image {
                                                 source: @image-url("assets/republic.svg");
                                                 colorize: Theme.accent;
                                                 width: 30px;
@@ -3205,8 +3227,14 @@ export component AppWindow inherits Window {
                                                 x: (parent.width - self.width) / 2;
                                                 y: (parent.height - self.height) / 2;
                                             }
+                                            if root.org-img-set: Image {
+                                                source: root.org-img;
+                                                width: 100%;
+                                                height: 100%;
+                                                image-fit: cover;
+                                            }
                                             // avatar-style corner edit: opens
-                                            // the (mock) image picker modal
+                                            // the image picker modal
                                             AppButton {
                                                 width: 22px;
                                                 height: 22px;
@@ -3216,7 +3244,7 @@ export component AppWindow inherits Window {
                                                 label: "✎";
                                                 tooltip: Strings.org-edit;
                                                 clicked => {
-                                                    root.org-logo-draft = "~/Pictures/";
+                                                    root.org-logo-draft = "";
                                                     root.org-logo-modal-open = true;
                                                 }
                                             }
@@ -3988,42 +4016,62 @@ export component AppWindow inherits Window {
                         // (and the same approve/decline commands) as every
                         // other gated surface
                         if s.key == "organization" && root.selected-view == "pending": VerticalLayout {
-                            spacing: 8px;
+                            padding: 8px;
+                            spacing: 12px;
+                            // a heading that owns the pane, not a shy caption
                             Text {
                                 text: Strings.mv-pending;
-                                color: Theme.dim;
-                                font-size: Theme.fs-cap;
-                                font-weight: 600;
+                                color: Theme.text;
+                                font-size: Theme.fs-h2;
+                                font-weight: 700;
                             }
                             Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
-                                VerticalLayout {
-                                    padding: 2px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    if s.pending-count == 0: Text {
-                                        text: Strings.mv-empty-pending;
-                                        color: Theme.faint;
-                                        font-size: Theme.fs-cap;
+                                op-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: op-list.preferred-height + 8px;
+                                    op-list := VerticalLayout {
+                                        padding: 4px;
+                                        padding-right: 14px;
+                                        spacing: 16px;
+                                        alignment: start;
+                                        if s.pending-count == 0: Text {
+                                            text: Strings.mv-empty-pending;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for p in s.pending: ProposalCard {
+                                            p: p;
+                                            org-img: root.org-img;
+                                            org-img-set: root.org-img-set;
+                                            approve => {
+                                                root.approve(p.id);
+                                            }
+                                            decline => {
+                                                root.decline(p.id);
+                                            }
+                                            discuss => {
+                                                // the proposal's discussion is
+                                                // its patch channel on the chat
+                                                // bus — engine-side filter, like
+                                                // the sidebar channel rows
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{p.id}");
+                                            }
+                                            view-image => {
+                                                root.download-proposal-image(p.proposed, p.text);
+                                            }
+                                        }
                                     }
-                                    for p in s.pending: ProposalCard {
-                                        p: p;
-                                        approve => {
-                                            root.approve(p.id);
-                                        }
-                                        decline => {
-                                            root.decline(p.id);
-                                        }
-                                        discuss => {
-                                            // the proposal's discussion is
-                                            // its patch channel on the chat
-                                            // bus — engine-side filter, like
-                                            // the sidebar channel rows
-                                            root.select-view("chat", "today");
-                                            root.select-channel("patch:\{p.id}");
-                                        }
-                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: op-fl.height;
+                                    content-h: op-fl.viewport-height;
+                                    scroll-y: op-fl.viewport-y;
                                 }
                             }
                         }
@@ -5291,18 +5339,19 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
-    // Modal: the republic's image (Organization → Status). The picker is
-    // a mock path field, but Select / Remove create REAL gated proposals
-    // on the Organization surface — applying them has no visible effect
-    // yet (nothing is read from disk or rendered).
+    // Modal: the republic's image (Organization → Status). Shows the
+    // CURRENT image; a new one comes in via the real file dialog. Select /
+    // Remove create REAL gated proposals on the Organization surface —
+    // only the file reference travels with the proposal (chat file-share
+    // mechanism: the bytes stay on this device until the transfer story).
     // =================================================================
     if root.org-logo-modal-open: ConfirmModal {
-        dialog-width: 440px;
+        dialog-width: 460px;
         title: Strings.ol-title;
         body: Strings.ol-body;
         confirm-label: Strings.oc-propose;
         confirm-enabled: root.org-logo-draft != "";
-        alt-label: Strings.ol-remove;
+        alt-label: root.org-img-path == "" ? "" : Strings.ol-remove;
         dismissed => {
             root.org-logo-modal-open = false;
         }
@@ -5316,9 +5365,71 @@ export component AppWindow inherits Window {
             root.org-propose("remove_image", Strings.op-remove-logo, "");
             root.show-toast(Strings.toast-proposed);
         }
-        AppField {
-            text <=> root.org-logo-draft;
-            placeholder: "~/Pictures/republic.png";
+        VerticalLayout {
+            spacing: 12px;
+            // the current image — what the proposal would change
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Rectangle {
+                    width: 64px;
+                    height: 64px;
+                    border-radius: Theme.win95 ? 0px : 8px;
+                    background: Theme.accent-soft;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    clip: true;
+                    if !root.org-img-set: Image {
+                        source: @image-url("assets/republic.svg");
+                        colorize: Theme.accent;
+                        width: 32px;
+                        height: 32px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    if root.org-img-set: Image {
+                        source: root.org-img;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+                    Text {
+                        text: Strings.ol-current;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: root.org-img-path == "" ? Strings.ol-none : root.org-img-path;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        overflow: elide;
+                    }
+                }
+            }
+            // the proposed replacement, via the real file dialog
+            HorizontalLayout {
+                spacing: 8px;
+                AppField {
+                    text <=> root.org-logo-draft;
+                    placeholder: "~/Pictures/republic.png";
+                    horizontal-stretch: 1;
+                }
+                AppButton {
+                    height: 38px;
+                    pad: 10px;
+                    icon: @image-url("assets/folder.svg");
+                    icon-set: true;
+                    label: Strings.ol-pick;
+                    clicked => {
+                        root.org-logo-pick();
+                    }
+                }
+            }
         }
     }
 
@@ -5565,6 +5676,63 @@ export component AppWindow inherits Window {
             color: Theme.warn;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
+        }
+    }
+
+    // =================================================================
+    // Image preview: a proposed image after its (mock) download — the
+    // chat file-share mechanism. Scrim or Escape closes it.
+    // =================================================================
+    if root.img-preview-open: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000a0;
+        TouchArea {
+            clicked => {
+                root.img-preview-open = false;
+            }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(parent.width - 120px, 720px);
+            height: min(parent.height - 120px, 560px);
+            background: Theme.panel;
+            border-radius: Theme.win95 ? 0px : 10px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            // absorb clicks so only the scrim dismisses
+            TouchArea { }
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.img-preview-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        font-weight: 700;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    AppButton {
+                        width: 28px;
+                        height: 28px;
+                        pad: 0px;
+                        label: "×";
+                        clicked => {
+                            root.img-preview-open = false;
+                        }
+                    }
+                }
+                Image {
+                    source: root.img-preview-src;
+                    image-fit: contain;
+                    vertical-stretch: 1;
+                }
+            }
         }
     }
 
