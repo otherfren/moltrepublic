@@ -1626,7 +1626,6 @@ struct MemberRowData {
     last: String,
     /// 0 = synced, 1 = syncing, 2 = offline (mock presence).
     state: i32,
-    open: i32,
     uploads: i32,
 }
 
@@ -1882,7 +1881,6 @@ async fn push_surfaces(
                 pk: m.identity_pk,
                 last: m.last_seen,
                 state: i32::from(m.presence),
-                open: i32::try_from(m.open_proposals).unwrap_or(i32::MAX),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
             })
             .collect(),
@@ -2148,7 +2146,6 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             pk: m.pk.as_str().into(),
             last: m.last.as_str().into(),
             state: m.state,
-            open_proposals: m.open,
             uploads: m.uploads,
         })
         .collect();
@@ -3222,8 +3219,8 @@ lexicon! {
     om_col_id: "ID", "ID";
     om_col_pk: "Public key", "Public Key";
     om_col_last: "Last seen", "Zuletzt gesehen";
-    om_col_open: "Open proposals", "Offene Vorschläge";
     om_col_uploads: "Uploads", "Uploads";
+    om_me: "(that's me)", "(das bin ich)";
     om_col_recovery: "Recovery link", "Recovery-Link";
     ou_col_user: "User", "Nutzer";
     ou_col_date: "Date", "Datum";

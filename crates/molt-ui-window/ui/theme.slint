@@ -88,7 +88,6 @@ export struct MemberRow {
     pk: string, // full anchored identity key, lowercase hex ("" unanchored)
     last: string, // human "last seen" label (mock)
     state: int, // 0 = synced, 1 = syncing, 2 = offline (mock presence)
-    open-proposals: int, // pending proposals awaiting THIS member's vote
     uploads: int, // files this member shared into the chat
 }
 
@@ -407,6 +406,7 @@ export global Strings {
     in property <string> oa-denied;
     in property <string> oa-pending-mine;
     in property <string> oa-list-pending;
+    in property <string> om-me; // "(das bin ich)" tag behind the own row's name
     in property <string> org-edit;
     in property <string> ol-title;
     in property <string> ol-body;
@@ -425,7 +425,6 @@ export global Strings {
     in property <string> om-col-id;
     in property <string> om-col-pk;
     in property <string> om-col-last;
-    in property <string> om-col-open;
     in property <string> om-col-uploads;
     in property <string> om-col-recovery;
     // Organization → Uploads table

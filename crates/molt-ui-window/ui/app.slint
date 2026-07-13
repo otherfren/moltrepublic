@@ -3633,14 +3633,6 @@ export component AppWindow inherits Window {
                                                 width: 100px;
                                             }
                                             Text {
-                                                text: Strings.om-col-open;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                                width: 100px;
-                                                horizontal-alignment: right;
-                                                wrap: word-wrap;
-                                            }
-                                            Text {
                                                 text: Strings.om-col-uploads;
                                                 color: Theme.faint;
                                                 font-size: Theme.fs-cap;
@@ -3662,9 +3654,12 @@ export component AppWindow inherits Window {
                                         for m in root.org-members: Rectangle {
                                             height: 40px;
                                             border-radius: Theme.win95 ? 0px : 6px;
-                                            background: Theme.panel-2;
+                                            // the own seat stands out: accent
+                                            // tint + border and a "(das bin
+                                            // ich)" tag behind the name
+                                            background: m.name == root.node-member ? Theme.accent-soft : Theme.panel-2;
                                             border-width: 1px;
-                                            border-color: Theme.line;
+                                            border-color: m.name == root.node-member ? Theme.accent : Theme.line;
                                             HorizontalLayout {
                                                 padding-left: 12px;
                                                 padding-right: 12px;
@@ -3677,7 +3672,7 @@ export component AppWindow inherits Window {
                                                     background: m.state == 0 ? Theme.good : (m.state == 1 ? Theme.warn : Theme.faint);
                                                 }
                                                 Text {
-                                                    text: m.name;
+                                                    text: m.name == root.node-member ? "\{m.name} \{Strings.om-me}" : m.name;
                                                     color: m.name == root.node-member ? Theme.accent : Theme.text;
                                                     font-size: Theme.fs-body;
                                                     font-weight: 700;
@@ -3751,15 +3746,6 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                     width: 100px;
                                                     overflow: elide;
-                                                }
-                                                Text {
-                                                    text: "\{m.open-proposals}";
-                                                    color: m.open-proposals > 0 ? Theme.warn : Theme.dim;
-                                                    font-size: Theme.fs-body;
-                                                    font-weight: m.open-proposals > 0 ? 700 : 400;
-                                                    vertical-alignment: center;
-                                                    width: 100px;
-                                                    horizontal-alignment: right;
                                                 }
                                                 // only a button when the member
                                                 // shared files — it jumps into
