@@ -758,6 +758,8 @@ impl State {
                 payload,
                 approvals: 0,
                 state: ProposalState::Proposed,
+                declined_at: 0,
+                declined_by: String::new(),
             });
         self.next_id = self.next_id.max(id + 1);
     }

@@ -482,35 +482,22 @@ export component AppWindow inherits Window {
     property <string> export-note;
 
     // ---- toast: short feedback bubble (e.g. after copy-to-clipboard).
-    // Two timers bound its visibility: the soft timer hides it 2.6 s after
-    // the LAST trigger, the cap timer 2.9 s after it APPEARED — so back-to-
-    // back copies keep the feedback fresh, but the bubble is never on
-    // screen longer than 3 seconds in one stretch. ----
+    // The timer's `running` is BOUND to toast-open (declarative) — an
+    // imperatively restart()ed stopped Timer never fires, which left the
+    // bubble on screen forever. A re-trigger while shown only swaps the
+    // text; the bubble is gone < 3 s after it appeared, always. ----
     property <string> toast-text;
     property <bool> toast-open: false;
     public function show-toast(msg: string) {
         root.toast-text = msg;
-        if (!root.toast-open) {
-            root.toast-open = true;
-            toast-cap.restart();
-        }
-        toast-timer.restart();
+        root.toast-open = true;
     }
     function hide-toast() {
         root.toast-open = false;
-        toast-timer.stop();
-        toast-cap.stop();
     }
     toast-timer := Timer {
-        interval: 2600ms;
-        running: false;
-        triggered => {
-            root.hide-toast();
-        }
-    }
-    toast-cap := Timer {
-        interval: 2900ms; // the hard < 3 s cap, however often the toast re-arms
-        running: false;
+        interval: 2800ms; // the hard < 3 s cap
+        running: root.toast-open;
         triggered => {
             root.hide-toast();
         }
@@ -784,8 +771,12 @@ export component AppWindow inherits Window {
                             for v in s.views: VerticalLayout {
                                 // Organization → Pending exists only while
                                 // something is in voting; open decisions of
-                                // THIS node raise the ⚠-badge on the row
-                                if v.key != "pending" || s.pending-count > 0: ViewRow {
+                                // THIS node raise the ⚠-badge on the row.
+                                // Declined exists only while a decline is
+                                // still inside the retention window (the
+                                // view empties on the chat rhythm).
+                                if (v.key != "pending" || s.pending-count > 0)
+                                    && (v.key != "declined" || s.declined-count > 0): ViewRow {
                                     // chat's "today" IS the group view —
                                     // localized like the old group channel
                                     // row it replaces
@@ -795,6 +786,7 @@ export component AppWindow inherits Window {
                                     pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
                                         : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
+                                    alert-total: v.key == "pending" ? s.pending-count : 0;
                                     chosen => {
                                         root.mv-draft = "";
                                         root.select-view(s.key, v.key);
@@ -3215,23 +3207,32 @@ export component AppWindow inherits Window {
                                             background: Theme.accent-soft;
                                             border-width: 1px;
                                             border-color: Theme.accent;
-                                            clip: true;
-                                            // the ratified image once one is
-                                            // set (and locally loadable) —
-                                            // the placeholder mark otherwise
-                                            if !root.org-img-set: Image {
-                                                source: @image-url("assets/republic.svg");
-                                                colorize: Theme.accent;
-                                                width: 30px;
-                                                height: 30px;
-                                                x: (parent.width - self.width) / 2;
-                                                y: (parent.height - self.height) / 2;
-                                            }
-                                            if root.org-img-set: Image {
-                                                source: root.org-img;
+                                            // the clip lives on an INNER rect
+                                            // so the corner-edit button's
+                                            // hover tooltip can spill past
+                                            // the image bounds
+                                            Rectangle {
                                                 width: 100%;
                                                 height: 100%;
-                                                image-fit: cover;
+                                                border-radius: parent.border-radius;
+                                                clip: true;
+                                                // the ratified image once one is
+                                                // set (and locally loadable) —
+                                                // the placeholder mark otherwise
+                                                if !root.org-img-set: Image {
+                                                    source: @image-url("assets/republic.svg");
+                                                    colorize: Theme.accent;
+                                                    width: 30px;
+                                                    height: 30px;
+                                                    x: (parent.width - self.width) / 2;
+                                                    y: (parent.height - self.height) / 2;
+                                                }
+                                                if root.org-img-set: Image {
+                                                    source: root.org-img;
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    image-fit: cover;
+                                                }
                                             }
                                             // avatar-style corner edit: opens
                                             // the image picker modal
@@ -3655,9 +3656,10 @@ export component AppWindow inherits Window {
                                             height: 40px;
                                             border-radius: Theme.win95 ? 0px : 6px;
                                             // the own seat stands out: accent
-                                            // tint + border and a "(das bin
-                                            // ich)" tag behind the name
-                                            background: m.name == root.node-member ? Theme.accent-soft : Theme.panel-2;
+                                            // border and a "(das bin ich)"
+                                            // tag behind the name — no tinted
+                                            // fill, the border is enough
+                                            background: Theme.panel-2;
                                             border-width: 1px;
                                             border-color: m.name == root.node-member ? Theme.accent : Theme.line;
                                             HorizontalLayout {
@@ -4058,6 +4060,57 @@ export component AppWindow inherits Window {
                                     view-h: op-fl.height;
                                     content-h: op-fl.viewport-height;
                                     scroll-y: op-fl.viewport-y;
+                                }
+                            }
+                        }
+
+                        // Organization → Declined: proposals a member vetoed,
+                        // read-only cards (the decision fell); the list keeps
+                        // only declines inside the retention window, so the
+                        // pane empties on the same rhythm as the group chat
+                        if s.key == "organization" && root.selected-view == "declined": VerticalLayout {
+                            padding: 8px;
+                            spacing: 12px;
+                            Text {
+                                text: Strings.mv-declined;
+                                color: Theme.text;
+                                font-size: Theme.fs-h2;
+                                font-weight: 700;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                od-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: od-list.preferred-height + 8px;
+                                    od-list := VerticalLayout {
+                                        padding: 4px;
+                                        padding-right: 14px;
+                                        spacing: 16px;
+                                        alignment: start;
+                                        if s.declined-count == 0: Text {
+                                            text: Strings.mv-empty-declined;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for p in s.declined: ProposalCard {
+                                            p: p;
+                                            org-img: root.org-img;
+                                            org-img-set: root.org-img-set;
+                                            read-only: true;
+                                            view-image => {
+                                                root.download-proposal-image(p.proposed, p.text);
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: od-fl.height;
+                                    content-h: od-fl.viewport-height;
+                                    scroll-y: od-fl.viewport-y;
                                 }
                             }
                         }

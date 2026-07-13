@@ -66,12 +66,15 @@ export component ChoiceCard inherits Rectangle {
 // A small warn-coloured count pill: open proposals awaiting a decision.
 export component PendingBadge inherits Rectangle {
     in property <int> count;
+    // optional override: a preformatted label (e.g. "1/4") instead of the
+    // bare count
+    in property <string> label: "";
     width: max(18px, cnt.preferred-width + 11px);
     height: 17px;
     border-radius: Theme.win95 ? 0px : 8.5px;
     background: Theme.warn;
     cnt := Text {
-        text: root.count;
+        text: root.label == "" ? "\{root.count}" : root.label;
         color: Theme.panel;
         font-size: 11px;
         font-weight: 700;
@@ -186,8 +189,11 @@ export component ViewRow inherits Rectangle {
     in property <bool> selected;
     in property <int> pending: 0;
     // decisions still waiting on THIS node's vote: rendered as a warning
-    // (⚠ + count) instead of the neutral pending pill
+    // (⚠ + "mine/total") instead of the neutral pending pill
     in property <int> alert: 0;
+    // the total the alert is part of (pending count) — "1/4" reads "my vote
+    // is missing on 1 of 4 open decisions"
+    in property <int> alert-total: 0;
     callback chosen();
     height: 30px;
     border-radius: Theme.win95 ? 0px : 6px;
@@ -226,11 +232,12 @@ export component ViewRow inherits Rectangle {
         if root.alert > 0: Text {
             text: "⚠️";
             font-family: "Twemoji Mozilla";
-            font-size: 12px;
+            font-size: 17px;
             vertical-alignment: center;
         }
         if root.alert > 0: PendingBadge {
             count: root.alert;
+            label: root.alert-total > 0 ? "\{root.alert}/\{root.alert-total}" : "";
             y: (parent.height - self.height) / 2;
         }
         if root.alert == 0 && root.pending > 0: PendingBadge {
@@ -899,6 +906,9 @@ export component ProposalCard inherits Rectangle {
     // the image ops' Ist-Stand renders it (loaded by the Rust side)
     in property <image> org-img;
     in property <bool> org-img-set;
+    // Declined view: the decision already fell — no approve/decline/discuss
+    // row, a "declined by … ·  when" line instead
+    in property <bool> read-only: false;
     callback approve();
     callback decline();
     // jump into the proposal's discussion — its patch channel on the chat
@@ -940,6 +950,25 @@ export component ProposalCard inherits Rectangle {
                 text: "#\{root.p.id}";
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
+            }
+        }
+        // the verdict line of a declined proposal: who vetoed it, and when
+        if root.p.declined-by != "": HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: "👎";
+                font-size: 22px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.p.declined-when == ""
+                    ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
+                    : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}";
+                color: Theme.bad;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                vertical-alignment: center;
             }
         }
         // Ist-Stand / Soll-Stand, when the engine knows them (the
@@ -1081,7 +1110,7 @@ export component ProposalCard inherits Rectangle {
             spacing: 10px;
             Rectangle {
                 horizontal-stretch: 1;
-                height: 30px;
+                height: 44px;
                 clip: true;
                 vp-fl := Flickable {
                     width: 100%;
@@ -1092,24 +1121,24 @@ export component ProposalCard inherits Rectangle {
                         spacing: 6px;
                         alignment: start;
                         for v in root.p.votes: Rectangle {
-                            height: 28px;
+                            height: 40px;
                             y: 1px;
-                            width: vp-pill.preferred-width + 20px;
-                            border-radius: Theme.win95 ? 0px : 14px;
+                            width: vp-pill.preferred-width + 24px;
+                            border-radius: Theme.win95 ? 0px : 20px;
                             border-width: 1px;
                             border-color: v.vote == 1 ? Theme.good.transparentize(0.45)
                                 : (v.vote == 2 ? Theme.bad.transparentize(0.45) : Theme.line);
                             background: v.vote == 1 ? Theme.good.transparentize(0.86)
                                 : (v.vote == 2 ? Theme.bad.transparentize(0.86) : Theme.panel);
                             vp-pill := HorizontalLayout {
-                                x: 10px;
+                                x: 12px;
                                 height: 100%;
-                                spacing: 5px;
+                                spacing: 7px;
                                 alignment: start;
                                 Text {
                                     text: v.vote == 1 ? "👍" : (v.vote == 2 ? "👎" : "?");
                                     color: v.vote == 2 ? Theme.bad : (v.vote == 1 ? Theme.good : Theme.warn);
-                                    font-size: v.vote == 0 ? 17px : 13px;
+                                    font-size: v.vote == 0 ? 26px : 24px;
                                     font-weight: 800;
                                     vertical-alignment: center;
                                 }
@@ -1132,17 +1161,17 @@ export component ProposalCard inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        HorizontalLayout {
+        if !root.read-only: HorizontalLayout {
             spacing: 8px;
             AppButton {
-                label: Strings.mv-approve;
+                label: "👍 \{Strings.mv-approve}";
                 primary: true;
                 clicked => {
                     root.approve();
                 }
             }
             AppButton {
-                label: Strings.mv-decline;
+                label: "👎 \{Strings.mv-decline}";
                 clicked => {
                     root.decline();
                 }

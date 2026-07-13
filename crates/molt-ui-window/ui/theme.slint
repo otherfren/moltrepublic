@@ -71,6 +71,8 @@ export struct ProposalRow {
     image-op: bool, // set_image / remove_image → picture + download link
     charter-op: bool, // set_charter → long text, capped + scrollable
     votes: [MemberVoteMark], // per-member stance, roster order
+    declined-by: string, // "" = not declined (the Declined view fills it)
+    declined-when: string, // human "when" label of the decline
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -176,9 +178,11 @@ export struct SurfaceTab {
     // (engine-derived: ProposalView.approved_by_me / snapshot.denied)
     pending-voted-count: int,
     pending-my-vote-count: int,
-    denied-count: int,
+    denied-count: int, // ALL declines (status strip)
+    declined-count: int, // declines inside the display-retention window
     log: [LogLine],
     pending: [ProposalRow],
+    declined: [ProposalRow], // the retained declines (Declined view)
     views: [ViewItem], // its nav sub-views, default first
 }
 
@@ -448,6 +452,9 @@ export global Strings {
     in property <string> pc-proposed;
     in property <string> pc-discuss;
     in property <string> pc-proposal; // title prefix ("Vorschlag:")
+    in property <string> pc-declined-by; // declined card: "Declined by" lead
+    in property <string> mv-declined; // Organization → Declined heading
+    in property <string> mv-empty-declined;
     in property <string> pc-img-hint; // the proposed-image link's hint line
     in property <string> pc-img-missing; // toast: bytes not local (mock transfer)
     // Status info panel (founding date, consensus, activity), the charter

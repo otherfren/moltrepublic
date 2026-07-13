@@ -232,6 +232,8 @@ impl State {
                         payload: payload.clone(),
                         approvals: 0,
                         state: ProposalState::Proposed,
+                        declined_at: 0,
+                        declined_by: MemberId::new(),
                     },
                 );
                 self.next_id = self.next_id.max(id.0 + 1);
@@ -249,10 +251,14 @@ impl State {
                     }
                 }
             }
-            WorkspaceEvent::Declined { id, .. } => {
+            WorkspaceEvent::Declined { id, by } => {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
                     if p.state == ProposalState::Proposed {
                         p.state = ProposalState::Rejected;
+                        // envelope data only (replay determinism): when and
+                        // by whom — the Declined read view renders both
+                        p.declined_at = env.ts;
+                        p.declined_by = by.clone();
                     }
                 }
             }

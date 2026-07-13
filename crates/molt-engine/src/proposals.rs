@@ -236,7 +236,7 @@ impl State {
         // member first — matching `approved_by_me` — then roster order), so
         // the row always agrees with the `approvals` count.
         let me = self.member();
-        let votes: Vec<MemberVote> = if self.is_chain_governed() {
+        let mut votes: Vec<MemberVote> = if self.is_chain_governed() {
             let signed: Vec<String> = self
                 .pending_sigs
                 .get(&id)
@@ -274,6 +274,15 @@ impl State {
                 })
                 .collect()
         };
+        // a rejected proposal names its decliner: that roster row shows the
+        // veto instead of an open/approved stance
+        if p.state == ProposalState::Rejected && !p.declined_by.is_empty() {
+            for v in &mut votes {
+                if v.member == p.declined_by {
+                    v.vote = VoteState::Declined;
+                }
+            }
+        }
         ProposalView {
             id: ProposalId(id),
             surface: p.surface,
@@ -285,6 +294,8 @@ impl State {
             current,
             proposed,
             votes,
+            declined_at: p.declined_at,
+            declined_by: p.declined_by.clone(),
         }
     }
 
@@ -373,16 +384,23 @@ impl State {
             .filter(|(_, p)| p.surface == surface && p.state == ProposalState::Proposed)
             .map(|(id, p)| self.view(*id, p))
             .collect();
+        // the declined projection (Organization → Declined): newest decline
+        // first, id as the deterministic tie-breaker (the proposals map is
+        // a HashMap — never lean on its iteration order)
+        let mut declined: Vec<ProposalView> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.surface == surface && p.state == ProposalState::Rejected)
+            .map(|(id, p)| self.view(*id, p))
+            .collect();
+        declined.sort_by(|a, b| b.declined_at.cmp(&a.declined_at).then(b.id.0.cmp(&a.id.0)));
         SurfaceSnapshot {
             surface,
             gated: surface.is_gated(),
             applied: self.applied_values(surface, channel.as_ref()),
             pending,
-            denied: self
-                .proposals
-                .values()
-                .filter(|p| p.surface == surface && p.state == ProposalState::Rejected)
-                .count(),
+            denied: declined.len(),
+            declined,
             channels: if surface == Surface::Chat {
                 self.chat_channels()
             } else {

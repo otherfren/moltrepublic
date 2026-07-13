@@ -106,6 +106,9 @@ impl Surface {
                 // in-voting organization changes (charter / name / image /
                 // plugins); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
+                // declined organization changes, within the display-retention
+                // window; the GUI shows this entry only while non-empty too
+                ("declined", "Declined"),
             ],
             // "today" is the group view: everything within the chat
             // retention window (the key predates the rename and stays —
@@ -1495,6 +1498,13 @@ pub struct ProposalRecord {
     pub approvals: usize,
     /// Lifecycle state.
     pub state: ProposalState,
+    /// When it was declined (the `Declined` envelope's ts, unix seconds;
+    /// 0 = not declined). Additive — an older snapshot reads as 0.
+    #[serde(default)]
+    pub declined_at: u64,
+    /// Who declined it ("" = not declined).
+    #[serde(default)]
+    pub declined_by: MemberId,
 }
 
 /// Exactly what the engine actor holds for one workspace — the snapshot
@@ -2556,9 +2566,9 @@ pub enum VoteState {
     Open,
     /// Approved (chain governance: a collected co-signature).
     Approved,
-    /// Declined. Reserved for the display contract: today a decline closes
-    /// the proposal (it leaves the Proposed-only pending read), so readers
-    /// never see this value yet.
+    /// Declined. A decline closes the proposal (it leaves the Proposed-only
+    /// pending read); the snapshot's `declined` list marks the decliner's
+    /// roster row with this value.
     Declined,
 }
 
@@ -2598,6 +2608,13 @@ pub struct ProposalView {
     /// order), so the pills always agree with `approvals`.
     #[serde(default)]
     pub votes: Vec<MemberVote>,
+    /// When the proposal was declined (unix seconds; 0 = not declined) —
+    /// what the GUI's display-retention window filters the Declined view on.
+    #[serde(default)]
+    pub declined_at: u64,
+    /// Who declined it ("" = not declined).
+    #[serde(default)]
+    pub declined_by: MemberId,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -2629,6 +2646,11 @@ pub struct SurfaceSnapshot {
     /// Number of declined (denied) proposals against this surface.
     #[serde(default)]
     pub denied: usize,
+    /// The declined proposals themselves, newest decline first (the
+    /// Organization → Declined view). Additive with a default, so an older
+    /// writer's snapshot stays deserializable.
+    #[serde(default)]
+    pub declined: Vec<ProposalView>,
     /// Chat only: every channel in the log (always the full list, even on
     /// a filtered read; `Group` is always present). Empty on other surfaces.
     #[serde(default)]

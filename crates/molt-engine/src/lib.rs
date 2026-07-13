@@ -1697,6 +1697,8 @@ mod tests {
             payload: json!({"op": op, "title": "t", "value": value}),
             approvals: 0,
             state: molt_core::ProposalState::Proposed,
+            declined_at: 0,
+            declined_by: String::new(),
         };
         assert_eq!(
             proposals::change_summary(
@@ -1951,6 +1953,55 @@ mod tests {
                 "the own approval must reflect in the pending view"
             );
             assert_eq!(snap.denied, 1, "the declined proposal counts as denied");
+        });
+    }
+
+    /// A declined proposal leaves `pending` and surfaces in the snapshot's
+    /// `declined` list — with who declined and when (the envelope ts the
+    /// GUI's retention window filters on), and the decliner's stance marked
+    /// in the votes row. The Organization → Declined view renders exactly
+    /// this projection.
+    #[test]
+    fn declined_proposals_surface_with_decliner_and_timestamp() {
+        rt().block_on(async {
+            let cfg = GroupConfig {
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"nope"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            w.execute(Command::Decline { proposal: id })
+                .await
+                .expect("decline");
+            let snap = read_surface(&w, Surface::Memory).await;
+            assert!(snap.pending.is_empty(), "a decline leaves pending");
+            assert_eq!(snap.denied, 1, "the count stays for the status strip");
+            assert_eq!(snap.declined.len(), 1, "the declined view is exposed");
+            let v = &snap.declined[0];
+            assert_eq!(v.id, id);
+            assert_eq!(v.state, molt_core::ProposalState::Rejected);
+            assert_eq!(v.declined_by, "me", "the decliner is named");
+            assert!(v.declined_at > 0, "the decline carries its envelope ts");
+            let mine = v
+                .votes
+                .iter()
+                .find(|x| x.member == "me")
+                .expect("my roster row");
+            assert_eq!(
+                mine.vote,
+                molt_core::VoteState::Declined,
+                "the votes row marks the decliner"
+            );
         });
     }
 

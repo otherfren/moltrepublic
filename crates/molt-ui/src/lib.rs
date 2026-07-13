@@ -1762,8 +1762,11 @@ struct SurfaceData {
     /// Pending proposals this node already approved (the rest of `pending`
     /// still wait on this node's vote — the approvals table shows the split).
     pending_voted: usize,
-    /// Declined proposals against this surface.
+    /// Declined proposals against this surface (total, for the status strip).
     denied: usize,
+    /// The declined proposals still inside the display-retention window —
+    /// the Declined view empties on the same rhythm as the group chat.
+    declined: Vec<ProposalRowData>,
 }
 struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
@@ -1811,6 +1814,9 @@ struct ProposalRowData {
     charter_op: bool,
     /// Per-member stance in roster order (0 open · 1 approved · 2 declined).
     votes: Vec<(String, i32)>,
+    /// Who declined it ("" = not declined) + the human "when" label.
+    declined_by: String,
+    declined_when: String,
 }
 
 /// Read status + every surface snapshot and push them into the Slint models.
@@ -2066,29 +2072,29 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                     }
                 })
                 .collect();
-            let pending: Vec<ProposalRow> = s
-                .pending
-                .iter()
-                .map(|p| ProposalRow {
-                    id: p.id,
-                    text: p.text.clone().into(),
-                    approvals: p.approvals,
-                    threshold: p.threshold,
-                    current: p.current.clone().into(),
-                    proposed: p.proposed.clone().into(),
-                    image_op: p.image_op,
-                    charter_op: p.charter_op,
-                    votes: ModelRc::new(VecModel::from(
-                        p.votes
-                            .iter()
-                            .map(|(member, vote)| MemberVoteMark {
-                                member: member.as_str().into(),
-                                vote: *vote,
-                            })
-                            .collect::<Vec<_>>(),
-                    )),
-                })
-                .collect();
+            let to_row = |p: &ProposalRowData| ProposalRow {
+                id: p.id,
+                text: p.text.clone().into(),
+                approvals: p.approvals,
+                threshold: p.threshold,
+                current: p.current.clone().into(),
+                proposed: p.proposed.clone().into(),
+                image_op: p.image_op,
+                charter_op: p.charter_op,
+                votes: ModelRc::new(VecModel::from(
+                    p.votes
+                        .iter()
+                        .map(|(member, vote)| MemberVoteMark {
+                            member: member.as_str().into(),
+                            vote: *vote,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                declined_by: p.declined_by.clone().into(),
+                declined_when: p.declined_when.clone().into(),
+            };
+            let pending: Vec<ProposalRow> = s.pending.iter().map(to_row).collect();
+            let declined: Vec<ProposalRow> = s.declined.iter().map(to_row).collect();
             // the surface's sub-views come straight from the shared
             // molt-core vocabulary (same list select_view validates against)
             let views: Vec<ViewItem> = Surface::parse(&s.key)
@@ -2112,8 +2118,10 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 pending_voted_count: s.pending_voted as i32,
                 pending_my_vote_count: (s.pending.len() - s.pending_voted) as i32,
                 denied_count: s.denied as i32,
+                declined_count: s.declined.len() as i32,
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
+                declined: ModelRc::new(VecModel::from(declined)),
                 views: ModelRc::new(VecModel::from(views)),
             }
         })
@@ -2230,6 +2238,7 @@ fn view_icon(key: &str) -> &'static str {
         "members" => "👥",
         "uploads" => "📎",
         "pending" => "🗳️",
+        "declined" => "🚫",
         "today" => "💬",
         "archive" => "🗄️",
         "brain" => "🧠",
@@ -2329,38 +2338,15 @@ fn surface_data(
     };
     let no_quotes = HashMap::new();
     annotate_chat_log(&mut log, chat_ctx.map_or(&no_quotes, |c| &c.quotes));
-    let pending: Vec<ProposalRowData> = snap
-        .pending
+    let pending: Vec<ProposalRowData> = snap.pending.iter().map(proposal_row).collect();
+    // the Declined view empties on the same rhythm as the group chat: the
+    // same DISPLAY retention window, anchored on when the decline happened
+    // (the engine read stays complete)
+    let declined: Vec<ProposalRowData> = snap
+        .declined
         .iter()
-        .map(|p| {
-            let op = p
-                .payload
-                .get("op")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            ProposalRowData {
-                id: p.id.0 as i32,
-                text: summarize(&p.payload),
-                approvals: p.approvals as i32,
-                threshold: p.threshold as i32,
-                current: p.current.clone(),
-                proposed: p.proposed.clone(),
-                image_op: matches!(op, "set_image" | "remove_image"),
-                charter_op: op == "set_charter",
-                votes: p
-                    .votes
-                    .iter()
-                    .map(|v| {
-                        let stance = match v.vote {
-                            molt_core::VoteState::Open => 0,
-                            molt_core::VoteState::Approved => 1,
-                            molt_core::VoteState::Declined => 2,
-                        };
-                        (v.member.clone(), stance)
-                    })
-                    .collect(),
-            }
-        })
+        .filter(|p| within_retention(p.declined_at, chat_cutoff))
+        .map(proposal_row)
         .collect();
     SurfaceData {
         key: sf.as_str().to_string(),
@@ -2370,6 +2356,45 @@ fn surface_data(
         pending,
         pending_voted: snap.pending.iter().filter(|p| p.approved_by_me).count(),
         denied: snap.denied,
+        declined,
+    }
+}
+
+/// Project one proposal view into the card row the GUI renders — shared by
+/// the pending and the declined list.
+fn proposal_row(p: &molt_core::ProposalView) -> ProposalRowData {
+    let op = p
+        .payload
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    ProposalRowData {
+        id: p.id.0 as i32,
+        text: summarize(&p.payload),
+        approvals: p.approvals as i32,
+        threshold: p.threshold as i32,
+        current: p.current.clone(),
+        proposed: p.proposed.clone(),
+        image_op: matches!(op, "set_image" | "remove_image"),
+        charter_op: op == "set_charter",
+        votes: p
+            .votes
+            .iter()
+            .map(|v| {
+                let stance = match v.vote {
+                    molt_core::VoteState::Open => 0,
+                    molt_core::VoteState::Approved => 1,
+                    molt_core::VoteState::Declined => 2,
+                };
+                (v.member.clone(), stance)
+            })
+            .collect(),
+        declined_by: p.declined_by.clone(),
+        declined_when: if p.declined_at > 0 {
+            when_label(p.declined_at)
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -3378,6 +3403,9 @@ lexicon! {
     mv_approve: "Approve", "Zustimmen";
     mv_decline: "Decline", "Ablehnen";
     mv_pending: "Pending decisions", "Offene Entscheidungen";
+    mv_declined: "Declined proposals", "Abgelehnte Vorschläge";
+    mv_empty_declined: "No declined proposals right now — this view empties on the chat retention rhythm.", "Gerade keine abgelehnten Vorschläge — diese Ansicht leert sich im Chat-Aufbewahrungsrhythmus.";
+    pc_declined_by: "Declined by", "Abgelehnt von";
     mv_applied: "Applied", "Angewandt";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
@@ -3623,6 +3651,8 @@ mod tests {
             current: String::new(),
             proposed: String::new(),
             votes: Vec::new(),
+            declined_at: 0,
+            declined_by: String::new(),
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(4, &[pv], &HashMap::new(), &first_seen);
@@ -3679,6 +3709,8 @@ mod tests {
             current: String::new(),
             proposed: String::new(),
             votes: Vec::new(),
+            declined_at: 0,
+            declined_by: String::new(),
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
