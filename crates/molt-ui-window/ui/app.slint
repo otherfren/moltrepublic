@@ -1765,16 +1765,21 @@ export component AppWindow inherits Window {
                                         alignment: center;
                                         spacing: 2px;
                                         horizontal-stretch: 1;
+                                        // elide, or a long name widens this row's
+                                        // name column and the buttons misalign
+                                        min-width: 0;
                                         Text {
                                             text: w.name;
                                             color: Theme.text;
                                             font-size: Theme.fs-body;
                                             font-weight: 600;
+                                            overflow: elide;
                                         }
                                         Text {
                                             text: w.detail;
                                             color: Theme.faint;
                                             font-size: Theme.fs-cap;
+                                            overflow: elide;
                                         }
                                     }
                                     Text {
