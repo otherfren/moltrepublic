@@ -43,6 +43,42 @@ component FieldLabel inherits VerticalLayout {
     @children
 }
 
+// Organization → Status: the gated-settings card (chat retention with its
+// propose-edit pencil). One definition, two placements: beside the info
+// strip when the pane is wide enough, below the charter otherwise.
+component OrgSettingsCard inherits DetailGroup {
+    in property <int> retention;
+    callback edit();
+    title: Strings.ocs-title;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: Strings.ocs-chat-retention;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: "\{root.retention} \{Strings.ocs-days}";
+            color: Theme.dim;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+        AppButton {
+            width: 26px;
+            height: 26px;
+            pad: 0px;
+            label: "✎";
+            tooltip: Strings.org-edit;
+            tooltip-left: true;
+            clicked => {
+                root.edit();
+            }
+        }
+    }
+}
+
 // A clickable, sortable column header for the backup table (the Open
 // screen's header idiom: faint until hovered/active, accent ▲/▼).
 component SortHeader inherits Rectangle {
@@ -125,11 +161,7 @@ export component AppWindow inherits Window {
     in property <int> org-online;
     in property <int> org-total;
     // the status info panel: founding date label ("—" = unknown) and the
-    // mock activity trio, mirrored from the engine's Status reply
     in property <string> org-founded;
-    in property <int> org-active-1h;
-    in property <int> org-active-24h;
-    in property <int> org-active-7d;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -3399,87 +3431,74 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 // untitled info strip: founding date, the
-                                // consensus rule, and the activity trio
-                                // (replaces the pills under the name)
-                                Rectangle {
-                                    background: Theme.panel-2;
-                                    border-radius: Theme.win95 ? 0px : 8px;
-                                    border-width: Theme.border-w;
-                                    border-color: Theme.line;
-                                    HorizontalLayout {
-                                        padding: 12px;
-                                        spacing: 22px;
-                                        VerticalLayout {
-                                            spacing: 4px;
-                                            Text {
-                                                text: Strings.os-founded;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
+                                // consensus rule, and the member count —
+                                // the gated-settings card sits beside it
+                                // when the pane is wide enough (its content
+                                // is one line; full-width it looked lost)
+                                os-row := HorizontalLayout {
+                                    spacing: 8px;
+                                    property <bool> side-settings: self.width > 680px;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        background: Theme.panel-2;
+                                        border-radius: Theme.win95 ? 0px : 8px;
+                                        border-width: Theme.border-w;
+                                        border-color: Theme.line;
+                                        HorizontalLayout {
+                                            padding: 12px;
+                                            spacing: 22px;
+                                            VerticalLayout {
+                                                spacing: 4px;
+                                                Text {
+                                                    text: Strings.os-founded;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                }
+                                                Text {
+                                                    text: root.org-founded;
+                                                    color: Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                }
                                             }
-                                            Text {
-                                                text: root.org-founded == "" ? "—" : root.org-founded;
-                                                color: Theme.text;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 700;
+                                            VerticalLayout {
+                                                spacing: 4px;
+                                                Text {
+                                                    text: Strings.os-consensus;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                }
+                                                Text {
+                                                    text: root.threshold-badge;
+                                                    color: Theme.accent;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                }
                                             }
+                                            VerticalLayout {
+                                                spacing: 4px;
+                                                Text {
+                                                    text: Strings.ow-members;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                }
+                                                Text {
+                                                    text: "\{root.org-total}";
+                                                    color: Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
                                         }
-                                        VerticalLayout {
-                                            spacing: 4px;
-                                            Text {
-                                                text: Strings.os-consensus;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                            }
-                                            Text {
-                                                text: root.threshold-badge;
-                                                color: Theme.accent;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 700;
-                                            }
+                                    }
+                                    if os-row.side-settings: OrgSettingsCard {
+                                        width: 300px;
+                                        retention: root.org-chat-retention;
+                                        edit => {
+                                            root.org-retention-draft = root.org-chat-retention;
+                                            root.org-retention-modal-open = true;
                                         }
-                                        VerticalLayout {
-                                            spacing: 4px;
-                                            Text {
-                                                text: Strings.os-act-1h;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                            }
-                                            Text {
-                                                text: "\{root.org-active-1h} / \{root.org-total}";
-                                                color: Theme.text;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 700;
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            spacing: 4px;
-                                            Text {
-                                                text: Strings.os-act-24h;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                            }
-                                            Text {
-                                                text: "\{root.org-active-24h} / \{root.org-total}";
-                                                color: Theme.text;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 700;
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            spacing: 4px;
-                                            Text {
-                                                text: Strings.os-act-7d;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                            }
-                                            Text {
-                                                text: "\{root.org-active-7d} / \{root.org-total}";
-                                                color: Theme.text;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 700;
-                                            }
-                                        }
-                                        Rectangle { horizontal-stretch: 1; }
                                     }
                                 }
                                 DetailGroup {
@@ -3532,148 +3551,117 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 // settings that are themselves gated changes:
-                                // editing one proposes it to the members
-                                DetailGroup {
-                                    title: Strings.ocs-title;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: Strings.ocs-chat-retention;
-                                            color: Theme.text;
-                                            font-size: Theme.fs-body;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: "\{root.org-chat-retention} \{Strings.ocs-days}";
-                                            color: Theme.dim;
-                                            font-size: Theme.fs-body;
-                                            vertical-alignment: center;
-                                        }
-                                        AppButton {
-                                            width: 26px;
-                                            height: 26px;
-                                            pad: 0px;
-                                            label: "✎";
-                                            tooltip: Strings.org-edit;
-                                            tooltip-left: true;
-                                            clicked => {
-                                                root.org-retention-draft = root.org-chat-retention;
-                                                root.org-retention-modal-open = true;
-                                            }
-                                        }
+                                // editing one proposes it to the members —
+                                // shown down here only when the pane is too
+                                // narrow to seat the card beside the strip
+                                if !os-row.side-settings: OrgSettingsCard {
+                                    retention: root.org-chat-retention;
+                                    edit => {
+                                        root.org-retention-draft = root.org-chat-retention;
+                                        root.org-retention-modal-open = true;
                                     }
                                 }
-                                DetailGroup {
-                                    title: Strings.org-approvals;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: Strings.oa-col-surface;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                            horizontal-stretch: 1;
-                                            vertical-alignment: bottom;
-                                        }
-                                        Text {
-                                            text: Strings.mv-applied;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                            width: 64px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: bottom;
-                                        }
-                                        Text {
-                                            text: Strings.oa-pending-voted;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                            width: 96px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: bottom;
-                                            wrap: word-wrap;
-                                        }
-                                        Text {
-                                            text: Strings.oa-denied;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                            width: 64px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: bottom;
-                                        }
-                                        Text {
-                                            text: Strings.oa-pending-mine;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                            width: 170px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: bottom;
-                                            wrap: word-wrap;
-                                        }
-                                    }
-                                    Rectangle {
-                                        height: 1px;
-                                        background: Theme.line;
-                                    }
-                                    for st in root.surfaces: HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: st.name;
-                                            color: st.gated ? Theme.accent : Theme.text;
-                                            font-size: Theme.fs-body;
-                                            horizontal-stretch: 1;
-                                            overflow: elide;
-                                            vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: "\{st.applied-count}";
-                                            color: Theme.text;
-                                            font-size: Theme.fs-body;
-                                            width: 64px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: "\{st.pending-voted-count}";
-                                            color: st.pending-voted-count > 0 ? Theme.text : Theme.dim;
-                                            font-size: Theme.fs-body;
-                                            width: 96px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: "\{st.denied-count}";
-                                            color: st.denied-count > 0 ? Theme.bad : Theme.dim;
-                                            font-size: Theme.fs-body;
-                                            width: 64px;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
-                                        }
-                                        // my open decisions: the count, and a
-                                        // jump straight into the surface's
-                                        // pending list when something waits
+                                // the approvals table shrink-wraps: its
+                                // content is a handful of counts — spread
+                                // over the full pane it read as empty
+                                HorizontalLayout {
+                                    alignment: start;
+                                    DetailGroup {
+                                        title: Strings.org-approvals;
                                         HorizontalLayout {
-                                            width: 170px;
                                             spacing: 8px;
-                                            alignment: end;
-                                            if st.pending-my-vote-count > 0: AppButton {
-                                                height: 26px;
-                                                pad: 8px;
-                                                label: Strings.oa-list-pending;
-                                                clicked => {
-                                                    root.mv-draft = "";
-                                                    if (st.key == "organization") {
-                                                        root.select-view("organization", "pending");
-                                                    } else {
-                                                        root.select-surface(st.key);
-                                                    }
-                                                }
+                                            Text {
+                                                text: Strings.oa-col-surface;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 120px;
+                                                vertical-alignment: bottom;
                                             }
                                             Text {
-                                                text: "\{st.pending-my-vote-count}";
-                                                color: st.pending-my-vote-count > 0 ? Theme.warn : Theme.dim;
+                                                text: Strings.mv-applied;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: bottom;
+                                            }
+                                            Text {
+                                                text: Strings.oa-denied;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: bottom;
+                                            }
+                                            Text {
+                                                text: Strings.oa-pending;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: bottom;
+                                            }
+                                            // the jump-to-vote column carries
+                                            // no header
+                                            Rectangle { width: 130px; }
+                                        }
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Theme.line;
+                                        }
+                                        for st in root.surfaces: HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: st.name;
+                                                color: st.gated ? Theme.accent : Theme.text;
                                                 font-size: Theme.fs-body;
-                                                font-weight: st.pending-my-vote-count > 0 ? 700 : 400;
+                                                width: 120px;
+                                                overflow: elide;
                                                 vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "\{st.applied-count}";
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "\{st.denied-count}";
+                                                color: st.denied-count > 0 ? Theme.bad : Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "\{st.pending-count}";
+                                                color: st.pending-count > 0 ? Theme.text : Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                width: 82px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            // headerless: only when this
+                                            // node's own vote is missing, the
+                                            // jump straight into the vote
+                                            HorizontalLayout {
+                                                width: 130px;
+                                                alignment: center;
+                                                if st.pending-my-vote-count > 0: AppButton {
+                                                    height: 26px;
+                                                    pad: 8px;
+                                                    label: Strings.oa-list-pending;
+                                                    clicked => {
+                                                        root.mv-draft = "";
+                                                        if (st.key == "organization") {
+                                                            root.select-view("organization", "pending");
+                                                        } else {
+                                                            root.select-surface(st.key);
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }

@@ -1628,11 +1628,9 @@ struct SurfacesBundle {
 
 /// The Organization → Status info strip, from the engine's Status reply.
 struct OrgStats {
-    /// Rendered founding date ("" = unknown → the strip shows "—").
+    /// Rendered founding date, always `YYYY-MM-DD` (a workspace without a
+    /// recorded date shows the epoch, `1970-01-01`).
     founded: String,
-    active_1h: i32,
-    active_24h: i32,
-    active_7d: i32,
     /// The republic's current image (engine `StatusView.image`): a file
     /// reference; the picture itself loads UI-side where the bytes are
     /// local (the picking device — mock transfer, like chat shares).
@@ -1859,14 +1857,13 @@ async fn push_surfaces(
             s.member,
             format!("{}-of-{}", s.threshold, s.members.len()),
             OrgStats {
+                // the literal epoch (not file_date_label(0): a negative-UTC
+                // timezone would render ts 0 as 1969-12-31)
                 founded: if s.founded_ts == 0 {
-                    String::new()
+                    "1970-01-01".to_string()
                 } else {
                     file_date_label(s.founded_ts)
                 },
-                active_1h: i32::try_from(s.active_1h).unwrap_or(i32::MAX),
-                active_24h: i32::try_from(s.active_24h).unwrap_or(i32::MAX),
-                active_7d: i32::try_from(s.active_7d).unwrap_or(i32::MAX),
                 image: s.image,
             },
         ),
@@ -2210,9 +2207,6 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
 
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());
-    ui.set_org_active_1h(b.org_stats.active_1h);
-    ui.set_org_active_24h(b.org_stats.active_24h);
-    ui.set_org_active_7d(b.org_stats.active_7d);
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes are local only on the device that picked
@@ -3308,9 +3302,8 @@ lexicon! {
     org_reachable: "reachable", "erreichbar";
     org_approvals: "Approvals", "Approvals";
     oa_col_surface: "Surface", "Bereich";
-    oa_pending_voted: "Pending (I voted)", "Offen (ich habe gestimmt)";
+    oa_pending: "Pending", "Offen";
     oa_denied: "Denied", "Abgelehnt";
-    oa_pending_mine: "Pending (my vote required)", "Offen (meine Stimme fehlt)";
     oa_list_pending: "List pending", "Offene zeigen";
     org_edit: "Edit", "Bearbeiten";
     ol_title: "Republic image", "Bild der Republik";
@@ -3354,9 +3347,6 @@ lexicon! {
     pc_img_missing: "Image not available locally — the user-to-user transfer is not built yet.", "Bild lokal nicht verfügbar — die Übertragung von Gerät zu Gerät ist noch nicht gebaut.";
     os_founded: "Founded", "Gegründet";
     os_consensus: "Consensus", "Konsens";
-    os_act_1h: "Active · last hour", "Aktiv · letzte Stunde";
-    os_act_24h: "Active · 24 h", "Aktiv · 24 h";
-    os_act_7d: "Active · 7 days", "Aktiv · 7 Tage";
     cv_shrink: "Shrink", "Verkleinern";
     ocs_title: "Settings", "Einstellungen";
     ocs_chat_retention: "Delete chat after", "Chat löschen nach";
