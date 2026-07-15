@@ -256,3 +256,13 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   `WorkspaceEvent::ChatReacted` now carries an additive idempotent `op`
   (`Add`/`Remove`, `#[serde(default)]`); a peer that does not send it falls
   back to the old toggle semantics — the accepted Q3 degradation posture.
+- **Chat retention is a read filter, not physical deletion (2026-07-16).**
+  "Delete chat after N days" is a real, threshold-gated engine setting
+  (`set_chat_retention` on the Organization surface) and it is enforced at
+  the READ contract: `ReadState` hides chat messages and declined vetoes
+  older than the effective window, identically for GUI and MCP. The bytes
+  still sit in the encrypted local log until the workspace is deleted.
+  Physical pruning is a separate follow-up: log compaction must respect the
+  legacy positional index scheme (synthetic-id derivation walks positions),
+  the replay floor and the outbox cursors — a rewrite of the segment story,
+  deliberately not smuggled into the retention feature.
