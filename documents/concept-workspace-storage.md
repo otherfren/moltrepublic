@@ -350,6 +350,17 @@ change shape, the mocks just gain organs.
     backed-up workspace dir, not a fully compromised home directory;
   * v2 (opt-in): passphrase sealing via argon2id — the parameters already
     have a home in the manifest's `[crypto]` table.
+* **The seed entropy itself is ALSO stored device-sealed** in
+  `keys/seed.sealed` (decision 2026-07-15; own AAD domain `molt-seed-v1` so
+  the two sealed blobs can never be swapped for one another). Rationale: the
+  Open screen's details panel shows the recovery phrase of an
+  at-rest-unencrypted workspace, and `transport.state` already caches the
+  identity signing key — an attacker holding dir + device key gained the
+  workspace's full capabilities before this file existed. The v2 passphrase
+  sealing (S6) **removes** `seed.sealed`: an encrypted-at-rest workspace has
+  no seed material on disk, which is why the panel hides the seed (and the
+  roster) for encrypted entries. Pre-decision dirs simply lack the file —
+  the panel says honestly that no seed is stored.
 * Nonces are random per frame (24 B XChaCha nonce space makes counter
   bookkeeping unnecessary); key rotation = new segment generation tag in the
   segment header (design slot, not v1).

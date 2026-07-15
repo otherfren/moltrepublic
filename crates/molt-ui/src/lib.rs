@@ -3319,7 +3319,8 @@ lexicon! {
     ow_s3_on: "S3 active", "S3 aktiv";
     ow_s3_off: "No S3", "Kein S3";
     ow_grp_backup: "Backup", "Backup";
-    ow_grp_net: "Network", "Netzwerk";
+    ow_grp_seed: "Seed", "Seed";
+    ow_seed_missing: "No seed is stored on this device — only your written-down phrase can restore this workspace.", "Auf diesem Gerät ist kein Seed gespeichert — nur deine notierte Phrase kann diesen Workspace wiederherstellen.";
     ow_members: "Members", "Mitglieder";
     ow_backup_cfg: "Settings", "Settings";
     ow_export: "Manual backup", "Manuelles Backup";

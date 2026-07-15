@@ -242,11 +242,15 @@ impl State {
         let member = self.config.member.clone();
         let roster = self.config.members.clone();
         let rule_m = u8::try_from(self.config.threshold.max(1)).unwrap_or(u8::MAX);
+        // the fresh dir's phrase, kept for the session entry (empty in demo
+        // mode — a demo entry has no on-disk key hierarchy to restore)
+        let mut entry_seed = String::new();
         let id = if self.persist {
             // the real restore paths (S4/S5) will rebuild from the backup;
             // until then the restored dir is founded fresh, like a create
             let seed = molt_storage::generate_seed_phrase()
                 .map_err(|e| MoltError::Restore(e.to_string()))?;
+            entry_seed = seed.clone();
             // restore rebuilds identities from the backup (S4/S5); until
             // then the fresh local dir carries none
             self.materialize_workspace(
@@ -275,7 +279,7 @@ impl State {
             rule_m,
             roster.len(),
             members,
-            String::new(),
+            entry_seed,
             "tor".to_string(),
             false,
             String::new(), // restore rebuilds the charter at S4/S5
@@ -610,7 +614,10 @@ impl State {
         }
         // members show live (the ritual just sealed them all)
         let members = roster_members(&roster, |_| true, "just now");
-        let seed = if self.persist { String::new() } else { c.seed.clone() };
+        // the phrase stays in the entry (and on disk, device-sealed —
+        // decision 2026-07-15): the Open screen's details panel shows it
+        // while the workspace is at-rest-unencrypted
+        let seed = c.seed.clone();
         self.push_workspace_entry(
             &id,
             &c.name,
@@ -877,7 +884,7 @@ impl State {
             sealed.rule_m,
             sealed.roster.len(),
             members,
-            String::new(),
+            j.seed.clone(),
             "tor".to_string(),
             self.session.settings.s3_backup,
             sealed.agenda.clone(),
@@ -1108,7 +1115,7 @@ impl State {
             sealed.rule_m,
             sealed.roster.len(),
             members,
-            String::new(),
+            phrase.clone(),
             "tor".to_string(),
             self.session.settings.s3_backup,
             sealed.agenda.clone(),

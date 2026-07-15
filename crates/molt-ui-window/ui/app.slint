@@ -488,7 +488,12 @@ export component AppWindow inherits Window {
     property <int> open-state: 0; // 0 = synced, 1 = syncing, 2 = offline
     property <bool> open-s3: false;
     property <string> open-seed;
-    property <string> open-net;
+    // LIVE binding into the list row (never assigned!) — the other open-*
+    // fields are click-time copies, but encrypting/decrypting the selected
+    // row must fold the seed/members groups immediately
+    property <bool> open-encrypted: root.open-selected >= 0
+        && root.open-selected < root.ws-list.length
+        && root.ws-list[root.open-selected].encrypted;
     property <[MemberSync]> open-members;
     property <bool> seed-shown: false;
     property <string> export-note;
@@ -535,7 +540,6 @@ export component AppWindow inherits Window {
         root.open-state = w.state;
         root.open-s3 = w.s3;
         root.open-seed = w.seed;
-        root.open-net = w.net;
         root.open-members = w.members;
         root.seed-shown = false;
         root.export-note = "";
@@ -559,7 +563,6 @@ export component AppWindow inherits Window {
         root.open-state = 0;
         root.open-s3 = false;
         root.open-seed = "";
-        root.open-net = "";
     }
 
     // Sort the backup table by a header column: clicking the active column
@@ -1969,117 +1972,103 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
                         }
-                        // one row of themed groups: backup (+ seed reveal —
-                        // the sync status lives in the table now) | net
-                        HorizontalLayout {
-                            spacing: 10px;
-                            DetailGroup {
-                                title: Strings.ow-grp-backup;
-                                horizontal-stretch: 1;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 9px;
-                                        height: 9px;
-                                        border-radius: 4.5px;
-                                        y: (parent.height - self.height) / 2;
-                                        background: root.open-s3 ? Theme.good : Theme.warn;
-                                    }
-                                    Text {
-                                        text: root.open-s3 ? Strings.ow-s3-on : Strings.ow-s3-off;
-                                        color: root.open-s3 ? Theme.good : Theme.warn;
-                                        font-size: Theme.fs-body;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        overflow: elide;
+                        // stacked themed groups — backup, seed, members
+                        // (each its own theme; the net panel is gone)
+                        DetailGroup {
+                            title: Strings.ow-grp-backup;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 9px;
+                                    height: 9px;
+                                    border-radius: 4.5px;
+                                    y: (parent.height - self.height) / 2;
+                                    background: root.open-s3 ? Theme.good : Theme.warn;
+                                }
+                                Text {
+                                    text: root.open-s3 ? Strings.ow-s3-on : Strings.ow-s3-off;
+                                    color: root.open-s3 ? Theme.good : Theme.warn;
+                                    font-size: Theme.fs-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                AppButton {
+                                    height: 30px;
+                                    pad: 10px;
+                                    icon: @image-url("assets/gear.svg");
+                                    icon-set: true;
+                                    label: Strings.ow-backup-cfg;
+                                    clicked => {
+                                        // S3 editing lives on the backup
+                                        // tab; return here when it closes.
+                                        root.settings-return = AppScreen.open;
+                                        root.set-tab = 2;
+                                        root.navigate(AppScreen.settings);
                                     }
                                 }
-                                HorizontalLayout {
-                                    alignment: start;
-                                    spacing: 8px;
-                                    AppButton {
-                                        height: 30px;
-                                        pad: 10px;
-                                        icon: @image-url("assets/eye.svg");
-                                        icon-set: true;
-                                        label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
-                                        clicked => {
-                                            root.seed-shown = !root.seed-shown;
-                                        }
-                                    }
-                                    AppButton {
-                                        height: 30px;
-                                        pad: 10px;
-                                        icon: @image-url("assets/gear.svg");
-                                        icon-set: true;
-                                        label: Strings.ow-backup-cfg;
-                                        clicked => {
-                                            // S3 editing lives on the backup
-                                            // tab; return here when it closes.
-                                            root.settings-return = AppScreen.open;
-                                            root.set-tab = 2;
-                                            root.navigate(AppScreen.settings);
-                                        }
-                                    }
-                                    AppButton {
-                                        height: 30px;
-                                        pad: 10px;
-                                        icon: @image-url("assets/floppy.svg");
-                                        icon-set: true;
-                                        label: Strings.ow-export;
-                                        clicked => {
-                                            root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
-                                            root.backup-modal-open = true;
-                                        }
+                                AppButton {
+                                    height: 30px;
+                                    pad: 10px;
+                                    icon: @image-url("assets/floppy.svg");
+                                    icon-set: true;
+                                    label: Strings.ow-export;
+                                    clicked => {
+                                        root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
+                                        root.backup-modal-open = true;
                                     }
                                 }
                             }
-                            DetailGroup {
-                                title: Strings.ow-grp-net;
-                                horizontal-stretch: 0;
-                                // centre the single line in the space below the
-                                // caption instead of letting it hang at the bottom
-                                VerticalLayout {
-                                    alignment: center;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Rectangle {
-                                            width: 9px;
-                                            height: 9px;
-                                            border-radius: 4.5px;
-                                            y: (parent.height - self.height) / 2;
-                                            background: root.open-net == "clearnet" ? Theme.warn : Theme.good;
-                                        }
-                                        Text {
-                                            text: root.open-net == "tor" ? "Tor" : (root.open-net == "nym" ? "Nym" : "Clearnet");
-                                            color: root.open-net == "clearnet" ? Theme.warn : Theme.good;
-                                            font-size: Theme.fs-body;
-                                            vertical-alignment: center;
-                                        }
+                            if root.export-note != "": Text {
+                                text: root.export-note;
+                                color: Theme.good;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                        }
+                        // seed group: only while the workspace is at-rest-
+                        // unencrypted (encrypted = no seed material around).
+                        // Masked behind the reveal button; a dir from before
+                        // seed storage says honestly that nothing is stored.
+                        if !root.open-encrypted: DetailGroup {
+                            title: Strings.ow-grp-seed;
+                            if root.open-seed != "": HorizontalLayout {
+                                alignment: start;
+                                AppButton {
+                                    height: 30px;
+                                    pad: 10px;
+                                    icon: @image-url("assets/eye.svg");
+                                    icon-set: true;
+                                    label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
+                                    clicked => {
+                                        root.seed-shown = !root.seed-shown;
                                     }
                                 }
                             }
-                        }
-                        if root.export-note != "": Text {
-                            text: root.export-note;
-                            color: Theme.good;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                        // seed panel: masked by default; hold the eye button to
-                        // peek at the real phrase, copy puts it on the clipboard
-                        if root.seed-shown: SeedPanel {
-                            seed: root.open-seed;
-                            copy-requested => {
-                                root.copy-text(root.open-seed);
-                                root.show-toast(Strings.toast-copied);
+                            if root.open-seed != "" && root.seed-shown: SeedPanel {
+                                seed: root.open-seed;
+                                copy-requested => {
+                                    root.copy-text(root.open-seed);
+                                    root.show-toast(Strings.toast-copied);
+                                }
+                            }
+                            if root.open-seed == "": Text {
+                                text: Strings.ow-seed-missing;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
                         // the DAO's members and when each of them last synced;
                         // fixed-width chips laid out as a grid that wraps to
                         // new lines (Slint has no flow layout, so x/y are
-                        // computed from the index)
-                        DetailGroup {
+                        // computed from the index). Hidden while encrypted —
+                        // like the seed, the roster is content.
+                        if !root.open-encrypted && root.open-members.length > 0: DetailGroup {
                             title: Strings.ow-members;
                             mgrid := Rectangle {
                                 property <length> chip-w: 160px;

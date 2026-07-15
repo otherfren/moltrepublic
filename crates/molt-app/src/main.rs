@@ -98,10 +98,24 @@ fn main() -> anyhow::Result<()> {
     let workspace_dir = provision_workspace_dir(&config.storage.workspace_dir)?;
     // recoverable deletes expire after 30 days
     molt_storage::purge_trash(&workspace_dir, molt_storage::TRASH_MAX_AGE_SECS);
-    // the Open screen's list: every manifest under the root (no decryption)
+    // the Open screen's list: every manifest under the root, plus what the
+    // device-sealed key opens for the details panel of an at-rest-unencrypted
+    // dir — the stored recovery phrase and the genesis' roster/charter
     let workspaces: Vec<molt_core::WorkspaceInfo> = molt_storage::scan_workspaces(&workspace_dir)
         .iter()
-        .map(molt_storage::ScanEntry::info)
+        .map(|e| {
+            let mut w = e.info();
+            if let Some(phrase) = molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id) {
+                w.seed = phrase;
+            }
+            if let Some(genesis) = molt_storage::peek_genesis(&workspace_dir, &e.dir, &w.id) {
+                if let molt_core::WorkspaceEvent::Founded { roster, agenda, .. } = genesis.body {
+                    w.members = molt_core::roster_members(&roster, |_| false, "offline");
+                    w.agenda = agenda;
+                }
+            }
+            w
+        })
         .collect();
     tracing::info!(
         dir = %workspace_dir.display(),

@@ -946,9 +946,10 @@ mod tests {
             assert_eq!(id.len(), 64, "a real derived workspace id");
             let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
             assert_eq!(ws.name, "Keystone");
-            // the recovery phrase is shown once in the wizard and never
-            // kept in the shared session of a persisted workspace
-            assert!(ws.seed.is_empty());
+            // the recovery phrase stays in the entry (decision 2026-07-15:
+            // stored device-sealed, shown by the Open screen's details
+            // panel while the workspace is at-rest-unencrypted)
+            assert_eq!(ws.seed.split(' ').count(), 24, "the real phrase: {}", ws.seed);
 
             // write history: chat, reaction, delete, proposal to threshold
             // (all chat verbs address by stable id since the chat bus)

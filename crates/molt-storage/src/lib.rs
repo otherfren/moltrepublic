@@ -33,9 +33,13 @@
 //! BIP-39 phrase) is the root. `workspace_id = HKDF(seed, "molt-ws-id",
 //! member)`, `workspace_key = HKDF(seed, "molt-ws-key", workspace_id)`. The
 //! key is stored sealed to a device key (`~/.moltrepublic/device.key`, 0600)
-//! so day-to-day opens never touch the seed. Honest threat-model note: this
-//! protects the synced / backed-up workspace dir, not a fully compromised
-//! home directory (passphrase sealing is the opt-in v2, milestone S6).
+//! so day-to-day opens never touch the seed. The seed entropy itself is also
+//! stored device-sealed (`keys/seed.sealed`, own AAD domain — decision
+//! 2026-07-15) so the Open screen can show the phrase of an
+//! at-rest-unencrypted workspace; S6 passphrase sealing removes that file.
+//! Honest threat-model note: all of this protects the synced / backed-up
+//! workspace dir, not a fully compromised home directory (passphrase sealing
+//! is the opt-in v2, milestone S6).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -350,6 +354,100 @@ fn unseal_workspace_key(
         })?;
     <[u8; 32]>::try_from(pt.as_slice())
         .map_err(|_| StorageError::BadFile("unsealed workspace key is not 32 bytes".to_string()))
+}
+
+/// The AAD for `keys/seed.sealed` — its own domain (`molt-seed-v1` ‖ id),
+/// so the sealed seed and the sealed workspace key can never be swapped
+/// for one another on disk.
+fn seed_seal_aad(id: &[u8; 32]) -> [u8; 44] {
+    let mut aad = [0u8; 44];
+    aad[..12].copy_from_slice(b"molt-seed-v1");
+    aad[12..].copy_from_slice(id);
+    aad
+}
+
+/// Seal the recovery-seed entropy to the device key (`nonce || ciphertext`,
+/// AAD [`seed_seal_aad`]). Stored so the details panel can show the phrase
+/// of an at-rest-unencrypted workspace (decision 2026-07-15); the opt-in
+/// passphrase sealing (S6) removes the file.
+fn seal_seed_entropy(
+    device_key: &[u8; 32],
+    id: &[u8; 32],
+    entropy: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let cipher = XChaCha20Poly1305::new(device_key.into());
+    let ct = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: entropy,
+                aad: &seed_seal_aad(id),
+            },
+        )
+        .map_err(|_| StorageError::Crypto("sealing the seed failed".to_string()))?;
+    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Read a workspace's recovery phrase back from `keys/seed.sealed`.
+/// `None` for anything that isn't a healthy sealed seed — absent file
+/// (pre-seed-storage workspace), foreign device key, tampered blob —
+/// the Open screen shows an honest "not stored" instead of failing.
+pub fn read_sealed_seed(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<String> {
+    let blob = match fs::read(ws_dir.join("keys").join("seed.sealed")) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(dir = %ws_dir.display(), error = %e, "sealed seed unreadable");
+            return None;
+        }
+    };
+    if blob.len() <= NONCE_LEN {
+        tracing::warn!(dir = %ws_dir.display(), "sealed seed is too short");
+        return None;
+    }
+    let id = id_bytes(id_hex).ok()?;
+    let device_key = match load_or_create_device_key(&device_key_path(root)) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(error = %e, "device key unavailable for the sealed seed");
+            return None;
+        }
+    };
+    let (nonce, ct) = blob.split_at(NONCE_LEN);
+    let cipher = XChaCha20Poly1305::new((&device_key).into());
+    let entropy = cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ct,
+                aad: &seed_seal_aad(&id),
+            },
+        )
+        .ok()?;
+    Some(bip39::Mnemonic::from_entropy(&entropy).ok()?.to_string())
+}
+
+/// Decrypt just the genesis (frame 1 of segment 1) of a workspace directory —
+/// enough for the Open screen to show a CLOSED workspace's roster and charter
+/// without replaying its log or taking its lock. `None` for anything that
+/// isn't a healthy readable genesis (foreign device key, corrupt frame, …).
+pub fn peek_genesis(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<EventEnvelope> {
+    let id = id_bytes(id_hex).ok()?;
+    let manifest = read_manifest(ws_dir).ok()?;
+    let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file)).ok()?;
+    let device_key = load_or_create_device_key(&device_key_path(root)).ok()?;
+    let key = unseal_workspace_key(&device_key, &id, &sealed).ok()?;
+    let data = fs::read(ws_dir.join("log").join(segment_name(1))).ok()?;
+    let (frames, _torn) = split_frames(&data);
+    let first = frames.first()?;
+    let plaintext = decrypt_frame(&key, &id, 1, 1, first.nonce, first.ciphertext).ok()?;
+    serde_json::from_slice(&plaintext).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -993,6 +1091,10 @@ pub fn create_workspace(
     let device_key = load_or_create_device_key(&device_key_path(root))?;
     let sealed = seal_workspace_key(&device_key, &id, &key)?;
     write_atomic(&staging, "keys/workspace.key", &sealed, true)?;
+    // the recovery phrase, device-sealed (own AAD domain): the Open screen's
+    // details panel shows it while the workspace is at-rest-unencrypted
+    let sealed_seed = seal_seed_entropy(&device_key, &id, seed)?;
+    write_atomic(&staging, "keys/seed.sealed", &sealed_seed, true)?;
 
     // frame 1: the genesis
     let plaintext = serde_json::to_vec(genesis)
@@ -1225,9 +1327,10 @@ pub struct ScanEntry {
 impl ScanEntry {
     /// Project this directory entry into the session's workspace-list shape.
     /// Only plaintext facts: sync/presence fields stay neutral (they are the
-    /// transport's runtime state), the member roster stays empty until the
-    /// workspace is opened and the genesis replays, and the recovery seed is
-    /// never on disk — the list shows an entry without revealing content.
+    /// transport's runtime state) and roster/seed stay empty here. The app's
+    /// startup scan fills them via [`read_sealed_seed`] / [`peek_genesis`]
+    /// (both open with the device-sealed key material) so the details panel
+    /// of an at-rest-unencrypted workspace shows the real phrase and roster.
     pub fn info(&self) -> molt_core::WorkspaceInfo {
         let w = &self.manifest.workspace;
         let last_backup_min = self
@@ -1849,6 +1952,77 @@ mod tests {
         assert!(seed_entropy("amber basalt cedar").is_err());
         // two generations never collide
         assert_ne!(phrase, generate_seed_phrase().expect("gen2"));
+    }
+
+    #[test]
+    fn the_seed_phrase_is_stored_sealed_and_reads_back() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let phrase = generate_seed_phrase().expect("gen");
+        let seed = seed_entropy(&phrase).expect("entropy");
+        let ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let id_hex = ws.manifest.workspace.id.clone();
+        drop(ws);
+        assert!(dir.join("keys").join("seed.sealed").exists());
+        assert_eq!(
+            read_sealed_seed(&root, &dir, &id_hex).as_deref(),
+            Some(phrase.as_str())
+        );
+    }
+
+    #[test]
+    fn a_missing_tampered_or_foreign_sealed_seed_reads_as_none() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let phrase = generate_seed_phrase().expect("gen");
+        let seed = seed_entropy(&phrase).expect("entropy");
+        let ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let id_hex = ws.manifest.workspace.id.clone();
+        drop(ws);
+        let sealed = dir.join("keys").join("seed.sealed");
+
+        // the sealed workspace KEY must not unseal as a seed (distinct
+        // AAD domain — otherwise the two blobs would be interchangeable)
+        let key_blob = fs::read(dir.join("keys").join("workspace.key")).expect("read key");
+        let seed_blob = fs::read(&sealed).expect("read seed");
+        fs::write(&sealed, &key_blob).expect("swap");
+        assert_eq!(read_sealed_seed(&root, &dir, &id_hex), None);
+
+        // a truncated/tampered blob reads as None, never panics
+        fs::write(&sealed, &seed_blob[..10]).expect("truncate");
+        assert_eq!(read_sealed_seed(&root, &dir, &id_hex), None);
+
+        // a pre-seed-storage workspace (no file) reads as None
+        fs::remove_file(&sealed).expect("rm");
+        assert_eq!(read_sealed_seed(&root, &dir, &id_hex), None);
+
+        // a foreign device key cannot unseal the phrase
+        fs::write(&sealed, &seed_blob).expect("restore");
+        fs::write(device_key_path(&root), [9u8; 32]).expect("swap device key");
+        assert_eq!(read_sealed_seed(&root, &dir, &id_hex), None);
+    }
+
+    #[test]
+    fn peek_genesis_reads_frame_one_without_a_replay() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        // extra chat frames prove the peek stops at the genesis
+        let dir = make_ws(&root, 3);
+        let manifest = read_manifest(&dir).expect("manifest");
+        let id_hex = manifest.workspace.id.clone();
+
+        let genesis = peek_genesis(&root, &dir, &id_hex).expect("peek");
+        assert_eq!(genesis.seq, 1);
+        match genesis.body {
+            WorkspaceEvent::Founded { ref name, .. } => assert_eq!(name, "Chess Club"),
+            ref other => panic!("expected Founded, got {other:?}"),
+        }
+
+        // a foreign device key cannot peek
+        fs::write(device_key_path(&root), [9u8; 32]).expect("swap device key");
+        assert!(peek_genesis(&root, &dir, &id_hex).is_none());
     }
 
     #[test]
