@@ -7,17 +7,22 @@
 import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, MemberSync, ProposalRow } from "theme.slint";
 import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
 
-// A large clickable option card used on the first-run choice screen.
+// A large clickable option card used on the first-run choice screen. The
+// title is split into its hotkey letter (rendered underlined; the window
+// activates the card when it is typed) and the rest; `marked` mirrors the
+// hover look for the arrow-key selection.
 export component ChoiceCard inherits Rectangle {
-    in property <string> title;
+    in property <string> key;
+    in property <string> rest;
     in property <string> sub;
     in property <image> icon;
+    in property <bool> marked: false;
     callback chosen();
     height: 88px;
     border-radius: Theme.radius;
-    background: ta.has-hover ? Theme.raised : Theme.panel-2;
+    background: ta.has-hover || root.marked ? Theme.raised : Theme.panel-2;
     border-width: Theme.border-w;
-    border-color: ta.has-hover ? Theme.accent : Theme.line;
+    border-color: ta.has-hover || root.marked ? Theme.accent : Theme.line;
     animate background, border-color { duration: 110ms; }
 
     Rectangle {
@@ -44,11 +49,32 @@ export component ChoiceCard inherits Rectangle {
         height: 100%;
         alignment: center;
         spacing: 4px;
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: Theme.fs-h2;
-            font-weight: 700;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 0;
+            Rectangle {
+                width: keyt.preferred-width;
+                height: keyt.preferred-height;
+                keyt := Text {
+                    text: root.key;
+                    color: Theme.text;
+                    font-size: Theme.fs-h2;
+                    font-weight: 700;
+                }
+                // the hotkey underline, sitting just under the glyph
+                Rectangle {
+                    y: keyt.preferred-height - 3px;
+                    height: 1.5px;
+                    width: keyt.preferred-width;
+                    background: Theme.text;
+                }
+            }
+            Text {
+                text: root.rest;
+                color: Theme.text;
+                font-size: Theme.fs-h2;
+                font-weight: 700;
+            }
         }
         Text {
             text: root.sub;

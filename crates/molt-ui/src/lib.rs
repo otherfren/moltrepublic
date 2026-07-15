@@ -3161,13 +3161,19 @@ lexicon! {
     choice_subtitle: "Choose how to begin.", "Wähle, wie du beginnen möchtest.";
     choice_mock_note: "Workspaces are stored encrypted in the workspace folder (see Settings).", "Workspaces werden verschlüsselt im Workspace-Ordner gespeichert (siehe Einstellungen).";
     choice_group_republic: "New republic", "Neue Republik";
-    choice_create_title: "Create", "Gründen";
+    // card titles split as hotkey letter + rest: the letter renders
+    // underlined and typing it activates the card
+    choice_create_key: "C", "G";
+    choice_create_rest: "reate", "ründen";
     choice_create_sub: "A new workspace", "Workspace erstellen";
-    choice_open_title: "Open", "Öffnen";
+    choice_open_key: "O", "Ö";
+    choice_open_rest: "pen", "ffnen";
     choice_open_sub: "Open a local workspace", "Lokalen Workspace öffnen";
-    choice_join_title: "Join", "Beitreten";
+    choice_join_key: "J", "B";
+    choice_join_rest: "oin", "eitreten";
     choice_join_sub: "Via an invite link", "Einem Workspace per Einladungslink beitreten";
-    choice_restore_title: "Restore", "Wiederherstellen";
+    choice_restore_key: "R", "W";
+    choice_restore_rest: "estore", "iederherstellen";
     choice_restore_sub: "With your phrase — from a backup or after device loss", "Mit deiner Phrase — aus Backup oder nach Geräteverlust";
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";

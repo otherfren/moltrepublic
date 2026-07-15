@@ -245,6 +245,40 @@ export component AppWindow inherits Window {
         if (root.screen != root.nav-default-screen) {
             root.nav-default-screen = root.screen;
             root.nav-collapsed = root.screen != AppScreen.main;
+            // the welcome screen's arrow-key mark starts fresh per visit,
+            // and the root scope re-takes focus so the arrow/hotkey handler
+            // hears keys even if a (now hidden) wizard field held them
+            root.choice-focus = -1;
+            if (root.screen == AppScreen.choice) {
+                esc.focus();
+            }
+        }
+    }
+    // the welcome card marked via arrow keys (-1 = none): mirrors the hover
+    // look (ChoiceCard.marked); Enter/Space acts like a click on it
+    property <int> choice-focus: -1;
+    // ONE place performs a welcome card's action — the cards' click handlers
+    // and the keyboard paths (arrows + Enter/Space, hotkey letters) share it
+    function choice-go(i: int) {
+        if (i == 0) {
+            root.navigate(AppScreen.open);
+        } else if (i == 1) {
+            root.rw-seed = "";
+            root.rw-file = "";
+            // a recovery already in flight keeps its state; a fresh visit
+            // starts clean
+            if (!root.rv-running) {
+                root.rv-link = "";
+                root.rv-error = "";
+            }
+            root.navigate(AppScreen.restore);
+        } else if (i == 2) {
+            root.reset-create();
+            root.navigate(AppScreen.create);
+        } else if (i == 3) {
+            root.jw-invite = "";
+            root.jw-member = "";
+            root.navigate(AppScreen.join);
         }
     }
     // modal: confirm closing the workspace (raised by either close button)
@@ -680,6 +714,39 @@ export component AppWindow inherits Window {
                 root.handle-escape();
                 return accept;
             }
+            // welcome screen keyboard driving: arrows mark a card (hover
+            // look), Enter/Space clicks it, a title's hotkey letter fires
+            // it directly
+            if (root.screen == AppScreen.choice && !root.confirm-quit-open) {
+                if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                    root.choice-focus = root.choice-focus < 0 ? 0 : Math.mod(root.choice-focus + 1, 4);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                    root.choice-focus = root.choice-focus < 0 ? 3 : Math.mod(root.choice-focus + 3, 4);
+                    return accept;
+                }
+                if (root.choice-focus >= 0 && (event.text == Key.Return || event.text == " ")) {
+                    root.choice-go(root.choice-focus);
+                    return accept;
+                }
+                if (event.text.to-lowercase() == Strings.choice-open-key.to-lowercase()) {
+                    root.choice-go(0);
+                    return accept;
+                }
+                if (event.text.to-lowercase() == Strings.choice-restore-key.to-lowercase()) {
+                    root.choice-go(1);
+                    return accept;
+                }
+                if (event.text.to-lowercase() == Strings.choice-create-key.to-lowercase()) {
+                    root.choice-go(2);
+                    return accept;
+                }
+                if (event.text.to-lowercase() == Strings.choice-join-key.to-lowercase()) {
+                    root.choice-go(3);
+                    return accept;
+                }
+            }
             reject
         }
 
@@ -707,10 +774,18 @@ export component AppWindow inherits Window {
                 // wordmark (brand): the moltrepublic.ai lockup as crisp text —
                 // molt (orange) · republic (teal) · .ai (orange). The teal follows
                 // the theme so it stays legible on the dark palette.
-                Rectangle {
+                brand := Rectangle {
                     // same height as the main view's header bar, so the two
                     // top panels line up
                     height: 64px;
+                    // per-letter model of the lockup (o = brand orange, else
+                    // the theme teal) — split so a hover can shuffle each
+                    // letter's colour between the two brand tones
+                    property <[{c: string, o: bool}]> letters: [
+                        { c: "m", o: true }, { c: "o", o: true }, { c: "l", o: true }, { c: "t", o: true },
+                        { c: "r", o: false }, { c: "e", o: false }, { c: "p", o: false }, { c: "u", o: false },
+                        { c: "b", o: false }, { c: "l", o: false }, { c: "i", o: false }, { c: "c", o: false },
+                        { c: ".", o: true }, { c: "a", o: true }, { c: "i", o: true }];
                     if !root.nav-collapsed: HorizontalLayout {
                         padding-left: 20px;
                         padding-right: 20px;
@@ -719,31 +794,27 @@ export component AppWindow inherits Window {
                             alignment: center;
                             HorizontalLayout {
                                 spacing: 0;
-                                Text {
-                                    text: "molt";
-                                    color: #e65515;
+                                for l[i] in brand.letters: Text {
+                                    text: l.c;
+                                    // hovered: every letter picks one of the
+                                    // two brand tones pseudo-randomly, re-
+                                    // shuffling ~4×/s (animation-tick only
+                                    // runs while the binding is on the hover
+                                    // branch); unhovered: the lockup colours
+                                    color: brand-ta.has-hover
+                                        ? (Math.mod((Math.floor(animation-tick() / 280ms) + i) * (i * 2 + 3), 4) < 2
+                                            ? #e65515
+                                            : (Theme.theme-index == 1 ? #6fc7d0 : #064955))
+                                        : (l.o ? #e65515 : (Theme.theme-index == 1 ? #6fc7d0 : #064955));
+                                    animate color { duration: 150ms; }
                                     font-size: 24px;
                                     font-weight: 800;
-                                    letter-spacing: -0.4px;
-                                }
-                                Text {
-                                    text: "republic";
-                                    color: Theme.theme-index == 1 ? #6fc7d0 : #064955;
-                                    font-size: 24px;
-                                    font-weight: 800;
-                                    letter-spacing: -0.4px;
-                                }
-                                Text {
-                                    text: ".ai";
-                                    color: #e65515;
-                                    font-size: 24px;
-                                    font-weight: 800;
-                                    letter-spacing: -0.4px;
                                 }
                             }
                         }
                     }
-                    // collapsed: the brand shrinks to its initial
+                    // collapsed: the brand shrinks to its initial — a hover
+                    // spins it once around, unhovering spins it back
                     if root.nav-collapsed: Text {
                         text: "m";
                         color: #e65515;
@@ -751,7 +822,13 @@ export component AppWindow inherits Window {
                         font-weight: 800;
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
+                        transform-rotation: brand-ta.has-hover ? 360deg : 0deg;
+                        animate transform-rotation {
+                            duration: 600ms;
+                            easing: ease-in-out;
+                        }
                     }
+                    brand-ta := TouchArea { }
                 }
                 Rectangle {
                     height: 1px;
@@ -1000,27 +1077,23 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { height: 4px; }
                         ChoiceCard {
-                            title: Strings.choice-open-title;
+                            key: Strings.choice-open-key;
+                            rest: Strings.choice-open-rest;
                             sub: Strings.choice-open-sub;
                             icon: @image-url("assets/open.svg");
+                            marked: root.choice-focus == 0;
                             chosen => {
-                                root.navigate(AppScreen.open);
+                                root.choice-go(0);
                             }
                         }
                         ChoiceCard {
-                            title: Strings.choice-restore-title;
+                            key: Strings.choice-restore-key;
+                            rest: Strings.choice-restore-rest;
                             sub: Strings.choice-restore-sub;
                             icon: @image-url("assets/restore.svg");
+                            marked: root.choice-focus == 1;
                             chosen => {
-                                root.rw-seed = "";
-                                root.rw-file = "";
-                                // a recovery already in flight keeps its
-                                // state; a fresh visit starts clean
-                                if (!root.rv-running) {
-                                    root.rv-link = "";
-                                    root.rv-error = "";
-                                }
-                                root.navigate(AppScreen.restore);
+                                root.choice-go(1);
                             }
                         }
                         // "New republic" — create / join grouped and indented,
@@ -1041,22 +1114,23 @@ export component AppWindow inherits Window {
                             VerticalLayout {
                                 spacing: 8px;
                                 ChoiceCard {
-                                    title: Strings.choice-create-title;
+                                    key: Strings.choice-create-key;
+                                    rest: Strings.choice-create-rest;
                                     sub: Strings.choice-create-sub;
                                     icon: @image-url("assets/create.svg");
+                                    marked: root.choice-focus == 2;
                                     chosen => {
-                                        root.reset-create();
-                                        root.navigate(AppScreen.create);
+                                        root.choice-go(2);
                                     }
                                 }
                                 ChoiceCard {
-                                    title: Strings.choice-join-title;
+                                    key: Strings.choice-join-key;
+                                    rest: Strings.choice-join-rest;
                                     sub: Strings.choice-join-sub;
                                     icon: @image-url("assets/join.svg");
+                                    marked: root.choice-focus == 3;
                                     chosen => {
-                                        root.jw-invite = "";
-                                        root.jw-member = "";
-                                        root.navigate(AppScreen.join);
+                                        root.choice-go(3);
                                     }
                                 }
                             }
@@ -2090,7 +2164,10 @@ export component AppWindow inherits Window {
                                         padding-left: 9px;
                                         padding-right: 9px;
                                         spacing: 6px;
-                                        Rectangle {
+                                        // no presence knowledge (closed
+                                        // workspace, empty "last") = no dot,
+                                        // no fake offline status
+                                        if m.last != "": Rectangle {
                                             width: 7px;
                                             height: 7px;
                                             border-radius: 3.5px;
@@ -2098,7 +2175,7 @@ export component AppWindow inherits Window {
                                             background: m.state == 0 ? Theme.good : (m.state == 2 ? Theme.faint : Theme.warn);
                                         }
                                         Text {
-                                            text: "\{m.name} · \{m.last}";
+                                            text: m.last == "" ? m.name : "\{m.name} · \{m.last}";
                                             color: Theme.dim;
                                             font-size: Theme.fs-cap;
                                             vertical-alignment: center;
