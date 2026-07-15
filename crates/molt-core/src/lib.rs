@@ -2760,6 +2760,28 @@ pub struct StatusView {
     /// the bytes stay on the proposer's disk until the transfer story.
     #[serde(default)]
     pub image: String,
+    /// The republic's EFFECTIVE display name: the last applied `set_name`
+    /// Organization change, the ratified founding name until one applies
+    /// ("" on pre-ritual/demo groups). The `republic_id` stays the
+    /// content-derived founding value — a rename never changes identity.
+    #[serde(default)]
+    pub name: String,
+    /// The EFFECTIVE charter: the last applied `set_charter` over the
+    /// ratified founding agenda. The genesis block keeps the founding
+    /// charter immutably; this is the fold on top.
+    #[serde(default)]
+    pub agenda: String,
+    /// The EFFECTIVE "delete chat after" window in days: the last applied
+    /// `set_chat_retention`, default 7. The read contract (`ReadState`)
+    /// hides chat messages and declined proposals older than this.
+    #[serde(default = "default_chat_retention_days")]
+    pub chat_retention_days: u64,
+}
+
+/// The chat-retention default: 7 days, the window every republic starts
+/// with until a gated `set_chat_retention` change applies.
+pub fn default_chat_retention_days() -> u64 {
+    7
 }
 
 /// The group configuration the engine runs under.

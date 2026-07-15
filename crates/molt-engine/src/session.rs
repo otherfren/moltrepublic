@@ -429,13 +429,16 @@ impl State {
         Ok(transport_state)
     }
 
-    /// Mirror the replayed genesis identity into the session's list entry:
-    /// the manifest copies feed the undecrypted Open screen, the event
-    /// stream is the authority once the workspace is open.
-    fn refresh_active_entry(&mut self) {
+    /// Mirror the replayed identity into the session's list entry: the
+    /// manifest copies feed the undecrypted Open screen, the event stream
+    /// is the authority once the workspace is open. Name and agenda are
+    /// the EFFECTIVE values (genesis folded with the applied Organization
+    /// ops) — an applied `set_name`/`set_charter` shows up everywhere.
+    pub(crate) fn refresh_active_entry(&mut self) {
         let Some(replica) = self.replica.clone() else {
             return;
         };
+        let eff = self.org_effective();
         let Some(active) = &self.active else {
             return;
         };
@@ -447,12 +450,27 @@ impl State {
         else {
             return;
         };
-        ws.name = replica.name;
+        ws.name = eff.name;
         ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
-        ws.agenda = replica.agenda;
+        ws.agenda = eff.agenda;
         // members are a projection of the replayed roster — always rebuilt,
         // so a roster grown by MemberJoined never leaves a stale list
         ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");
+    }
+
+    /// An Organization change was applied: ripple the effective identity
+    /// into every mirror that shows it — the session entry (header + Open
+    /// list), the plaintext manifest on disk (the undecrypted Open-screen
+    /// scan must agree after a restart) and the session broadcast.
+    pub(crate) fn after_org_applied(&mut self) {
+        self.refresh_active_entry();
+        if let Some(active) = &self.active {
+            let name = self.org_effective().name;
+            if !name.is_empty() {
+                active.handle.set_display_name(name);
+            }
+        }
+        self.emit_session(SessionScope::Full);
     }
 
     /// Flush + closing snapshot + LOCK release for the open workspace (if

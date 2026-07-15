@@ -1158,15 +1158,21 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
         // message exists anywhere — the out-of-order case by construction
         tokio::time::sleep(Duration::from_millis(400)).await;
 
+        // stamped "now": an ancient ts would age the message straight out
+        // of the retention read window and the assertion below reads chat
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         ada_feed.push(EventEnvelope {
             seq: 1,
-            ts: 1_751_000_002,
+            ts: now,
             by: "ada".to_string(),
             body: WorkspaceEvent::Chat(ChatMessage::text(
                 target,
                 "ada",
                 "the parked target",
-                1_751_000_002,
+                now,
             )),
         });
         let _ = wake_ada.send(1);

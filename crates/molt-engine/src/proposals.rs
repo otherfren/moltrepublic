@@ -13,17 +13,36 @@ use molt_core::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{ReplicaState, State};
+use crate::State;
+
+/// The republic's EFFECTIVE display state: the ratified genesis folded
+/// with the applied Organization ops (last write wins per op). This is
+/// what every reader shows — the genesis itself stays immutable history,
+/// it is only the fold's floor. Display/read state, never consensus input.
+pub(crate) struct OrgEffective {
+    /// Last applied `set_name`, founding name until one applies.
+    pub name: String,
+    /// Last applied `set_charter`, founding agenda until one applies.
+    pub agenda: String,
+    /// Last applied `set_chat_retention` in days (default 7): the "delete
+    /// chat after" window the read contract filters on.
+    pub retention_days: u64,
+    /// Last applied `set_image` reference, cleared by `remove_image`.
+    pub image: String,
+}
+
+/// Parse a retention window ("14 days" or a bare "14") into days.
+/// `None` when unparseable or outside 1..=365 — callers refuse, never guess.
+pub(crate) fn parse_retention_days(value: &str) -> Option<u64> {
+    let days: u64 = value.split_whitespace().next()?.parse().ok()?;
+    (1..=365).contains(&days).then_some(days)
+}
 
 /// The "Ist-Stand / Soll-Stand" display pair of a proposal: what the
-/// targeted state is now (from the genesis replica, for the Organization
+/// targeted state is now (the EFFECTIVE org state, for the Organization
 /// edit ops) and what the change would make it (the payload's `value`).
-/// Mock-grade display data, never consensus input — "" when unknown.
-pub(crate) fn change_summary(
-    replica: Option<&ReplicaState>,
-    org_image: &str,
-    p: &ProposalRecord,
-) -> (String, String) {
+/// Display data, never consensus input — "" when unknown.
+pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String, String) {
     let proposed = p
         .payload
         .get("value")
@@ -35,17 +54,38 @@ pub(crate) fn change_summary(
     }
     let op = p.payload.get("op").and_then(Value::as_str).unwrap_or("");
     let current = match op {
-        "set_charter" => replica.map(|r| r.agenda.clone()).unwrap_or_default(),
-        "set_name" => replica.map(|r| r.name.clone()).unwrap_or_default(),
-        // the chat-retention setting is not yet engine state — its mock
-        // default is the Ist-Stand until the real setting lands
-        "set_chat_retention" => "7 days".to_string(),
+        "set_charter" => eff.agenda.clone(),
+        "set_name" => eff.name.clone(),
+        "set_chat_retention" => format!("{} days", eff.retention_days),
         // the image ops show what they change: the current image reference
-        "set_image" | "remove_image" => org_image.to_string(),
+        "set_image" | "remove_image" => eff.image.clone(),
         // no plugin state exists yet (mock) — nothing to show
         _ => String::new(),
     };
     (current, proposed)
+}
+
+/// Refuse an Organization edit whose value could never become honest
+/// effective state: an applied entry is forever (the log is append-only),
+/// so a blank name or an unparseable retention window must not get in.
+/// Local proposals only — the wire fold stays defensive on its own.
+fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltError> {
+    if surface != Surface::Organization {
+        return Ok(());
+    }
+    let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+    let value = payload.get("value").and_then(Value::as_str).unwrap_or("");
+    match op {
+        "set_name" if value.trim().is_empty() => Err(MoltError::BadPayload(
+            "the republic needs a non-empty name".into(),
+        )),
+        "set_chat_retention" if parse_retention_days(value).is_none() => {
+            Err(MoltError::BadPayload(
+                "the retention window must be 1..=365 days (e.g. \"14 days\")".into(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 impl State {
@@ -62,6 +102,7 @@ impl State {
                 "payload must be a JSON object".into(),
             ));
         }
+        validate_org_payload(surface, &payload)?;
         let me = self.member();
         let id = ProposalId(self.next_id);
         let env = self.make_env(
@@ -184,6 +225,9 @@ impl State {
         self.record(env);
         if let Some(surface) = self.proposals.get(&id.0).map(|p| p.surface) {
             self.emit(Event::Applied { id, surface });
+            if surface == Surface::Organization {
+                self.after_org_applied();
+            }
         }
     }
 
@@ -229,7 +273,7 @@ impl State {
         } else {
             p.approvals > 0
         };
-        let (current, proposed) = change_summary(self.replica.as_ref(), &self.org_image(), p);
+        let (current, proposed) = change_summary(&self.org_effective(), p);
         // the voting row: one stance per roster member, roster order. Chain
         // governance knows exactly who signed; the legacy counted simulation
         // attributes its anonymous counter deterministically (the local
@@ -299,26 +343,47 @@ impl State {
         }
     }
 
-    /// The republic's current image: the `value` of the last applied
-    /// `set_image` Organization change, cleared again by an applied
-    /// `remove_image`. Display-grade state derived from the applied log
-    /// (the applied values ARE the raw proposal payloads) — "" when unset.
-    pub(crate) fn org_image(&self) -> String {
-        let mut image = String::new();
+    /// The republic's EFFECTIVE display state: fold the applied
+    /// Organization log (the applied values ARE the raw proposal payloads,
+    /// last write per op wins) over the ratified genesis. Wire arrivals are
+    /// not re-validated here, so the fold is defensive: an unparseable
+    /// retention keeps the previous window, an empty name keeps the
+    /// previous name.
+    pub(crate) fn org_effective(&self) -> OrgEffective {
+        let mut eff = OrgEffective {
+            name: self.replica.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
+            agenda: self.replica.as_ref().map(|r| r.agenda.clone()).unwrap_or_default(),
+            retention_days: molt_core::default_chat_retention_days(),
+            image: String::new(),
+        };
         for v in self.applied_values(Surface::Organization, None) {
+            let value = v.get("value").and_then(Value::as_str).unwrap_or_default();
             match v.get("op").and_then(Value::as_str) {
-                Some("set_image") => {
-                    image = v
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
+                Some("set_name") => {
+                    let name = value.trim();
+                    if !name.is_empty() {
+                        eff.name = name.to_string();
+                    }
                 }
-                Some("remove_image") => image.clear(),
+                Some("set_charter") => eff.agenda = value.to_string(),
+                Some("set_chat_retention") => {
+                    if let Some(days) = parse_retention_days(value) {
+                        eff.retention_days = days;
+                    }
+                }
+                Some("set_image") => eff.image = value.to_string(),
+                Some("remove_image") => eff.image.clear(),
                 _ => {}
             }
         }
-        image
+        eff
+    }
+
+    /// The instant before which chat content ages out of the read contract:
+    /// `now - effective retention`. A timestamp of 0 (legacy/unknown age)
+    /// is always kept — unknown must not silently vanish.
+    pub(crate) fn chat_retention_cutoff(&self) -> u64 {
+        crate::now_secs().saturating_sub(self.org_effective().retention_days * 86_400)
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
@@ -329,9 +394,14 @@ impl State {
     /// position-in-`applied` is not an addressing scheme.
     fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
         if surface == Surface::Chat {
+            // "delete chat after N days" applies at the read (co-equality:
+            // GUI and MCP consume this same snapshot); physical log pruning
+            // is a separate follow-up. ts 0 = unknown age, always kept.
+            let cutoff = self.chat_retention_cutoff();
             self.chat
                 .iter()
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
+                .filter(|m| m.ts == 0 || m.ts >= cutoff)
                 .map(|m| serde_json::to_value(m).unwrap_or_default())
                 .collect()
         } else {
@@ -386,11 +456,14 @@ impl State {
             .collect();
         // the declined projection (Organization → Declined): newest decline
         // first, id as the deterministic tie-breaker (the proposals map is
-        // a HashMap — never lean on its iteration order)
+        // a HashMap — never lean on its iteration order). A veto ages out
+        // of the view on the chat-retention rhythm (0 = unknown, kept).
+        let cutoff = self.chat_retention_cutoff();
         let mut declined: Vec<ProposalView> = self
             .proposals
             .iter()
             .filter(|(_, p)| p.surface == surface && p.state == ProposalState::Rejected)
+            .filter(|(_, p)| p.declined_at == 0 || p.declined_at >= cutoff)
             .map(|(id, p)| self.view(*id, p))
             .collect();
         declined.sort_by(|a, b| b.declined_at.cmp(&a.declined_at).then(b.id.0.cmp(&a.id.0)));
@@ -554,7 +627,12 @@ impl State {
                     .filter(|p| p.surface == s && p.state == ProposalState::Proposed)
                     .count();
                 let applied = if s == Surface::Chat {
-                    self.chat.len()
+                    // count what the read contract shows (retention window)
+                    let cutoff = self.chat_retention_cutoff();
+                    self.chat
+                        .iter()
+                        .filter(|m| m.ts == 0 || m.ts >= cutoff)
+                        .count()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
                         + self.chain_applied.get(&s).map(|v| v.len()).unwrap_or(0)
@@ -567,6 +645,7 @@ impl State {
                 }
             })
             .collect();
+        let eff = self.org_effective();
         StatusView {
             member: self.member(),
             members: roster,
@@ -576,7 +655,10 @@ impl State {
             active_1h,
             active_24h,
             active_7d,
-            image: self.org_image(),
+            image: eff.image,
+            name: eff.name,
+            agenda: eff.agenda,
+            chat_retention_days: eff.retention_days,
         }
     }
 }

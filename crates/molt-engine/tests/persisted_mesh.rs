@@ -383,12 +383,19 @@ async fn a_wire_quote_resolves_on_the_receiver() {
     let (w_b, ada_feed, wake_a, _sups) = wire_pair(&tmp.path().join("node-b")).await;
 
     ada_feed.push(common::chat_env(2, "ada", "original"));
-    let mut reply = ChatMessage::text(common::test_msg_id(3), "ada", "quoting you", 1_751_000_003);
+    // stamped "now" like chat_env — an ancient ts would age the reply
+    // straight out of the retention read window
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        + 3;
+    let mut reply = ChatMessage::text(common::test_msg_id(3), "ada", "quoting you", ts);
     reply.quote_id = Some(common::test_msg_id(2));
     reply.quote = Some(999); // a bogus sender-local index: must not transfer
     ada_feed.push(EventEnvelope {
         seq: 3,
-        ts: 1_751_000_003,
+        ts,
         by: "ada".to_string(),
         body: WorkspaceEvent::Chat(reply),
     });

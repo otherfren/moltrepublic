@@ -1683,15 +1683,11 @@ mod tests {
     /// Display data, never consensus input — empty when unknown.
     #[test]
     fn org_pending_cards_carry_current_and_proposed_state() {
-        let replica = ReplicaState {
+        let eff = |image: &str| proposals::OrgEffective {
             name: "Guild".into(),
-            member: "me".into(),
-            roster: vec!["me".into()],
-            rule_m: 1,
-            identities: Vec::new(),
             agenda: "alte Satzung".into(),
-            republic_id: String::new(),
-            founded_ts: 0,
+            retention_days: 7,
+            image: image.to_string(),
         };
         let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
             surface,
@@ -1703,16 +1699,14 @@ mod tests {
         };
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "",
+                &eff(""),
                 &rec(Surface::Organization, "set_charter", "neue Satzung")
             ),
             ("alte Satzung".to_string(), "neue Satzung".to_string())
         );
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "",
+                &eff(""),
                 &rec(Surface::Organization, "set_name", "New Guild")
             ),
             ("Guild".to_string(), "New Guild".to_string())
@@ -1721,42 +1715,210 @@ mod tests {
         // ("" while none is set → the UI hides the empty line)
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "",
+                &eff(""),
                 &rec(Surface::Organization, "set_image", "~/logo.png")
             ),
             (String::new(), "~/logo.png".to_string())
         );
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "/tmp/old.png",
+                &eff("/tmp/old.png"),
                 &rec(Surface::Organization, "set_image", "~/logo.png")
             ),
             ("/tmp/old.png".to_string(), "~/logo.png".to_string())
         );
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "/tmp/old.png",
+                &eff("/tmp/old.png"),
                 &rec(Surface::Organization, "remove_image", "")
             ),
             ("/tmp/old.png".to_string(), String::new())
         );
         // a non-organization proposal exposes no pair beyond its value
         assert_eq!(
-            proposals::change_summary(Some(&replica), "", &rec(Surface::Memory, "add_note", "")),
+            proposals::change_summary(&eff(""), &rec(Surface::Memory, "add_note", "")),
             (String::new(), String::new())
         );
-        // the chat-retention setting has a mock default as its Ist-Stand
+        // the chat-retention setting's Ist-Stand is the effective window
         assert_eq!(
             proposals::change_summary(
-                Some(&replica),
-                "",
+                &eff(""),
                 &rec(Surface::Organization, "set_chat_retention", "14 days")
             ),
             ("7 days".to_string(), "14 days".to_string())
         );
+    }
+
+    /// The republic's effective display identity is a fold of the applied
+    /// Organization log over the genesis: an applied `set_name` /
+    /// `set_charter` / `set_chat_retention` actually changes what every
+    /// reader sees (`StatusView.name/agenda/chat_retention_days`), and the
+    /// pending cards carry the EFFECTIVE state as their Ist-Stand. The
+    /// genesis itself stays immutable — it is only the fold's floor.
+    #[test]
+    fn effective_identity_follows_the_applied_org_ops() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let status = |w: &WalletHandle| {
+                let w = w.clone();
+                async move {
+                    match w.execute(Command::Status).await.expect("status") {
+                        Reply::Status(st) => st,
+                        other => panic!("unexpected: {other:?}"),
+                    }
+                }
+            };
+            let propose = |op: &'static str, value: &'static str| {
+                let w = w.clone();
+                async move {
+                    let payload = json!({"op": op, "title": "t", "value": value});
+                    match w
+                        .execute(Command::Propose {
+                            surface: Surface::Organization,
+                            payload,
+                        })
+                        .await
+                        .expect("propose")
+                    {
+                        Reply::Proposed { id } => id,
+                        other => panic!("unexpected: {other:?}"),
+                    }
+                }
+            };
+            let st = status(&w).await;
+            assert_eq!(st.name, "", "a demo workspace has no genesis name");
+            assert_eq!(st.agenda, "");
+            assert_eq!(st.chat_retention_days, 7, "the default window is 7 days");
+            for (op, value) in [
+                ("set_name", "Neue Gilde"),
+                ("set_charter", "wir bauen echte dinge"),
+                ("set_chat_retention", "14 days"),
+            ] {
+                let id = propose(op, value).await;
+                w.execute(Command::Approve { proposal: id }).await.expect("approve");
+            }
+            let st = status(&w).await;
+            assert_eq!(st.name, "Neue Gilde");
+            assert_eq!(st.agenda, "wir bauen echte dinge");
+            assert_eq!(st.chat_retention_days, 14);
+            // a follow-up proposal shows the EFFECTIVE state as Ist-Stand
+            let _next = propose("set_name", "Dritte Gilde").await;
+            let pending = read_surface(&w, Surface::Organization).await.pending;
+            assert_eq!(pending[0].current, "Neue Gilde");
+            assert_eq!(pending[0].proposed, "Dritte Gilde");
+            // a bare number parses as days too
+            let id = propose("set_chat_retention", "21").await;
+            w.execute(Command::Approve { proposal: id }).await.expect("approve");
+            assert_eq!(status(&w).await.chat_retention_days, 21);
+            // nonsense is refused at propose time — an unparseable window
+            // must never reach the applied log
+            for bad in ["bald", "", "0 days", "9999 days"] {
+                let err = w
+                    .execute(Command::Propose {
+                        surface: Surface::Organization,
+                        payload: json!({"op": "set_chat_retention", "title": "t", "value": bad}),
+                    })
+                    .await
+                    .expect_err("an unparseable retention window is refused");
+                assert!(
+                    matches!(err, MoltError::BadPayload(_)),
+                    "unexpected error for {bad:?}: {err:?}"
+                );
+            }
+            // an empty name is refused too (the fold must never go blank)
+            let err = w
+                .execute(Command::Propose {
+                    surface: Surface::Organization,
+                    payload: json!({"op": "set_name", "title": "t", "value": "  "}),
+                })
+                .await
+                .expect_err("an empty name is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
+        });
+    }
+
+    /// "Delete chat after N days" is engine semantics, enforced at the read
+    /// contract (co-equality: GUI and MCP see the same filtered snapshot):
+    /// chat messages older than the effective window and declined proposals
+    /// whose veto aged out disappear from `ReadState`; a legacy ts of 0
+    /// stays visible (unknown age must not silently vanish), and the
+    /// channel enumeration keeps covering the full log.
+    #[test]
+    fn chat_retention_filters_the_read_contract() {
+        let mut st = plain_state();
+        let now = now_secs();
+        let stale = now - 10 * 86_400;
+        let fresh = now - 3_600;
+        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope {
+            seq,
+            ts: if ts == 0 { now } else { ts },
+            by: "peer-1".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([u8::try_from(seq).expect("small test seq"); 16]),
+                "peer-1",
+                body,
+                ts,
+            )),
+        };
+        st.apply(&msg(1, stale, "stale"));
+        st.apply(&msg(2, fresh, "fresh"));
+        st.apply(&msg(3, 0, "legacy"));
+        let snap = st.snapshot(Surface::Chat, None);
+        assert_eq!(
+            snap.applied.len(),
+            2,
+            "the 10-day-old message ages out of the 7-day default window"
+        );
+        assert_eq!(
+            snap.channels[0].count, 3,
+            "channels enumerate the full log — a channel never vanishes by aging"
+        );
+        // widening the window to 30 days via an applied org change brings
+        // the stale message back — the setting is REAL state
+        st.apply(&molt_core::EventEnvelope {
+            seq: 4,
+            ts: now,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: Surface::Organization,
+                payload: json!({"op": "set_chat_retention", "title": "t", "value": "30 days"}),
+            },
+        });
+        st.apply(&molt_core::EventEnvelope {
+            seq: 5,
+            ts: now,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Applied { id: molt_core::ProposalId(1) },
+        });
+        assert_eq!(st.snapshot(Surface::Chat, None).applied.len(), 3);
+        // declined proposals age out on the same rhythm (their veto stamp)
+        st.apply(&molt_core::EventEnvelope {
+            seq: 6,
+            ts: stale,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(2),
+                surface: Surface::Organization,
+                payload: json!({"op": "set_name", "title": "t", "value": "abgelehnt"}),
+            },
+        });
+        st.apply(&molt_core::EventEnvelope {
+            seq: 7,
+            ts: now - 40 * 86_400,
+            by: "peer-1".to_string(),
+            body: molt_core::WorkspaceEvent::Declined {
+                id: molt_core::ProposalId(2),
+                by: "peer-1".to_string(),
+            },
+        });
+        let org = st.snapshot(Surface::Organization, None);
+        assert!(
+            org.declined.is_empty(),
+            "a veto older than the retention window is hidden: {:?}",
+            org.declined
+        );
+        assert_eq!(org.denied, 0, "the denied count follows the filtered view");
     }
 
     /// The republic's current image is display-grade state derived from the

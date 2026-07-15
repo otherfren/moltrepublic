@@ -631,6 +631,9 @@ impl State {
                     id: ProposalId(*proposal_id),
                     surface: *surface,
                 });
+                if *surface == Surface::Organization {
+                    self.after_org_applied();
+                }
             }
             // a re-admission committed: on EVERY node, a threshold-approved
             // recovery outranks the announce rate limit (the member's fresh

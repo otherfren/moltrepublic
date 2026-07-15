@@ -17,18 +17,19 @@ pub fn test_msg_id(seq: u64) -> molt_core::MessageId {
 }
 
 /// One hand-built peer chat envelope carrying `test_msg_id(seq)` — what a
-/// sender's outbox would hold for a plain text message.
+/// sender's outbox would hold for a plain text message. Stamped "now" so
+/// the messages sit inside the chat-retention read window.
 pub fn chat_env(seq: u64, from: &str, body: &str) -> EventEnvelope {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        + seq;
     EventEnvelope {
         seq,
-        ts: 1_751_000_000 + seq,
+        ts,
         by: from.to_string(),
-        body: WorkspaceEvent::Chat(ChatMessage::text(
-            test_msg_id(seq),
-            from,
-            body,
-            1_751_000_000 + seq,
-        )),
+        body: WorkspaceEvent::Chat(ChatMessage::text(test_msg_id(seq), from, body, ts)),
     }
 }
 

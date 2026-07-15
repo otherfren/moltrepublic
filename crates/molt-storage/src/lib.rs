@@ -823,6 +823,16 @@ impl OpenedWorkspace {
         }
     }
 
+    /// Rewrite the manifest's display name (atomic; no-op when unchanged).
+    /// The directory name deliberately stays — it is never parsed back.
+    pub fn set_display_name(&mut self, name: &str) -> Result<(), StorageError> {
+        if self.manifest.workspace.name == name {
+            return Ok(());
+        }
+        self.manifest.workspace.name = name.to_string();
+        write_manifest(&self.dir, &self.manifest)
+    }
+
     /// Persist new prefs for this workspace.
     pub fn set_prefs(&mut self, p: WorkspacePrefs) -> Result<(), StorageError> {
         write_prefs(&self.dir, &p)?;
@@ -1482,6 +1492,10 @@ pub fn purge_trash(root: &Path, max_age_secs: u64) {
 enum WriterMsg {
     Append(EventEnvelope),
     Prefs(WorkspacePrefs),
+    /// Rewrite the manifest's display name (an applied `set_name`): the
+    /// plaintext identity card must agree with the replayed state so the
+    /// undecrypted Open-screen scan lists the effective name.
+    Rename(String),
     Snapshot(WorkspaceSnapshot),
     /// Outbox read: every envelope with `seq >= from`. Served by the
     /// writer thread so reads are consistently ordered with queued appends
@@ -1550,6 +1564,12 @@ impl StorageHandle {
     /// Persist new prefs.
     pub fn set_prefs(&self, p: WorkspacePrefs) {
         let _ = self.tx.send(WriterMsg::Prefs(p));
+    }
+
+    /// Rewrite the manifest's display name (an applied `set_name`); no-op
+    /// when unchanged. Fire-and-forget like `set_prefs`.
+    pub fn set_display_name(&self, name: String) {
+        let _ = self.tx.send(WriterMsg::Rename(name));
     }
 
     /// Enqueue a snapshot write.
@@ -1736,6 +1756,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::Prefs(p)) => {
                         if let Err(e) = ws.set_prefs(p) {
                             fail(&failed_flag, "prefs write", &e);
+                        }
+                    }
+                    Ok(WriterMsg::Rename(name)) => {
+                        if let Err(e) = ws.set_display_name(&name) {
+                            fail(&failed_flag, "manifest rename", &e);
                         }
                     }
                     Ok(WriterMsg::ReadFrom(from_seq, reply)) => {
