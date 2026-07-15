@@ -28,5 +28,6 @@ tracing.workspace = true
 # clipboard for the seed copy button (X11: contents live as long as the app)
 arboard.workspace = true
 rfd.workspace = true
+base64.workspace = true
 chrono.workspace = true
 paste.workspace = true

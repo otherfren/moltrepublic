@@ -512,7 +512,7 @@ export component AppWindow inherits Window {
     in property <image> img-preview-src;
     // (mock-)download the proposed image behind a pending set_image and
     // open the preview; Rust toasts if the bytes are not local
-    callback download-proposal-image(string /* file ref */, string /* title */);
+    callback download-proposal-image(string /* base64 payload bytes */, string /* title */);
     property <bool> org-charter-modal-open: false;
     property <string> org-charter-draft;
     property <bool> org-name-modal-open: false;
@@ -520,7 +520,9 @@ export component AppWindow inherits Window {
     // charter reader (click on the charter → full text, scrollable)
     property <bool> charter-view-open: false;
     // chat-retention setting (mock current value; a change is a proposal)
-    property <int> org-chat-retention: 7;
+    // the effective "delete chat after" window — mirrored from the
+    // engine's StatusView (an applied set_chat_retention changes it)
+    in property <int> org-chat-retention: 7;
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
 
@@ -2973,8 +2975,10 @@ export component AppWindow inherits Window {
                                                     if (!l.file-available) {
                                                         root.show-toast(Strings.mv-file-gone);
                                                     } else if (l.id != "") {
+                                                        // opens the save dialog;
+                                                        // the outcome toasts via
+                                                        // the transfer events
                                                         root.download-file(l.id);
-                                                        root.show-toast(Strings.toast-download + " " + l.file-name);
                                                     }
                                                 }
                                                 file-remove-requested => {
@@ -4061,7 +4065,20 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     width: 110px;
                                                     alignment: center;
-                                                    if u.online: AppButton {
+                                                    spacing: 6px;
+                                                    // live download status: the
+                                                    // percent while moving, a
+                                                    // check/warn mark after
+                                                    if u.status != "": Text {
+                                                        text: u.status;
+                                                        color: u.status-kind == 3 ? Theme.bad
+                                                            : u.status-kind == 2 ? Theme.accent
+                                                            : Theme.dim;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                    }
+                                                    if u.online && u.status-kind != 1: AppButton {
                                                         height: 28px;
                                                         pad: 10px;
                                                         y: (parent.height - self.height) / 2;
@@ -4071,7 +4088,7 @@ export component AppWindow inherits Window {
                                                             root.download-file(u.id);
                                                         }
                                                     }
-                                                    if !u.online: Text {
+                                                    if !u.online && u.status-kind != 1: Text {
                                                         text: Strings.ou-offline;
                                                         color: Theme.faint;
                                                         font-size: Theme.fs-cap;
@@ -4157,7 +4174,7 @@ export component AppWindow inherits Window {
                                                 root.select-channel("patch:\{p.id}");
                                             }
                                             view-image => {
-                                                root.download-proposal-image(p.proposed, p.text);
+                                                root.download-proposal-image(p.img-b64, p.text);
                                             }
                                         }
                                     }
@@ -4208,7 +4225,7 @@ export component AppWindow inherits Window {
                                             org-img-set: root.org-img-set;
                                             read-only: true;
                                             view-image => {
-                                                root.download-proposal-image(p.proposed, p.text);
+                                                root.download-proposal-image(p.img-b64, p.text);
                                             }
                                         }
                                     }

@@ -2661,10 +2661,19 @@ pub enum Reply {
     },
     /// A status summary.
     Status(StatusView),
-    /// The member table (Organization → Members).
-    Members(Vec<MemberView>),
-    /// Every file shared into the chat (Organization → Uploads).
-    Uploads(Vec<UploadView>),
+    /// The member table (Organization → Members). A struct variant on
+    /// purpose: the internally-tagged `reply` repr cannot serialize a bare
+    /// sequence (the MCP surface renders replies as JSON).
+    Members {
+        /// One row per roster member.
+        members: Vec<MemberView>,
+    },
+    /// Every file shared into the chat (Organization → Uploads). Struct
+    /// variant for the same reason as [`Reply::Members`].
+    Uploads {
+        /// One row per share, log order.
+        uploads: Vec<UploadView>,
+    },
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
 }
@@ -3153,6 +3162,25 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every Reply variant must serialize (the MCP surface renders replies
+    /// as JSON text): the internally-tagged repr cannot hold a bare
+    /// sequence, so the list replies must stay struct variants.
+    #[test]
+    fn every_reply_variant_serializes_to_json() {
+        let replies = [
+            Reply::Ack,
+            Reply::Proposed { id: ProposalId(1) },
+            Reply::Proposals { proposals: vec![] },
+            Reply::Members { members: vec![] },
+            Reply::Uploads { uploads: vec![] },
+            Reply::Session(Box::default()),
+        ];
+        for r in replies {
+            let json = serde_json::to_string(&r);
+            assert!(json.is_ok(), "reply failed to serialize: {r:?} → {json:?}");
+        }
+    }
 
     #[test]
     fn invite_roundtrip_and_rejects() {

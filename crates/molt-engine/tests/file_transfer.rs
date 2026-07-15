@@ -47,7 +47,7 @@ async fn read_session(w: &WalletHandle) -> Box<SessionView> {
 
 async fn read_uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {
     match w.execute(Command::ReadUploads).await.expect("read uploads") {
-        Reply::Uploads(rows) => rows,
+        Reply::Uploads { uploads: rows } => rows,
         other => panic!("unexpected: {other:?}"),
     }
 }

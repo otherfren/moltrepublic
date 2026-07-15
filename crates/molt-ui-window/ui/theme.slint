@@ -68,7 +68,8 @@ export struct ProposalRow {
     threshold: int,
     current: string, // Ist-Stand ("" = unknown → line hidden)
     proposed: string, // Soll-Stand ("" = no value → line hidden)
-    image-op: bool, // set_image / remove_image → picture + download link
+    image-op: bool, // set_image / remove_image → picture + preview link
+    img-b64: string, // a pending set_image's embedded bytes (base64; "" else)
     charter-op: bool, // set_charter → long text, capped + scrollable
     votes: [MemberVoteMark], // per-member stance, roster order
     declined-by: string, // "" = not declined (the Declined view fills it)
@@ -105,8 +106,10 @@ export struct UploadRow {
     size: string,
     available: bool,
     online: bool, // sharer reachable (user-to-user transfer needs them)
-    checksum: string, // shortened mock sha256 (full value via MCP)
+    checksum: string, // shortened real sha256 (full value via MCP)
     expires: string, // "in 13 days" · "expired" · "—" (unavailable)
+    status: string, // live download status ("" idle · "42 %" · check/warn)
+    status-kind: int, // 0 idle · 1 running · 2 done · 3 failed
 }
 
 // One row of the founding-ritual member list: the founder plus one per
@@ -459,7 +462,7 @@ export global Strings {
     in property <string> mv-declined; // Organization → Declined heading
     in property <string> mv-empty-declined;
     in property <string> pc-img-hint; // the proposed-image link's hint line
-    in property <string> pc-img-missing; // toast: bytes not local (mock transfer)
+    in property <string> pc-img-missing; // toast: payload bytes failed to decode
     // Status info panel (founding date, consensus, member count — the
     // count reuses ow-members), the charter reader, and the settings
     // panel (chat retention)
@@ -619,7 +622,8 @@ export global Strings {
     in property <string> ch-topic-ph;
     in property <string> ch-topic-open;
     in property <string> mv-file-gone;
-    in property <string> toast-download;
+    in property <string> toast-dl-done; // "Saved:" + the landed path
+    in property <string> toast-dl-failed; // "Download failed:" + the reason
     in property <string> toast-file-removed;
     in property <string> dm-title;
     in property <string> dm-body;

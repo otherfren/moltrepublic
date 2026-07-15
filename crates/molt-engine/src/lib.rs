@@ -740,8 +740,8 @@ impl State {
                 Ok(Reply::Proposals { proposals: views })
             }
             Command::Status => Ok(Reply::Status(self.status())),
-            Command::ReadMembers => Ok(Reply::Members(self.members_view())),
-            Command::ReadUploads => Ok(Reply::Uploads(self.uploads_view())),
+            Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
+            Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
 
             // net.rs (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {
@@ -1681,7 +1681,7 @@ mod tests {
             .await
             .expect("propose");
             match w.execute(Command::ReadMembers).await.expect("members") {
-                Reply::Members(rows) => {
+                Reply::Members { members: rows } => {
                     assert_eq!(rows.len(), 3, "one row per roster member");
                     let me = rows.iter().find(|m| m.member == "me").expect("me");
                     assert_eq!(me.uploads, 1, "the share counts as my upload");
@@ -1697,7 +1697,7 @@ mod tests {
                 other => panic!("unexpected: {other:?}"),
             }
             match w.execute(Command::ReadUploads).await.expect("uploads") {
-                Reply::Uploads(rows) => {
+                Reply::Uploads { uploads: rows } => {
                     assert_eq!(rows.len(), 1);
                     assert_eq!(rows[0].member, "me");
                     assert_eq!(rows[0].name, "charter.pdf");
