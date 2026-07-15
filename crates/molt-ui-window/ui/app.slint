@@ -233,8 +233,20 @@ export component AppWindow inherits Window {
     in property <string> selected-surface: "chat";
     in property <string> selected-view: "today";
     // sidebar mode: expanded (labels) or collapsed to an icon rail. Toggled
-    // by clicking the vertical divider on the sidebar's right edge.
-    property <bool> nav-collapsed: false;
+    // by clicking the vertical divider on the sidebar's right edge. Off the
+    // main screen the sidebar carries no navigation, so the default is the
+    // collapsed rail; entering/leaving a workspace re-applies the default
+    // (a manual toggle holds within the current screen).
+    property <bool> nav-collapsed: root.screen != AppScreen.main;
+    // last screen the default was applied for: `screen` is re-pushed with
+    // every session snapshot, so only a REAL change may reset a manual toggle
+    property <AppScreen> nav-default-screen: AppScreen.choice;
+    changed screen => {
+        if (root.screen != root.nav-default-screen) {
+            root.nav-default-screen = root.screen;
+            root.nav-collapsed = root.screen != AppScreen.main;
+        }
+    }
     // modal: confirm closing the workspace (raised by either close button)
     property <bool> confirm-close-open: false;
     // modal: confirm quitting the program while a workspace is open
@@ -1577,10 +1589,20 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 40px;
-                        background: Theme.panel;
+                        background: ow-dir-ta.has-hover ? Theme.raised : Theme.panel;
                         border-radius: Theme.radius;
                         border-width: Theme.border-w;
                         border-color: Theme.line;
+                        // the path bar is itself clickable and does exactly
+                        // what the change-folder button next to it does
+                        ow-dir-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.settings-return = AppScreen.open;
+                                root.set-tab = 1;
+                                root.navigate(AppScreen.settings);
+                            }
+                        }
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 12px;
@@ -1714,8 +1736,8 @@ export component AppWindow inherits Window {
                         }
                         Rectangle {
                             // Open / Encrypt-Decrypt / Delete buttons zone
-                            // (86 + 12 + 120 + 12 + 86)
-                            width: 316px;
+                            // (86 + 12 + 134 + 12 + 86)
+                            width: 330px;
                         }
                     }
                     Rectangle {
@@ -1792,11 +1814,32 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
-                                    // last backup + the jump into the S3
-                                    // backup settings
+                                    // the jump into the S3 backup settings +
+                                    // last backup. The gear leads the cell so
+                                    // it visibly belongs to the Backup column
+                                    // (trailing, it read as part of Status);
+                                    // its tip opens to the LEFT — above, the
+                                    // first row's tip vanished under the
+                                    // clipped table header.
                                     HorizontalLayout {
                                         width: 150px;
                                         spacing: 6px;
+                                        AppButton {
+                                            width: 26px;
+                                            height: 26px;
+                                            pad: 0px;
+                                            icon-size: 16px;
+                                            y: (parent.height - self.height) / 2;
+                                            icon: @image-url("assets/gear.svg");
+                                            icon-set: true;
+                                            tooltip: Strings.ow-backup-cfg;
+                                            tooltip-left: true;
+                                            clicked => {
+                                                root.settings-return = AppScreen.open;
+                                                root.set-tab = 2;
+                                                root.navigate(AppScreen.settings);
+                                            }
+                                        }
                                         Text {
                                             text: w.backup;
                                             color: Theme.dim;
@@ -1804,20 +1847,6 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
                                             overflow: elide;
-                                        }
-                                        AppButton {
-                                            width: 26px;
-                                            height: 26px;
-                                            pad: 0px;
-                                            y: (parent.height - self.height) / 2;
-                                            icon: @image-url("assets/gear.svg");
-                                            icon-set: true;
-                                            tooltip: Strings.ow-backup-cfg;
-                                            clicked => {
-                                                root.settings-return = AppScreen.open;
-                                                root.set-tab = 2;
-                                                root.navigate(AppScreen.settings);
-                                            }
                                         }
                                     }
                                     // at-rest state (mock): encrypted = the
@@ -1843,7 +1872,8 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     AppButton {
-                                        width: 120px;
+                                        // wide enough for "Entschlüsseln"
+                                        width: 134px;
                                         height: 32px;
                                         y: (parent.height - self.height) / 2;
                                         label: w.encrypted ? Strings.ow-decrypt : Strings.ow-encrypt;

@@ -40,9 +40,12 @@ export component AppButton inherits Rectangle {
     in property <bool> tooltip-left: false;
     // horizontal label padding; lower it for compact in-group buttons
     in property <length> pad: 14px;
-    // optional leading icon (colorized to the label colour)
+    // optional leading icon (colorized to the label colour); pick a size
+    // whose margins land on whole pixels (icon-only buttons: even icon in
+    // an even button, or the icon renders visibly off-center)
     in property <image> icon;
     in property <bool> icon-set: false;
+    in property <length> icon-size: 15px;
     callback clicked();
 
     height: 34px;
@@ -79,8 +82,8 @@ export component AppButton inherits Rectangle {
         if root.icon-set: Image {
             source: root.icon;
             colorize: root.primary ? Theme.accent-ink : Theme.text;
-            width: 15px;
-            height: 15px;
+            width: root.icon-size;
+            height: root.icon-size;
             y: (parent.height - self.height) / 2;
         }
         Text {

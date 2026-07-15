@@ -1048,7 +1048,7 @@ fn sync_strings(
 }
 
 /// Map a session workspace into the Slint-side row struct.
-fn workspace_item(w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
+fn workspace_item(lang: i32, w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
     let members: Vec<MemberSync> = w
         .members
         .iter()
@@ -1062,12 +1062,12 @@ fn workspace_item(w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
         id: w.id.as_str().into(),
         name: w.name.as_str().into(),
         detail: w.detail.as_str().into(),
-        status: sync_status_label(w.state, w.last_sync_min, w.sync_queue).into(),
+        status: sync_status_label(lang, w.state, w.last_sync_min, w.sync_queue).into(),
         synced: w.synced,
         state: i32::from(w.state),
         last_sync_min: w.last_sync_min as i32,
         s3: w.s3,
-        backup: backup_when_label(w.last_backup_min).into(),
+        backup: backup_when_label(lang, w.last_backup_min).into(),
         encrypted: w.encrypted,
         seed: w.seed.as_str().into(),
         net: w.net.as_str().into(),
@@ -1075,23 +1075,38 @@ fn workspace_item(w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
     }
 }
 
-/// A human "x ago" label from minutes.
-fn ago_label(minutes: u32) -> String {
-    match minutes {
-        0 => "just now".to_string(),
-        m if m < 60 => format!("{m} min ago"),
-        m if m < 1440 => format!("{} h ago", m / 60),
-        m => format!("{} d ago", m / 1440),
+/// A human "x ago" label from minutes (0 = English, 1 = German — these
+/// labels are composed per row in Rust, so like [`seat_state_label`] they
+/// take the language instead of going through the Slint `Strings` global).
+fn ago_label(lang: i32, minutes: u32) -> String {
+    if lang == 1 {
+        match minutes {
+            0 => "gerade eben".to_string(),
+            m if m < 60 => format!("vor {m} Min."),
+            m if m < 1440 => format!("vor {} Std.", m / 60),
+            m if m < 2880 => "vor 1 Tag".to_string(),
+            m => format!("vor {} Tagen", m / 1440),
+        }
+    } else {
+        match minutes {
+            0 => "just now".to_string(),
+            m if m < 60 => format!("{m} min ago"),
+            m if m < 1440 => format!("{} h ago", m / 60),
+            m => format!("{} d ago", m / 1440),
+        }
     }
 }
 
 /// Render the human sync-status line from the machine fields — prose is
 /// presentation, so it lives here and not in the shared data.
-fn sync_status_label(state: u8, last_sync_min: u32, sync_queue: u32) -> String {
-    match state {
-        1 => format!("Syncing… {sync_queue} items left"),
-        2 => format!("Offline · last sync {}", ago_label(last_sync_min)),
-        _ => format!("Synced · {}", ago_label(last_sync_min)),
+fn sync_status_label(lang: i32, state: u8, last_sync_min: u32, sync_queue: u32) -> String {
+    match (lang, state) {
+        (1, 1) => format!("Synchronisiere… {sync_queue} ausstehend"),
+        (1, 2) => format!("Offline · letzter Sync {}", ago_label(lang, last_sync_min)),
+        (1, _) => format!("Synchronisiert · {}", ago_label(lang, last_sync_min)),
+        (_, 1) => format!("Syncing… {sync_queue} items left"),
+        (_, 2) => format!("Offline · last sync {}", ago_label(lang, last_sync_min)),
+        (_, _) => format!("Synced · {}", ago_label(lang, last_sync_min)),
     }
 }
 
@@ -1105,17 +1120,18 @@ fn size_label(size_kib: u32) -> String {
 }
 
 /// Human "last backup" cell ([`molt_core::WorkspaceInfo::NEVER`] = never).
-fn backup_when_label(minutes: u32) -> String {
+fn backup_when_label(lang: i32, minutes: u32) -> String {
     if minutes == molt_core::WorkspaceInfo::NEVER {
-        "never".to_string()
+        if lang == 1 { "nie" } else { "never" }.to_string()
     } else {
-        ago_label(minutes)
+        ago_label(lang, minutes)
     }
 }
 
 /// The settings backup table: every local workspace mapped to its bucket
 /// backup (if auto-backup is on), then the bucket-only orphans.
 fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
+    let lang = i32::from(sv.language == "de");
     // machine sort key for the last-backup column ("never" sorts last)
     fn last_key(min: u32) -> i32 {
         if min == molt_core::WorkspaceInfo::NEVER {
@@ -1134,7 +1150,7 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
             has_local: true,
             auto: w.s3,
             size: size_label(w.size_kib).into(),
-            last: backup_when_label(w.last_backup_min).into(),
+            last: backup_when_label(lang, w.last_backup_min).into(),
             size_kib: i32::try_from(w.size_kib).unwrap_or(i32::MAX),
             last_min: last_key(w.last_backup_min),
         })
@@ -1146,7 +1162,7 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         has_local: false,
         auto: false,
         size: size_label(o.size_kib).into(),
-        last: backup_when_label(o.last_backup_min).into(),
+        last: backup_when_label(lang, o.last_backup_min).into(),
         size_kib: i32::try_from(o.size_kib).unwrap_or(i32::MAX),
         last_min: last_key(o.last_backup_min),
     }));
@@ -1311,13 +1327,18 @@ async fn push_session(
 /// changed — otherwise an unrelated change (language, theme, navigation)
 /// would wipe what the user is typing in the settings form.
 fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
+    let lang = i32::from(sv.language == "de");
     ui.set_screen(from_screen(sv.screen));
     ui.set_selected_surface(sv.surface.as_str().into());
     ui.set_selected_view(sv.view.as_str().into());
 
     // the Open screen's list mirrors the session's workspaces, re-applying
     // whatever column sort the user picked
-    let mut items: Vec<WorkspaceItem> = sv.workspaces.iter().map(workspace_item).collect();
+    let mut items: Vec<WorkspaceItem> = sv
+        .workspaces
+        .iter()
+        .map(|w| workspace_item(lang, w))
+        .collect();
     sort_ws_items(
         &mut items,
         ui.get_ws_sort_key().as_str(),
@@ -1344,7 +1365,7 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
         .map(|w| {
             (
                 i32::from(w.state),
-                sync_status_label(w.state, w.last_sync_min, w.sync_queue),
+                sync_status_label(lang, w.state, w.last_sync_min, w.sync_queue),
             )
         })
         .unwrap_or((0, String::new()));
@@ -1389,7 +1410,6 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
 
     apply_runs(ui, sv);
     ui.global::<Theme>().set_theme_index(theme_index(&sv.theme));
-    let lang = i32::from(sv.language == "de");
     ui.set_lang_index(lang);
     ui.set_notice(sv.notice.clone().into());
     // a failed write carries its detail in the notice; split it off so the
@@ -3951,11 +3971,24 @@ mod tests {
 
     #[test]
     fn sync_status_label_matches_the_demo_prose() {
-        assert_eq!(sync_status_label(0, 0, 0), "Synced · just now");
-        assert_eq!(sync_status_label(0, 2, 0), "Synced · 2 min ago");
-        assert_eq!(sync_status_label(0, 60, 0), "Synced · 1 h ago");
-        assert_eq!(sync_status_label(1, 0, 80), "Syncing… 80 items left");
-        assert_eq!(sync_status_label(2, 4320, 0), "Offline · last sync 3 d ago");
+        assert_eq!(sync_status_label(0, 0, 0, 0), "Synced · just now");
+        assert_eq!(sync_status_label(0, 0, 2, 0), "Synced · 2 min ago");
+        assert_eq!(sync_status_label(0, 0, 60, 0), "Synced · 1 h ago");
+        assert_eq!(sync_status_label(0, 1, 0, 80), "Syncing… 80 items left");
+        assert_eq!(sync_status_label(0, 2, 4320, 0), "Offline · last sync 3 d ago");
+    }
+
+    #[test]
+    fn sync_status_label_speaks_german() {
+        assert_eq!(sync_status_label(1, 0, 0, 0), "Synchronisiert · gerade eben");
+        assert_eq!(sync_status_label(1, 0, 2, 0), "Synchronisiert · vor 2 Min.");
+        assert_eq!(sync_status_label(1, 0, 60, 0), "Synchronisiert · vor 1 Std.");
+        assert_eq!(sync_status_label(1, 1, 0, 80), "Synchronisiere… 80 ausstehend");
+        assert_eq!(
+            sync_status_label(1, 2, 4320, 0),
+            "Offline · letzter Sync vor 3 Tagen"
+        );
+        assert_eq!(sync_status_label(1, 0, 1440, 0), "Synchronisiert · vor 1 Tag");
     }
 
     fn ws(name: &str, minutes: i32) -> WorkspaceItem {
@@ -3980,10 +4013,14 @@ mod tests {
     fn size_and_backup_labels() {
         assert_eq!(size_label(920), "920 KiB");
         assert_eq!(size_label(1840), "1.8 MiB");
-        assert_eq!(backup_when_label(molt_core::WorkspaceInfo::NEVER), "never");
-        assert_eq!(backup_when_label(0), "just now");
-        assert_eq!(backup_when_label(30), "30 min ago");
-        assert_eq!(backup_when_label(129_600), "90 d ago");
+        assert_eq!(backup_when_label(0, molt_core::WorkspaceInfo::NEVER), "never");
+        assert_eq!(backup_when_label(0, 0), "just now");
+        assert_eq!(backup_when_label(0, 30), "30 min ago");
+        assert_eq!(backup_when_label(0, 129_600), "90 d ago");
+        assert_eq!(backup_when_label(1, molt_core::WorkspaceInfo::NEVER), "nie");
+        assert_eq!(backup_when_label(1, 0), "gerade eben");
+        assert_eq!(backup_when_label(1, 30), "vor 30 Min.");
+        assert_eq!(backup_when_label(1, 129_600), "vor 90 Tagen");
     }
 
     #[test]
