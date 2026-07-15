@@ -714,19 +714,20 @@ export component AppWindow inherits Window {
                 root.handle-escape();
                 return accept;
             }
-            // welcome screen keyboard driving: arrows mark a card (hover
-            // look), Enter/Space clicks it, a title's hotkey letter fires
-            // it directly
+            // welcome screen keyboard driving: Up/Down mark a card (hover
+            // look), Enter/Space/Right click it, a title's hotkey letter
+            // fires it directly
             if (root.screen == AppScreen.choice && !root.confirm-quit-open) {
-                if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                if (event.text == Key.DownArrow) {
                     root.choice-focus = root.choice-focus < 0 ? 0 : Math.mod(root.choice-focus + 1, 4);
                     return accept;
                 }
-                if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                if (event.text == Key.UpArrow) {
                     root.choice-focus = root.choice-focus < 0 ? 3 : Math.mod(root.choice-focus + 3, 4);
                     return accept;
                 }
-                if (root.choice-focus >= 0 && (event.text == Key.Return || event.text == " ")) {
+                if (root.choice-focus >= 0
+                    && (event.text == Key.Return || event.text == " " || event.text == Key.RightArrow)) {
                     root.choice-go(root.choice-focus);
                     return accept;
                 }
@@ -746,6 +747,15 @@ export component AppWindow inherits Window {
                     root.choice-go(3);
                     return accept;
                 }
+            }
+            // Left = back wherever back makes sense: handle-escape() encodes
+            // exactly that (modals close, open -> welcome, wizard steps walk
+            // back with their running-guards) and stays a no-op elsewhere.
+            // Reaches here only when no focused element consumed the key —
+            // a text field keeps its cursor movement.
+            if (event.text == Key.LeftArrow) {
+                root.handle-escape();
+                return accept;
             }
             reject
         }
