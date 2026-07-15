@@ -708,6 +708,29 @@ export component ConfirmModal inherits Rectangle {
     width: 100%;
     height: 100%;
     background: #0000008c;
+    // keyboard: the dialog takes focus while it is up — Enter presses the
+    // (enabled) confirm button, Escape presses cancel. Zero-sized so clicks
+    // never route focus here; a child field that grabs focus keeps its own
+    // Return (wire its `accepted` to `confirmed` at the instance) while its
+    // Escape bubbles to the window's handler, which closes the same flag.
+    kb := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Return && root.confirm-enabled) {
+                root.confirmed();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.dismissed();
+                return accept;
+            }
+            reject
+        }
+    }
+    init => {
+        kb.focus();
+    }
     // scrim: absorbs clicks to the app behind; outside click cancels
     TouchArea {
         clicked => {

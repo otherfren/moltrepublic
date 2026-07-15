@@ -1603,6 +1603,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 
 /// Plain, `Send` snapshot of all surfaces, built off the UI thread.
 struct SurfacesBundle {
+    /// Language the labels were rendered for (0 = en, 1 = de) — the nav's
+    /// sub-view names are localized when the bundle lands.
+    lang: i32,
     member: String,
     threshold_badge: String,
     surfaces: Vec<SurfaceData>,
@@ -1871,9 +1874,14 @@ async fn push_surfaces(
     };
     // the chat-bus UI state is per-workspace: bind it to the active id so
     // a workspace switch drops the previous selection/unread/first-seen
-    let active_ws = match wallet.execute(Command::ReadSession).await {
-        Ok(Reply::Session(s)) => s.active_workspace.clone(),
-        _ => String::new(),
+    // (the language rides along — a SetLanguage emits a Full session
+    // change, which re-runs this push, so the nav labels stay live)
+    let (active_ws, lang) = match wallet.execute(Command::ReadSession).await {
+        Ok(Reply::Session(s)) => (
+            s.active_workspace.clone(),
+            i32::from(s.language == "de"),
+        ),
+        _ => (String::new(), 0),
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
@@ -2012,6 +2020,7 @@ async fn push_surfaces(
         .iter()
         .map(|(sf, snap)| {
             surface_data(
+                lang,
                 *sf,
                 snap,
                 &member,
@@ -2021,6 +2030,7 @@ async fn push_surfaces(
         })
         .collect();
     let bundle = SurfacesBundle {
+        lang,
         member,
         threshold_badge,
         surfaces,
@@ -2123,7 +2133,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         .iter()
                         .map(|(key, label)| ViewItem {
                             key: (*key).into(),
-                            name: (*label).into(),
+                            name: view_label(b.lang, key, label).into(),
                             icon: view_icon(key).into(),
                         })
                         .collect()
@@ -2307,6 +2317,7 @@ fn chat_messages(snap: &SurfaceSnapshot) -> Vec<ChatMessage> {
 /// member handle — it marks own messages and the own reaction pill.
 /// `chat_ctx` is `Some` for the chat surface only.
 fn surface_data(
+    lang: i32,
     sf: Surface,
     snap: &SurfaceSnapshot,
     me: &str,
@@ -2370,7 +2381,7 @@ fn surface_data(
         .collect();
     SurfaceData {
         key: sf.as_str().to_string(),
-        name: surface_name(sf).to_string(),
+        name: surface_name(lang, sf).to_string(),
         gated: snap.gated,
         log,
         pending,
@@ -2990,15 +3001,63 @@ fn summarize(v: &serde_json::Value) -> String {
     v.to_string()
 }
 
-fn surface_name(sf: Surface) -> &'static str {
-    match sf {
-        Surface::Organization => "Organization",
-        Surface::Chat => "Chat",
-        Surface::Memory => "Memory",
-        Surface::Quests => "Quests",
-        Surface::Vault => "Vault",
-        Surface::Wallet => "Wallet",
+/// Localized surface label for the sidebar (0 = English, 1 = German) —
+/// presentation, like [`seat_state_label`]; the machine key stays
+/// [`Surface::as_str`].
+fn surface_name(lang: i32, sf: Surface) -> &'static str {
+    if lang == 1 {
+        match sf {
+            Surface::Organization => "Organisation",
+            Surface::Chat => "Chat",
+            Surface::Memory => "Gedächtnis",
+            Surface::Quests => "Quests",
+            Surface::Vault => "Tresor",
+            Surface::Wallet => "Wallet",
+        }
+    } else {
+        match sf {
+            Surface::Organization => "Organization",
+            Surface::Chat => "Chat",
+            Surface::Memory => "Memory",
+            Surface::Quests => "Quests",
+            Surface::Vault => "Vault",
+            Surface::Wallet => "Wallet",
+        }
     }
+}
+
+/// Localized sub-view label for a nav row. The English display label comes
+/// from the shared `molt-core` vocabulary ([`Surface::views`]); German maps
+/// by the machine key here — keys repeating across surfaces (archive,
+/// proposals, status, …) deliberately share one word.
+fn view_label(lang: i32, key: &str, en: &str) -> String {
+    if lang != 1 {
+        return en.to_string();
+    }
+    match key {
+        "members" => "Mitglieder",
+        "uploads" => "Uploads",
+        "pending" => "Ausstehend",
+        "declined" => "Abgelehnt",
+        "today" => "Gruppe",
+        "archive" => "Archiv",
+        "proposals" => "Vorschläge",
+        "accepted" => "Angenommen",
+        "denied" => "Abgelehnt",
+        "create" => "Erstellen",
+        "my-quests" => "Meine Quests",
+        "secrets" => "Geheimnisse",
+        "disclose" => "Offenlegen",
+        "exposed" => "Offengelegt",
+        "balance" => "Kontostand",
+        "history" => "Verlauf",
+        "send" => "Senden",
+        "receive" => "Empfangen",
+        "settings" => "Einstellungen",
+        // Status, Brain, Board — shared or product terms
+        _ => en,
+    }
+    .to_string()
 }
 
 /// The default transition op the GUI uses when proposing on a surface.
@@ -3983,6 +4042,18 @@ mod tests {
         assert_eq!(sync_status_label(0, 0, 60, 0), "Synced · 1 h ago");
         assert_eq!(sync_status_label(0, 1, 0, 80), "Syncing… 80 items left");
         assert_eq!(sync_status_label(0, 2, 4320, 0), "Offline · last sync 3 d ago");
+    }
+
+    #[test]
+    fn nav_labels_speak_german() {
+        assert_eq!(surface_name(1, Surface::Organization), "Organisation");
+        assert_eq!(surface_name(0, Surface::Organization), "Organization");
+        assert_eq!(view_label(1, "members", "Members"), "Mitglieder");
+        assert_eq!(view_label(1, "archive", "Archive"), "Archiv");
+        assert_eq!(view_label(1, "pending", "Pending"), "Ausstehend");
+        // unmapped keys fall back to the shared English vocabulary
+        assert_eq!(view_label(1, "status", "Status"), "Status");
+        assert_eq!(view_label(0, "members", "Members"), "Members");
     }
 
     #[test]

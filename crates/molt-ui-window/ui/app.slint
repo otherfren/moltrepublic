@@ -257,6 +257,31 @@ export component AppWindow inherits Window {
     // the welcome card marked via arrow keys (-1 = none): mirrors the hover
     // look (ChoiceCard.marked); Enter/Space acts like a click on it
     property <int> choice-focus: -1;
+    // focus lifeline for the modal keyboard driving: a ConfirmModal takes
+    // focus while it is up (Enter = action, Escape = cancel); when the LAST
+    // modal closes — by button, key or scrim — the root scope re-takes
+    // focus so the global key handler keeps hearing the keyboard
+    property <bool> any-modal-open: root.confirm-close-open
+        || root.confirm-leave-open
+        || root.confirm-quit-open
+        || root.confirm-delete-open
+        || root.confirm-delmsg-open
+        || root.backup-modal-open
+        || root.restore-file-modal-open
+        || root.ws-dir-modal-open
+        || root.org-logo-modal-open
+        || root.org-charter-modal-open
+        || root.org-name-modal-open
+        || root.org-retention-modal-open
+        || root.decrypt-modal-open
+        || root.charter-view-open
+        || root.recover-link-open
+        || root.img-preview-open;
+    changed any-modal-open => {
+        if (!root.any-modal-open) {
+            esc.focus();
+        }
+    }
     // ONE place performs a welcome card's action — the cards' click handlers
     // and the keyboard paths (arrows + Enter/Space, hotkey letters) share it
     function choice-go(i: int) {
@@ -712,6 +737,12 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.handle-escape();
+                return accept;
+            }
+            // the image preview's only action is closing — Enter mirrors ×
+            // (the ConfirmModal dialogs handle their own Enter via focus)
+            if (event.text == Key.Return && root.img-preview-open) {
+                root.img-preview-open = false;
                 return accept;
             }
             // welcome screen keyboard driving: Up/Down mark a card (hover
@@ -2735,9 +2766,9 @@ export component AppWindow inherits Window {
             // ---- main view: the selected surface (surfaces live in the sidebar) ----
             if root.screen == AppScreen.main: VerticalLayout {
                 // top header bar (same height as the sidebar wordmark, so the
-                // two line up): workspace name, then three status pills left
-                // of the × — monero daemon, chat transport, and sync (the
-                // mock derives the first two from the workspace's state).
+                // two line up): workspace name and the × — the daemon/
+                // transport/sync status displays move into the left nav
+                // (planned), not up here as pills.
                 Rectangle {
                     height: 64px;
                     background: Theme.panel;
@@ -2753,32 +2784,6 @@ export component AppWindow inherits Window {
                             overflow: elide;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            StatusPill {
-                                label: "monerod";
-                                tone: root.active-state == 2 ? Theme.bad : Theme.good;
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            // the transport-health surface (concept §4 / P6):
-                            // green nominal, amber degraded, red down — with the
-                            // engine's reason as the hover tooltip
-                            StatusPill {
-                                label: "chat";
-                                tone: root.net-health-tone == 2 ? Theme.bad
-                                    : (root.net-health-tone == 1 ? Theme.warn : Theme.good);
-                                tooltip: root.net-health-reason;
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            StatusPill {
-                                label: root.active-status == "" ? "Synced" : root.active-status;
-                                tone: root.active-state == 0 ? Theme.good : (root.active-state == 2 ? Theme.faint : Theme.warn);
-                            }
                         }
                         VerticalLayout {
                             alignment: center;
@@ -5014,72 +5019,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // =================================================================
-    if root.confirm-close-open: Rectangle {
-            width: 100%;
-            height: 100%;
-            background: #0000008c;
-            // scrim: absorbs clicks to the app behind; outside click cancels
-            TouchArea {
-                clicked => {
-                    root.confirm-close-open = false;
-                }
-            }
-            Rectangle {
-                width: min(400px, root.width - 48px);
-                height: dialog.preferred-height;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                background: Theme.panel;
-                border-radius: Theme.win95 ? 0px : 12px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                // absorb clicks inside the dialog so the scrim doesn't cancel
-                TouchArea { }
-                dialog := VerticalLayout {
-                    padding: 22px;
-                    spacing: 12px;
-                    Text {
-                        text: Strings.close-ws-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.close-ws-body;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    Rectangle {
-                        height: 4px;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            label: Strings.close-ws-cancel;
-                            clicked => {
-                                root.confirm-close-open = false;
-                            }
-                        }
-                        AppButton {
-                            label: Strings.close-ws-confirm;
-                            primary: true;
-                            clicked => {
-                                root.confirm-close-open = false;
-                                root.reset-open-workspace();
-                                root.close-workspace();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
     // Modal: confirm quitting the program while a workspace is open
     // (raised from Rust's window close-requested handler).
     // Modal: leaving the settings screen with unsaved draft edits. Three ways
@@ -5120,72 +5059,9 @@ export component AppWindow inherits Window {
         }
     }
 
-    // =================================================================
-    if root.confirm-quit-open: Rectangle {
-            width: 100%;
-            height: 100%;
-            background: #0000008c;
-            TouchArea {
-                clicked => {
-                    root.confirm-quit-open = false;
-                }
-            }
-            Rectangle {
-                width: min(400px, root.width - 48px);
-                height: qdialog.preferred-height;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                background: Theme.panel;
-                border-radius: Theme.win95 ? 0px : 12px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                TouchArea { }
-                qdialog := VerticalLayout {
-                    padding: 22px;
-                    spacing: 12px;
-                    Text {
-                        text: Strings.quit-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.quit-body;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    Rectangle {
-                        height: 4px;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            label: Strings.close-ws-cancel;
-                            clicked => {
-                                root.confirm-quit-open = false;
-                            }
-                        }
-                        AppButton {
-                            label: Strings.quit-confirm;
-                            primary: true;
-                            clicked => {
-                                root.confirm-quit-open = false;
-                                root.quit();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
     // Modal: confirm deleting a workspace from the Open list — the delete
     // button stays disabled until the user types the exact name.
-    if root.confirm-delete-open: ConfirmModal {
+    if root.confirm-delete-open: del-dlg := ConfirmModal {
         dialog-width: 420px;
         title: Strings.del-ws-title;
         body: Strings.del-ws-body;
@@ -5209,84 +5085,14 @@ export component AppWindow inherits Window {
             text <=> root.delete-typed;
             placeholder: root.delete-name;
             invalid: root.delete-typed != "" && root.delete-typed != root.delete-name;
+            // Enter inside the field = the (gated) action button
+            accepted => {
+                if (del-dlg.confirm-enabled) {
+                    del-dlg.confirmed();
+                }
+            }
         }
     }
-
-    // =================================================================
-    if root.confirm-delete-open: Rectangle {
-            width: 100%;
-            height: 100%;
-            background: #0000008c;
-            TouchArea {
-                clicked => {
-                    root.confirm-delete-open = false;
-                }
-            }
-            Rectangle {
-                width: min(420px, root.width - 48px);
-                height: ddialog.preferred-height;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                background: Theme.panel;
-                border-radius: Theme.win95 ? 0px : 12px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                TouchArea { }
-                ddialog := VerticalLayout {
-                    padding: 22px;
-                    spacing: 12px;
-                    Text {
-                        text: Strings.del-ws-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.del-ws-body;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: root.delete-name;
-                        color: Theme.text;
-                        font-size: Theme.fs-body;
-                        font-weight: 700;
-                    }
-                    AppField {
-                        text <=> root.delete-typed;
-                        placeholder: root.delete-name;
-                        invalid: root.delete-typed != "" && root.delete-typed != root.delete-name;
-                    }
-                    Rectangle {
-                        height: 4px;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            label: Strings.close-ws-cancel;
-                            clicked => {
-                                root.confirm-delete-open = false;
-                            }
-                        }
-                        AppButton {
-                            label: Strings.del-ws-confirm;
-                            primary: true;
-                            enabled: root.delete-typed == root.delete-name;
-                            clicked => {
-                                root.confirm-delete-open = false;
-                                root.deselect-workspace();
-                                root.delete-workspace(root.delete-id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
     // Modal: confirm deleting a chat message — the text is wiped for
     // everyone, only the deletion notice remains.
@@ -5304,73 +5110,9 @@ export component AppWindow inherits Window {
         }
     }
 
-    // =================================================================
-    if root.confirm-delmsg-open: Rectangle {
-            width: 100%;
-            height: 100%;
-            background: #0000008c;
-            TouchArea {
-                clicked => {
-                    root.confirm-delmsg-open = false;
-                }
-            }
-            Rectangle {
-                width: min(400px, root.width - 48px);
-                height: dmdialog.preferred-height;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                background: Theme.panel;
-                border-radius: Theme.win95 ? 0px : 12px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                TouchArea { }
-                dmdialog := VerticalLayout {
-                    padding: 22px;
-                    spacing: 12px;
-                    Text {
-                        text: Strings.dm-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.dm-body;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    Rectangle {
-                        height: 4px;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            label: Strings.close-ws-cancel;
-                            clicked => {
-                                root.confirm-delmsg-open = false;
-                            }
-                        }
-                        AppButton {
-                            label: Strings.dm-confirm;
-                            primary: true;
-                            clicked => {
-                                root.confirm-delmsg-open = false;
-                                root.delete-chat(root.delmsg-id);
-                                root.delmsg-id = "";
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
     // Modal: manual backup — pick where the workspace is written as one
     // encrypted blob (mock: confirming records the note, writes nothing).
-    if root.backup-modal-open: ConfirmModal {
+    if root.backup-modal-open: bk-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.bk-title;
         body: Strings.bk-body;
@@ -5391,85 +5133,17 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.backup-path;
             placeholder: "~/Backups/republic.molt.enc";
+            accepted => {
+                if (bk-dlg.confirm-enabled) {
+                    bk-dlg.confirmed();
+                }
+            }
         }
     }
 
-    // =================================================================
-    if root.backup-modal-open: Rectangle {
-            width: 100%;
-            height: 100%;
-            background: #0000008c;
-            TouchArea {
-                clicked => {
-                    root.backup-modal-open = false;
-                }
-            }
-            Rectangle {
-                width: min(440px, root.width - 48px);
-                height: bdialog.preferred-height;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                background: Theme.panel;
-                border-radius: Theme.win95 ? 0px : 12px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                TouchArea { }
-                bdialog := VerticalLayout {
-                    padding: 22px;
-                    spacing: 12px;
-                    Text {
-                        text: Strings.bk-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.bk-body;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: Strings.bk-path;
-                        color: Theme.text;
-                        font-size: Theme.fs-body;
-                    }
-                    AppField {
-                        text <=> root.backup-path;
-                        placeholder: "~/Backups/republic.molt.enc";
-                    }
-                    Rectangle {
-                        height: 4px;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            label: Strings.close-ws-cancel;
-                            clicked => {
-                                root.backup-modal-open = false;
-                            }
-                        }
-                        AppButton {
-                            label: Strings.bk-confirm;
-                            primary: true;
-                            enabled: root.backup-path != "";
-                            clicked => {
-                                root.backup-modal-open = false;
-                                root.export-note = Strings.ow-export-note + " " + root.backup-path;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
     // Modal: pick the encrypted workspace blob for the manual restore
     // (mock file chooser: a path field, nothing is read from disk).
-    if root.restore-file-modal-open: ConfirmModal {
+    if root.restore-file-modal-open: rf-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.rw-file-title;
         body: Strings.rw-file-body;
@@ -5485,6 +5159,11 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.rw-file-draft;
             placeholder: "~/Backups/republic.molt.enc";
+            accepted => {
+                if (rf-dlg.confirm-enabled) {
+                    rf-dlg.confirmed();
+                }
+            }
         }
     }
 
@@ -5495,7 +5174,7 @@ export component AppWindow inherits Window {
     // only the file reference travels with the proposal (chat file-share
     // mechanism: the bytes stay on this device until the transfer story).
     // =================================================================
-    if root.org-logo-modal-open: ConfirmModal {
+    if root.org-logo-modal-open: ol-dlg := ConfirmModal {
         dialog-width: 460px;
         title: Strings.ol-title;
         body: Strings.ol-body;
@@ -5568,6 +5247,11 @@ export component AppWindow inherits Window {
                     text <=> root.org-logo-draft;
                     placeholder: "~/Pictures/republic.png";
                     horizontal-stretch: 1;
+                    accepted => {
+                        if (ol-dlg.confirm-enabled) {
+                            ol-dlg.confirmed();
+                        }
+                    }
                 }
                 AppButton {
                     height: 38px;
@@ -5587,7 +5271,7 @@ export component AppWindow inherits Window {
     // Modal: decrypt an at-rest-encrypted workspace (Open screen). The
     // phrase is required; verifying it is the real-crypto story (mock).
     // =================================================================
-    if root.decrypt-modal-open: ConfirmModal {
+    if root.decrypt-modal-open: dec-dlg := ConfirmModal {
         dialog-width: 480px;
         title: "\{Strings.dw-title} — \{root.decrypt-name}";
         body: Strings.dw-body;
@@ -5607,6 +5291,11 @@ export component AppWindow inherits Window {
                 placeholder: Strings.ph-seed;
                 secret: true;
                 horizontal-stretch: 1;
+                accepted => {
+                    if (dec-dlg.confirm-enabled) {
+                        dec-dlg.confirmed();
+                    }
+                }
             }
             AppButton {
                 height: 38px;
@@ -5627,7 +5316,7 @@ export component AppWindow inherits Window {
     // becomes a real proposal the members approve by threshold. Applying
     // it does not yet rename the shown republic (mock effect).
     // =================================================================
-    if root.org-name-modal-open: ConfirmModal {
+    if root.org-name-modal-open: orn-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.orn-title;
         body: Strings.orn-body;
@@ -5644,6 +5333,11 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.org-name-draft;
             placeholder: Strings.ph-ws-name;
+            accepted => {
+                if (orn-dlg.confirm-enabled) {
+                    orn-dlg.confirmed();
+                }
+            }
         }
     }
 
@@ -5763,7 +5457,7 @@ export component AppWindow inherits Window {
     // Mock folder picker for the settings workspace tab: edits a draft,
     // Select commits it into the workspace-dir config field.
     // =================================================================
-    if root.ws-dir-modal-open: ConfirmModal {
+    if root.ws-dir-modal-open: wsd-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.set-ws-dir-title;
         body: Strings.set-ws-dir-body;
@@ -5779,6 +5473,11 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.ws-dir-draft;
             placeholder: "~/.moltrepublic/workspaces";
+            accepted => {
+                if (wsd-dlg.confirm-enabled) {
+                    wsd-dlg.confirmed();
+                }
+            }
         }
     }
 
