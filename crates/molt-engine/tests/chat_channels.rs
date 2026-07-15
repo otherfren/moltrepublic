@@ -364,21 +364,34 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     // A share IS a chat message, so the member's offer into the patch
     // channel must arrive at the founder filed under Patch(pid) — not
     // flattened into Group.
+    let share_src = tempfile::tempdir().expect("share tmp");
+    let share_path = share_src.path().join("minutes.pdf");
+    std::fs::write(&share_path, b"the patch minutes").expect("write share source");
     b.execute(Command::ShareFile {
-        name: "minutes.pdf".to_string(),
-        size: 48_000,
-        kind: "PDF".to_string(),
-        modified: 1_751_000_400,
+        path: share_path.display().to_string(),
         channel: patch.clone(),
     })
     .await
     .expect("member shares into the patch channel");
-    let b_share = read_chat_snap(&b, Some(patch.clone()))
-        .await
-        .applied
-        .into_iter()
-        .find(|m| m["file"]["name"] == serde_json::json!("minutes.pdf"))
-        .expect("the member's own patch view holds the offer");
+    // the share posts async once the off-actor hash completes — poll
+    let b_share = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let hit = read_chat_snap(&b, Some(patch.clone()))
+                .await
+                .applied
+                .into_iter()
+                .find(|m| m["file"]["name"] == serde_json::json!("minutes.pdf"));
+            if let Some(hit) = hit {
+                break hit;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the member's own patch view never held the offer"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
     let share_msg: ChatMessage = serde_json::from_value(b_share).expect("share decodes");
     assert_eq!(share_msg.channel, patch, "the share is tagged before the wire");
     member_feed.push(EventEnvelope {

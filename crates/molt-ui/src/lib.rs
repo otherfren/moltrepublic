@@ -767,29 +767,14 @@ pub fn run_app(
                 .map(|s| s.selected.clone())
                 .unwrap_or_default();
             // the native picker runs async (XDG portal) off the UI thread;
-            // only the file's METADATA is read and shared — no bytes move
+            // the engine derives the metadata + real sha256 from this path
+            // and posts the share when hashing completes
             rt.spawn(async move {
                 let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
                     return; // cancelled
                 };
-                let name = file.file_name();
-                let (size, modified) = std::fs::metadata(file.path())
-                    .map(|md| {
-                        let modified = md
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0); // 0 = the engine stamps "now"
-                        (md.len(), modified)
-                    })
-                    .unwrap_or((0, 0));
-                let kind = file_kind_label(&name);
                 let cmd = Command::ShareFile {
-                    name,
-                    size,
-                    kind,
-                    modified,
+                    path: file.path().display().to_string(),
                     channel,
                 };
                 if let Err(e) = w.execute(cmd).await {
@@ -811,7 +796,28 @@ pub fn run_app(
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::DownloadFile { id });
+            let w = w.clone();
+            let weak = weak.clone();
+            // save-dialog per download (product decision): the user picks
+            // the destination, then the engine fetches peer-to-peer;
+            // completion/failure surfaces via Event::FileTransfer
+            rt.spawn(async move {
+                let Some(dest) = rfd::AsyncFileDialog::new().save_file().await else {
+                    return; // cancelled
+                };
+                let cmd = Command::DownloadFile {
+                    id,
+                    dest: Some(dest.path().display().to_string()),
+                };
+                if let Err(e) = w.execute(cmd).await {
+                    let msg = format!("⚠ {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_show_toast(msg.into());
+                        }
+                    });
+                }
+            });
         });
     }
     {
@@ -1240,6 +1246,7 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
     SessionSettings {
         headless: ui.get_cfg_headless(),
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
+        download_dir: ui.get_cfg_download_dir().to_string(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
         s3_access_key: ui.get_cfg_s3_access().to_string(),
@@ -1482,6 +1489,7 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
 fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_headless(s.headless);
     ui.set_cfg_workspace_dir(s.workspace_dir.clone().into());
+    ui.set_cfg_download_dir(s.download_dir.clone().into());
     ui.set_cfg_s3_backup(s.s3_backup);
     ui.set_cfg_s3_endpoint(s.s3_endpoint.clone().into());
     ui.set_cfg_s3_access(s.s3_access_key.clone().into());
@@ -2590,24 +2598,6 @@ fn file_date_label(ts: u64) -> String {
     utc.with_timezone(&chrono::Local)
         .format("%Y-%m-%d")
         .to_string()
-}
-
-/// The display type of a shared file, from its extension (proper MIME
-/// sniffing can come with the transport; the label is presentation).
-fn file_kind_label(name: &str) -> String {
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
-    match ext.as_deref() {
-        Some("pdf") => "PDF",
-        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "svg") => "Image",
-        Some("md" | "txt") => "Text",
-        Some("ods" | "xlsx" | "csv") => "Spreadsheet",
-        Some("odt" | "docx") => "Document",
-        Some("zip" | "tar" | "gz" | "7z") => "Archive",
-        Some("mp3" | "ogg" | "flac" | "opus") => "Audio",
-        Some("mp4" | "mkv" | "webm") => "Video",
-        _ => "File",
-    }
-    .to_string()
 }
 
 /// The whole-log pass over a chat: author-block zebra (the stripe flips

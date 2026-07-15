@@ -103,28 +103,52 @@ impl State {
         Ok(id)
     }
 
-    /// Share a file into the chat: a message carrying only the metadata.
-    /// The bytes stay on this node's disk — participants download from
-    /// there while the file exists (mocked until the transport story).
-    /// A share IS a chat message (concept Q8), so it files under the given
-    /// channel view exactly like `cmd_chat` — never hardcoded `Group`.
+    /// Share a local file into the chat: kick the off-actor hash task —
+    /// the share message posts (via [`State::cmd_net_file_shared`]) once
+    /// the real metadata + sha256 exist. Only metadata enters the chat;
+    /// the path stays this node's business (prefs, never wire/log).
     pub(crate) fn cmd_share_file(
+        &mut self,
+        path: String,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
+        self.ensure_demo_net();
+        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            return Err(MoltError::BadPayload(
+                "the file path must not be empty".into(),
+            ));
+        }
+        let p = std::path::PathBuf::from(&path);
+        if p.file_name().is_none() {
+            return Err(MoltError::BadPayload(format!(
+                "{path:?} has no file name component"
+            )));
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("the engine is shutting down".into()));
+        };
+        crate::transfer::spawn_share_hash(p, channel, self.net_scope, cmd_tx);
+        Ok(Reply::Ack)
+    }
+
+    /// The off-actor share hash finished: post the share message (the real
+    /// metadata + checksum) and remember the source path so this node can
+    /// serve downloads — across restarts, via the prefs sidecar. (The arm
+    /// mirrors the command's fields one-to-one; bundling them into a struct
+    /// would only rename the coupling.)
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_net_file_shared(
         &mut self,
         name: String,
         size: u64,
         kind: String,
         modified: u64,
+        checksum: String,
+        path: String,
         channel: ChannelRef,
     ) -> Result<Reply, MoltError> {
-        self.ensure_demo_net();
-        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            return Err(MoltError::BadPayload(
-                "the file name must not be empty".into(),
-            ));
-        }
-        let kind = kind.trim().to_string();
         let from = self.member();
         let id = mint_message_id()?;
         let mut msg = ChatMessage::text(id, from.clone(), String::new(), now_secs())
@@ -132,16 +156,14 @@ impl State {
         msg.file = Some(FileMeta {
             name: name.clone(),
             size,
-            kind: if kind.is_empty() {
-                "File".to_string()
-            } else {
-                kind
-            },
+            kind,
             modified: if modified == 0 { now_secs() } else { modified },
             available: true,
+            checksum,
         });
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
+        self.remember_share_path(id, &path);
         self.emit(Event::Chat {
             id,
             from,
@@ -151,15 +173,96 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// (Mock-)download a shared file from the sharer's disk: validates that
-    /// the share exists and is still available; no bytes move until the
-    /// transport exists.
-    pub(crate) fn cmd_download_file(&self, id: MessageId) -> Result<Reply, MoltError> {
-        let (_, msg) = self.chat_by_id(&id)?;
-        let file = msg.file.as_ref().ok_or(MoltError::NoFile(id))?;
-        if !file.available {
-            return Err(MoltError::FileUnavailable(id));
+    /// The off-actor share hash failed — surface the honest error.
+    pub(crate) fn cmd_net_file_share_failed(
+        &mut self,
+        name: String,
+        reason: String,
+    ) -> Result<Reply, MoltError> {
+        tracing::warn!(%name, %reason, "sharing a file failed");
+        self.session.notice = format!("share-failed:{name}:{reason}");
+        self.emit_session(molt_core::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Download a shared file: fetch the bytes peer-to-peer from the
+    /// sharer's device (async kickoff — progress and the result arrive as
+    /// [`Event::FileTransfer`]). The node's OWN share is an honest local
+    /// copy; a workspace without a real mesh gets an honest error.
+    pub(crate) fn cmd_download_file(
+        &mut self,
+        id: MessageId,
+        dest: Option<String>,
+    ) -> Result<Reply, MoltError> {
+        let (from, target) = {
+            let (_, msg) = self.chat_by_id(&id)?;
+            let file = msg.file.as_ref().ok_or(MoltError::NoFile(id))?;
+            if !file.available {
+                return Err(MoltError::FileUnavailable(id));
+            }
+            (
+                msg.from.clone(),
+                crate::transfer::FetchTarget {
+                    id_hex: id.to_string(),
+                    name: file.name.clone(),
+                    size: file.size,
+                    checksum: file.checksum.clone(),
+                },
+            )
+        };
+        if self.downloads.get(&id).is_some_and(|d| {
+            d.phase == "requested" || d.phase == "transferring"
+        }) {
+            return Err(MoltError::BadPayload(
+                "this share is already downloading".into(),
+            ));
         }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("the engine is shutting down".into()));
+        };
+        let dest = crate::transfer::DestSpec {
+            explicit: dest,
+            default_dir: self.session.settings.download_dir.clone(),
+        };
+        let me = self.member();
+        if from == me {
+            // my own share: no network involved — an honest local copy
+            let source = self.share_paths.get(&id).cloned().ok_or_else(|| {
+                MoltError::Engine(
+                    "this node no longer knows the shared file's local path".into(),
+                )
+            })?;
+            crate::transfer::spawn_local_copy(
+                source,
+                id,
+                target,
+                dest,
+                self.net_scope,
+                cmd_tx,
+            );
+        } else {
+            // a peer's share: the transfer needs the real mesh
+            let (Some(transport), Some(group)) = (
+                self.net.as_ref().and_then(|n| n.runtime_transport()),
+                self.net.as_ref().and_then(|n| n.group_arc()),
+            ) else {
+                return Err(MoltError::Engine(
+                    "this workspace's members are simulated — no real node holds this file"
+                        .into(),
+                ));
+            };
+            crate::transfer::spawn_file_fetch(
+                transport,
+                group,
+                id,
+                target,
+                dest,
+                crate::transfer::FetchTimeouts::default(),
+                self.net_scope,
+                cmd_tx,
+            );
+        }
+        self.set_download_phase(id, molt_core::TransferPhase::Requested);
         Ok(Reply::Ack)
     }
 
@@ -179,7 +282,63 @@ impl State {
             index
         };
         self.record_file_remove(index, id, me);
+        self.forget_share_path(&id);
         Ok(Reply::Ack)
+    }
+
+    /// Remember one of MY shares' local source path — runtime map + the
+    /// per-workspace prefs sidecar (survives restarts; never wire/log).
+    fn remember_share_path(&mut self, id: MessageId, path: &str) {
+        self.share_paths.insert(id, std::path::PathBuf::from(path));
+        if let Some(active) = &mut self.active {
+            active
+                .prefs
+                .shared_files
+                .insert(id.to_string(), path.to_string());
+            active.handle.set_prefs(active.prefs.clone());
+        }
+    }
+
+    /// Forget a share's source path (share removed).
+    pub(crate) fn forget_share_path(&mut self, id: &MessageId) {
+        self.share_paths.remove(id);
+        if let Some(active) = &mut self.active {
+            if active.prefs.shared_files.remove(&id.to_string()).is_some() {
+                active.handle.set_prefs(active.prefs.clone());
+            }
+        }
+    }
+
+    /// Track a download's lifecycle for the uploads view + event stream.
+    pub(crate) fn set_download_phase(&mut self, id: MessageId, phase: molt_core::TransferPhase) {
+        let view = match &phase {
+            molt_core::TransferPhase::Requested => molt_core::DownloadView {
+                phase: "requested".to_string(),
+                percent: 0,
+                path: String::new(),
+                error: String::new(),
+            },
+            molt_core::TransferPhase::Progress { percent } => molt_core::DownloadView {
+                phase: "transferring".to_string(),
+                percent: *percent,
+                path: String::new(),
+                error: String::new(),
+            },
+            molt_core::TransferPhase::Done { path } => molt_core::DownloadView {
+                phase: "done".to_string(),
+                percent: 100,
+                path: path.clone(),
+                error: String::new(),
+            },
+            molt_core::TransferPhase::Failed { reason } => molt_core::DownloadView {
+                phase: "failed".to_string(),
+                percent: 0,
+                path: String::new(),
+                error: reason.clone(),
+            },
+        };
+        self.downloads.insert(id, view);
+        self.emit(Event::FileTransfer { id, phase });
     }
 
     /// Toggle the local member's emoji reaction: the emoji you already

@@ -41,6 +41,7 @@ pub mod mls;
 pub mod smp;
 pub mod socks5;
 pub mod supervisor;
+pub mod transfer;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`
 /// (the default build never pulls arti). See the module docs and the
 /// `Cargo.toml` `[features]` note.

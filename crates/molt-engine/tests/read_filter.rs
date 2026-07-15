@@ -212,15 +212,27 @@ async fn a_file_share_files_into_its_channel() {
         name: "papers".to_string(),
     };
     chat(&w, "group hello", ChannelRef::Group).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let share_path = tmp.path().join("charter.pdf");
+    std::fs::write(&share_path, b"the charter").expect("write share source");
     w.execute(Command::ShareFile {
-        name: "charter.pdf".to_string(),
-        size: 48_000,
-        kind: "PDF".to_string(),
-        modified: 1_751_000_000,
+        path: share_path.display().to_string(),
         channel: papers.clone(),
     })
     .await
     .expect("share");
+    // the share posts async once the off-actor hash completes — poll
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if read_chat_snapshot(&w, None).await.applied.len() >= 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the share message never posted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     // the share message carries the real channel, not a hardcoded Group
     let full = read_chat_snapshot(&w, None).await;

@@ -280,13 +280,15 @@ impl State {
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::MlsCommit { .. }
-            | WorkspaceEvent::MeshAnnounced { .. } => {
+            | WorkspaceEvent::MeshAnnounced { .. }
+            | WorkspaceEvent::FileRequested { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
                 // catch-up request, a membership-proposal announcement, a raw MLS
-                // re-key commit, a relayed mesh announce) ride the log only to
-                // reach the outbox; the chain lives in chain.state, the MLS
-                // ratchet in the group and the mesh in transport.state, none
-                // rebuilt from the log, so apply/replay is a deliberate no-op
+                // re-key commit, a relayed mesh announce, a file fetch request)
+                // ride the log only to reach the outbox; the chain lives in
+                // chain.state, the MLS ratchet in the group, the mesh in
+                // transport.state and a file transfer on its dedicated queue,
+                // none rebuilt from the log, so apply/replay is a deliberate no-op
             }
         }
     }
@@ -452,6 +454,8 @@ impl State {
         self.chat.clear();
         self.chat_pos.clear();
         self.parked.clear();
+        self.share_paths.clear();
+        self.downloads.clear();
         self.applied.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
@@ -569,6 +573,8 @@ mod tests {
                     kind: "PDF".to_string(),
                     modified: 100,
                     available: true,
+                    // legacy fixture: pre-transfer shares carry no checksum
+                    checksum: String::new(),
                 });
                 WorkspaceEvent::Chat(share)
             }),

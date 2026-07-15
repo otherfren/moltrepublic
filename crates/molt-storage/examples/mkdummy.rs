@@ -109,6 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: kind.to_string(),
             modified: ts - 86_400,
             available: true,
+            // a dummy share has no real bytes — honestly unknown
+            checksum: String::new(),
         });
         EventEnvelope {
             seq,

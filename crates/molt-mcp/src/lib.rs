@@ -376,6 +376,7 @@ fn settings_arg(args: &Value) -> SessionSettings {
             .and_then(Value::as_bool)
             .unwrap_or(d.headless),
         workspace_dir: text("workspace_dir", d.workspace_dir),
+        download_dir: text("download_dir", d.download_dir),
         s3_backup: args
             .get("s3_backup")
             .and_then(Value::as_bool)
@@ -476,37 +477,35 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "share_file",
             command: "share_file",
-            description: "Share a file into the ungated chat: only the METADATA (name, size, type, date) is posted — the bytes stay on this node's disk, participants download from there while the file exists (mocked until the transport lands). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
+            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async — it appears in read_state once hashing completes). Only metadata enters the chat; the path stays this node's business and the bytes move per-download over a dedicated encrypted queue. A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "file name, no path" },
-                    "size": { "type": "integer", "description": "size in bytes" },
-                    "kind": { "type": "string", "description": "display type, e.g. PDF" },
-                    "modified": { "type": "integer", "description": "file date, unix seconds (omit = now)" },
+                    "path": { "type": "string", "description": "absolute path of the local file to share" },
                     "channel": channel_schema("optional: the channel view this share files under (omit for the all-hands group)")
                 },
-                "required": ["name"]
+                "required": ["path"]
             }),
             build: |args| Ok(Command::ShareFile {
-                name: str_arg(args, "name")?,
-                size: args.get("size").and_then(Value::as_u64).unwrap_or(0),
-                kind: args.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
-                modified: args.get("modified").and_then(Value::as_u64).unwrap_or(0),
+                path: str_arg(args, "path")?,
                 channel: channel_arg(args)?.unwrap_or_default(),
             }),
         },
         ToolDef {
             name: "download_file",
             command: "download_file",
-            description: "Download a shared file from its sharer's disk, addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails once the sharer deleted the local file. Mock: validates availability, moves no bytes.",
+            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes the file to `dest` (an existing directory, or a full target path; omitted = the configured download directory). Async kickoff — poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
             schema: || json!({
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" } },
+                "properties": {
+                    "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" },
+                    "dest": { "type": "string", "description": "optional destination: an existing directory or a full target path (omit = the configured download directory)" }
+                },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::DownloadFile {
                 id: id_arg(args, "id")?,
+                dest: args.get("dest").and_then(Value::as_str).map(str::to_string),
             }),
         },
         ToolDef {
@@ -1037,7 +1036,13 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 24] = [
+        const INTERNAL: [&str; 30] = [
+            "net_file_shared",
+            "net_file_share_failed",
+            "net_file_request_ready",
+            "net_file_progress",
+            "net_file_done",
+            "net_file_failed",
             "restore_tick",
             "net_delivered",
             "net_peer_seen",
@@ -1190,17 +1195,17 @@ mod tests {
             schema["properties"]["channel"]["properties"]["kind"]["enum"],
             json!(["group", "patch", "topic"])
         );
-        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(schema["required"], json!(["path"]));
 
         // Omitted channel → the all-hands group (the default view).
-        match build("share_file", &json!({ "name": "a.pdf" })).expect("plain share builds") {
+        match build("share_file", &json!({ "path": "/tmp/a.pdf" })).expect("plain share builds") {
             Command::ShareFile { channel, .. } => assert_eq!(channel, ChannelRef::Group),
             other => panic!("wrong command: {other:?}"),
         }
         // Patch channel by proposal id.
         match build(
             "share_file",
-            &json!({ "name": "a.pdf", "channel": { "kind": "patch", "id": 7 } }),
+            &json!({ "path": "/tmp/a.pdf", "channel": { "kind": "patch", "id": 7 } }),
         )
         .expect("patch share builds")
         {
@@ -1212,7 +1217,7 @@ mod tests {
         // Topic channel — normalized exactly like chat_send.
         match build(
             "share_file",
-            &json!({ "name": "a.pdf", "channel": { "kind": "topic", "name": "  Budget " } }),
+            &json!({ "path": "/tmp/a.pdf", "channel": { "kind": "topic", "name": "  Budget " } }),
         )
         .expect("topic share builds")
         {
@@ -1307,7 +1312,10 @@ mod tests {
             other => panic!("wrong command: {other:?}"),
         }
         match build("download_file", &json!({ "id": HEX_ID })).expect("download builds") {
-            Command::DownloadFile { id: got } => assert_eq!(got, id),
+            Command::DownloadFile { id: got, dest } => {
+                assert_eq!(got, id);
+                assert_eq!(dest, None);
+            }
             other => panic!("wrong command: {other:?}"),
         }
         match build("remove_file", &json!({ "id": HEX_ID })).expect("remove builds") {

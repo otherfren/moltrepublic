@@ -344,6 +344,7 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         tor_port: s.tor_port,
         smp_server: s.smp_server.clone(),
         smp_url: s.smp_url.clone(),
+        download_dir: s.download_dir.clone(),
         mcp_port: s.mcp_port,
         mcp_allow: s.mcp_allow.clone(),
         mcp_token: s.mcp_token.clone(),
@@ -372,6 +373,7 @@ fn session_settings(s: &Settings) -> SessionSettings {
         tor_port: s.tor_port,
         smp_server: s.smp_server.clone(),
         smp_url: s.smp_url.clone(),
+        download_dir: s.download_dir.clone(),
     }
 }
 

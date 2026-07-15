@@ -336,6 +336,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
+            | WorkspaceEvent::FileRequested { .. }
     )
 }
 
@@ -742,7 +743,7 @@ impl State {
     /// The recovery recv loops and mesh-extension tasks live as long as the
     /// workspace stays open — a mesh REBUILD (extension) does not invalidate
     /// them; only a workspace switch/close does (`reset_workspace_state`).
-    fn net_scope_current(&self, scope: Option<u64>) -> bool {
+    pub(crate) fn net_scope_current(&self, scope: Option<u64>) -> bool {
         match scope {
             None => true,
             Some(s) => s == self.net_scope,
@@ -934,10 +935,104 @@ impl State {
                     }
                 }
             }
+            // a member wants a shared file's bytes: authenticate the
+            // REQUESTER by MLS decryption (like a mesh announce), and only
+            // the SHARER acts — everyone else in the group decrypts the
+            // broadcast and drops it silently. The bytes then flow over the
+            // advertised dedicated queue, never through this log.
+            WorkspaceEvent::FileRequested { ct } => {
+                let me = self.member();
+                if let Ok(raw) = hex::decode(&ct) {
+                    if let Some((requester, plain)) =
+                        self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
+                    {
+                        if requester != me && self.roster().contains(&requester) {
+                            if let Ok(req) =
+                                serde_json::from_slice::<molt_net::transfer::FetchRequest>(&plain)
+                            {
+                                self.answer_file_request(req);
+                            }
+                        }
+                    }
+                }
+            }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
             }
         }
+        Ok(Reply::Ack)
+    }
+
+    /// A group-authenticated fetch request landed and this node is asked to
+    /// serve: honest refusals (expired, unknown share, unavailable, foreign
+    /// share, unknown path) go back as a `Refused` frame where possible;
+    /// a valid request spawns the bounded serve task.
+    fn answer_file_request(&mut self, req: molt_net::transfer::FetchRequest) {
+        let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) else {
+            return; // no real mesh → nothing to serve on
+        };
+        let refuse = |reason: &str| {
+            let frame = molt_net::transfer::TransferFrame::Refused {
+                id: req.id.clone(),
+                reason: reason.to_string(),
+            };
+            crate::transfer::spawn_send_refusal(transport.clone(), req.reply.clone(), frame);
+        };
+        if req.expires < crate::now_secs() {
+            tracing::debug!(share = %req.id, "dropping an expired file request");
+            return; // the requester is long gone — nobody listens for a refusal
+        }
+        let Ok(id) = req.id.parse::<MessageId>() else {
+            return;
+        };
+        let me = self.member();
+        let Ok((_, msg)) = self.chat_by_id(&id) else {
+            refuse("this node does not know the share");
+            return;
+        };
+        if msg.from != me {
+            return; // not my share — the sharer will answer
+        }
+        let Some(file) = msg.file.as_ref() else {
+            refuse("the message carries no file");
+            return;
+        };
+        if !file.available {
+            refuse("the sharer removed the file — no longer available");
+            return;
+        }
+        let (size, modified) = (file.size, file.modified);
+        let Some(path) = self.share_paths.get(&id).cloned() else {
+            refuse("this node no longer knows the shared file's local path");
+            return;
+        };
+        crate::transfer::spawn_file_serve(
+            transport,
+            path,
+            size,
+            modified,
+            req.id,
+            req.reply,
+            self.file_serve_slots.clone(),
+        );
+    }
+
+    /// The fetch task's request is ready: record the `FileRequested` event
+    /// (the outbox ships it to every peer; the sharer answers).
+    pub(crate) fn cmd_net_file_request_ready(
+        &mut self,
+        id: MessageId,
+        ct: String,
+    ) -> Result<Reply, MoltError> {
+        // the share must still exist and be available — the honest guard
+        // before broadcasting a request every member will decrypt
+        let (_, msg) = self.chat_by_id(&id)?;
+        if !msg.file.as_ref().is_some_and(|f| f.available) {
+            return Err(MoltError::FileUnavailable(id));
+        }
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::FileRequested { ct });
+        self.record(env);
         Ok(Reply::Ack)
     }
 

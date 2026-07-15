@@ -80,6 +80,10 @@ pub struct StorageConfig {
     /// Automatic-backup interval in minutes.
     #[serde(default = "default_s3_interval_min")]
     pub s3_interval_min: u16,
+    /// Where downloaded chat files land when no explicit destination is
+    /// given. `~` expands to $HOME.
+    #[serde(default = "default_download_dir")]
+    pub download_dir: String,
 }
 
 impl Default for StorageConfig {
@@ -92,6 +96,7 @@ impl Default for StorageConfig {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval_min(),
+            download_dir: default_download_dir(),
         }
     }
 }
@@ -244,6 +249,11 @@ impl Default for UiConfig {
     }
 }
 
+/// The default download destination.
+pub fn default_download_dir() -> String {
+    "~/Downloads".to_string()
+}
+
 /// Default per-group workspace root.
 pub fn default_workspace_dir() -> String {
     "~/.moltrepublic/workspaces".to_string()
@@ -333,6 +343,8 @@ pub struct Settings {
     pub s3_bucket: String,
     /// Automatic-backup interval in minutes.
     pub s3_interval_min: u16,
+    /// Where downloaded chat files land when no explicit destination is given.
+    pub download_dir: String,
     /// Anonymity network: `"tor" | "nym" | "none"`.
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
@@ -367,6 +379,7 @@ impl Default for Settings {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval_min(),
+            download_dir: default_download_dir(),
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
@@ -416,6 +429,7 @@ impl From<&Config> for Settings {
             s3_secret_key: c.storage.s3_secret_key.clone(),
             s3_bucket: c.storage.s3_bucket.clone(),
             s3_interval_min: c.storage.s3_interval_min,
+            download_dir: c.storage.download_dir.clone(),
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
@@ -456,6 +470,8 @@ s3_secret_key = {s3_secret_key}
 s3_bucket = {s3_bucket}
 # Automatic-backup interval in minutes.
 s3_interval_min = {s3_interval_min}
+# Where downloaded chat files land ("~" = $HOME).
+download_dir = {download_dir}
 
 [mcp]
 # MCP server TCP port. Always served (UI + headless).
@@ -507,6 +523,7 @@ theme = {theme}
         s3_secret_key = toml_str(&settings.s3_secret_key),
         s3_bucket = toml_str(&settings.s3_bucket),
         s3_interval_min = settings.s3_interval_min,
+        download_dir = toml_str(&settings.download_dir),
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
         mcp_token = toml_str(&settings.mcp_token),
@@ -541,6 +558,9 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(b) = storage.get("s3_backup").and_then(toml::Value::as_bool) {
             s.s3_backup = b;
+        }
+        if let Some(v) = storage.get("download_dir").and_then(toml::Value::as_str) {
+            s.download_dir = v.to_string();
         }
         if let Some(v) = storage.get("s3_endpoint").and_then(toml::Value::as_str) {
             s.s3_endpoint = v.to_string();
@@ -710,6 +730,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         "s3_interval_min",
         i64::from(settings.s3_interval_min),
     );
+    set_str(storage, "download_dir", &settings.download_dir);
 
     let mcp = table_at(doc.as_table_mut(), &["mcp"]);
     set_int(mcp, "port", i64::from(settings.mcp_port));
@@ -901,6 +922,7 @@ mod tests {
             tor_port: 9150,
             smp_server: "custom".to_string(),
             smp_url: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io".to_string(),
+            download_dir: "/srv/molt/downloads".to_string(),
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),

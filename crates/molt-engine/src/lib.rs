@@ -34,6 +34,7 @@ mod net;
 mod proposals;
 mod recovery;
 mod session;
+mod transfer;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -350,6 +351,16 @@ pub(crate) struct State {
     /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
     /// never persisted, a restart loses parked refs (ephemerality is fine).
     pub(crate) parked: net::ParkedRefs,
+    /// MY shares: message id → local source path (runtime mirror of
+    /// `prefs.shared_files`; NEVER wire, NEVER log — the paths would leak
+    /// this node's filesystem layout).
+    pub(crate) share_paths: HashMap<MessageId, std::path::PathBuf>,
+    /// Requester-side live download status per share (runtime-only; feeds
+    /// [`molt_core::UploadView::download`]).
+    pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
+    /// Sharer-side serve throttle: at most 2 concurrent uploads; further
+    /// requests queue on the semaphore instead of saturating the uplink.
+    pub(crate) file_serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Applied transition log per gated surface.
     pub(crate) applied: HashMap<Surface, Vec<Value>>,
     /// Every known proposal — stored as the schema type
@@ -546,6 +557,9 @@ impl State {
             chat: Vec::new(),
             chat_pos: HashMap::new(),
             parked: net::ParkedRefs::new(),
+            share_paths: HashMap::new(),
+            downloads: HashMap::new(),
+            file_serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             applied,
             proposals: HashMap::new(),
             next_id: 1,
@@ -644,15 +658,70 @@ impl State {
             } => self.cmd_chat(body, quote, channel),
             Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
-            Command::ShareFile {
+            Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
+            Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
+            Command::RemoveFile { id } => self.cmd_remove_file(id),
+            // file-transfer task feedback (engine-internal, scope-guarded)
+            Command::NetFileShared {
                 name,
                 size,
                 kind,
                 modified,
+                checksum,
+                path,
                 channel,
-            } => self.cmd_share_file(name, size, kind, modified, channel),
-            Command::DownloadFile { id } => self.cmd_download_file(id),
-            Command::RemoveFile { id } => self.cmd_remove_file(id),
+                generation,
+            } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_file_shared(name, size, kind, modified, checksum, path, channel)
+            }
+            Command::NetFileShareFailed {
+                name,
+                reason,
+                generation,
+            } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_file_share_failed(name, reason)
+            }
+            Command::NetFileRequestReady { id, ct, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_file_request_ready(id, ct)
+            }
+            Command::NetFileProgress {
+                id,
+                transferred,
+                total,
+                generation,
+            } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                let percent = (transferred * 100)
+                    .checked_div(total)
+                    .map_or(100, |p| u8::try_from(p).unwrap_or(100));
+                self.set_download_phase(id, molt_core::TransferPhase::Progress { percent });
+                Ok(Reply::Ack)
+            }
+            Command::NetFileDone { id, path, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.set_download_phase(id, molt_core::TransferPhase::Done { path });
+                Ok(Reply::Ack)
+            }
+            Command::NetFileFailed { id, reason, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.set_download_phase(id, molt_core::TransferPhase::Failed { reason });
+                Ok(Reply::Ack)
+            }
 
             // proposals.rs
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
@@ -911,6 +980,57 @@ mod tests {
             .expect("valid message id")
     }
 
+    /// Write `content` to `dir/name` and share it — awaiting the share
+    /// message (posting is async: it appears once the off-actor hash
+    /// completes). Returns the share's stable id.
+    async fn share_temp_file(
+        w: &WalletHandle,
+        dir: &std::path::Path,
+        name: &str,
+        content: &[u8],
+    ) -> MessageId {
+        let path = dir.join(name);
+        std::fs::write(&path, content).expect("write share source");
+        w.execute(Command::ShareFile {
+            path: path.display().to_string(),
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("share");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let snap = read_surface(w, Surface::Chat).await;
+            if let Some(row) = snap
+                .applied
+                .iter()
+                .find(|m| m["file"]["name"] == serde_json::json!(name))
+            {
+                return msg_id(row);
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the share message for {name} never posted"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Poll until `path` exists with exactly `content`.
+    async fn await_file(path: &std::path::Path, content: &[u8]) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::fs::read(path).is_ok_and(|b| b == content) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} never landed with the expected bytes",
+                path.display()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// The "it survives a restart" keystone: found a republic on a storage
     /// engine, write chat + a threshold-applied proposal, close, reopen —
     /// the replayed state equals the live state exactly.
@@ -992,29 +1112,14 @@ mod tests {
             w.execute(Command::DeleteChat { id: second_id })
                 .await
                 .expect("delete");
-            // two file shares: one stays available, one is removed — both
-            // states must survive the reopen
-            w.execute(Command::ShareFile {
-                name: "charter.pdf".into(),
-                size: 48_000,
-                kind: "PDF".into(),
-                modified: 1_751_000_000,
-                channel: molt_core::ChannelRef::default(),
-            })
-            .await
-            .expect("share");
-            w.execute(Command::ShareFile {
-                name: "draft.md".into(),
-                size: 900,
-                kind: "Text".into(),
-                modified: 1_751_000_000,
-                channel: molt_core::ChannelRef::default(),
-            })
-            .await
-            .expect("share 2");
-            let snap = read_surface(&w, Surface::Chat).await;
-            let kept_share_id = msg_id(&snap.applied[2]);
-            let removed_share_id = msg_id(&snap.applied[3]);
+            // two file shares (real temp files): one stays available, one
+            // is removed — both states must survive the reopen
+            let src_dir = tmp.path().join("sources");
+            std::fs::create_dir_all(&src_dir).expect("src dir");
+            let kept_share_id =
+                share_temp_file(&w, &src_dir, "charter.pdf", b"the sealed charter").await;
+            let removed_share_id =
+                share_temp_file(&w, &src_dir, "draft.md", b"a draft to remove").await;
             w.execute(Command::RemoveFile {
                 id: removed_share_id,
             })
@@ -1040,14 +1145,24 @@ mod tests {
             assert_eq!(memory_after.applied, memory_before.applied);
             assert_eq!(memory_after.pending.len(), memory_before.pending.len());
 
-            // the file shares replay with their availability intact —
-            // and stay addressable by the SAME ids after the reopen
-            w.execute(Command::DownloadFile { id: kept_share_id })
-                .await
-                .expect("kept file downloads after reopen");
+            // the file shares replay with their availability intact — and
+            // stay addressable by the SAME ids after the reopen. The kept
+            // share's source path came back via prefs (this node keeps
+            // serving/copying across restarts): downloading the own share
+            // is an honest local copy into the destination
+            let dest_dir = tmp.path().join("downloads");
+            std::fs::create_dir_all(&dest_dir).expect("dest dir");
+            w.execute(Command::DownloadFile {
+                id: kept_share_id,
+                dest: Some(dest_dir.display().to_string()),
+            })
+            .await
+            .expect("kept file downloads after reopen");
+            await_file(&dest_dir.join("charter.pdf"), b"the sealed charter").await;
             assert!(matches!(
                 w.execute(Command::DownloadFile {
                     id: removed_share_id,
+                    dest: None,
                 })
                 .await,
                 Err(MoltError::FileUnavailable(i)) if i == removed_share_id
@@ -1227,49 +1342,49 @@ mod tests {
     #[test]
     fn file_share_lifecycle_download_until_removed() {
         rt().block_on(async {
+            use sha2::Digest as _;
+            let tmp = tempfile::tempdir().expect("tmp");
             let w = spawn(GroupConfig::demo(), SessionView::default());
-            w.execute(Command::ShareFile {
-                name: "charter.pdf".into(),
-                size: 48_000,
-                kind: "PDF".into(),
-                modified: 1_751_000_000,
-                channel: molt_core::ChannelRef::default(),
+            let content: &[u8] = b"the sealed charter, for real this time";
+            let share_id = share_temp_file(&w, tmp.path(), "charter.pdf", content).await;
+
+            // the chat log carries the REAL metadata the engine derived —
+            // including the streamed sha256 (the download anchor)
+            let snap = read_surface(&w, Surface::Chat).await;
+            let f = &snap.applied[0]["file"];
+            assert_eq!(f["name"], json!("charter.pdf"));
+            assert_eq!(f["size"], json!(content.len()));
+            assert_eq!(f["kind"], json!("PDF"));
+            assert!(f["modified"].as_u64().is_some_and(|m| m > 0));
+            assert_eq!(f["available"], json!(true));
+            let want_sha = hex::encode(sha2::Sha256::digest(content));
+            assert_eq!(f["checksum"], json!(want_sha), "the real sha256 is log-anchored");
+
+            // downloading the OWN share is an honest local copy — and a
+            // name collision resolves as "name (1).ext", never overwrites
+            let dest = tmp.path().join("dl");
+            std::fs::create_dir_all(&dest).expect("dest");
+            w.execute(Command::DownloadFile {
+                id: share_id,
+                dest: Some(dest.display().to_string()),
             })
             .await
-            .expect("share");
-
-            // the chat log carries exactly the metadata
-            let share_id = match w
-                .execute(Command::ReadState {
-                    surface: Surface::Chat,
-                    channel: None,
-                })
-                .await
-                .expect("read")
-            {
-                Reply::State(s) => {
-                    let f = &s.applied[0]["file"];
-                    assert_eq!(f["name"], json!("charter.pdf"));
-                    assert_eq!(f["size"], json!(48_000));
-                    assert_eq!(f["kind"], json!("PDF"));
-                    assert_eq!(f["modified"], json!(1_751_000_000));
-                    assert_eq!(f["available"], json!(true));
-                    msg_id(&s.applied[0])
-                }
-                other => panic!("unexpected: {other:?}"),
-            };
-
-            // downloadable while the sharer keeps the file …
-            w.execute(Command::DownloadFile { id: share_id })
-                .await
-                .expect("download works while available");
+            .expect("download works while available");
+            await_file(&dest.join("charter.pdf"), content).await;
+            w.execute(Command::DownloadFile {
+                id: share_id,
+                dest: Some(dest.display().to_string()),
+            })
+            .await
+            .expect("second download");
+            await_file(&dest.join("charter (1).pdf"), content).await;
 
             // … the sharer removes it locally → permanently unavailable
             w.execute(Command::RemoveFile { id: share_id })
                 .await
                 .expect("remove own share");
             assert!(matches!(
-                w.execute(Command::DownloadFile { id: share_id }).await,
+                w.execute(Command::DownloadFile { id: share_id, dest: None }).await,
                 Err(MoltError::FileUnavailable(i)) if i == share_id
             ));
             assert!(matches!(
@@ -1285,34 +1400,53 @@ mod tests {
             })
             .await
             .expect("chat");
-            let plain_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[1]);
+            let plain_id = msg_id(
+                read_surface(&w, Surface::Chat)
+                    .await
+                    .applied
+                    .iter()
+                    .find(|m| m["body"] == json!("hi"))
+                    .expect("plain message"),
+            );
             assert!(matches!(
-                w.execute(Command::DownloadFile { id: plain_id }).await,
+                w.execute(Command::DownloadFile { id: plain_id, dest: None }).await,
                 Err(MoltError::NoFile(i)) if i == plain_id
             ));
             // deleting a share message drops the share entirely
-            w.execute(Command::ShareFile {
-                name: "notes.md".into(),
-                size: 10,
-                kind: "".into(),
-                modified: 0,
-                channel: molt_core::ChannelRef::default(),
-            })
-            .await
-            .expect("share 2");
-            let share2_id = msg_id(&read_surface(&w, Surface::Chat).await.applied[2]);
+            let share2_id = share_temp_file(&w, tmp.path(), "notes.md", b"notes").await;
             w.execute(Command::DeleteChat { id: share2_id })
                 .await
                 .expect("delete");
             assert!(matches!(
-                w.execute(Command::DownloadFile { id: share2_id }).await,
+                w.execute(Command::DownloadFile { id: share2_id, dest: None }).await,
                 Err(MoltError::NoFile(i)) if i == share2_id
             ));
             let unknown = MessageId([9u8; 16]);
             assert!(matches!(
-                w.execute(Command::DownloadFile { id: unknown }).await,
+                w.execute(Command::DownloadFile { id: unknown, dest: None }).await,
                 Err(MoltError::UnknownMessage(i)) if i == unknown
             ));
+            // sharing an unreadable path fails honestly (no share message,
+            // an honest notice instead)
+            w.execute(Command::ShareFile {
+                path: tmp.path().join("missing.bin").display().to_string(),
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("kickoff succeeds; the failure surfaces async");
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let s = read_session(&w).await;
+                if s.notice.starts_with("share-failed:missing.bin") {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the share failure never surfaced: {:?}",
+                    s.notice
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
         });
     }
 
@@ -1535,16 +1669,9 @@ mod tests {
     #[test]
     fn members_and_uploads_projections_serve_the_org_tables() {
         rt().block_on(async {
+            let tmp = tempfile::tempdir().expect("tmp");
             let w = spawn(GroupConfig::demo(), SessionView::default());
-            w.execute(Command::ShareFile {
-                name: "charter.pdf".into(),
-                size: 48_000,
-                kind: "PDF".into(),
-                modified: 1_751_000_000,
-                channel: molt_core::ChannelRef::default(),
-            })
-            .await
-            .expect("share");
+            share_temp_file(&w, tmp.path(), "charter.pdf", b"real shared bytes").await;
             // a self-cosigned pending proposal: no longer waiting on me,
             // still waiting on both peers
             w.execute(Command::Propose {
@@ -1583,25 +1710,22 @@ mod tests {
                         "mock share links expire 14 days after the share"
                     );
                     assert_eq!(
-                        rows[0].checksum.len(),
-                        64,
-                        "the mock checksum is a full sha256 hex"
+                        rows[0].checksum,
+                        {
+                            use sha2::Digest as _;
+                            hex::encode(sha2::Sha256::digest(b"real shared bytes"))
+                        },
+                        "the REAL sha256 of the shared bytes, log-anchored"
                     );
                     assert!(
                         rows[0].online,
                         "the sharer is this node itself — always online"
                     );
+                    assert!(
+                        rows[0].download.is_none(),
+                        "no download of this share is running"
+                    );
                 }
-                other => panic!("unexpected: {other:?}"),
-            }
-            // the mock checksum is deterministic: a second read serves the
-            // identical value (auto-tests can pin it)
-            let again = match w.execute(Command::ReadUploads).await.expect("uploads 2") {
-                Reply::Uploads(rows) => rows[0].checksum.clone(),
-                other => panic!("unexpected: {other:?}"),
-            };
-            match w.execute(Command::ReadUploads).await.expect("uploads 3") {
-                Reply::Uploads(rows) => assert_eq!(rows[0].checksum, again),
                 other => panic!("unexpected: {other:?}"),
             }
         });

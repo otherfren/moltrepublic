@@ -429,7 +429,38 @@ impl State {
         // rebuild the logo file from the replayed log if it went missing
         // (crash, restore) — deterministic, the bytes live in the payload
         self.sync_logo_file();
+        // re-adopt MY shares' source paths from prefs, filtered to shares
+        // that replayed as mine and still available — this node keeps
+        // serving downloads across restarts
+        self.adopt_share_paths();
         Ok(transport_state)
+    }
+
+    /// Load `prefs.shared_files` into the runtime share-path map, dropping
+    /// entries whose share no longer exists in the replayed log, is not
+    /// ours, or was removed (their serve would be refused anyway).
+    fn adopt_share_paths(&mut self) {
+        let entries: Vec<(String, String)> = match &self.active {
+            Some(active) => active
+                .prefs
+                .shared_files
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => return,
+        };
+        let me = self.member();
+        for (id_hex, path) in entries {
+            let Ok(id) = id_hex.parse::<molt_core::MessageId>() else {
+                continue;
+            };
+            let Ok((_, msg)) = self.chat_by_id(&id) else {
+                continue;
+            };
+            if msg.from == me && msg.file.as_ref().is_some_and(|f| f.available) {
+                self.share_paths.insert(id, std::path::PathBuf::from(path));
+            }
+        }
     }
 
     /// Mirror the replayed identity into the session's list entry: the

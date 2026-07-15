@@ -252,6 +252,10 @@ pub struct SessionSettings {
     /// Custom SMP server URL, used when `smp_server = "custom"`.
     #[serde(default)]
     pub smp_url: String,
+    /// Where downloaded chat files land when no explicit destination is
+    /// given (`~` expands).
+    #[serde(default = "default_download_dir")]
+    pub download_dir: String,
 }
 
 impl Default for SessionSettings {
@@ -273,6 +277,7 @@ impl Default for SessionSettings {
             tor_port: 9050,
             smp_server: "public".to_string(),
             smp_url: String::new(),
+            download_dir: default_download_dir(),
         }
     }
 }
@@ -280,6 +285,11 @@ impl Default for SessionSettings {
 /// The inconspicuous default S3 bucket name.
 fn default_s3_bucket() -> String {
     "media-archive".to_string()
+}
+
+/// The default download destination.
+fn default_download_dir() -> String {
+    "~/Downloads".to_string()
 }
 
 /// Default automatic-backup interval (minutes).
@@ -643,11 +653,11 @@ impl BackupOrphan {
     }
 }
 
-/// Metadata of a file shared into the chat. Only metadata travels — the
-/// bytes stay on the sharer's disk; participants download from there as
-/// long as the file exists (the fetch itself is the transport's job, next
-/// story; today it is mocked). When the sharer deletes the local file the
-/// share flips to unavailable for everyone, permanently.
+/// Metadata of a file shared into the chat. Only metadata travels in the
+/// chat message — the bytes stay on the sharer's disk; a download fetches
+/// them peer-to-peer over a dedicated encrypted queue (so the sharer must
+/// be online). When the sharer deletes the local file the share flips to
+/// unavailable for everyone, permanently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMeta {
     /// File name (no path — where it lives is the sharer's business).
@@ -662,10 +672,34 @@ pub struct FileMeta {
     /// answer "no longer available").
     #[serde(default = "file_available_default")]
     pub available: bool,
+    /// sha256 over the file's bytes, lowercase hex, computed by the sharer
+    /// at share time. The download anchor: a fetched file must hash to
+    /// exactly this. Additive; "" on legacy shares (honestly unknown) —
+    /// skipped when empty so the legacy wire shape stays byte-identical.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checksum: String,
 }
 
 fn file_available_default() -> bool {
     true
+}
+
+/// The display type of a shared file, from its extension (proper MIME
+/// sniffing can come with the transport; the label is presentation).
+pub fn file_kind_label(name: &str) -> String {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
+    match ext.as_deref() {
+        Some("pdf") => "PDF",
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "svg") => "Image",
+        Some("md" | "txt") => "Text",
+        Some("ods" | "xlsx" | "csv") => "Spreadsheet",
+        Some("odt" | "docx") => "Document",
+        Some("zip" | "tar" | "gz" | "7z") => "Archive",
+        Some("mp3" | "ogg" | "flac" | "opus") => "Audio",
+        Some("mp4" | "mkv" | "webm") => "Video",
+        _ => "File",
+    }
+    .to_string()
 }
 
 /// The stable, globally unique identity of one chat message (chat-bus
@@ -1019,6 +1053,12 @@ pub struct WorkspacePrefs {
     /// whose members joined over a real transport.
     #[serde(default)]
     pub simulated_members: bool,
+    /// MY shares: chat message id (hex) → absolute local source path, so
+    /// this node can keep serving downloads across restarts. Strictly this
+    /// node's business — prefs.toml never crosses the wire and is not
+    /// history (the paths would leak the local filesystem layout).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_files: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for WorkspacePrefs {
@@ -1029,6 +1069,7 @@ impl Default for WorkspacePrefs {
             s3_backup: false,
             last_backup: None,
             simulated_members: false,
+            shared_files: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1441,6 +1482,18 @@ pub enum WorkspaceEvent {
         member: MemberId,
         /// The member's anchored identity pk the change carries.
         identity_pk: String,
+    },
+    /// A member wants a shared file's BYTES: its fetch request, carried as
+    /// **MLS ciphertext** (hex of the group-encrypted
+    /// `molt_net::transfer::FetchRequest` JSON — share id, reply-queue
+    /// handover, expiry). Transport-only like [`WorkspaceEvent::MeshAnnounced`]
+    /// (`apply` is a no-op): the log stores only ciphertext, so the reply
+    /// queue's key never enters shared history, and only the SHARER acts on
+    /// it (everyone else decrypts and drops). The bytes themselves flow over
+    /// the advertised dedicated queue — never through this log.
+    FileRequested {
+        /// Hex of the requester's MLS-encrypted fetch request.
+        ct: String,
     },
     /// A **raw MLS re-key commit** to broadcast to the group (recovery: after a
     /// coordinator re-keys a returning member's seat, every OTHER member must
@@ -1982,31 +2035,33 @@ pub enum Command {
         /// The reaction emoji.
         emoji: String,
     },
-    /// Share a file into the ungated chat. Only the METADATA is posted —
-    /// the bytes never leave this node's disk; participants download from
-    /// there while the file exists (the fetch is the transport's job, next
-    /// story; mocked today). A share IS a chat message, so it files under
-    /// a channel view like any other (concept Q8).
+    /// Share a local file into the ungated chat. The engine derives the
+    /// metadata (name, size, date, kind) and streams the real sha256 off
+    /// the actor; the share message posts when hashing completes. Only
+    /// METADATA enters the chat — the path stays this node's business
+    /// (prefs, never wire/log), and the bytes move per-download over a
+    /// dedicated encrypted queue. A share IS a chat message, so it files
+    /// under a channel view like any other (concept Q8).
     ShareFile {
-        /// File name (no path).
-        name: String,
-        /// Size in bytes.
-        size: u64,
-        /// Display type, e.g. `"PDF"` — NOT the channel's serde tag.
-        kind: String,
-        /// The file's own date, unix seconds (0 = stamp now).
-        modified: u64,
+        /// Absolute path of the local file to share.
+        path: String,
         /// The channel view the share files under. `Command` is never
         /// persisted, so the field is a clean swap (no serde default) —
         /// every construction site states its channel.
         channel: ChannelRef,
     },
-    /// Download a shared file from the sharer's disk (mock: validates
-    /// availability, moves no bytes). Fails once the sharer deleted the
-    /// local file.
+    /// Download a shared file: fetch the bytes peer-to-peer from the
+    /// sharer's device (async kickoff — progress and the result arrive as
+    /// `Event::FileTransfer` / `read_uploads`). Fails once the sharer
+    /// deleted the local file; an offline sharer times out honestly.
     DownloadFile {
         /// The share message's stable id.
         id: MessageId,
+        /// Destination: an existing directory (the file lands inside it,
+        /// name collisions resolve as "name (1).ext") or a full target
+        /// path. Defaults to the session's download directory.
+        #[serde(default)]
+        dest: Option<String>,
     },
     /// Sharer-only: the local file is gone (deleted from this disk) — the
     /// share becomes permanently unavailable for every participant.
@@ -2445,6 +2500,86 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The off-actor share hash finished: metadata + real sha256 of a file
+    /// being shared — the actor posts the share message and remembers the
+    /// source path (engine-internal; raised by the share-hash task). Never
+    /// an MCP tool.
+    NetFileShared {
+        /// File name (no path).
+        name: String,
+        /// Size in bytes.
+        size: u64,
+        /// Display type, e.g. `"PDF"`.
+        kind: String,
+        /// The file's own mtime, unix seconds.
+        modified: u64,
+        /// sha256 over the bytes, lowercase hex.
+        checksum: String,
+        /// The local source path (stays node-local: prefs, never wire/log).
+        path: String,
+        /// The channel view the share files under.
+        channel: ChannelRef,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The off-actor share hash failed (unreadable file) — surface the
+    /// honest error (engine-internal). Never an MCP tool.
+    NetFileShareFailed {
+        /// The file name that failed.
+        name: String,
+        /// The honest reason.
+        reason: String,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The fetch task minted its reply queue and MLS-encrypted its request:
+    /// the actor records the `FileRequested { ct }` event so the outbox
+    /// carries it to the sharer (engine-internal). Never an MCP tool.
+    NetFileRequestReady {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Hex of the MLS-encrypted `FetchRequest`.
+        ct: String,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Download progress (engine-internal; raised by the fetch task,
+    /// throttled). Never an MCP tool.
+    NetFileProgress {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Bytes received so far.
+        transferred: u64,
+        /// Total bytes expected.
+        total: u64,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A download completed and verified (engine-internal). Never an MCP tool.
+    NetFileDone {
+        /// The share message's stable id.
+        id: MessageId,
+        /// The final local path the file landed at.
+        path: String,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A download failed (engine-internal; the honest reason). Never an
+    /// MCP tool.
+    NetFileFailed {
+        /// The share message's stable id.
+        id: MessageId,
+        /// The honest reason.
+        reason: String,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder **accepted** the join request (engine-internal; surfaced by
     /// the off-actor join task on the founder's advisory `JoinAccepted` ack). The
     /// joiner's wizard confirms the join landed while it waits for the
@@ -2694,11 +2829,25 @@ pub struct MemberView {
     pub uploads: usize,
 }
 
+/// A live download's progress, per share (requester side): what the
+/// Uploads table and an MCP `read_uploads` render while bytes move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadView {
+    /// `"requested" | "transferring" | "done" | "failed"`.
+    pub phase: String,
+    /// 0..=100 while transferring (piece counts are known up front).
+    pub percent: u8,
+    /// The final local path, set when done.
+    pub path: String,
+    /// The honest reason, set when failed.
+    pub error: String,
+}
+
 /// One file shared into the chat (Organization → Uploads). Only metadata
-/// travels — the bytes stay on the sharer's disk and move user-to-user
-/// when a member follows the share link ([`FileMeta`]; the fetch itself is
-/// mocked today). The expiry is a mock too: links die 14 days after the
-/// share.
+/// travels in the chat — the bytes stay on the sharer's disk and move
+/// user-to-user over a dedicated encrypted queue when a member downloads
+/// ([`FileMeta`]), which is why a download needs the sharer online. The
+/// expiry is still a mock: links die 14 days after the share.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadView {
     /// The carrying chat message — the address `download_file` takes.
@@ -2722,11 +2871,14 @@ pub struct UploadView {
     /// online). Additive with a default.
     #[serde(default)]
     pub online: bool,
-    /// Content checksum, lowercase sha256 hex. Mock: no bytes exist yet, so
-    /// it deterministically hashes the share's identity (name, size, file
-    /// date) — stable across reads and nodes. Additive with a default.
+    /// Content checksum, lowercase sha256 hex — the sharer's log-anchored
+    /// [`FileMeta::checksum`] a download must reproduce. "" on legacy
+    /// shares (honestly unknown). Additive with a default.
     #[serde(default)]
     pub checksum: String,
+    /// This node's live download of the share, if any (requester side).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<DownloadView>,
 }
 
 /// A one-shot status summary of the running group.
@@ -2810,10 +2962,42 @@ impl GroupConfig {
     }
 }
 
+/// Where a file download stands ([`Event::FileTransfer`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum TransferPhase {
+    /// The fetch request went out to the sharer.
+    Requested,
+    /// Bytes are moving.
+    Progress {
+        /// 0..=100.
+        percent: u8,
+    },
+    /// Landed and verified.
+    Done {
+        /// The final local path.
+        path: String,
+    },
+    /// Failed — the honest reason.
+    Failed {
+        /// Human-readable reason.
+        reason: String,
+    },
+}
+
 /// Events broadcast to every attached operator (GUI live-mirror, MCP stream).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    /// A file download's lifecycle (requester side; [`TransferPhase`]):
+    /// kicked off, moving, landed, or failed — what a GUI toasts and
+    /// re-reads uploads on.
+    FileTransfer {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Where the transfer stands.
+        phase: TransferPhase,
+    },
     /// A chat message was posted.
     Chat {
         /// The message's stable id.

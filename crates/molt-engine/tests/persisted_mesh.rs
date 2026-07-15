@@ -279,11 +279,11 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
     })
     .await
     .expect("ben chats");
+    let share_src = tempfile::tempdir().expect("share tmp");
+    let share_path = share_src.path().join("notes.txt");
+    std::fs::write(&share_path, b"ben's notes").expect("write share source");
     w_b.execute(Command::ShareFile {
-        name: "notes.txt".to_string(),
-        size: 12,
-        kind: "TXT".to_string(),
-        modified: 100,
+        path: share_path.display().to_string(),
         channel: molt_core::ChannelRef::default(),
     })
     .await

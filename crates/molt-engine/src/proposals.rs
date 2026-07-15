@@ -11,7 +11,6 @@ use molt_core::{
     SurfaceStat, UploadView, VoteState, WorkspaceEvent,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::State;
 
@@ -631,30 +630,20 @@ impl State {
         self.chat
             .iter()
             .filter_map(|m| {
-                m.file.as_ref().map(|f| {
-                    // deterministic mock checksum: no bytes exist yet, so it
-                    // hashes the share's identity — stable across reads/nodes
-                    let mut h = Sha256::new_with_prefix(b"molt-upload-mock-checksum\0");
-                    h.update(f.name.as_bytes());
-                    h.update(f.size.to_le_bytes());
-                    h.update(f.modified.to_le_bytes());
-                    let checksum = h
-                        .finalize()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>();
-                    UploadView {
-                        id: m.id,
-                        member: m.from.clone(),
-                        ts: m.ts,
-                        name: f.name.clone(),
-                        kind: f.kind.clone(),
-                        size: f.size,
-                        available: f.available,
-                        expires_ts: m.ts + MOCK_LINK_TTL_SECS,
-                        online: m.from == me || presence(&m.from) != 2,
-                        checksum,
-                    }
+                m.file.as_ref().map(|f| UploadView {
+                    id: m.id,
+                    member: m.from.clone(),
+                    ts: m.ts,
+                    name: f.name.clone(),
+                    kind: f.kind.clone(),
+                    size: f.size,
+                    available: f.available,
+                    expires_ts: m.ts + MOCK_LINK_TTL_SECS,
+                    online: m.from == me || presence(&m.from) != 2,
+                    // the sharer's log-anchored sha256 ("" = legacy share,
+                    // honestly unknown) — what a download must reproduce
+                    checksum: f.checksum.clone(),
+                    download: self.downloads.get(&m.id).cloned(),
                 })
             })
             .collect()

@@ -527,6 +527,9 @@ export component AppWindow inherits Window {
     // settings: a local editable draft, seeded from the engine session by Rust.
     in-out property <bool> cfg-headless: false;
     in-out property <string> cfg-workspace-dir;
+    // where downloaded chat files land (config-file setting; no edit UI
+    // yet — mirrored so a settings save round-trips it unchanged)
+    in-out property <string> cfg-download-dir;
     in-out property <int> cfg-mcp-port: 4040;
     in-out property <string> cfg-mcp-allow: "127.0.0.1";
     in-out property <string> cfg-mcp-token;
