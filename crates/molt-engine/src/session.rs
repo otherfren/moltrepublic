@@ -426,6 +426,9 @@ impl State {
             self.request_catchup(height + 1);
         }
         self.refresh_active_entry();
+        // rebuild the logo file from the replayed log if it went missing
+        // (crash, restore) — deterministic, the bytes live in the payload
+        self.sync_logo_file();
         Ok(transport_state)
     }
 
@@ -461,7 +464,8 @@ impl State {
     /// An Organization change was applied: ripple the effective identity
     /// into every mirror that shows it — the session entry (header + Open
     /// list), the plaintext manifest on disk (the undecrypted Open-screen
-    /// scan must agree after a restart) and the session broadcast.
+    /// scan must agree after a restart), the materialized logo file and
+    /// the session broadcast.
     pub(crate) fn after_org_applied(&mut self) {
         self.refresh_active_entry();
         if let Some(active) = &self.active {
@@ -470,7 +474,35 @@ impl State {
                 active.handle.set_display_name(name);
             }
         }
+        self.sync_logo_file();
         self.emit_session(SessionScope::Full);
+    }
+
+    /// Reconcile the workspace's `logo.<ext>` file with the applied
+    /// Organization log: the last applied `set_image`'s embedded bytes are
+    /// what the file must hold, an applied `remove_image` (or no image op
+    /// at all) means no file. Idempotent — also run at open, so a crashed
+    /// or restored workspace rebuilds the logo deterministically from the
+    /// log. The write itself happens on the storage writer thread.
+    pub(crate) fn sync_logo_file(&self) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let mut want: Option<(String, Vec<u8>)> = None;
+        for v in self.applied_values(Surface::Organization, None) {
+            match v.get("op").and_then(serde_json::Value::as_str) {
+                Some("set_image") => {
+                    let value =
+                        v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    if let Some(bytes) = crate::proposals::image_bytes(&v) {
+                        want = Some((crate::proposals::logo_ext(value), bytes));
+                    }
+                }
+                Some("remove_image") => want = None,
+                _ => {}
+            }
+        }
+        active.handle.set_logo(want);
     }
 
     /// Flush + closing snapshot + LOCK release for the open workspace (if

@@ -134,3 +134,96 @@ async fn an_applied_set_name_renames_the_session_entry_and_the_manifest() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+/// An applied `set_image` is REAL on every member's device: the bytes ride
+/// the proposal payload (sign-what-you-see), and applying materializes them
+/// as `logo.<ext>` inside the workspace directory — the reference every
+/// view shows is that local file. `remove_image` deletes it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_applied_set_image_materializes_the_logo_file() {
+    use base64::Engine as _;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let session = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let w = molt_engine::__spawn_sim_founding(molt_core::GroupConfig::demo(), session, true);
+    w.execute(Command::CreateStart {
+        name: "Logo Club".to_string(),
+        member: "petra".to_string(),
+        threshold: 1,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    await_founding(&w).await;
+    w.execute(Command::CreateFinish).await.expect("enter");
+    let id = read_session(&w).await.active_workspace.clone();
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("workspace dir");
+
+    let image_bytes: Vec<u8> = b"\x89PNG fake test image bytes".to_vec();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    w.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({
+            "op": "set_image",
+            "title": "Logo setzen",
+            "value": "vereinslogo.png",
+            "bytes_b64": b64,
+        }),
+    })
+    .await
+    .expect("propose set_image");
+
+    // the applied change materializes the logo file (async writer → poll)
+    let logo = dir.join("logo.png");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if std::fs::read(&logo).is_ok_and(|b| b == image_bytes) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "logo.png never materialized with the proposed bytes"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // and the effective image reference IS that local file
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => assert_eq!(st.image, logo.display().to_string()),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // an applied remove_image deletes the file and clears the reference
+    w.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({
+            "op": "remove_image",
+            "title": "Logo entfernen",
+            "value": "",
+        }),
+    })
+    .await
+    .expect("propose remove_image");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if !logo.exists() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "logo.png was not deleted by the applied remove_image"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => assert_eq!(st.image, ""),
+        other => panic!("unexpected: {other:?}"),
+    }
+}

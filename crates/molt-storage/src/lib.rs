@@ -833,6 +833,30 @@ impl OpenedWorkspace {
         write_manifest(&self.dir, &self.manifest)
     }
 
+    /// Reconcile the workspace's `logo.<ext>` file with the applied image
+    /// state: write the wanted bytes (atomic, skipped when identical),
+    /// remove every other `logo.*`. `None` removes the logo entirely.
+    pub fn set_logo(&mut self, logo: Option<(String, Vec<u8>)>) -> Result<(), StorageError> {
+        let want_name = logo.as_ref().map(|(ext, _)| format!("logo.{ext}"));
+        // drop stale logo files (an older extension, or all of them)
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("logo.") && Some(&name) != want_name.as_ref() {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        if let (Some(name), Some((_, bytes))) = (want_name, logo) {
+            let path = self.dir.join(&name);
+            if fs::read(&path).is_ok_and(|have| have == bytes) {
+                return Ok(()); // already materialized
+            }
+            write_atomic(&self.dir, &name, &bytes, false)?;
+        }
+        Ok(())
+    }
+
     /// Persist new prefs for this workspace.
     pub fn set_prefs(&mut self, p: WorkspacePrefs) -> Result<(), StorageError> {
         write_prefs(&self.dir, &p)?;
@@ -1496,6 +1520,10 @@ enum WriterMsg {
     /// plaintext identity card must agree with the replayed state so the
     /// undecrypted Open-screen scan lists the effective name.
     Rename(String),
+    /// Reconcile the workspace's logo file with the applied image state:
+    /// `Some((ext, bytes))` materializes `logo.<ext>` (removing any other
+    /// `logo.*`), `None` removes it. Idempotent.
+    Logo(Option<(String, Vec<u8>)>),
     Snapshot(WorkspaceSnapshot),
     /// Outbox read: every envelope with `seq >= from`. Served by the
     /// writer thread so reads are consistently ordered with queued appends
@@ -1570,6 +1598,12 @@ impl StorageHandle {
     /// when unchanged. Fire-and-forget like `set_prefs`.
     pub fn set_display_name(&self, name: String) {
         let _ = self.tx.send(WriterMsg::Rename(name));
+    }
+
+    /// Reconcile the workspace's logo file with the applied image state
+    /// (`Some((ext, bytes))` materializes, `None` removes). Fire-and-forget.
+    pub fn set_logo(&self, logo: Option<(String, Vec<u8>)>) {
+        let _ = self.tx.send(WriterMsg::Logo(logo));
     }
 
     /// Enqueue a snapshot write.
@@ -1761,6 +1795,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::Rename(name)) => {
                         if let Err(e) = ws.set_display_name(&name) {
                             fail(&failed_flag, "manifest rename", &e);
+                        }
+                    }
+                    Ok(WriterMsg::Logo(logo)) => {
+                        if let Err(e) = ws.set_logo(logo) {
+                            fail(&failed_flag, "logo write", &e);
                         }
                     }
                     Ok(WriterMsg::ReadFrom(from_seq, reply)) => {

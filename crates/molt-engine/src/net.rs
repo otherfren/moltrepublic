@@ -879,6 +879,17 @@ impl State {
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
             WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
+                // defense in depth: a peer's set_image must respect the same
+                // byte cap the propose validation enforces locally — an
+                // oversized payload is dropped, never recorded
+                if surface == molt_core::Surface::Organization
+                    && payload.get("op").and_then(serde_json::Value::as_str) == Some("set_image")
+                    && !crate::proposals::image_bytes(&payload)
+                        .is_some_and(|b| b.len() <= crate::proposals::ORG_IMAGE_MAX_BYTES)
+                {
+                    tracing::warn!(from = %from, "dropping a set_image proposal without valid bytes within the cap");
+                    return Ok(Reply::Ack);
+                }
                 self.receive_proposed(id.0, surface, payload);
                 self.emit(molt_core::Event::Proposed { id, surface });
             }

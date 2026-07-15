@@ -38,6 +38,38 @@ pub(crate) fn parse_retention_days(value: &str) -> Option<u64> {
     (1..=365).contains(&days).then_some(days)
 }
 
+/// The hard cap on a republic image (decoded bytes). The bytes ride the
+/// proposal payload — sign-what-you-see: every member votes on the actual
+/// image — so the payload must stay a small gossip frame, not a file drop.
+pub(crate) const ORG_IMAGE_MAX_BYTES: usize = 256 * 1024;
+
+/// The logo file extension for a proposed image: taken from the display
+/// value's extension (lowercased, alphanumeric, short), "png" otherwise —
+/// the fold and the writer must derive the SAME name.
+pub(crate) fn logo_ext(value: &str) -> String {
+    let ext = value.rsplit('.').next().unwrap_or_default().to_lowercase();
+    if !ext.is_empty()
+        && ext.len() <= 5
+        && ext != value
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        ext
+    } else {
+        "png".to_string()
+    }
+}
+
+/// Decode a `set_image` payload's embedded bytes (`None` when absent,
+/// empty or undecodable — the defensive twin of the propose validation).
+pub(crate) fn image_bytes(payload: &Value) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let b64 = payload.get("bytes_b64").and_then(Value::as_str)?;
+    if b64.is_empty() {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
 /// The "Ist-Stand / Soll-Stand" display pair of a proposal: what the
 /// targeted state is now (the EFFECTIVE org state, for the Organization
 /// edit ops) and what the change would make it (the payload's `value`).
@@ -84,6 +116,21 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
                 "the retention window must be 1..=365 days (e.g. \"14 days\")".into(),
             ))
         }
+        // an image proposal must carry the actual bytes (sign-what-you-see:
+        // members vote on the image, not on a path only the proposer has)
+        "set_image" => match image_bytes(payload) {
+            None => Err(MoltError::BadPayload(
+                "a set_image proposal must embed the image (base64 `bytes_b64`)".into(),
+            )),
+            Some(bytes) if bytes.len() > ORG_IMAGE_MAX_BYTES => Err(MoltError::BadPayload(
+                format!(
+                    "the image is too large ({} KiB) — the limit is {} KiB",
+                    bytes.len() / 1024,
+                    ORG_IMAGE_MAX_BYTES / 1024
+                ),
+            )),
+            Some(_) => Ok(()),
+        },
         _ => Ok(()),
     }
 }
@@ -371,7 +418,21 @@ impl State {
                         eff.retention_days = days;
                     }
                 }
-                Some("set_image") => eff.image = value.to_string(),
+                Some("set_image") => {
+                    // with embedded bytes and a storage dir the reference is
+                    // the materialized logo file (sync_logo_file writes it);
+                    // session-only workspaces fall back to the display value
+                    let has_bytes =
+                        v.get("bytes_b64").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+                    eff.image = match (&self.active, has_bytes) {
+                        (Some(active), true) => active
+                            .dir
+                            .join(format!("logo.{}", logo_ext(value)))
+                            .display()
+                            .to_string(),
+                        _ => value.to_string(),
+                    };
+                }
                 Some("remove_image") => eff.image.clear(),
                 _ => {}
             }
@@ -392,7 +453,7 @@ impl State {
     /// channel — exact [`ChannelRef`] equality, so Topic names match by
     /// exact string (pin P3). Filtered rows keep their embedded ids;
     /// position-in-`applied` is not an addressing scheme.
-    fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
+    pub(crate) fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
         if surface == Surface::Chat {
             // "delete chat after N days" applies at the read (co-equality:
             // GUI and MCP consume this same snapshot); physical log pruning

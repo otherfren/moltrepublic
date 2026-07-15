@@ -1921,13 +1921,16 @@ mod tests {
         assert_eq!(org.denied, 0, "the denied count follows the filtered view");
     }
 
-    /// The republic's current image is display-grade state derived from the
-    /// applied Organization log: the last applied `set_image`'s value wins,
-    /// an applied `remove_image` clears it — and the pending image cards
-    /// carry it as their Ist-Stand. Only the file reference travels (like a
-    /// chat file share); the bytes stay on the proposer's disk.
+    /// The republic's current image is derived from the applied
+    /// Organization log: the last applied `set_image` wins, an applied
+    /// `remove_image` clears it — and the pending image cards carry it as
+    /// their Ist-Stand. A `set_image` now CARRIES the bytes (base64 in the
+    /// payload — sign-what-you-see: members vote on the actual image); on
+    /// a session-only workspace (no storage dir to materialize a logo
+    /// file into) the reference falls back to the proposed display value.
     #[test]
     fn current_image_follows_the_applied_org_ops() {
+        use base64::Engine as _;
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             let status = |w: &WalletHandle| {
@@ -1939,10 +1942,15 @@ mod tests {
                     }
                 }
             };
-            let propose = |op: &'static str, value: &'static str| {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(b"tiny test image");
+            let propose = |op: &'static str, value: &'static str, with_bytes: bool| {
                 let w = w.clone();
+                let b64 = b64.clone();
                 async move {
-                    let payload = json!({"op": op, "title": "t", "value": value});
+                    let mut payload = json!({"op": op, "title": "t", "value": value});
+                    if with_bytes {
+                        payload["bytes_b64"] = json!(b64);
+                    }
                     match w
                         .execute(Command::Propose {
                             surface: Surface::Organization,
@@ -1958,20 +1966,41 @@ mod tests {
             };
             assert_eq!(status(&w).await.image, "", "no image before any change");
             // 2-of-3 with self-cosign: one approval applies the change
-            let id = propose("set_image", "/tmp/team.png").await;
+            let id = propose("set_image", "team.png", true).await;
             w.execute(Command::Approve { proposal: id }).await.expect("approve");
-            assert_eq!(status(&w).await.image, "/tmp/team.png");
+            assert_eq!(status(&w).await.image, "team.png");
             // a follow-up image proposal shows the applied state as Ist-Stand
-            let next = propose("set_image", "/tmp/new.png").await;
+            let next = propose("set_image", "new.png", true).await;
             let pending = read_surface(&w, Surface::Organization).await.pending;
-            assert_eq!(pending[0].current, "/tmp/team.png");
-            assert_eq!(pending[0].proposed, "/tmp/new.png");
+            assert_eq!(pending[0].current, "team.png");
+            assert_eq!(pending[0].proposed, "new.png");
             w.execute(Command::Approve { proposal: next }).await.expect("approve");
-            assert_eq!(status(&w).await.image, "/tmp/new.png", "last applied wins");
+            assert_eq!(status(&w).await.image, "new.png", "last applied wins");
             // an applied remove_image clears the state again
-            let rm = propose("remove_image", "").await;
+            let rm = propose("remove_image", "", false).await;
             w.execute(Command::Approve { proposal: rm }).await.expect("approve");
             assert_eq!(status(&w).await.image, "");
+            // a set_image without the actual bytes is refused — the mock
+            // path-reference era is over (nothing real could be applied)
+            let err = w
+                .execute(Command::Propose {
+                    surface: Surface::Organization,
+                    payload: json!({"op": "set_image", "title": "t", "value": "x.png"}),
+                })
+                .await
+                .expect_err("a set_image without bytes is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
+            // oversized bytes are refused with a clear error
+            let big = base64::engine::general_purpose::STANDARD
+                .encode(vec![0u8; proposals::ORG_IMAGE_MAX_BYTES + 1]);
+            let err = w
+                .execute(Command::Propose {
+                    surface: Surface::Organization,
+                    payload: json!({"op": "set_image", "title": "t", "value": "big.png", "bytes_b64": big}),
+                })
+                .await
+                .expect_err("an oversized image is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
         });
     }
 
