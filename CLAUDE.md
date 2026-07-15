@@ -227,6 +227,22 @@ crash-safety) is the remaining hardening.
   user's `cargo build`); when RAM is tight build with `-j 1`. GUI changes are
   validated by a clean `cargo build -p molt-ui-window` (Slint compiler) plus
   `-p molt-ui` (logic against the generated API).
+- **GUI iteration goes through `scripts/dev-ui.sh` — NOT the 6-GiB build.**
+  It sets `SLINT_LIVE_PREVIEW=1` + the `live-preview` feature chain
+  (molt-app → molt-ui → molt-ui-window → `slint/live-preview`, Slint ≥ 1.13):
+  slint-build then emits ~2.6k-line interpreter-backed stubs with the identical
+  API instead of the ~400k-line module — measured 2026-07-14: a .slint edit
+  recompiles in **~2 s at <1 GiB** instead of ~4 min / ~6 GiB. `dev-ui.sh run`
+  starts moltd with runtime .slint hot-reload (properties/models/callbacks
+  survive a save; an *incompatible* interface change panics the running app —
+  restart it, still no recompile). The script uses its own `target/dev-ui`
+  cache so the feature set never thrashes the normal build's cache (first fill
+  is a one-time full-stack build, but RAM-light). Dev-only: never enable the
+  feature by default in a Cargo.toml. The .slint compiler still runs fully, so
+  `dev-ui.sh build` catches .slint errors and API breaks in molt-ui; the
+  authoritative pre-commit check remains one normal
+  `cargo build -p molt-ui-window -p molt-ui` (once per change-set, not per
+  iteration).
 - Network tests (real SMP server) are `#[ignore]`d; the founding+join+MLS flow is
   proven fast over loopback in `crates/molt-engine/tests/two_instances.rs` and
   end-to-end over real SMP in `ritual_engine_over_smp.rs` (`-- --ignored`).

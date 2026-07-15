@@ -12,6 +12,13 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Dev-only: with SLINT_LIVE_PREVIEW=1 at build time, slint-build emits small
+# interpreter-backed stubs (same API) instead of the ~400k-line module, and the
+# running app hot-reloads .slint saves. Use via scripts/dev-ui.sh — never a
+# default; release builds stay fully compiled.
+live-preview = ["slint/live-preview"]
+
 [dependencies]
 slint.workspace = true
 

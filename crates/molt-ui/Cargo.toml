@@ -12,6 +12,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Dev-only GUI iteration (scripts/dev-ui.sh). Passes through to molt-ui-window.
+live-preview = ["molt-ui-window/live-preview"]
+
 [dependencies]
 molt-ui-window.workspace = true
 molt-core.workspace = true

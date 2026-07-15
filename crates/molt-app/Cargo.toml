@@ -21,6 +21,9 @@ path = "src/main.rs"
 # the reproducible core build stays lean; a build with it flipped lets the GUI
 # offer the "embedded" tor-mode. Passes straight through to molt-net.
 embedded-tor = ["molt-net/embedded-tor"]
+# Dev-only GUI iteration: Slint live-preview stubs + runtime .slint hot reload.
+# Use via scripts/dev-ui.sh, never as a default. Passes through to molt-ui.
+live-preview = ["molt-ui/live-preview"]
 
 [dependencies]
 molt-core.workspace = true
