@@ -45,6 +45,7 @@ async fn read_chat_snapshot(w: &WalletHandle, channel: Option<ChannelRef>) -> Su
         .execute(Command::ReadState {
             surface: Surface::Chat,
             channel,
+            view: None,
         })
         .await
         .expect("read state")
@@ -52,6 +53,67 @@ async fn read_chat_snapshot(w: &WalletHandle, channel: Option<ChannelRef>) -> Su
         Reply::State(s) => s,
         other => panic!("unexpected reply: {other:?}"),
     }
+}
+
+/// The retention time axis rides the same read: a just-sent message is
+/// younger than half the window, so it shows in the General ("today")
+/// view and not in the Archive; the two filters (channel + view) compose;
+/// and an unknown view key is an error, never a silent wrong window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn view_filter_rides_read_state() {
+    let w = spawn_solo();
+    chat(&w, "fresh", ChannelRef::Group).await;
+    let read = |channel: Option<ChannelRef>, view: &str| {
+        let w = w.clone();
+        let view = view.to_string();
+        async move {
+            match w
+                .execute(Command::ReadState {
+                    surface: Surface::Chat,
+                    channel,
+                    view: Some(view),
+                })
+                .await
+                .expect("read state")
+            {
+                Reply::State(s) => s,
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        }
+    };
+    assert_eq!(
+        read(None, "today").await.applied.len(),
+        1,
+        "a just-sent message is in the General view"
+    );
+    assert!(
+        read(None, "archive").await.applied.is_empty(),
+        "…and not in the Archive"
+    );
+    // channel and view compose
+    assert_eq!(read(Some(ChannelRef::Group), "today").await.applied.len(), 1);
+    assert!(read(Some(ChannelRef::Group), "archive")
+        .await
+        .applied
+        .is_empty());
+    // the enumeration stays unfiltered either way
+    assert_eq!(
+        read(None, "archive").await.channels,
+        read_chat_snapshot(&w, None).await.channels
+    );
+    // an unknown view key errors (shared `Surface::views` vocabulary)
+    let err = w
+        .execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+            view: Some("yesterday".to_string()),
+        })
+        .await
+        .expect_err("an unknown view key must be refused");
+    assert!(
+        format!("{err:?}").contains("yesterday"),
+        "the error names the bad key: {err:?}"
+    );
 }
 
 /// Parse one applied-log value back into the typed message (also proves

@@ -39,6 +39,7 @@ async fn read_chat_snap(w: &WalletHandle, channel: Option<ChannelRef>) -> Surfac
         .execute(Command::ReadState {
             surface: Surface::Chat,
             channel,
+            view: None,
         })
         .await
         .expect("read chat")

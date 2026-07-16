@@ -1323,6 +1323,7 @@ async fn founding_governs_over_the_direct_mesh() {
         .execute(Command::ReadState {
             surface: Surface::Memory,
             channel: None,
+            view: None,
         })
         .await
         .expect("read pending")
@@ -1584,6 +1585,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
             .execute(Command::ReadState {
                 surface: Surface::Organization,
                 channel: None,
+                view: None,
             })
             .await
             .expect("read pending")

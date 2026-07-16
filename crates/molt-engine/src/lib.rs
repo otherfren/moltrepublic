@@ -727,8 +727,16 @@ impl State {
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
             Command::Approve { proposal } => self.cmd_approve(proposal),
             Command::Decline { proposal } => self.cmd_decline(proposal),
-            Command::ReadState { surface, channel } => {
-                Ok(Reply::State(self.snapshot(surface, channel)))
+            Command::ReadState { surface, channel, view } => {
+                // the view key is shared vocabulary (`Surface::views`, the
+                // same list `select_view` validates against); an unknown
+                // key must error, never silently read the wrong window
+                if let Some(v) = &view {
+                    if !surface.views().iter().any(|(k, _)| k == v) {
+                        return Err(MoltError::UnknownView(surface, v.clone()));
+                    }
+                }
+                Ok(Reply::State(self.snapshot(surface, channel, view.as_deref())))
             }
             Command::ListProposals => {
                 let mut views: Vec<_> = self
@@ -968,6 +976,7 @@ mod tests {
             .execute(Command::ReadState {
                 surface,
                 channel: None,
+                view: None,
             })
             .await
             .expect("read state")
@@ -1291,6 +1300,7 @@ mod tests {
                     .execute(Command::ReadState {
                         surface: Surface::Chat,
                         channel: None,
+                        view: None,
                     })
                     .await
                     .expect("read")
@@ -1481,6 +1491,7 @@ mod tests {
                 .execute(Command::ReadState {
                     surface: Surface::Chat,
                     channel: None,
+                    view: None,
                 })
                 .await
                 .expect("read")
@@ -1654,6 +1665,7 @@ mod tests {
                 .execute(Command::ReadState {
                     surface: Surface::Memory,
                     channel: None,
+                    view: None,
                 })
                 .await
                 .expect("read")
@@ -1993,7 +2005,7 @@ mod tests {
         st.apply(&msg(1, stale, "stale"));
         st.apply(&msg(2, fresh, "fresh"));
         st.apply(&msg(3, 0, "legacy"));
-        let snap = st.snapshot(Surface::Chat, None);
+        let snap = st.snapshot(Surface::Chat, None, None);
         assert_eq!(
             snap.applied.len(),
             2,
@@ -2022,7 +2034,7 @@ mod tests {
             by: "me".to_string(),
             body: molt_core::WorkspaceEvent::Applied { id: molt_core::ProposalId(1) },
         });
-        assert_eq!(st.snapshot(Surface::Chat, None).applied.len(), 3);
+        assert_eq!(st.snapshot(Surface::Chat, None, None).applied.len(), 3);
         // declined proposals age out on the same rhythm (their veto stamp)
         st.apply(&molt_core::EventEnvelope {
             seq: 6,
@@ -2043,7 +2055,7 @@ mod tests {
                 by: "peer-1".to_string(),
             },
         });
-        let org = st.snapshot(Surface::Organization, None);
+        let org = st.snapshot(Surface::Organization, None, None);
         assert!(
             org.declined.is_empty(),
             "a veto older than the retention window is hidden: {:?}",
@@ -2157,6 +2169,105 @@ mod tests {
         assert!(
             !matches!(err, MoltError::FileExpired(_)),
             "inside the widened window the share is downloadable again: {err:?}"
+        );
+    }
+
+    /// The today/archive boundary is a pure function of the message
+    /// timestamp, "now" and the retention window (explicit `now`, like the
+    /// `*_label_at` helpers): "today" admits the younger half of the
+    /// window, "archive" the older half still inside it, `None` the whole
+    /// window — and a legacy ts of 0 (unknown age) files under the general
+    /// view, never the archive, and never vanishes.
+    #[test]
+    fn chat_view_boundary_splits_the_retention_window_at_half() {
+        use crate::proposals::chat_view_admits;
+        let now = 1_700_000_000;
+        let days = 10; // window: 864 000 s, half: 432 000 s
+        let at = |pct: u64| now - 864_000 * pct / 100;
+        // 10 % of the window old: today, not archive
+        assert!(chat_view_admits(Some("today"), at(10), now, days));
+        assert!(!chat_view_admits(Some("archive"), at(10), now, days));
+        assert!(chat_view_admits(None, at(10), now, days));
+        // exactly 50 %: still today (the boundary is inclusive young-side)
+        assert!(chat_view_admits(Some("today"), at(50), now, days));
+        assert!(!chat_view_admits(Some("archive"), at(50), now, days));
+        // 60 %: archive, not today
+        assert!(!chat_view_admits(Some("today"), at(60), now, days));
+        assert!(chat_view_admits(Some("archive"), at(60), now, days));
+        assert!(chat_view_admits(None, at(60), now, days));
+        // exactly 100 %: the window's oldest visible instant — archive
+        assert!(chat_view_admits(Some("archive"), at(100), now, days));
+        assert!(chat_view_admits(None, at(100), now, days));
+        // 110 %: aged out everywhere (deleted, exactly as today)
+        assert!(!chat_view_admits(Some("today"), at(110), now, days));
+        assert!(!chat_view_admits(Some("archive"), at(110), now, days));
+        assert!(!chat_view_admits(None, at(110), now, days));
+        // ts 0 = unknown age: general view + unfiltered, never archive
+        assert!(chat_view_admits(Some("today"), 0, now, days));
+        assert!(!chat_view_admits(Some("archive"), 0, now, days));
+        assert!(chat_view_admits(None, 0, now, days));
+    }
+
+    /// `ReadState { view }` splits the visible chat log on the retention
+    /// half-window: General ("today") shows only the young half, Archive
+    /// only the old half, no view the whole window — and the channel
+    /// enumeration stays unfiltered across all three reads (same posture
+    /// as the channel filter).
+    #[test]
+    fn archive_view_holds_the_older_half_of_the_retention_window() {
+        let mut st = plain_state();
+        let now = now_secs();
+        let window = 7 * 86_400; // the default 7-day retention window
+        let young = now - window * 10 / 100;
+        let old = now - window * 60 / 100;
+        let gone = now - window * 110 / 100;
+        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope {
+            seq,
+            ts: if ts == 0 { now } else { ts },
+            by: "peer-1".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([u8::try_from(seq).expect("small test seq"); 16]),
+                "peer-1",
+                body,
+                ts,
+            )),
+        };
+        st.apply(&msg(1, young, "young"));
+        st.apply(&msg(2, old, "old"));
+        st.apply(&msg(3, gone, "gone"));
+        let body_of = |v: &serde_json::Value| v["body"].as_str().expect("body").to_string();
+        let today = st.snapshot(Surface::Chat, None, Some("today"));
+        assert_eq!(
+            today.applied.iter().map(body_of).collect::<Vec<_>>(),
+            vec!["young"],
+            "General holds only the messages younger than half the window"
+        );
+        let archive = st.snapshot(Surface::Chat, None, Some("archive"));
+        assert_eq!(
+            archive.applied.iter().map(body_of).collect::<Vec<_>>(),
+            vec!["old"],
+            "Archive holds only the older half (still inside the window)"
+        );
+        let all = st.snapshot(Surface::Chat, None, None);
+        assert_eq!(
+            all.applied.iter().map(body_of).collect::<Vec<_>>(),
+            vec!["young", "old"],
+            "no view = the whole retention window, exactly as before"
+        );
+        // the enumeration is a whole-window concern, like with `channel`
+        assert_eq!(today.channels, all.channels);
+        assert_eq!(archive.channels, all.channels);
+        // a legacy ts of 0 files under the general view, never the archive
+        st.apply(&msg(4, 0, "legacy"));
+        assert_eq!(
+            st.snapshot(Surface::Chat, None, Some("today")).applied.len(),
+            2,
+            "unknown age joins the general view"
+        );
+        assert_eq!(
+            st.snapshot(Surface::Chat, None, Some("archive")).applied.len(),
+            1,
+            "unknown age never files as archived"
         );
     }
 

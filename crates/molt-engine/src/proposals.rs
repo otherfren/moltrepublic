@@ -465,9 +465,10 @@ impl State {
     }
 
     /// THE retention predicate: has `ts` aged out of the read contract at
-    /// `cutoff`? One definition for the bulk filter ([`State::chat_visible`])
-    /// and the point checks (download of a share, serving a fetch request),
-    /// so they cannot drift. ts 0 = unknown age, never expires.
+    /// `cutoff`? One definition for the bulk filter (the `None` arm of
+    /// [`chat_view_admits`], behind [`State::chat_visible`]) and the point
+    /// checks (download of a share, serving a fetch request), so they
+    /// cannot drift. ts 0 = unknown age, never expires.
     pub(crate) fn aged_out_at(cutoff: u64, ts: u64) -> bool {
         ts != 0 && ts < cutoff
     }
@@ -478,27 +479,83 @@ impl State {
     pub(crate) fn chat_ts_aged_out(&self, ts: u64) -> bool {
         Self::aged_out_at(self.chat_retention_cutoff(), ts)
     }
+}
 
+/// The retention read-filter boundary, a pure function of the message
+/// timestamp, `now` and the effective window (explicit `now` so tests pin
+/// it, like the `*_label_at` helpers): does the given chat sub-view admit
+/// a message of that age?
+///
+/// The window splits at its half: `"today"` (the General view) admits the
+/// younger half (age ≤ 50 % of the window, boundary inclusive), `"archive"`
+/// the older half still inside the window (50 % < age ≤ 100 %), `None` the
+/// whole window — today's unfiltered read, so older readers keep their
+/// behavior. Anything past 100 % stays hidden everywhere ("deleted"). A
+/// timestamp of 0 (legacy/unknown age) must never silently vanish: it
+/// files under the general view and the unfiltered read, never the archive.
+/// The whole-window arm delegates to [`State::aged_out_at`] — the same
+/// predicate the share-expiry point checks use — so the two can't drift.
+pub(crate) fn chat_view_admits(
+    view: Option<&str>,
+    ts: u64,
+    now: u64,
+    retention_days: u64,
+) -> bool {
+    let window = retention_days * 86_400;
+    let cutoff = now.saturating_sub(window);
+    let half = now.saturating_sub(window / 2);
+    match (view, ts) {
+        (Some("archive"), 0) => false,
+        (_, 0) => true,
+        (Some("archive"), ts) => ts >= cutoff && ts < half,
+        // any other validated key is the general ("today") view
+        (Some(_), ts) => ts >= half,
+        (None, ts) => !State::aged_out_at(cutoff, ts),
+    }
+}
+
+impl State {
     /// The chat messages the read contract exposes: "delete chat after N
     /// days" is engine semantics (co-equality — GUI and MCP see the same),
     /// so a message older than the effective window is hidden from EVERY
     /// chat-derived view (the log, uploads, member upload counts, channel
     /// counts) — not just the chat pane. ts 0 (unknown age) is always kept;
-    /// physical log pruning is a separate follow-up.
+    /// physical log pruning is a separate follow-up. One boundary source of
+    /// truth: this is [`chat_view_admits`] with no view.
     pub(crate) fn chat_visible(&self) -> impl Iterator<Item = &molt_core::ChatMessage> {
-        let cutoff = self.chat_retention_cutoff();
-        self.chat.iter().filter(move |m| !Self::aged_out_at(cutoff, m.ts))
+        self.chat_visible_in(None)
+    }
+
+    /// [`State::chat_visible`] narrowed to one retention sub-view
+    /// ("today"/"archive", `None` = the whole window) — the read contract
+    /// behind `ReadState { view }`, shared by GUI and MCP (co-equality).
+    pub(crate) fn chat_visible_in<'a>(
+        &'a self,
+        view: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a molt_core::ChatMessage> + 'a {
+        let now = crate::now_secs();
+        let days = self.org_effective().retention_days;
+        self.chat
+            .iter()
+            .filter(move |m| chat_view_admits(view, m.ts, now, days))
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
     /// messages into the same JSON shape the log always had; a `channel`
     /// filter (chat only) keeps exactly the messages filing under that
     /// channel — exact [`ChannelRef`] equality, so Topic names match by
-    /// exact string (pin P3). Filtered rows keep their embedded ids;
-    /// position-in-`applied` is not an addressing scheme.
-    pub(crate) fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
+    /// exact string (pin P3) — and a `view` filter (chat only, orthogonal)
+    /// narrows to one half of the retention window ([`chat_view_admits`]).
+    /// Filtered rows keep their embedded ids; position-in-`applied` is not
+    /// an addressing scheme.
+    pub(crate) fn applied_values(
+        &self,
+        surface: Surface,
+        channel: Option<&ChannelRef>,
+        view: Option<&str>,
+    ) -> Vec<Value> {
         if surface == Surface::Chat {
-            self.chat_visible()
+            self.chat_visible_in(view)
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
                 .map(|m| serde_json::to_value(m).unwrap_or_default())
                 .collect()
@@ -554,10 +611,17 @@ impl State {
         infos
     }
 
-    /// The read contract: the (possibly channel-filtered) applied log plus,
-    /// on the chat surface, the always-unfiltered channel enumeration.
-    /// Other surfaces ignore `channel` and keep `channels` empty.
-    pub(crate) fn snapshot(&self, surface: Surface, channel: Option<ChannelRef>) -> SurfaceSnapshot {
+    /// The read contract: the (possibly channel- and view-filtered) applied
+    /// log plus, on the chat surface, the always-unfiltered channel
+    /// enumeration. `view` is the retention time axis ("today"/"archive",
+    /// validated by the command handler); other surfaces ignore `channel`
+    /// and `view` and keep `channels` empty.
+    pub(crate) fn snapshot(
+        &self,
+        surface: Surface,
+        channel: Option<ChannelRef>,
+        view: Option<&str>,
+    ) -> SurfaceSnapshot {
         let pending: Vec<ProposalView> = self
             .proposals
             .iter()
@@ -580,7 +644,7 @@ impl State {
         SurfaceSnapshot {
             surface,
             gated: surface.is_gated(),
-            applied: self.applied_values(surface, channel.as_ref()),
+            applied: self.applied_values(surface, channel.as_ref(), view),
             pending,
             denied: declined.len(),
             declined,

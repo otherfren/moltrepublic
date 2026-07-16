@@ -2927,11 +2927,15 @@ export component AppWindow inherits Window {
                         padding: 8px;
                         spacing: 8px;
 
-                        // chat / Today — konkinwallet-style: the members
-                        // strip (who is online right now), zebra-striped
-                        // messages with emoji reactions, and a compose box
-                        // that grows on Alt+Enter line breaks.
-                        if s.key == "chat" && root.selected-view == "today": VerticalLayout {
+                        // chat — konkinwallet-style: the members strip (who
+                        // is online right now), zebra-striped messages with
+                        // emoji reactions, and a compose box that grows on
+                        // Alt+Enter line breaks. One pane for both sub-views:
+                        // the engine's ReadState{view} filter decides what
+                        // the log holds (General = the younger half of the
+                        // retention window, Archive = the older half); the
+                        // compose row collapses in the read-only Archive.
+                        if s.key == "chat": VerticalLayout {
                             spacing: 8px;
 
                             // presence strip: fixed-width pills wrapping into
@@ -3269,11 +3273,16 @@ export component AppWindow inherits Window {
                             }
 
                             // compose: Enter sends; Alt+Enter breaks the line
-                            // and the box grows to show the extra text
+                            // and the box grows to show the extra text.
+                            // Hidden (collapsed) in the Archive sub-view —
+                            // the archive is read-only history; a new message
+                            // would file under General anyway. (visible +
+                            // height instead of `if`: chat-in is focused from
+                            // outside this row, so it must always exist.)
                             HorizontalLayout {
-                                // collapsed when the selected channel is a
-                                // decided vote's read-only discussion
-                                visible: !root.selected-channel-closed;
+                                // …also collapsed when the selected channel
+                                // is a decided vote's read-only discussion
+                                visible: root.selected-view == "today" && !root.selected-channel-closed;
                                 height: self.visible ? self.preferred-height : 0px;
                                 spacing: 8px;
                                 Rectangle {
@@ -3436,17 +3445,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                            }
-                        }
-
-                        // chat / Archive: content arrives with a later per-view pass
-                        if s.key == "chat" && root.selected-view != "today": VerticalLayout {
-                            alignment: start;
-                            padding: 8px;
-                            Text {
-                                text: Strings.mv-later;
-                                color: Theme.faint;
-                                font-size: Theme.fs-body;
                             }
                         }
 
