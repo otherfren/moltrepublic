@@ -292,3 +292,13 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   prefs sidecar likewise stay until that follow-up forgets expired shares
   (a downloader's saved copy is the user's file — never the engine's to
   delete).
+- **Applied entries carry their proposal id (2026-07-17).** The read
+  contract grew a parallel id track: `SurfaceSnapshot.applied_ids` runs
+  positionally next to `applied` and names the proposal each applied entry
+  came from (`None` = origin unknown: chat rows, pre-id dumps). The applied
+  payloads themselves stay byte-identical — payload-comparing readers (the
+  UI fate probe, MCP) are untouched. This is what lets an ACCEPTED vote's
+  row (gated applied logs, Organization → Accepted) reopen its patch-channel
+  discussion via 💬, completing the decided-votes story: declined cards
+  already kept the link, now applied rows do too — read-only either way,
+  the engine refuses new writes into a decided discussion.
