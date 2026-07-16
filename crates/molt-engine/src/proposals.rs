@@ -727,6 +727,10 @@ impl State {
             name: eff.name,
             agenda: eff.agenda,
             chat_retention_days: eff.retention_days,
+            // recovery exists exactly here — the frontends key the per-member
+            // "recovery link" action on this (never on the member's presence:
+            // a recovery link is FOR an unreachable member)
+            chain_governed: self.is_chain_governed(),
         }
     }
 }

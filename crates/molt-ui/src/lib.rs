@@ -1309,13 +1309,22 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
 
 /// The recovery-flow reading of the transient session notice — the engine's
 /// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's
-/// minted link, and the rejoiner's started/failed/done lifecycle.
+/// mint lifecycle (pending → link | failed), and the rejoiner's
+/// started/failed/done lifecycle.
 #[derive(Debug, PartialEq, Eq)]
 enum RecoverNotice {
     /// Not a recovery notice (every other notice, e.g. "saved").
     None,
+    /// Coordinator: a link mint started for this member — the dialog opens in
+    /// its calm pending state until the outcome notice replaces it.
+    LinkPending(String),
     /// Coordinator: the engine minted a single-use `molt://recover/…` link.
     Link(String),
+    /// Coordinator: the mint failed for an operational reason of THIS node
+    /// (`mesh-not-running`, or a transport failure) — the returning member's
+    /// presence is never involved. Rendered as the calm failed state of the
+    /// same link dialog, not as an error toast.
+    LinkFailed(String),
     /// Rejoiner: the engine accepted link + phrase; the rejoin runs off the
     /// actor (it can span the survivors' human approval).
     Started(String),
@@ -1329,7 +1338,11 @@ enum RecoverNotice {
 /// Split a session notice into its recovery reading (verbatim payload —
 /// an error may itself contain colons).
 fn parse_recover_notice(notice: &str) -> RecoverNotice {
-    if let Some(link) = notice.strip_prefix("recovery-link:") {
+    if let Some(member) = notice.strip_prefix("recovery-link-pending:") {
+        RecoverNotice::LinkPending(member.to_string())
+    } else if let Some(reason) = notice.strip_prefix("recovery-link-failed:") {
+        RecoverNotice::LinkFailed(reason.to_string())
+    } else if let Some(link) = notice.strip_prefix("recovery-link:") {
         RecoverNotice::Link(link.to_string())
     } else if let Some(member) = notice.strip_prefix("recover-started:") {
         RecoverNotice::Started(member.to_string())
@@ -1539,9 +1552,26 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     if ui.get_recover_notice_seen() != sv.notice.as_str() {
         ui.set_recover_notice_seen(sv.notice.clone().into());
         match parse_recover_notice(&sv.notice) {
+            RecoverNotice::LinkPending(member) => {
+                // coordinator: a mint attempt started — open the dialog in
+                // its calm pending state (the outcome notice fills it in)
+                ui.set_recover_link_member(member.into());
+                ui.set_recovery_link("".into());
+                ui.set_recovery_link_error("".into());
+                ui.set_recover_link_open(true);
+            }
             RecoverNotice::Link(link) => {
                 // coordinator: present the freshly minted single-use link
                 ui.set_recovery_link(link.into());
+                ui.set_recovery_link_error("".into());
+                ui.set_recover_link_open(true);
+            }
+            RecoverNotice::LinkFailed(reason) => {
+                // coordinator: the mint failed for an operational reason of
+                // THIS node — same dialog, calm failed state (never a toast;
+                // the returning member's presence is irrelevant to a mint)
+                ui.set_recovery_link("".into());
+                ui.set_recovery_link_error(reason.into());
                 ui.set_recover_link_open(true);
             }
             RecoverNotice::Started(member) => {
@@ -1747,6 +1777,10 @@ struct OrgStats {
     /// The effective "delete chat after" window (engine
     /// `StatusView.chat_retention_days`).
     retention_days: i32,
+    /// Whether the open workspace is a chain-governed republic (engine
+    /// `StatusView.chain_governed`) — the per-member "recovery link" action
+    /// exists exactly there, so the Members table offers it only then.
+    chain_governed: bool,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -1986,6 +2020,7 @@ async fn push_surfaces(
                 },
                 image: s.image,
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
+                chain_governed: s.chain_governed,
             },
         ),
         _ => return,
@@ -2341,6 +2376,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());
     ui.set_org_chat_retention(b.org_stats.retention_days);
+    // the Members table offers "recovery link" only where recovery exists
+    ui.set_org_chain_governed(b.org_stats.chain_governed);
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes are local only on the device that picked
@@ -3514,6 +3551,10 @@ lexicon! {
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
     rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
+    rlk_pending: "Creating the link…", "Link wird erstellt…";
+    rlk_pending_hint: "The returning member does not need to be online — a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein — ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
+    rlk_failed_mesh: "The link could not be created: this device is not connected to the republic's mesh right now. Close and reopen the republic to reconnect, then try again. The returning member does not need to be online for this.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist gerade nicht mit dem Mesh der Republik verbunden. Schließe die Republik und öffne sie erneut, dann versuche es noch einmal. Das zurückkehrende Mitglied muss dafür nicht online sein.";
+    rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "Restore", "Wiederherstellen";
@@ -3672,7 +3713,8 @@ mod tests {
     }
 
     /// The recovery flow rides the transient session notice (the engine's
-    /// contract: `recovery-link:` / `recover-started:` / `recover-failed:` /
+    /// contract: `recovery-link-pending:` / `recovery-link:` /
+    /// `recovery-link-failed:` / `recover-started:` / `recover-failed:` /
     /// `recovered:`); the parser must split each prefix off verbatim and
     /// treat everything else — including the existing notices — as none.
     #[test]
@@ -3692,6 +3734,23 @@ mod tests {
         assert_eq!(
             parse_recover_notice("recovered:ashi"),
             RecoverNotice::Done("ashi".to_string())
+        );
+        // the coordinator's mint lifecycle: pending on the attempt, then the
+        // outcome — a calm failed state (the flip side of Link) whose payload
+        // is a reason the dialog maps onto localized text
+        assert_eq!(
+            parse_recover_notice("recovery-link-pending:ashi"),
+            RecoverNotice::LinkPending("ashi".to_string())
+        );
+        assert_eq!(
+            parse_recover_notice("recovery-link-failed:mesh-not-running"),
+            RecoverNotice::LinkFailed("mesh-not-running".to_string())
+        );
+        // `recovery-link-failed:` must not be swallowed by the shorter
+        // `recovery-link:` prefix — order in the parser matters
+        assert_eq!(
+            parse_recover_notice("recovery-link-failed:transport: queue gone"),
+            RecoverNotice::LinkFailed("transport: queue gone".to_string())
         );
         // the non-recovery notices stay untouched by this path
         assert_eq!(parse_recover_notice("saved"), RecoverNotice::None);

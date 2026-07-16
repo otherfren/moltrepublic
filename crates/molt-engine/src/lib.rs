@@ -858,6 +858,12 @@ impl State {
                 link,
                 generation,
             } => self.cmd_net_recover_link_ready(member, link, generation),
+            Command::NetRecoverLinkFailed {
+                member,
+                reason,
+                ticket,
+                generation,
+            } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
             Command::NetTestServer { url } => self.cmd_net_test_server(url),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::NetRitualLinkReady {

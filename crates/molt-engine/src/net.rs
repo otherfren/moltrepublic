@@ -1093,7 +1093,11 @@ impl State {
     /// existing seat. Validate the request against the open chain-governed
     /// workspace, mint a single-use ticket (the spend-once guard registers it),
     /// then provision the dedicated recovery queue off the actor and report the
-    /// link. Rejections are surfaced to the operator; nothing is torn down.
+    /// link. Caller errors (no republic, unknown seat, no chain) reject hard;
+    /// OPERATIONAL states report on the recovery notice channel instead — the
+    /// mint's real outcome (the link, or a failure) always arrives there, and
+    /// the RETURNING member's presence is never involved: the link exists
+    /// precisely because that member is unreachable.
     pub(crate) fn cmd_recover_invite_start(
         &mut self,
         member: MemberId,
@@ -1117,12 +1121,25 @@ impl State {
         }
         let republic = replica.name.clone();
         let republic_id = replica.republic_id.clone();
+        // announce the attempt on the recovery notice channel: the frontends
+        // render a calm pending state until the real outcome (`recovery-link:`
+        // or `recovery-link-failed:`) replaces it — and because pending and
+        // outcome always differ, a REPEATED identical outcome still
+        // edge-triggers on every attempt
+        self.session.notice = format!("recovery-link-pending:{member}");
+        self.emit_session(molt_core::SessionScope::Full);
         // the recovery queue is minted on the RUNTIME transport (a clone shares
-        // its Arc, so this node can both create the queue and subscribe to it)
+        // its Arc, so this node can both create the queue and subscribe to it).
+        // No runtime mesh (e.g. the workspace was reopened without a resumable
+        // transport) is an operational state of THIS node, not a caller error:
+        // ack the decision and report the calm outcome on the notice channel.
         let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) else {
-            return Err(MoltError::Recover(
-                "the republic's mesh is not running — cannot mint a recovery queue".to_string(),
-            ));
+            return self.cmd_net_recover_link_failed(
+                member,
+                "mesh-not-running".to_string(),
+                String::new(),
+                None,
+            );
         };
         let ticket = molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
         let wrap = molt_net::wrap::WrapKey::fresh().map_err(|e| MoltError::Recover(e.to_string()))?;
@@ -1162,6 +1179,32 @@ impl State {
         }
         tracing::info!(%member, %link, "recovery link ready");
         self.session.notice = format!("recovery-link:{link}");
+        self.emit_session(molt_core::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// A recovery-link mint failed — either synchronously (no runtime mesh,
+    /// from [`Self::cmd_recover_invite_start`] itself) or from the off-actor
+    /// provisioning task (`Command::NetRecoverLinkFailed`, e.g. the SMP server
+    /// was unreachable). Surface the calm `recovery-link-failed:` notice on the
+    /// same channel the minted link rides — the operator asked for a link, so
+    /// silence would leave it waiting forever — and unregister the dead mint's
+    /// ticket (it never left this node; nothing of the attempt stays armed).
+    pub(crate) fn cmd_net_recover_link_failed(
+        &mut self,
+        member: MemberId,
+        reason: String,
+        ticket: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        if !ticket.is_empty() {
+            self.recovery_tickets.remove(&ticket);
+        }
+        tracing::warn!(%member, %reason, "recovery link mint failed");
+        self.session.notice = format!("recovery-link-failed:{reason}");
         self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1644,6 +1687,28 @@ fn spawn_brain(
 mod tests {
     use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
     use molt_core::{ChatMessage, EventEnvelope, MessageId, WorkspaceEvent};
+
+    /// The provisioning task's failure report lands as the calm
+    /// `recovery-link-failed:` session notice (the same channel the minted
+    /// link rides), and the dead mint's ticket is unregistered — nothing of
+    /// the failed attempt stays armed.
+    #[test]
+    fn a_recover_link_failure_report_sets_the_notice_and_kills_the_ticket() {
+        let mut st = crate::tests::plain_state();
+        st.recovery_tickets.insert("t-1".to_string());
+        st.cmd_net_recover_link_failed(
+            "bob".to_string(),
+            "boom".to_string(),
+            "t-1".to_string(),
+            None,
+        )
+        .expect("the report acks");
+        assert_eq!(st.session.notice, "recovery-link-failed:boom");
+        assert!(
+            st.recovery_tickets.is_empty(),
+            "the failed mint's ticket must not stay armed"
+        );
+    }
 
     /// A wire reaction whose known target is already a tombstone is skipped
     /// ENTIRELY — no event recorded (the log gets no dead entry), nothing
