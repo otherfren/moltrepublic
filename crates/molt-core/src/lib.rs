@@ -106,6 +106,10 @@ impl Surface {
                 // in-voting organization changes (charter / name / image /
                 // plugins); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
+                // the applied organization changes (the surface's applied
+                // log) — every accepted vote's row, with the 💬 back-link
+                // into its discussion; hidden while empty, like pending
+                ("accepted", "Accepted"),
                 // declined organization changes, within the display-retention
                 // window; the GUI shows this entry only while non-empty too
                 ("declined", "Declined"),

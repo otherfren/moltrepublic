@@ -1021,8 +1021,10 @@ export component AppWindow inherits Window {
                                 // THIS node raise the ⚠-badge on the row.
                                 // Declined exists only while a decline is
                                 // still inside the retention window (the
-                                // view empties on the chat rhythm).
+                                // view empties on the chat rhythm); Accepted
+                                // only once something was applied.
                                 if (v.key != "pending" || s.pending-count > 0)
+                                    && (v.key != "accepted" || s.applied-count > 0)
                                     && (v.key != "declined" || s.declined-count > 0): ViewRow {
                                     // chat's "today" IS the group view —
                                     // localized like the old group channel
@@ -4487,6 +4489,83 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // Organization → Accepted: the applied organization
+                        // changes (the surface's applied log, newest last).
+                        // Every row of known origin keeps the 💬 back-link
+                        // into its vote's discussion — read-only once
+                        // decided, the engine refuses new writes there.
+                        // Rows without a proposal id (legacy dumps) offer
+                        // no jump: the UI must not fake an address.
+                        if s.key == "organization" && root.selected-view == "accepted": VerticalLayout {
+                            padding: 8px;
+                            spacing: 12px;
+                            Text {
+                                text: Strings.mv-accepted;
+                                color: Theme.text;
+                                font-size: Theme.fs-h2;
+                                font-weight: 700;
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                oa-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: oa-list.preferred-height + 8px;
+                                    oa-list := VerticalLayout {
+                                        padding: 4px;
+                                        padding-right: 14px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        if s.applied-count == 0: Text {
+                                            text: Strings.mv-empty-applied;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for l in s.log: HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: l.text;
+                                                color: Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                wrap: word-wrap;
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                            }
+                                            if l.patch-id >= 0: AppButton {
+                                                height: 26px;
+                                                pad: 8px;
+                                                label: "💬 \{Strings.pc-discuss}";
+                                                clicked => {
+                                                    // the vote's discussion is its
+                                                    // patch channel on the chat bus
+                                                    // — same jump as ProposalCard
+                                                    root.select-view("chat", "today");
+                                                    root.select-channel("patch:\{l.patch-id}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: oa-fl.height;
+                                    content-h: oa-fl.viewport-height;
+                                    scroll-y: oa-fl.viewport-y;
+                                }
+                            }
+                            // beyond one page (size 20, Rust-side) this row
+                            // steps through the accepted history
+                            if s.applied-pages > 1: PagerRow {
+                                page: s.applied-page;
+                                pages: s.applied-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "applied", delta);
+                                }
+                            }
+                        }
+
                         // gated (memory / quests / vault / wallet — the
                         // gated organization has its own views above)
                         if s.gated && s.key != "organization": VerticalLayout {
@@ -4549,11 +4628,29 @@ export component AppWindow inherits Window {
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
                                     }
-                                    for l in s.log: Text {
-                                        text: l.text;
-                                        color: Theme.dim;
-                                        font-size: Theme.fs-body;
-                                        wrap: word-wrap;
+                                    // an accepted vote's row keeps the 💬
+                                    // back-link into its (read-only)
+                                    // discussion; rows of unknown origin
+                                    // (legacy dumps) offer none
+                                    for l in s.log: HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: l.text;
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-body;
+                                            wrap: word-wrap;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                        if l.patch-id >= 0: AppButton {
+                                            height: 26px;
+                                            pad: 8px;
+                                            label: "💬";
+                                            clicked => {
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{l.patch-id}");
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -43,6 +43,7 @@ export struct LogLine {
     file-name: string,
     file-meta: string, // rendered "1.2 MiB · PDF · 2026-07-01"
     file-available: bool, // still on the sharer's disk (false = removed)
+    patch-id: int, // the proposal an applied row came from (-1 = unknown origin: chat rows, legacy dumps) — gates the 💬 jump into its discussion
 }
 
 // One chat channel in the sidebar (chat bus): a VIEW over the one log,
@@ -626,6 +627,7 @@ export global Strings {
     in property <string> mv-decline;
     in property <string> mv-pending;
     in property <string> mv-applied;
+    in property <string> mv-accepted;
     in property <string> mv-chat-ph;
     in property <string> mv-propose-ph;
     in property <string> mv-empty-chat;
