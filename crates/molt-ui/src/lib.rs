@@ -2373,12 +2373,21 @@ async fn push_surfaces(
     // a workspace switch drops the previous selection/unread/first-seen
     // (the language rides along — a SetLanguage emits a Full session
     // change, which re-runs this push, so the nav labels stay live)
-    let (active_ws, lang) = match wallet.execute(Command::ReadSession).await {
+    // the chat surface's sub-view ("today"/"archive") rides the shared
+    // session; the time filter itself is engine-side (`ReadState { view }`,
+    // co-equality) — when another surface is selected the chat read stays
+    // on the default General view
+    let (active_ws, lang, chat_view) = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(s)) => (
             s.active_workspace.clone(),
             i32::from(s.language == "de"),
+            if s.surface == Surface::Chat {
+                s.view.clone()
+            } else {
+                Surface::Chat.default_view().to_string()
+            },
         ),
-        _ => (String::new(), 0),
+        _ => (String::new(), 0, Surface::Chat.default_view().to_string()),
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
@@ -2395,6 +2404,10 @@ async fn push_surfaces(
         .execute(Command::ReadState {
             surface: Surface::Chat,
             channel: None,
+            // whole-log concerns (channel enumeration, quote teasers):
+            // deliberately no view filter — a quote may point across the
+            // today/archive boundary like it may across channels
+            view: None,
         })
         .await
     {
@@ -2464,8 +2477,12 @@ async fn push_surfaces(
     let mut snaps: Vec<(Surface, SurfaceSnapshot)> = Vec::new();
     for sf in Surface::ALL {
         let channel = (sf == Surface::Chat).then(|| selected.clone());
+        // the displayed chat log follows the selected sub-view: General
+        // shows the younger half of the retention window, Archive the
+        // older half — filtered engine-side, same as the channel
+        let view = (sf == Surface::Chat).then(|| chat_view.clone());
         if let Ok(Reply::State(snap)) = wallet
-            .execute(Command::ReadState { surface: sf, channel })
+            .execute(Command::ReadState { surface: sf, channel, view })
             .await
         {
             snaps.push((sf, snap));
