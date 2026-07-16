@@ -206,6 +206,16 @@ Having verified a chain, a member knows — not trusts — that:
   everyone**, independent of who originally committed each block. Trade-off: the
   server re-serves through the log (the outbox), so serving grows its log — the
   chain compaction the model already anticipates addresses this.
+  Since 2026-07-17 a catch-up answer also re-serves the **open** governance
+  state (`serve_open_governance`, next to `serve_chain_from`): per open surface
+  proposal a regular `Proposed` plus every collected `Approved` — verbatim and
+  position-bound, nothing is re-signed, and nothing new is persisted (the
+  ephemeral-until-block boundary stands; a reopened member simply asks the mesh
+  instead of the disk). Re-gossip of identical events is idempotent on every
+  receiver (`receive_proposed` or-inserts, `collect_sig` keeps one signature
+  per member, `try_commit` refuses decided proposals), so several answering
+  peers converge harmlessly; membership (recovery) proposals are deliberately
+  not re-served — their window is mesh-liveness-bound by design.
 - **Real (Phase 4).** Recovery as catch-up-from-genesis + MLS re-key: a
   `Membership{Restored}` block re-admits the seat by threshold, the coordinator
   re-keys the group (`restore_member`) and broadcasts the raw commit over the

@@ -36,6 +36,13 @@ danebenstehende grep-Muster.
 
 ## WP1 — Applied-Einträge tragen ihre Proposal-Id; 💬 auch für akzeptierte Votes
 
+**✅ ERLEDIGT (2026-07-17, master `f930801`).** Umgesetzt wie geplant
+(Tupel-Vec, additive Dump-/Snapshot-Felder); zusätzlich entstand die neue
+Org-Unteransicht „Accepted" (`("accepted", "Accepted")` in
+`Surface::views`, hide-while-empty wie pending/declined), weil die
+Organization vorher gar keine Applied-Liste in der GUI hatte; der
+🗳-Rücksprung eines applied Org-Votes landet jetzt dort.
+
 **User-Anforderung:** „Wenn ein Vote akzeptiert oder abgelehnt wird, soll die
 Diskussion weiterhin verlinkt sein" — für *abgelehnte* Votes fertig
 (Declined-Karten behalten 💬, Channel öffnet read-only); für *akzeptierte*
