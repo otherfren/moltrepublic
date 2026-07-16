@@ -361,8 +361,11 @@ pub(crate) struct State {
     /// Sharer-side serve throttle: at most 2 concurrent uploads; further
     /// requests queue on the semaphore instead of saturating the uplink.
     pub(crate) file_serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Applied transition log per gated surface.
-    pub(crate) applied: HashMap<Surface, Vec<Value>>,
+    /// Applied transition log per gated surface: `(proposal id, payload)`
+    /// pairs — one source for the payload and its origin, so the snapshot's
+    /// parallel id track can never drift. `None` = origin unknown (restored
+    /// from a pre-id dump).
+    pub(crate) applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
     /// Every known proposal — stored as the schema type
     /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
     pub(crate) proposals: HashMap<u64, ProposalRecord>,
@@ -388,8 +391,10 @@ pub(crate) struct State {
     /// collide: a solo/simulation workspace keeps its counted governance in
     /// `applied` (chain genesis-only → this stays empty), while real
     /// threshold-committed governance lands here. Reads combine both. Re-folded
-    /// wholesale on every chain change, so a re-base is free.
-    pub(crate) chain_applied: HashMap<Surface, Vec<Value>>,
+    /// wholesale on every chain change, so a re-base is free. Same
+    /// `(proposal id, payload)` shape as [`State::applied`]; the id is always
+    /// present here (every `Applied` block names its proposal).
+    pub(crate) chain_applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
     /// Ephemeral per-proposal signature collection for chain governance
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
@@ -2269,6 +2274,80 @@ mod tests {
             1,
             "unknown age never files as archived"
         );
+    }
+
+    /// WP1 (governance follow-ups): the read contract carries a parallel id
+    /// track — `SurfaceSnapshot.applied_ids` is positionally parallel to
+    /// `applied` and names the proposal each entry came from. `None` =
+    /// origin unknown (chat rows, legacy dumps). The payloads themselves
+    /// stay byte-identical — the UI fate probe and MCP readers compare them.
+    #[test]
+    fn applied_entries_carry_their_proposal_id() {
+        let mut st = plain_state();
+        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            seq,
+            ts: 100 + seq,
+            by: by.to_string(),
+            body,
+        };
+        let payload = json!({"op": "add_note", "title": "minutes"});
+        st.apply(&e(
+            1,
+            "petra",
+            molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(4),
+                surface: Surface::Memory,
+                payload: payload.clone(),
+            },
+        ));
+        st.apply(&e(
+            2,
+            "walter",
+            molt_core::WorkspaceEvent::Applied {
+                id: molt_core::ProposalId(4),
+            },
+        ));
+        let snap = st.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.applied, vec![payload.clone()], "payload untouched");
+        assert_eq!(
+            snap.applied_ids,
+            vec![Some(4)],
+            "the applied entry knows the proposal it came from"
+        );
+        // chat rows have no proposal origin: same length, all None
+        st.apply(&e(
+            3,
+            "petra",
+            // ts 0 = unknown age: always inside the retention read window
+            molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([7u8; 16]),
+                "petra",
+                "gm",
+                0,
+            )),
+        ));
+        let chat = st.snapshot(Surface::Chat, None, None);
+        assert_eq!(chat.applied.len(), 1);
+        assert_eq!(chat.applied_ids, vec![None]);
+        // a NEW dump round-trips the id track…
+        let dump = st.snapshot_now().state;
+        let mut st2 = plain_state();
+        st2.restore_dump(dump.clone());
+        assert_eq!(
+            st2.snapshot(Surface::Memory, None, None).applied_ids,
+            vec![Some(4)]
+        );
+        // …a LEGACY dump (a pre-id writer: the field is absent) restores the
+        // payloads unchanged with unknown origin
+        let mut v = serde_json::to_value(&dump).expect("dump serializes");
+        v.as_object_mut().expect("a JSON object").remove("applied_ids");
+        let legacy: molt_core::EngineStateDump =
+            serde_json::from_value(v).expect("legacy dump deserializes");
+        let mut st3 = plain_state();
+        st3.restore_dump(legacy);
+        let restored = st3.snapshot(Surface::Memory, None, None);
+        assert_eq!(restored.applied, vec![payload], "payloads survive untouched");
+        assert_eq!(restored.applied_ids, vec![None], "unknown origin stays honest");
     }
 
     /// The republic's current image is derived from the applied

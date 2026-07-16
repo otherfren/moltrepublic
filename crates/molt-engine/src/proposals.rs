@@ -455,6 +455,7 @@ impl State {
             .into_iter()
             .flatten()
             .chain(self.chain_applied.get(&Surface::Organization).into_iter().flatten())
+            .map(|(_, v)| v)
     }
 
     /// The instant before which chat content ages out of the read contract:
@@ -547,17 +548,19 @@ impl State {
     /// exact string (pin P3) — and a `view` filter (chat only, orthogonal)
     /// narrows to one half of the retention window ([`chat_view_admits`]).
     /// Filtered rows keep their embedded ids; position-in-`applied` is not
-    /// an addressing scheme.
+    /// an addressing scheme. Each value rides with the proposal id it came
+    /// from (`None` = no proposal origin: chat rows, pre-id dumps) — the
+    /// snapshot splits the pairs into its `applied` / `applied_ids` tracks.
     pub(crate) fn applied_values(
         &self,
         surface: Surface,
         channel: Option<&ChannelRef>,
         view: Option<&str>,
-    ) -> Vec<Value> {
+    ) -> Vec<(Option<u64>, Value)> {
         if surface == Surface::Chat {
             self.chat_visible_in(view)
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
-                .map(|m| serde_json::to_value(m).unwrap_or_default())
+                .map(|m| (None, serde_json::to_value(m).unwrap_or_default()))
                 .collect()
         } else {
             // the surface's applied log is the legacy (counted-simulation)
@@ -641,10 +644,15 @@ impl State {
             .map(|(id, p)| self.view(*id, p))
             .collect();
         declined.sort_by(|a, b| b.declined_at.cmp(&a.declined_at).then(b.id.0.cmp(&a.id.0)));
+        let (applied_ids, applied) = self
+            .applied_values(surface, channel.as_ref(), view)
+            .into_iter()
+            .unzip();
         SurfaceSnapshot {
             surface,
             gated: surface.is_gated(),
-            applied: self.applied_values(surface, channel.as_ref(), view),
+            applied,
+            applied_ids,
             pending,
             denied: declined.len(),
             declined,
