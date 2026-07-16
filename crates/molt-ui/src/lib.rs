@@ -540,6 +540,27 @@ pub fn run_app(
         });
     }
     {
+        // The proposal-outcome lists' pager (Organization → Declined, the
+        // gated surfaces' applied log): step the UI-local page, then
+        // re-push — the push clamps against the list's current length and
+        // echoes "page x of y" back into the surface tab.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_page_list(move |surface, list, delta| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.page_list_by(surface.as_str(), list.as_str(), delta);
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
         // A member row's uploads count: jump to Organization → Uploads
         // pre-filtered to that member. The view switch is the same engine
         // command the nav issues; the filter itself stays single-writer in
@@ -1429,6 +1450,28 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
     }
 }
 
+/// Rows per page of the proposal-outcome lists (Organization → Declined
+/// and the gated surfaces' applied log). Below this the pager row hides.
+const LIST_PAGE_SIZE: usize = 20;
+
+/// The pure paging window: `(start, end, page, page_count)` over a list of
+/// `len` rows, `size` per page. The requested 0-based `page` clamps into
+/// range (a shrunk list re-bases onto its last page instead of showing an
+/// empty one), and an empty list is one empty page — `page_count` is never
+/// zero, so "page x of y" stays well-formed.
+fn page_slice(len: usize, page: usize, size: usize) -> (usize, usize, usize, usize) {
+    let page_count = len.div_ceil(size).max(1);
+    let page = page.min(page_count - 1);
+    let start = page * size;
+    let end = (start + size).min(len);
+    (start, end, page, page_count)
+}
+
+/// The bundle's effective page for one paged list (missing key = page 0).
+fn page_of(pages: &HashMap<String, usize>, surface: &str, list: &str) -> usize {
+    pages.get(&format!("{surface}:{list}")).copied().unwrap_or(0)
+}
+
 /// Toggle-or-switch a table's sort state: clicking the active column again
 /// flips the direction, a new column starts ascending.
 fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
@@ -1964,6 +2007,11 @@ struct SurfacesBundle {
     /// (a workspace-switch reset or the members-table uploads-jump; live
     /// typing is guarded by the generation).
     uploads_filter: String,
+    /// Effective (push-clamped) 0-based page per paged proposal-outcome
+    /// list, keyed `"{surface}:{list}"` — `apply_surfaces` slices the
+    /// declined/applied models with it and echoes "page x of y" into the
+    /// surface tab (see [`ChatUiState::list_pages`]).
+    list_pages: HashMap<String, usize>,
     /// The status info strip (founding date + mock activity trio).
     org_stats: OrgStats,
     /// Group-channel unread count (badges the Gruppe nav row).
@@ -2110,6 +2158,14 @@ struct ChatUiState {
     /// Uploads filter needle: case-insensitive substring across user,
     /// filename and (full) checksum; "" = all rows.
     uploads_filter: String,
+    /// Current 0-based page of the paged proposal-outcome lists, keyed
+    /// `"{surface}:{list}"` (list = "declined" | "applied"); a missing key
+    /// is page 0. UI-LOCAL presentation like the sorts — the engine's
+    /// reads stay the full projections (MCP sees them unchanged). The
+    /// stored page re-bases against the list's current length on every
+    /// push ([`ChatUiState::clamp_list_page`]); a workspace switch resets
+    /// it with the rest of this state.
+    list_pages: HashMap<String, usize>,
 }
 
 impl ChatUiState {
@@ -2175,6 +2231,31 @@ impl ChatUiState {
     fn set_uploads_filter(&mut self, needle: String) {
         self.uploads_filter = needle;
         self.generation += 1;
+    }
+
+    /// Step a paged proposal-outcome list by `delta` pages (the pager's
+    /// prev/next). Below the first page clamps at zero; the upper bound is
+    /// enforced at push time ([`ChatUiState::clamp_list_page`] — only the
+    /// push knows the list's current length). The generation bump stales
+    /// every in-flight push (its bundle carries the previous page).
+    fn page_list_by(&mut self, surface: &str, list: &str, delta: i32) {
+        let page = self.list_pages.entry(format!("{surface}:{list}")).or_insert(0);
+        *page = page.saturating_add_signed(delta as isize);
+        self.generation += 1;
+    }
+
+    /// Re-base a stored page against the list's CURRENT length and return
+    /// the effective 0-based page. The clamp writes back, so the next
+    /// prev/next steps from the page the user actually sees — not from a
+    /// stale out-of-range value a shrunk list left behind.
+    fn clamp_list_page(&mut self, surface: &str, list: &str, len: usize) -> usize {
+        let key = format!("{surface}:{list}");
+        let stored = self.list_pages.get(&key).copied().unwrap_or(0);
+        let (_, _, page, _) = page_slice(len, stored, LIST_PAGE_SIZE);
+        if page != stored {
+            self.list_pages.insert(key, page);
+        }
+        page
     }
 }
 struct SurfaceData {
@@ -2408,7 +2489,7 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
-    let (unread, first_seen, known, org_view) = {
+    let (unread, first_seen, known, org_view, list_pages) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
@@ -2419,6 +2500,26 @@ async fn push_surfaces(
             st.first_seen.entry(p.id.0).or_insert(now);
         }
         update_known_proposals(&mut st.proposals, &all_pending, &applied_by_surface);
+        // the paged proposal-outcome lists: re-base every stored page
+        // against its list's CURRENT length (a shrunk list must never
+        // leave the view on a page that no longer exists), then capture
+        // the effective pages for the bundle. Chat's log is the chat
+        // pane — never paged here.
+        let mut list_pages: HashMap<String, usize> = HashMap::new();
+        for (sf, s) in &snaps {
+            if *sf == Surface::Chat {
+                continue;
+            }
+            let key = sf.as_str();
+            list_pages.insert(
+                format!("{key}:declined"),
+                st.clamp_list_page(key, "declined", s.declined.len()),
+            );
+            list_pages.insert(
+                format!("{key}:applied"),
+                st.clamp_list_page(key, "applied", s.applied.len()),
+            );
+        }
         (
             st.ledger.observe(&counts, &selected_key),
             st.first_seen.clone(),
@@ -2430,6 +2531,7 @@ async fn push_surfaces(
                 st.uploads_asc,
                 st.uploads_filter.clone(),
             ),
+            list_pages,
         )
     };
     // the Organization tables' presentation pass (UI-local, like the
@@ -2478,6 +2580,7 @@ async fn push_surfaces(
         uploads_sort,
         uploads_asc,
         uploads_filter,
+        list_pages,
         org_stats,
         group_unread,
     };
@@ -2507,8 +2610,18 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .surfaces
         .iter()
         .map(|s| {
-            let log: Vec<LogLine> = s
-                .log
+            // the paged lists (page size LIST_PAGE_SIZE, pager row in the
+            // .slint side): a gated surface's log IS its applied/accepted
+            // history, so it pages; chat's log is the chat pane — full.
+            // Counts stay full-list so the status strip and the nav badges
+            // never shrink to a page.
+            let a_page = page_of(&b.list_pages, &s.key, "applied");
+            let (a_start, a_end, a_page, a_pages) = if s.gated {
+                page_slice(s.log.len(), a_page, LIST_PAGE_SIZE)
+            } else {
+                (0, s.log.len(), 0, 1)
+            };
+            let log: Vec<LogLine> = s.log[a_start..a_end]
                 .iter()
                 .map(|l| {
                     let reactions: Vec<ReactionItem> = l
@@ -2563,8 +2676,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 declined_by: p.declined_by.clone().into(),
                 declined_when: p.declined_when.clone().into(),
             };
+            // pending stays complete — an open vote must never hide behind
+            // a page; the declined (outcome) list pages like the applied log
             let pending: Vec<ProposalRow> = s.pending.iter().map(to_row).collect();
-            let declined: Vec<ProposalRow> = s.declined.iter().map(to_row).collect();
+            let d_page = page_of(&b.list_pages, &s.key, "declined");
+            let (d_start, d_end, d_page, d_pages) =
+                page_slice(s.declined.len(), d_page, LIST_PAGE_SIZE);
+            let declined: Vec<ProposalRow> =
+                s.declined[d_start..d_end].iter().map(to_row).collect();
             // the surface's sub-views come straight from the shared
             // molt-core vocabulary (same list select_view validates against)
             let views: Vec<ViewItem> = Surface::parse(&s.key)
@@ -2589,6 +2708,11 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 pending_my_vote_count: (s.pending.len() - s.pending_voted) as i32,
                 denied_count: s.denied as i32,
                 declined_count: s.declined.len() as i32,
+                // the pager echo, 1-based for the "page x of y" label
+                applied_page: (a_page + 1) as i32,
+                applied_pages: a_pages as i32,
+                declined_page: (d_page + 1) as i32,
+                declined_pages: d_pages as i32,
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
                 declined: ModelRc::new(VecModel::from(declined)),
@@ -3797,6 +3921,9 @@ lexicon! {
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
     ou_filter_ph: "Filter: user, filename or checksum", "Filter: Nutzer, Dateiname oder Checksum";
+    // the paged lists' "Page x of y" label, split around the two numbers
+    pg_page: "Page", "Seite";
+    pg_of: "of", "von";
     ou_no_match: "No uploads match the filter.", "Keine Uploads passen zum Filter.";
     orn_title: "Rename republic", "Republik umbenennen";
     orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
@@ -4890,6 +5017,60 @@ mod tests {
         st.set_uploads_filter("alice".to_string());
         assert_eq!(st.uploads_filter, "alice");
         assert_eq!(st.generation, g + 5, "every change stales in-flight pushes");
+    }
+
+    /// The pure paging window behind the proposal-outcome lists
+    /// (Declined / the applied log): 20 rows per page, the page clamps
+    /// into range (a shrunk list must never show an empty page), and a
+    /// list of at most one page reports `page_count == 1` — the pager
+    /// row hides on that.
+    #[test]
+    fn page_slice_windows_and_clamps() {
+        // empty list: one (empty) page, never a panic range
+        assert_eq!(page_slice(0, 0, 20), (0, 0, 0, 1));
+        // exactly one page: untouched
+        assert_eq!(page_slice(20, 0, 20), (0, 20, 0, 1));
+        // one entry over: a second page holding the remainder
+        assert_eq!(page_slice(21, 0, 20), (0, 20, 0, 2));
+        assert_eq!(page_slice(21, 1, 20), (20, 21, 1, 2));
+        // an out-of-range page clamps to the last one (the list shrank)
+        assert_eq!(page_slice(21, 9, 20), (20, 21, 1, 2));
+        // a full second page ends at the list end
+        assert_eq!(page_slice(40, 1, 20), (20, 40, 1, 2));
+        assert_eq!(page_slice(61, 3, 20), (60, 61, 3, 4));
+    }
+
+    /// The pager's UI-local state (ChatUiState, like the table sorts):
+    /// prev/next step per (surface, list) independently, below-zero
+    /// clamps at the first page, the push-time clamp re-bases a stored
+    /// page against the list's current length (and writes it back, so
+    /// the next step moves from the visible page), every step bumps the
+    /// push generation, and a workspace switch resets everything.
+    #[test]
+    fn list_page_state_steps_clamps_and_resets() {
+        let mut st = ChatUiState::default();
+        st.enter_workspace("ws-a");
+        let g = st.generation;
+        st.page_list_by("organization", "declined", 1);
+        st.page_list_by("organization", "declined", 1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 100), 2);
+        assert_eq!(st.generation, g + 2, "every step stales in-flight pushes");
+        // stepping below the first page clamps at zero
+        st.page_list_by("organization", "declined", -9);
+        assert_eq!(st.clamp_list_page("organization", "declined", 100), 0);
+        // the clamp writes back: page 3 on a 2-page list re-bases to the
+        // last page, and the next "prev" moves from THERE
+        st.page_list_by("organization", "declined", 3);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 1);
+        st.page_list_by("organization", "declined", -1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 0);
+        // per-(surface, list) independence
+        st.page_list_by("memory", "applied", 1);
+        assert_eq!(st.clamp_list_page("memory", "applied", 100), 1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 0);
+        // a workspace switch resets the pages with the rest of the state
+        st.enter_workspace("ws-b");
+        assert_eq!(st.clamp_list_page("memory", "applied", 100), 0);
     }
 
     /// Guard: every nav sub-view of every surface has a real icon — the

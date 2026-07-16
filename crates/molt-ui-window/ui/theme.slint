@@ -183,6 +183,14 @@ export struct SurfaceTab {
     pending-my-vote-count: int,
     denied-count: int, // ALL declines (status strip)
     declined-count: int, // declines inside the display-retention window
+    // the paged outcome lists' echo (page size 20, Rust-side slice):
+    // 1-based current page + page count for the "page x of y" pager row.
+    // `log`/`declined` below hold ONLY the current page; the counts above
+    // stay full-list.
+    applied-page: int,
+    applied-pages: int,
+    declined-page: int,
+    declined-pages: int,
     log: [LogLine],
     pending: [ProposalRow],
     declined: [ProposalRow], // the retained declines (Declined view)
@@ -452,6 +460,9 @@ export global Strings {
     in property <string> ou-filter-ph;
     in property <string> ou-no-match;
     in property <string> ou-note;
+    // the paged lists' "Page x of y" label parts
+    in property <string> pg-page;
+    in property <string> pg-of;
     // rename-republic modal + pending-card Ist/Soll + discussion jump
     in property <string> orn-title;
     in property <string> orn-body;

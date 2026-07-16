@@ -43,6 +43,41 @@ component FieldLabel inherits VerticalLayout {
     @children
 }
 
+// The paged lists' footer: ‹ Page x of y › — the caller shows it only when
+// the list exceeds one page (count > 20); the actual paging (slice, clamp
+// on shrink) runs in Rust, this row merely steps and displays the echo.
+component PagerRow inherits HorizontalLayout {
+    in property <int> page; // 1-based current page
+    in property <int> pages; // total page count
+    callback paged(int); // -1 = prev, +1 = next
+    spacing: 8px;
+    alignment: center;
+    AppButton {
+        label: "‹";
+        pad: 10px;
+        height: 26px;
+        enabled: root.page > 1;
+        clicked => {
+            root.paged(-1);
+        }
+    }
+    Text {
+        text: "\{Strings.pg-page} \{root.page} \{Strings.pg-of} \{root.pages}";
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+        vertical-alignment: center;
+    }
+    AppButton {
+        label: "›";
+        pad: 10px;
+        height: 26px;
+        enabled: root.page < root.pages;
+        clicked => {
+            root.paged(1);
+        }
+    }
+}
+
 // Organization → Status: the gated-settings card (chat retention with its
 // propose-edit pencil). One definition, two placements: beside the info
 // strip when the pane is wide enough, below the charter otherwise.
@@ -170,6 +205,10 @@ export component AppWindow inherits Window {
     // a member row's uploads count: jump to Organization → Uploads with
     // the filter pre-filled to that member's name
     callback jump-member-uploads(string);
+    // pager step on a paged proposal-outcome list: surface key, list key
+    // ("declined" | "applied"), page delta (-1/+1) — the page state lives
+    // in Rust and the sliced model + "page x of y" echo back on the push
+    callback page-list(string, string, int);
     // the ratified founding charter (free-text agenda) for the Constitution surface
     in property <string> active-agenda;
     // the charter pre-split into up to 3 balanced display columns (Rust
@@ -4409,6 +4448,16 @@ export component AppWindow inherits Window {
                                     scroll-y: od-fl.viewport-y;
                                 }
                             }
+                            // more than one page of retained declines (page
+                            // size 20, Rust-side): the cards above hold only
+                            // the current page, this row steps through them
+                            if s.declined-pages > 1: PagerRow {
+                                page: s.declined-page;
+                                pages: s.declined-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "declined", delta);
+                                }
+                            }
                         }
 
                         // gated (memory / quests / vault / wallet — the
@@ -4479,6 +4528,17 @@ export component AppWindow inherits Window {
                                         font-size: Theme.fs-body;
                                         wrap: word-wrap;
                                     }
+                                }
+                            }
+                            // the applied history holds the ACCEPTED votes —
+                            // beyond one page (page size 20, Rust-side) the
+                            // log above shows only the current page and this
+                            // row steps through them
+                            if s.applied-pages > 1: PagerRow {
+                                page: s.applied-page;
+                                pages: s.applied-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "applied", delta);
                                 }
                             }
                             HorizontalLayout {
