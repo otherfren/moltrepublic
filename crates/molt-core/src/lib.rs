@@ -2373,6 +2373,24 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A recovery link's off-actor queue provisioning failed (e.g. the SMP
+    /// server is unreachable), so no link will ever arrive (engine-internal,
+    /// from the recovery-mint task). The engine surfaces the calm
+    /// `recovery-link-failed:` notice — the flip side of
+    /// [`Command::NetRecoverLinkReady`] — and unregisters the dead mint's
+    /// ticket. Never an MCP tool.
+    NetRecoverLinkFailed {
+        /// The returning member the failed link was minted for.
+        member: MemberId,
+        /// A reason for the operator (`mesh-not-running`, or transport text).
+        reason: String,
+        /// The failed mint's single-use ticket, so the spend-once guard can
+        /// unregister it (it never left this node).
+        ticket: String,
+        /// Workspace scope (stale reports for a closed workspace are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder's off-actor SMP provisioning failed (e.g. the server is
     /// unreachable), so the founding can never seal (engine-internal). The
     /// engine fails the create run rather than leaving it stuck. Not a tool.
@@ -2941,6 +2959,12 @@ pub struct StatusView {
     /// hides chat messages and declined proposals older than this.
     #[serde(default = "default_chat_retention_days")]
     pub chat_retention_days: u64,
+    /// Whether the open workspace is a chain-governed republic. Recovery
+    /// (link mint + rejoin) exists only here — a frontend offers the
+    /// per-member "recovery link" action exactly when this is true (demo
+    /// and pre-chain workspaces have no chain for a rejoiner to verify).
+    #[serde(default)]
+    pub chain_governed: bool,
 }
 
 /// The chat-retention default: 7 days, the window every republic starts

@@ -3836,3 +3836,117 @@ async fn a_shed_future_epoch_message_survives_via_redelivery() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// **Minting a recovery link never needs the RETURNING member online** — the
+/// link exists precisely because that member is unreachable (device lost). The
+/// only live dependency is the coordinator's OWN mesh runtime. When that mesh
+/// is not running (here: the workspace was closed and reopened over the
+/// loopback hub, whose queues cannot outlive their transport — the same state
+/// as a reopen after a crash), the mint must NOT surface as a raw command
+/// error: the engine acks the human's decision and reports the operational
+/// outcome on the same session-notice channel the minted link itself rides
+/// (`recovery-link-failed:` beside `recovery-link:`), so every operator (GUI,
+/// MCP) reads a calm, retryable state instead of a failure toast. The reopened
+/// republic stays chain-governed — recovery exists here, and the status read
+/// says so (the GUI offers the action only where it exists).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) = molt_engine::__spawn_manual_founding_bootstrap(
+        molt_core::GroupConfig::demo(),
+        session_a,
+    );
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "mint links for the absent".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founding never sealed; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    b_task.await.expect("B task");
+    a.execute(Command::CreateFinish).await.expect("enter");
+    let id = read_session(&a).await.active_workspace.clone();
+    assert!(!id.is_empty(), "the founded republic is open");
+
+    // close cleanly, reopen: the loopback mesh cannot be resumed (its queues
+    // died with the ritual transport), so the reopened workspace runs WITHOUT
+    // a real mesh — the exact state the GUI's Members table acts from after
+    // an app restart that could not resume the transport
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+
+    // recovery still exists here (chain-governed republic) — and the status
+    // read carries that fact for the frontends
+    match a.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => {
+            assert!(st.chain_governed, "a reopened republic is chain-governed");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // the human's decision is acked, not errored; the outcome is the calm
+    // notice — the returning member's presence never entered the picture
+    a.execute(Command::RecoverInviteStart {
+        member: "member-b".to_string(),
+    })
+    .await
+    .expect("a mint without a running mesh is not a command error");
+    let s = read_session(&a).await;
+    assert_eq!(
+        s.notice, "recovery-link-failed:mesh-not-running",
+        "the operational outcome rides the recovery notice channel"
+    );
+}

@@ -162,6 +162,11 @@ export component AppWindow inherits Window {
     in property <int> org-total;
     // the status info panel: founding date label ("—" = unknown) and the
     in property <string> org-founded;
+    // whether the open workspace is a chain-governed republic — recovery
+    // exists exactly there, so the Members table offers the per-member
+    // "recovery link" action only then (never keyed on the member's
+    // presence: a recovery link is FOR an unreachable member)
+    in property <bool> org-chain-governed: false;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -453,7 +458,10 @@ export component AppWindow inherits Window {
 
     // recovery (total-loss rejoin over a molt://recover/… link):
     // coordinator side — mint a single-use link for an anchored seat
-    // (RecoverInviteStart); the link arrives as a "recovery-link:" notice
+    // (RecoverInviteStart); the mint's lifecycle arrives as notices:
+    // "recovery-link-pending:" opens the dialog calm-pending, then either
+    // "recovery-link:" (the link) or "recovery-link-failed:" (a calm,
+    // localized failed state — never an error toast) fills it in
     callback recover-invite(string);
     // rejoiner side — rejoin from link + phrase (RecoverStart)
     callback recover-start(string, string);
@@ -461,10 +469,12 @@ export component AppWindow inherits Window {
     // re-pushed unchanged session cannot re-fire a dialog; Rust-owned)
     in-out property <string> recover-notice-seen;
     // the minted link and its presentation dialog (opened from Rust when the
-    // engine's notice arrives); which seat it was minted for is UI-local
+    // engine's notices arrive); link == "" and error == "" is the pending
+    // state, a non-empty error is the failed state
     in-out property <string> recovery-link;
+    in-out property <string> recovery-link-error;
     in-out property <bool> recover-link-open: false;
-    property <string> recover-link-member;
+    in-out property <string> recover-link-member;
     // the rejoiner's recovery link (the peer way on the Restore screen; the
     // phrase is the shared rw-seed) …
     property <string> rv-link;
@@ -3910,13 +3920,19 @@ export component AppWindow inherits Window {
                                                 // link for a member who lost
                                                 // their device (never for the
                                                 // own seat — this node IS its
-                                                // device); the engine answers
-                                                // with a "recovery-link:"
-                                                // notice that opens the dialog
+                                                // device, and only where
+                                                // recovery exists: a
+                                                // chain-governed republic).
+                                                // The member's presence is
+                                                // irrelevant — the link is FOR
+                                                // an unreachable member. The
+                                                // engine's notices drive the
+                                                // dialog: pending → link or a
+                                                // calm failed state
                                                 HorizontalLayout {
                                                     width: 180px;
                                                     alignment: end;
-                                                    if m.name != root.node-member: AppButton {
+                                                    if root.org-chain-governed && m.name != root.node-member: AppButton {
                                                         height: 28px;
                                                         pad: 10px;
                                                         y: (parent.height - self.height) / 2;
@@ -5521,16 +5537,21 @@ export component AppWindow inherits Window {
 
     // =================================================================
     // Modal: a coordinator-minted recovery link (opened from Rust when the
-    // engine's "recovery-link:" notice arrives). Monospace + copy; the
-    // caution stays visible: off-band, single-use, dies with this session.
+    // engine's mint notices arrive). Three calm states: pending (the mint
+    // runs), the link (monospace + copy; the caution stays visible:
+    // off-band, single-use, dies with this session), or a localized
+    // failed explanation — never an error toast.
     // =================================================================
     if root.recover-link-open: ConfirmModal {
         dialog-width: 460px;
         title: root.recover-link-member == "" ? Strings.rlk-title
             : "\{Strings.rlk-title} · \{root.recover-link-member}";
-        body: Strings.rlk-body;
+        body: root.recovery-link-error != "" ? ""
+            : (root.recovery-link == "" ? Strings.rlk-pending-hint : Strings.rlk-body);
         cancel-label: Strings.set-close;
         confirm-label: Strings.ow-copy;
+        // copy only exists once there is a link to copy
+        confirm-enabled: root.recovery-link != "";
         dismissed => {
             root.recover-link-open = false;
         }
@@ -5540,7 +5561,24 @@ export component AppWindow inherits Window {
             root.copy-text(root.recovery-link);
             root.show-toast(Strings.toast-copied);
         }
-        Rectangle {
+        // the failed state: a calm, localized explanation of THIS node's
+        // condition (the known mesh reason gets its full text; anything
+        // else is wrapped generically)
+        if root.recovery-link-error != "": Text {
+            text: root.recovery-link-error == "mesh-not-running"
+                ? Strings.rlk-failed-mesh
+                : "\{Strings.rlk-failed-prefix}\{root.recovery-link-error}";
+            color: Theme.dim;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+        }
+        // the pending state: quiet progress line where the link will appear
+        if root.recovery-link-error == "" && root.recovery-link == "": Text {
+            text: Strings.rlk-pending;
+            color: Theme.faint;
+            font-size: Theme.fs-body;
+        }
+        if root.recovery-link != "": Rectangle {
             background: Theme.panel-2;
             border-radius: Theme.win95 ? 0px : 8px;
             border-width: Theme.border-w;
@@ -5558,7 +5596,7 @@ export component AppWindow inherits Window {
                 wrap: char-wrap;
             }
         }
-        Text {
+        if root.recovery-link != "": Text {
             text: Strings.rlk-caution;
             color: Theme.warn;
             font-size: Theme.fs-cap;
