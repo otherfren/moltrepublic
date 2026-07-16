@@ -110,10 +110,10 @@ impl Surface {
                 // window; the GUI shows this entry only while non-empty too
                 ("declined", "Declined"),
             ],
-            // "today" is the group view: everything within the chat
-            // retention window (the key predates the rename and stays —
+            // "today" is the general view: everything within the chat
+            // retention window (the key predates the renames and stays —
             // it is select_view's wire vocabulary)
-            Surface::Chat => &[("today", "Group"), ("archive", "Archive")],
+            Surface::Chat => &[("today", "General"), ("archive", "Archive")],
             Surface::Memory => &[
                 ("brain", "Brain"),
                 ("proposals", "Proposals"),

@@ -3685,7 +3685,7 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "uploads" => "Uploads",
         "pending" => "Ausstehend",
         "declined" => "Abgelehnt",
-        "today" => "Gruppe",
+        "today" => "Allgemein",
         "archive" => "Archiv",
         "proposals" => "Vorschläge",
         "accepted" => "Angenommen",
@@ -4153,7 +4153,7 @@ lexicon! {
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
     ch_discussions: "Discussions", "Diskussionen";
-    ch_group: "Group", "Gruppe";
+    ch_group: "General", "Allgemein";
     ch_new_topic: "New topic", "Neues Thema";
     ch_topic_ph: "Topic name…", "Themenname…";
     ch_topic_open: "Open topic", "Thema öffnen";
