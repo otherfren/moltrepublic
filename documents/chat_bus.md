@@ -186,7 +186,10 @@ window), not just a filtered chat.
 - **Files** (`FileMeta` in chat): a file share is a chat message, so it is
   tagged like any other — file offers scoped to a channel come for free.
 - **"today"/"archive" sub-views**: orthogonal time dimension; kept as a second
-  filter axis, not conflated with channels.
+  filter axis, not conflated with channels. Since 2026-07-16 this axis is real
+  read semantics: `ReadState` takes an optional `view` ("today"/"archive")
+  next to `channel`, and the two filters compose (see the retention note in
+  the limitations below).
 
 ## The phased plan
 
@@ -266,6 +269,14 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   legacy positional index scheme (synthetic-id derivation walks positions),
   the replay floor and the outbox cursors — a rewrite of the segment story,
   deliberately not smuggled into the retention feature.
+  The window additionally splits at its half for the chat sub-views
+  (2026-07-16): `ReadState { view }` serves "today" (the General view — age
+  ≤ 50 % of the window, boundary inclusive, plus legacy ts 0) and "archive"
+  (50 % < age ≤ 100 %); no `view` is the whole window, so older readers are
+  unchanged. The boundary is one pure function (`chat_view_admits`,
+  explicit `now`), the channel enumeration stays unfiltered, and the MCP
+  `read_state` tool takes the same parameter — engine-side for GUI and
+  agents alike, per Q5.
 - **Uploads are ephemeral on the same rhythm (2026-07-16).** A file share
   IS a chat message, so it ages out with the same window, cutoff and clock
   (`State::chat_visible` / `aged_out_at`; ts 0 = unknown age, kept) — one
