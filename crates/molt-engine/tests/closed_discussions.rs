@@ -63,6 +63,7 @@ async fn read_chat(w: &WalletHandle) -> SurfaceSnapshot {
         .execute(Command::ReadState {
             surface: Surface::Chat,
             channel: None,
+            view: None,
         })
         .await
         .expect("read state")

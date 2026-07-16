@@ -2078,6 +2078,16 @@ pub enum Command {
         /// every channel, filtered or not.
         #[serde(default)]
         channel: Option<ChannelRef>,
+        /// Chat only: the time axis of the retention window, keyed by
+        /// [`Surface::views`] ("today"/"archive"). `"today"` keeps the
+        /// messages younger than half the effective retention window (the
+        /// General view), `"archive"` the older half still inside the
+        /// window; `None` is the whole window (the additive default —
+        /// older readers keep today's behavior). An unknown key is an
+        /// error; other surfaces validate but ignore it. Orthogonal to
+        /// `channel` — the two filters compose.
+        #[serde(default)]
+        view: Option<String>,
     },
     /// List every proposal the engine currently knows about.
     ListProposals,

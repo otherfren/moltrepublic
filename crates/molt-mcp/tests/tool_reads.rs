@@ -91,6 +91,7 @@ async fn tool_built_reads_equal_engine_direct_reads() {
                 Command::ReadState {
                     surface: Surface::Chat,
                     channel: channel.clone(),
+                    view: None,
                 },
             )
             .await,

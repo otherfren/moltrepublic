@@ -348,6 +348,21 @@ fn channel_arg(args: &Value) -> Result<Option<ChannelRef>, String> {
     Ok(Some(channel))
 }
 
+/// The optional `view` argument of `read_state` — the retention time axis
+/// ("today"/"archive", the [`Surface::views`] keys). Absent/`null` means
+/// "the whole window"; a PRESENT argument of the wrong type is an error,
+/// never ignored. The KEY itself is validated engine-side against the
+/// surface's view list, so MCP and GUI reads share one vocabulary.
+fn view_arg(args: &Value) -> Result<Option<String>, String> {
+    match args.get("view") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "argument `view` must be a string view key (e.g. \"today\" or \"archive\"), got {other}"
+        )),
+    }
+}
+
 fn screen_arg(args: &Value) -> Result<Screen, String> {
     let s = str_arg(args, "screen")?;
     Screen::parse(&s).ok_or_else(|| format!("unknown screen `{s}`"))
@@ -580,18 +595,20 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY — chat_send/share_file into it are refused — but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them.",
+            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY — chat_send/share_file into it are refused — but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) for the retention time axis: \"today\" keeps the messages younger than half the effective retention window (the General view), \"archive\" the older half still inside the window; omitted = the whole window. The filters compose.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": surface_enum() },
-                    "channel": channel_schema("optional, chat only: return just this channel's messages (the channel enumeration still lists every channel)")
+                    "channel": channel_schema("optional, chat only: return just this channel's messages (the channel enumeration still lists every channel)"),
+                    "view": { "type": "string", "enum": ["today", "archive"], "description": "optional, chat only: the retention time axis — \"today\" = the younger half of the retention window, \"archive\" = the older half (still inside the window)" }
                 },
                 "required": ["surface"]
             }),
             build: |args| Ok(Command::ReadState {
                 surface: surface_arg(args)?,
                 channel: channel_arg(args)?,
+                view: view_arg(args)?,
             }),
         },
         ToolDef {
@@ -1298,6 +1315,52 @@ mod tests {
             Command::ReadState { channel, .. } => assert_eq!(channel, Some(ChannelRef::Group)),
             other => panic!("wrong command: {other:?}"),
         }
+    }
+
+    /// `read_state` exposes the retention time axis exactly like the GUI's
+    /// General/Archive sub-views (co-equality): an optional `view` string
+    /// that rides the same `Command::ReadState`. Absent/null = the whole
+    /// window; a present non-string is an error, never ignored.
+    #[test]
+    fn read_state_takes_the_retention_view_axis() {
+        let schema = (tool_named("read_state").schema)();
+        assert_eq!(
+            schema["properties"]["view"]["enum"],
+            json!(["today", "archive"])
+        );
+
+        match build("read_state", &json!({ "surface": "chat" })).expect("no view builds") {
+            Command::ReadState { view, .. } => assert_eq!(view, None),
+            other => panic!("wrong command: {other:?}"),
+        }
+        match build("read_state", &json!({ "surface": "chat", "view": null }))
+            .expect("null view builds")
+        {
+            Command::ReadState { view, .. } => assert_eq!(view, None),
+            other => panic!("wrong command: {other:?}"),
+        }
+        match build("read_state", &json!({ "surface": "chat", "view": "archive" }))
+            .expect("archive view builds")
+        {
+            Command::ReadState { view, .. } => assert_eq!(view, Some("archive".to_string())),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // both filters compose on the one command
+        match build(
+            "read_state",
+            &json!({ "surface": "chat", "channel": { "kind": "group" }, "view": "today" }),
+        )
+        .expect("channel + view build")
+        {
+            Command::ReadState { channel, view, .. } => {
+                assert_eq!(channel, Some(ChannelRef::Group));
+                assert_eq!(view, Some("today".to_string()));
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // a present view of the wrong type is an error, never ignored
+        assert!(build("read_state", &json!({ "surface": "chat", "view": 5 })).is_err());
+        assert!(build("read_state", &json!({ "surface": "chat", "view": ["today"] })).is_err());
     }
 
     #[test]

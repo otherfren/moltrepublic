@@ -39,6 +39,7 @@ pub async fn read_applied(w: &WalletHandle, surface: Surface) -> Vec<serde_json:
         .execute(Command::ReadState {
             surface,
             channel: None,
+            view: None,
         })
         .await
         .expect("read state")
@@ -54,6 +55,7 @@ pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
         .execute(Command::ReadState {
             surface: Surface::Chat,
             channel: None,
+            view: None,
         })
         .await
         .expect("read chat")
