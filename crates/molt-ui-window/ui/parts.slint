@@ -932,8 +932,9 @@ export component ProposalCard inherits Rectangle {
     // the image ops' Ist-Stand renders it (loaded by the Rust side)
     in property <image> org-img;
     in property <bool> org-img-set;
-    // Declined view: the decision already fell — no approve/decline/discuss
-    // row, a "declined by … ·  when" line instead
+    // Declined view: the decision already fell — no approve/decline
+    // buttons, a "declined by … ·  when" line instead. The discussion
+    // link stays (the channel is re-openable, read-only).
     in property <bool> read-only: false;
     callback approve();
     callback decline();
@@ -1187,16 +1188,20 @@ export component ProposalCard inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        if !root.read-only: HorizontalLayout {
+        // approve/decline only while the vote is open (`read-only` gates
+        // them) — the discussion link ALWAYS shows: a decided vote's
+        // discussion stays linked and re-openable (read-only, the engine
+        // refuses new writes there)
+        HorizontalLayout {
             spacing: 8px;
-            AppButton {
+            if !root.read-only: AppButton {
                 label: "👍 \{Strings.mv-approve}";
                 primary: true;
                 clicked => {
                     root.approve();
                 }
             }
-            AppButton {
+            if !root.read-only: AppButton {
                 label: "👎 \{Strings.mv-decline}";
                 clicked => {
                     root.decline();

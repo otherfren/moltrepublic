@@ -428,6 +428,10 @@ export component AppWindow inherits Window {
     // the selected channel is a patch channel (a vote's discussion) — set
     // by Rust alongside selected-channel; gates the banner's vote jump
     in property <bool> selected-channel-votable: false;
+    // the selected channel is a DECIDED vote's discussion: read-only —
+    // the compose row collapses and the banner says so (computed in Rust
+    // from the engine's channel annotation, instant on selection)
+    in property <bool> selected-channel-closed: false;
     callback select-channel(string);
     // new-topic affordance: a compose-side reveal row (send-to-new-topic).
     // Deliberately NOT a "create channel" ritual — a channel exists because
@@ -3106,6 +3110,15 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 1;
                                         overflow: elide;
                                     }
+                                    // a decided vote's discussion: quiet
+                                    // read-only note (the compose row below
+                                    // is collapsed)
+                                    if root.selected-channel-closed: Text {
+                                        text: "🔒 " + Strings.ch-readonly;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
                                     // a discussion is vote-bound: jump back
                                     // to the ballot this channel belongs to
                                     if root.selected-channel-votable: Rectangle {
@@ -3258,6 +3271,10 @@ export component AppWindow inherits Window {
                             // compose: Enter sends; Alt+Enter breaks the line
                             // and the box grows to show the extra text
                             HorizontalLayout {
+                                // collapsed when the selected channel is a
+                                // decided vote's read-only discussion
+                                visible: !root.selected-channel-closed;
+                                height: self.visible ? self.preferred-height : 0px;
                                 spacing: 8px;
                                 Rectangle {
                                     horizontal-stretch: 1;
@@ -4435,6 +4452,18 @@ export component AppWindow inherits Window {
                                             org-img: root.org-img;
                                             org-img-set: root.org-img-set;
                                             read-only: true;
+                                            discuss => {
+                                                // the decided vote's discussion
+                                                // stays linked — it reopens
+                                                // read-only. The jump lands on
+                                                // the "today" sub-view; an old
+                                                // discussion's messages may sit
+                                                // in Archive (acceptable — the
+                                                // second filter axis is a click
+                                                // away)
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{p.id}");
+                                            }
                                             view-image => {
                                                 root.download-proposal-image(p.img-b64, p.text);
                                             }

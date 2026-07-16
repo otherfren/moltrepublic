@@ -832,6 +832,14 @@ pub fn run_app(
                 ui.set_selected_channel_label(
                     channel_display_label(&ch, &HashMap::new()).as_str().into(),
                 );
+                // …and the read-only flag from the proposal cache, so the
+                // compose row collapses on the click, not a push later (the
+                // push then re-decides from the engine's annotation)
+                let closed = chat_ui
+                    .lock()
+                    .map(|st| selected_channel_closed(&ch, &[], &st.proposals))
+                    .unwrap_or(false);
+                ui.set_selected_channel_closed(closed);
             }
             if let Ok(mut st) = chat_ui.lock() {
                 // bumps the push generation: every in-flight push read
@@ -1990,6 +1998,9 @@ struct SurfacesBundle {
     selected_key: String,
     /// Compose-banner label of the selected channel ("" = group).
     selected_label: String,
+    /// The selected channel is a decided vote's read-only discussion
+    /// (collapses the compose row, shows the banner's 🔒 note).
+    selected_closed: bool,
     /// Organization → Members table rows (engine `ReadMembers`), already
     /// ordered by the active sort.
     members: Vec<MemberRowData>,
@@ -2466,6 +2477,13 @@ async fn push_surfaces(
         .iter()
         .flat_map(|(_, s)| s.pending.iter().cloned())
         .collect();
+    // …and the declined lists feed the cache too: a veto this UI never saw
+    // pending (fresh open, other member's decline) must still title its
+    // discussion channel and flag it closed
+    let all_declined: Vec<ProposalView> = snaps
+        .iter()
+        .flat_map(|(_, s)| s.declined.iter().cloned())
+        .collect();
     // the gated surfaces' applied logs — the proposal cache resolves a
     // vanished proposal's fate against them (the applied values ARE the
     // raw proposal payloads, for the chain and the legacy path alike)
@@ -2499,7 +2517,7 @@ async fn push_surfaces(
         for p in &all_pending {
             st.first_seen.entry(p.id.0).or_insert(now);
         }
-        update_known_proposals(&mut st.proposals, &all_pending, &applied_by_surface);
+        update_known_proposals(&mut st.proposals, &all_pending, &all_declined, &applied_by_surface);
         // the paged proposal-outcome lists: re-base every stored page
         // against its list's CURRENT length (a shrunk list must never
         // leave the view on a page that no longer exists), then capture
@@ -2552,6 +2570,7 @@ async fn push_surfaces(
     let group_unread =
         i32::try_from(unread.get("group").copied().unwrap_or(0)).unwrap_or(i32::MAX);
     let selected_label = channel_display_label(&selected, &titles);
+    let selected_closed = selected_channel_closed(&selected, &infos, &known);
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
@@ -2573,6 +2592,7 @@ async fn push_surfaces(
         channels,
         selected_key,
         selected_label,
+        selected_closed,
         members,
         uploads,
         members_sort,
@@ -2738,6 +2758,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel(b.selected_key.as_str().into());
     ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
+    ui.set_selected_channel_closed(b.selected_closed);
 
     // the Organization tables (Members / Uploads)
     let members: Vec<MemberRow> = b
@@ -3341,6 +3362,32 @@ fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String>) -> Strin
     }
 }
 
+/// Whether the selected channel is a DECIDED vote's discussion — read-only
+/// for new messages/shares (the engine refuses them with
+/// `DiscussionClosed`; this flag collapses the compose row and shows the
+/// banner note BEFORE anyone types into a refusal). The engine's channel
+/// annotation ([`ChannelInfo::state`]) is authoritative when present; a
+/// channel not (yet) in the enumeration — or an unannotated ref — falls
+/// back to the UI's proposal cache ([`KnownProposal::fate`]). Group/Topic,
+/// open votes and unknown referents are writable (`false`).
+fn selected_channel_closed(
+    selected: &ChannelRef,
+    infos: &[ChannelInfo],
+    known: &HashMap<u64, KnownProposal>,
+) -> bool {
+    let ChannelRef::Patch { id } = selected else {
+        return false;
+    };
+    if let Some(state) = infos
+        .iter()
+        .find(|i| &i.channel == selected)
+        .and_then(|i| i.state)
+    {
+        return state != molt_core::ProposalState::Proposed;
+    }
+    known.get(&id.0).is_some_and(|k| k.fate != KnownFate::Pending)
+}
+
 /// What the UI remembers about a proposal beyond the read contract's
 /// Proposed-only `pending` window. The engine never re-exposes a terminal
 /// proposal (a sealed block's `applied` value is the bare payload, without
@@ -3391,6 +3438,7 @@ enum KnownFate {
 fn update_known_proposals(
     known: &mut HashMap<u64, KnownProposal>,
     pending: &[ProposalView],
+    declined: &[ProposalView],
     applied: &HashMap<Surface, Vec<serde_json::Value>>,
 ) {
     for p in pending {
@@ -3418,6 +3466,26 @@ fn update_known_proposals(
         } else {
             KnownFate::Closed
         };
+    }
+    // the snapshots' declined lists are AUTHORITATIVE Rejected knowledge
+    // (the engine names the veto) — fold them last: a veto this UI never
+    // saw pending still gets a titled Closed entry, an out-of-order
+    // payload-probe verdict is overridden, but an Applied fate is never
+    // downgraded (the probe proved the seal; the byte-identical-twin
+    // ambiguity must not un-seal it here).
+    for p in declined {
+        let entry = known.entry(p.id.0).or_insert_with(|| KnownProposal {
+            title: summarize(&p.payload),
+            payload: p.payload.clone(),
+            surface: p.surface,
+            approvals: p.approvals,
+            threshold: p.threshold,
+            fate: KnownFate::Closed,
+        });
+        if entry.fate != KnownFate::Applied {
+            entry.title = summarize(&p.payload);
+            entry.fate = KnownFate::Closed;
+        }
     }
 }
 
@@ -3931,6 +3999,7 @@ lexicon! {
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
+    ch_readonly: "read-only — the vote is decided", "nur lesen — die Abstimmung ist entschieden";
     pc_proposal: "Proposal:", "Vorschlag:";
     pc_img_hint: "Click to view the proposed image", "Klicken zum Anzeigen des vorgeschlagenen Bilds";
     pc_img_missing: "The proposed image could not be decoded.", "Das vorgeschlagene Bild konnte nicht dekodiert werden.";
@@ -4341,26 +4410,31 @@ mod tests {
                 channel: ChannelRef::Topic { name: "zeta".into() },
                 count: 4,
                 last_ts: 40,
+                state: None,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(7) },
                 count: 1,
                 last_ts: 30,
+                state: None,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(5) },
                 count: 2,
                 last_ts: 20,
+                state: Some(ProposalState::Applied),
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(3) },
                 count: 5,
                 last_ts: 10,
+                state: Some(ProposalState::Proposed),
             },
             ChannelInfo {
                 channel: ChannelRef::Group,
                 count: 9,
                 last_ts: 50,
+                state: None,
             },
         ];
         let known = HashMap::from([
@@ -4503,14 +4577,14 @@ mod tests {
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
-        update_known_proposals(&mut known, std::slice::from_ref(&pv), &HashMap::new());
+        update_known_proposals(&mut known, std::slice::from_ref(&pv), &[], &HashMap::new());
         assert_eq!(known[&4].title, "budget", "human title, no op-code prefix");
         assert_eq!(known[&4].fate, KnownFate::Pending);
 
         // the proposal leaves the Proposed-only window and its payload
         // shows up in the surface's applied log → Applied
         let applied = HashMap::from([(Surface::Memory, vec![pv.payload.clone()])]);
-        update_known_proposals(&mut known, &[], &applied);
+        update_known_proposals(&mut known, &[], &[], &applied);
         assert_eq!(known[&4].fate, KnownFate::Applied);
 
         // the system line keeps the title and renders the sealed state
@@ -4526,6 +4600,7 @@ mod tests {
             channel: ChannelRef::Patch { id: ProposalId(4) },
             count: 1,
             last_ts: 10,
+            state: None,
         }];
         let rows = derive_channels(&infos, &known, &HashMap::new());
         assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
@@ -4538,8 +4613,8 @@ mod tests {
             payload: serde_json::json!({ "title": "drop the fee" }),
             ..pv.clone()
         };
-        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &applied);
-        update_known_proposals(&mut known, &[], &applied);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &applied);
+        update_known_proposals(&mut known, &[], &[], &applied);
         assert_eq!(known[&9].fate, KnownFate::Closed);
         let sys = patch_system_lines(9, &[], &known, &first_seen);
         let text = &sys[0].1.text;
@@ -4556,13 +4631,140 @@ mod tests {
             Surface::Memory,
             vec![serde_json::json!({ "title": "drop the fee" })],
         )]);
-        update_known_proposals(&mut known, &[], &applied9);
+        update_known_proposals(&mut known, &[], &[], &applied9);
         assert_eq!(known[&9].fate, KnownFate::Applied);
         // … while an already-Applied fate is sticky even if the surface
         // read is missing this pass
-        update_known_proposals(&mut known, &[], &HashMap::new());
+        update_known_proposals(&mut known, &[], &[], &HashMap::new());
         assert_eq!(known[&4].fate, KnownFate::Applied);
         assert_eq!(known[&9].fate, KnownFate::Applied);
+    }
+
+    /// One `ProposalView` for the cache tests, minimal noise.
+    fn view_of(id: u64, title: &str, state: ProposalState) -> ProposalView {
+        ProposalView {
+            id: ProposalId(id),
+            surface: Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "title": title }),
+            approvals: 0,
+            threshold: 3,
+            state,
+            approved_by_me: false,
+            current: String::new(),
+            proposed: String::new(),
+            votes: Vec::new(),
+            declined_at: if state == ProposalState::Rejected { 100 } else { 0 },
+            declined_by: if state == ProposalState::Rejected {
+                "ashi".to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// The snapshots' `declined` lists fold into the proposal cache: a veto
+    /// this UI never saw pending (fresh open, another member's decline)
+    /// still titles its discussion channel and flags it closed — and an
+    /// Applied fate is never downgraded by the fold.
+    #[test]
+    fn declined_votes_fold_into_the_cache_as_closed() {
+        let mut known = HashMap::new();
+        // never seen pending: the decline inserts a Closed entry, titled
+        let dv7 = view_of(7, "vetoed", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv7), &HashMap::new());
+        assert_eq!(known[&7].fate, KnownFate::Closed);
+        assert_eq!(known[&7].title, "vetoed", "human title from the summary");
+
+        // a cached Pending refreshes to Closed when its decline shows up
+        let pv8 = view_of(8, "late veto", ProposalState::Proposed);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv8), &[], &HashMap::new());
+        assert_eq!(known[&8].fate, KnownFate::Pending);
+        let dv8 = view_of(8, "late veto", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv8), &HashMap::new());
+        assert_eq!(known[&8].fate, KnownFate::Closed);
+
+        // an Applied fate is sticky against the fold (the applied-log probe
+        // proved the seal; byte-identical-twin ambiguity must not un-seal)
+        let pv9 = view_of(9, "sealed", ProposalState::Proposed);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &HashMap::new());
+        let applied = HashMap::from([(Surface::Memory, vec![pv9.payload.clone()])]);
+        update_known_proposals(&mut known, &[], &[], &applied);
+        assert_eq!(known[&9].fate, KnownFate::Applied);
+        let dv9 = view_of(9, "sealed", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv9), &applied);
+        assert_eq!(known[&9].fate, KnownFate::Applied, "never downgraded");
+
+        // …and the derive_channels contract holds over the folded cache:
+        // the closed discussion stays OFF the sidebar
+        let infos = vec![ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(7) },
+            count: 2,
+            last_ts: 20,
+            state: Some(ProposalState::Rejected),
+        }];
+        assert!(
+            derive_channels(&infos, &known, &HashMap::new()).is_empty(),
+            "a declined vote's discussion is not a sidebar row"
+        );
+    }
+
+    /// The compose-collapse flag: only a DECIDED vote's patch channel is
+    /// read-only. The engine's enumeration annotation is authoritative when
+    /// present; otherwise the proposal cache decides; group/topic, open
+    /// votes and unknown referents (Q4) stay writable.
+    #[test]
+    fn selected_channel_closed_flags_only_decided_patch_votes() {
+        let known_of = |fate: KnownFate| KnownProposal {
+            title: "t".to_string(),
+            payload: serde_json::json!({}),
+            surface: Surface::Memory,
+            approvals: 1,
+            threshold: 2,
+            fate,
+        };
+        let info = |id: u64, state: Option<ProposalState>| ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(id) },
+            count: 1,
+            last_ts: 10,
+            state,
+        };
+        let patch = |id: u64| ChannelRef::Patch { id: ProposalId(id) };
+        let known = HashMap::from([
+            (1u64, known_of(KnownFate::Pending)),
+            (2u64, known_of(KnownFate::Closed)),
+            (3u64, known_of(KnownFate::Applied)),
+        ]);
+
+        // group/topic are never closed
+        assert!(!selected_channel_closed(&ChannelRef::Group, &[], &known));
+        assert!(!selected_channel_closed(
+            &ChannelRef::Topic { name: "x".into() },
+            &[],
+            &known
+        ));
+
+        // the engine annotation decides when present …
+        let infos = vec![
+            info(1, Some(ProposalState::Proposed)),
+            info(2, Some(ProposalState::Rejected)),
+            info(3, Some(ProposalState::Applied)),
+        ];
+        assert!(!selected_channel_closed(&patch(1), &infos, &HashMap::new()));
+        assert!(selected_channel_closed(&patch(2), &infos, &HashMap::new()));
+        assert!(selected_channel_closed(&patch(3), &infos, &HashMap::new()));
+        // … and wins over a stale cache
+        let stale = HashMap::from([(2u64, known_of(KnownFate::Pending))]);
+        assert!(selected_channel_closed(&patch(2), &infos, &stale));
+
+        // no (or unannotated) enumeration entry → the cache decides — the
+        // instant-feedback path on selection passes no infos at all
+        assert!(!selected_channel_closed(&patch(1), &[], &known));
+        assert!(selected_channel_closed(&patch(2), &[], &known));
+        assert!(selected_channel_closed(&patch(3), &[], &known));
+        assert!(selected_channel_closed(&patch(2), &[info(2, None)], &known));
+
+        // unknown everywhere stays writable (chat-bus Q4)
+        assert!(!selected_channel_closed(&patch(99), &infos, &known));
     }
 
     /// Review finding: concurrent pushes raced last-write-wins — a stale
