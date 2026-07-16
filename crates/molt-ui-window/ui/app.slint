@@ -200,6 +200,9 @@ export component AppWindow inherits Window {
     // wipe a chat message (by stable id) and leave the deletion notice
     // (DeleteChat)
     callback delete-chat(string);
+    // jump from a patch channel's discussion back to its vote — Rust
+    // resolves the hosting surface from the proposal cache
+    callback jump-to-vote();
     // workspace verbs (engine-backed, co-equal with MCP)
     callback open-workspace(string);
     // (mock) at-rest encryption: flag flips in the engine session — the
@@ -360,6 +363,9 @@ export component AppWindow inherits Window {
     // display label of the selected channel ("" = group): the compose
     // banner's feedback — for a fresh topic the only signal it is armed
     in property <string> selected-channel-label: "";
+    // the selected channel is a patch channel (a vote's discussion) — set
+    // by Rust alongside selected-channel; gates the banner's vote jump
+    in property <bool> selected-channel-votable: false;
     callback select-channel(string);
     // new-topic affordance: a compose-side reveal row (send-to-new-topic).
     // Deliberately NOT a "create channel" ritual — a channel exists because
@@ -3032,6 +3038,30 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                         overflow: elide;
+                                    }
+                                    // a discussion is vote-bound: jump back
+                                    // to the ballot this channel belongs to
+                                    if root.selected-channel-votable: Rectangle {
+                                        width: jv-t.width + 14px;
+                                        height: 20px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: Theme.win95 ? 0px : 5px;
+                                        border-width: 1px;
+                                        border-color: Theme.line;
+                                        background: jv-ta.has-hover ? Theme.raised : transparent;
+                                        jv-t := Text {
+                                            text: "🗳 \{Strings.ch-to-vote}";
+                                            color: Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        jv-ta := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => {
+                                                root.jump-to-vote();
+                                            }
+                                        }
                                     }
                                     Rectangle {
                                         width: 20px;

@@ -718,6 +718,7 @@ pub fn run_app(
             };
             if let Some(ui) = weak.upgrade() {
                 ui.set_selected_channel(channel_key(&ch).as_str().into());
+                ui.set_selected_channel_votable(matches!(ch, ChannelRef::Patch { .. }));
                 // instant banner feedback — for a fresh (still empty) topic
                 // this is the only visible signal until its first message
                 // exists; the next push refreshes it with the lazy title
@@ -737,6 +738,26 @@ pub fn run_app(
             rt.spawn(async move {
                 push_surfaces(&w, &weak, &chat_ui).await;
             });
+        });
+    }
+    {
+        // "back to the vote" from a patch channel's banner: the selected
+        // channel names the proposal, the proposal cache names its hosting
+        // surface — the jump reuses the sidebar's own SelectView /
+        // SelectSurface commands (no new engine verb).
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_jump_to_vote(move || {
+            let Some(cmd) = chat_ui
+                .lock()
+                .ok()
+                .and_then(|st| vote_jump_command(&st.selected, &st.proposals))
+            else {
+                return;
+            };
+            issue(&rt, &w, &weak, cmd);
         });
     }
     {
@@ -2300,6 +2321,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_chat_channels(), channels, |m| ui.set_chat_channels(m));
     ui.set_selected_channel(b.selected_key.as_str().into());
+    ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
 
     // the Organization tables (Members / Uploads)
@@ -2843,6 +2865,30 @@ fn derive_channels(
             })
         })
         .collect()
+}
+
+/// The command the patch-channel banner's "back to the vote" button
+/// issues: a discussion is vote-bound (the channel key IS the proposal
+/// id), so the jump reuses the sidebar's own navigation verbs — an
+/// Organization ballot lives in the pending view (declined once closed;
+/// an applied one simply left the list), a gated surface hosts its cards
+/// on its main view (plain surface selection). A cache miss falls back to
+/// Organization → pending rather than a dead button. Non-patch channels
+/// have no vote.
+fn vote_jump_command(ch: &ChannelRef, known: &HashMap<u64, KnownProposal>) -> Option<Command> {
+    let ChannelRef::Patch { id } = ch else {
+        return None;
+    };
+    let (surface, fate) = known
+        .get(&id.0)
+        .map(|k| (k.surface, k.fate))
+        .unwrap_or((Surface::Organization, KnownFate::Pending));
+    Some(if matches!(surface, Surface::Organization) {
+        let view = if fate == KnownFate::Closed { "declined" } else { "pending" };
+        Command::SelectView { surface, view: view.to_string() }
+    } else {
+        Command::SelectSurface { surface }
+    })
 }
 
 /// The compose-banner label of the selected channel ("" = group, which
@@ -3598,6 +3644,7 @@ lexicon! {
     ch_new_topic: "New topic", "Neues Thema";
     ch_topic_ph: "Topic name…", "Themenname…";
     ch_topic_open: "Open topic", "Thema öffnen";
+    ch_to_vote: "To the vote", "Zur Abstimmung";
     mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
@@ -3816,6 +3863,49 @@ mod tests {
         // nothing open → no rows (the sidebar hides the whole section)
         let rows = derive_channels(&[], &HashMap::new(), &HashMap::new());
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn vote_jump_targets_the_hosting_surface_and_fate_view() {
+        let known_of = |surface: Surface, fate: KnownFate| KnownProposal {
+            title: "t".to_string(),
+            payload: serde_json::json!({}),
+            surface,
+            approvals: 0,
+            threshold: 2,
+            fate,
+        };
+        let known = HashMap::from([
+            (5u64, known_of(Surface::Organization, KnownFate::Pending)),
+            (6u64, known_of(Surface::Organization, KnownFate::Closed)),
+            (7u64, known_of(Surface::Memory, KnownFate::Pending)),
+        ]);
+        // only a patch channel has a vote to jump back to
+        assert!(vote_jump_command(&ChannelRef::Group, &known).is_none());
+        let topic = ChannelRef::Topic { name: "zeta".to_string() };
+        assert!(vote_jump_command(&topic, &known).is_none());
+        // an open Organization vote → its card sits in the pending view
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(5) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
+        ));
+        // a closed one moved to the declined view
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(6) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "declined"
+        ));
+        // a gated surface hosts its cards on its main view — plain surface
+        // selection, exactly like the sidebar row
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(7) }, &known),
+            Some(Command::SelectSurface { surface: Surface::Memory })
+        ));
+        // a cache miss (this UI never saw the proposal) falls back to the
+        // Organization pending view — never a dead button
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(99) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
+        ));
     }
 
     #[test]
