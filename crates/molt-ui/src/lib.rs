@@ -2309,6 +2309,11 @@ struct LogLineData {
     file_name: String,
     file_meta: String,
     file_available: bool,
+    /// The proposal this applied-log row came from (the snapshot's parallel
+    /// id track) — the 💬 jump into its discussion channel. `None` on chat
+    /// rows, system lines and rows of unknown origin (legacy dumps): those
+    /// must offer no jump (feedback honesty, like the `id != ""` guards).
+    proposal_id: Option<u64>,
 }
 struct ReactionData {
     emoji: String,
@@ -2688,6 +2693,12 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         file_name: l.file_name.clone().into(),
                         file_meta: l.file_meta.clone().into(),
                         file_available: l.file_available,
+                        // -1 = no known proposal origin: the row offers no
+                        // 💬 jump (feedback honesty, like the id guards)
+                        patch_id: l
+                            .proposal_id
+                            .and_then(|i| i32::try_from(i).ok())
+                            .unwrap_or(-1),
                     }
                 })
                 .collect();
@@ -2964,7 +2975,8 @@ fn surface_data(
     } else {
         snap.applied
             .iter()
-            .map(|v| LogLineData {
+            .enumerate()
+            .map(|(i, v)| LogLineData {
                 id: String::new(),
                 lead: String::new(),
                 text: summarize(v),
@@ -2983,6 +2995,9 @@ fn surface_data(
                 file_name: String::new(),
                 file_meta: String::new(),
                 file_available: false,
+                // the id track is positionally parallel to `applied`; a
+                // pre-id peer's snapshot has an empty/short track → None
+                proposal_id: snap.applied_ids.get(i).copied().flatten(),
             })
             .collect()
     };
@@ -3122,6 +3137,7 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         mine_emoji,
         reactions,
         has_file,
+        proposal_id: None,
         file_name,
         file_meta,
         file_available,
@@ -3357,7 +3373,13 @@ fn vote_jump_command(ch: &ChannelRef, known: &HashMap<u64, KnownProposal>) -> Op
         .map(|k| (k.surface, k.fate))
         .unwrap_or((Surface::Organization, KnownFate::Pending));
     Some(if matches!(surface, Surface::Organization) {
-        let view = if fate == KnownFate::Closed { "declined" } else { "pending" };
+        let view = match fate {
+            KnownFate::Closed => "declined",
+            // WP1: an applied Organization vote's row lives in the
+            // accepted (applied-log) view — the jump lands on it
+            KnownFate::Applied => "accepted",
+            KnownFate::Pending => "pending",
+        };
         Command::SelectView { surface, view: view.to_string() }
     } else {
         Command::SelectSurface { surface }
@@ -3554,6 +3576,7 @@ fn system_line_data(text: String) -> LogLineData {
         file_name: String::new(),
         file_meta: String::new(),
         file_available: false,
+        proposal_id: None,
     }
 }
 
@@ -4162,6 +4185,7 @@ lexicon! {
     mv_empty_declined: "No declined proposals right now — this view empties on the chat retention rhythm.", "Gerade keine abgelehnten Vorschläge — diese Ansicht leert sich im Chat-Aufbewahrungsrhythmus.";
     pc_declined_by: "Declined by", "Abgelehnt von";
     mv_applied: "Applied", "Angewandt";
+    mv_accepted: "Accepted changes", "Angenommene Änderungen";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
     mv_empty_chat: "No messages yet.", "Noch keine Nachrichten.";
@@ -4220,6 +4244,7 @@ mod tests {
             file_name: String::new(),
             file_meta: String::new(),
             file_available: false,
+            proposal_id: None,
         }
     }
 
@@ -4516,6 +4541,41 @@ mod tests {
             vote_jump_command(&ChannelRef::Patch { id: ProposalId(99) }, &known),
             Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
         ));
+        // WP1: an APPLIED Organization vote's row lives in the accepted view
+        let known = HashMap::from([(8u64, {
+            let mut k = known_of(Surface::Organization, KnownFate::Applied);
+            k.approvals = 2;
+            k
+        })]);
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(8) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "accepted"
+        ));
+    }
+
+    /// WP1: an applied log line carries the id of the proposal that produced
+    /// it (the snapshot's parallel id track), so the row can offer the 💬
+    /// jump into the vote's discussion. A row with no known origin (legacy
+    /// dump, pre-id peer) carries none and must offer no jump.
+    #[test]
+    fn applied_log_lines_carry_their_patch_id() {
+        let snap = molt_core::SurfaceSnapshot {
+            surface: Surface::Memory,
+            gated: true,
+            applied: vec![
+                serde_json::json!({"op": "add_note", "title": "a"}),
+                serde_json::json!({"op": "add_note", "title": "b"}),
+            ],
+            applied_ids: vec![Some(7), None],
+            pending: Vec::new(),
+            denied: 0,
+            declined: Vec::new(),
+            channels: Vec::new(),
+        };
+        let data = surface_data(0, Surface::Memory, &snap, "petra", None);
+        assert_eq!(data.log.len(), 2);
+        assert_eq!(data.log[0].proposal_id, Some(7));
+        assert_eq!(data.log[1].proposal_id, None);
     }
 
     #[test]

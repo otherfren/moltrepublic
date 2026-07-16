@@ -300,14 +300,21 @@ impl State {
     /// membership blocks). Chat, [`State::applied`] and pending proposals are
     /// left untouched — they are ephemeral or legacy-owned.
     pub(crate) fn apply_chain_to_state(&mut self) {
-        let mut projected: std::collections::HashMap<Surface, Vec<serde_json::Value>> =
-            std::collections::HashMap::new();
+        let mut projected: std::collections::HashMap<
+            Surface,
+            Vec<(Option<u64>, serde_json::Value)>,
+        > = std::collections::HashMap::new();
         for block in &self.chain {
             if let ChainChange::Applied {
-                surface, payload, ..
+                proposal_id,
+                surface,
+                payload,
             } = &block.change
             {
-                projected.entry(*surface).or_default().push(payload.clone());
+                projected
+                    .entry(*surface)
+                    .or_default()
+                    .push((Some(*proposal_id), payload.clone()));
             }
         }
         self.chain_applied = projected;
@@ -1148,6 +1155,24 @@ mod tests {
     /// A member that only holds the genesis receives a peer's broadcast commit
     /// block, verifies + adopts it, and its persistent state converges (the
     /// `receive_block` path that a non-committer follows).
+    /// WP1: the chain projection feeds the snapshot's parallel id track —
+    /// a committed `Applied` block's `proposal_id` reaches the read contract
+    /// positionally next to its payload.
+    #[test]
+    fn chain_applied_entries_carry_their_proposal_id() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(7, &["petra", "walter"]);
+        let mut peer = crate::tests::plain_state();
+        peer.adopt_chain(b.blocks.clone());
+        let snap = peer.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.applied.len(), 1, "one committed Applied block");
+        assert_eq!(
+            snap.applied_ids,
+            vec![Some(7)],
+            "the block's proposal id rides the id track"
+        );
+    }
+
     #[test]
     fn a_peer_adopts_a_broadcast_block_and_converges() {
         let b = Builder::new(&["petra", "walter"], 2);
@@ -1184,7 +1209,8 @@ mod tests {
             .get(&Surface::Memory)
             .expect("memory projection");
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0]["title"], json!("minutes"));
+        assert_eq!(applied[0].0, Some(1), "the projection keeps the proposal id");
+        assert_eq!(applied[0].1["title"], json!("minutes"));
 
         // an invalid block (tampered payload, sigs no longer match) is rejected
         let mut forged = b.seal(

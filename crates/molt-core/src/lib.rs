@@ -106,6 +106,10 @@ impl Surface {
                 // in-voting organization changes (charter / name / image /
                 // plugins); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
+                // the applied organization changes (the surface's applied
+                // log) — every accepted vote's row, with the 💬 back-link
+                // into its discussion; hidden while empty, like pending
+                ("accepted", "Accepted"),
                 // declined organization changes, within the display-retention
                 // window; the GUI shows this entry only while non-empty too
                 ("declined", "Declined"),
@@ -1597,6 +1601,12 @@ pub struct EngineStateDump {
     pub chat: Vec<ChatMessage>,
     /// Applied transition log per gated surface (keyed by surface name).
     pub applied: BTreeMap<String, Vec<Value>>,
+    /// The proposal id each `applied` entry came from, positionally matched
+    /// per surface (the id track of [`SurfaceSnapshot::applied_ids`]).
+    /// Additive with a default: a pre-id dump restores with unknown origin
+    /// (`None`), payloads untouched.
+    #[serde(default)]
+    pub applied_ids: BTreeMap<String, Vec<Option<u64>>>,
     /// Every known proposal by id.
     pub proposals: BTreeMap<u64, ProposalRecord>,
     /// The next proposal id to assign.
@@ -2820,6 +2830,15 @@ pub struct SurfaceSnapshot {
     /// The ordered log of applied transitions (for chat, the messages —
     /// possibly filtered by [`Command::ReadState`]'s `channel`).
     pub applied: Vec<Value>,
+    /// The parallel id track: positionally matched to `applied`, each entry
+    /// names the proposal that produced it. `None` = origin unknown (chat
+    /// rows, entries restored from a pre-id dump). The payloads in `applied`
+    /// stay untouched — readers that compare payloads keep working; this
+    /// track only ADDS the back-link a frontend needs to reopen the vote's
+    /// discussion (its `patch:<id>` channel). Additive with a default, so an
+    /// older writer's snapshot stays deserializable.
+    #[serde(default)]
+    pub applied_ids: Vec<Option<u64>>,
     /// Proposals still pending against this surface.
     pub pending: Vec<ProposalView>,
     /// Number of declined (denied) proposals against this surface.

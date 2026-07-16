@@ -268,7 +268,7 @@ impl State {
                         p.state = ProposalState::Applied;
                         let payload = p.payload.clone();
                         let surface = p.surface;
-                        self.applied.entry(surface).or_default().push(payload);
+                        self.applied.entry(surface).or_default().push((Some(id.0), payload));
                     }
                 }
             }
@@ -327,7 +327,23 @@ impl State {
                 .applied
                 .iter()
                 .filter(|(_, log)| !log.is_empty())
-                .map(|(s, log)| (s.as_str().to_string(), log.clone()))
+                .map(|(s, log)| {
+                    (
+                        s.as_str().to_string(),
+                        log.iter().map(|(_, v)| v.clone()).collect(),
+                    )
+                })
+                .collect(),
+            applied_ids: self
+                .applied
+                .iter()
+                .filter(|(_, log)| !log.is_empty())
+                .map(|(s, log)| {
+                    (
+                        s.as_str().to_string(),
+                        log.iter().map(|(id, _)| *id).collect(),
+                    )
+                })
                 .collect(),
             proposals: self
                 .proposals
@@ -424,7 +440,17 @@ impl State {
         }
         for (name, log) in dump.applied {
             if let Some(s) = Surface::parse(&name) {
-                self.applied.insert(s, log);
+                // re-join the payloads with their id track (additive dump
+                // field): a pre-id dump — or a short/absent id vec — yields
+                // `None` (origin unknown), payloads untouched
+                let ids = dump.applied_ids.get(&name).cloned().unwrap_or_default();
+                let mut ids = ids.into_iter();
+                self.applied.insert(
+                    s,
+                    log.into_iter()
+                        .map(|v| (ids.next().unwrap_or(None), v))
+                        .collect(),
+                );
             }
         }
         self.proposals = dump.proposals.into_iter().collect();
