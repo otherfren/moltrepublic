@@ -988,12 +988,21 @@ pub fn run_app(
                 .ok()
                 .and_then(|bytes| {
                     // Slint decodes image formats from a file path — stage
-                    // the payload bytes in a private temp file
-                    let path = std::env::temp_dir().join(format!(
-                        "molt-proposal-preview-{}.img",
-                        std::process::id()
-                    ));
-                    std::fs::write(&path, bytes).ok()?;
+                    // the payload bytes in a temp file with a RANDOM name,
+                    // created O_EXCL so a pre-planted symlink of a guessable
+                    // name can never redirect the write onto a victim file
+                    use std::io::Write as _;
+                    let mut rand = [0u8; 16];
+                    getrandom::getrandom(&mut rand).ok()?;
+                    let path = std::env::temp_dir()
+                        .join(format!("molt-proposal-preview-{}.img", hex::encode(rand)));
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true) // O_EXCL: fail if it already exists
+                        .open(&path)
+                        .ok()?;
+                    f.write_all(&bytes).ok()?;
+                    drop(f);
                     let img = slint::Image::load_from_path(&path).ok();
                     let _ = std::fs::remove_file(&path);
                     img

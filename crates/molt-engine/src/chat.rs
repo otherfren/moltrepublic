@@ -281,8 +281,8 @@ impl State {
             }
             index
         };
+        // record_file_remove forgets the source path at the choke point
         self.record_file_remove(index, id, me);
-        self.forget_share_path(&id);
         Ok(Reply::Ack)
     }
 
@@ -433,6 +433,10 @@ impl State {
             },
         );
         self.record(env);
+        // deleting a message drops its file share too — forget any source
+        // path so it does not linger in prefs.toml (choke point: covers
+        // local + wire deletes, no-op unless it is one of MY shares)
+        self.forget_share_path(&id);
         self.emit(Event::Deleted { id, by });
     }
 
@@ -447,6 +451,9 @@ impl State {
             },
         );
         self.record(env);
+        // the file is gone — forget its source path (choke point: local
+        // remove_file AND a wire FileRemoved both pass through here)
+        self.forget_share_path(&id);
         self.emit(Event::FileRemoved { id, by });
     }
 

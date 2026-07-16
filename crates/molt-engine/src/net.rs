@@ -963,20 +963,16 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A group-authenticated fetch request landed and this node is asked to
-    /// serve: honest refusals (expired, unknown share, unavailable, foreign
-    /// share, unknown path) go back as a `Refused` frame where possible;
-    /// a valid request spawns the bounded serve task.
+    /// A group-authenticated fetch request landed. The broadcast reaches
+    /// EVERY member, so **only the sharer answers** — a member that does
+    /// not (yet) hold the share, or whose share it isn't, stays completely
+    /// silent: a `Refused` from a non-sharer would abort the requester's
+    /// fetch of the REAL sharer's bytes (a laggard's refusal racing the
+    /// sharer's manifest). Once this node is established as the sharer,
+    /// honest refusals (unavailable, path lost) are correct.
     fn answer_file_request(&mut self, req: molt_net::transfer::FetchRequest) {
         let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) else {
             return; // no real mesh → nothing to serve on
-        };
-        let refuse = |reason: &str| {
-            let frame = molt_net::transfer::TransferFrame::Refused {
-                id: req.id.clone(),
-                reason: reason.to_string(),
-            };
-            crate::transfer::spawn_send_refusal(transport.clone(), req.reply.clone(), frame);
         };
         if req.expires < crate::now_secs() {
             tracing::debug!(share = %req.id, "dropping an expired file request");
@@ -986,13 +982,20 @@ impl State {
             return;
         };
         let me = self.member();
-        let Ok((_, msg)) = self.chat_by_id(&id) else {
-            refuse("this node does not know the share");
+        // silent unless this node is the sharer — never refuse a share we
+        // simply don't have; the actual sharer answers
+        let is_my_share = matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == me);
+        if !is_my_share {
             return;
-        };
-        if msg.from != me {
-            return; // not my share — the sharer will answer
         }
+        let refuse = |reason: &str| {
+            let frame = molt_net::transfer::TransferFrame::Refused {
+                id: req.id.clone(),
+                reason: reason.to_string(),
+            };
+            crate::transfer::spawn_send_refusal(transport.clone(), req.reply.clone(), frame);
+        };
+        let (_, msg) = self.chat_by_id(&id).expect("just checked it is our share");
         let Some(file) = msg.file.as_ref() else {
             refuse("the message carries no file");
             return;
@@ -1001,7 +1004,7 @@ impl State {
             refuse("the sharer removed the file — no longer available");
             return;
         }
-        let (size, modified) = (file.size, file.modified);
+        let size = file.size;
         let Some(path) = self.share_paths.get(&id).cloned() else {
             refuse("this node no longer knows the shared file's local path");
             return;
@@ -1010,7 +1013,6 @@ impl State {
             transport,
             path,
             size,
-            modified,
             req.id,
             req.reply,
             self.file_serve_slots.clone(),

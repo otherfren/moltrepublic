@@ -402,7 +402,10 @@ impl State {
             retention_days: molt_core::default_chat_retention_days(),
             image: String::new(),
         };
-        for v in self.applied_values(Surface::Organization, None) {
+        // fold over the BORROWED applied entries (never clone — a `set_image`
+        // entry carries the base64 image, so cloning the log here would copy
+        // hundreds of KB on every read; we only read a couple of fields)
+        for v in self.applied_org_entries() {
             let value = v.get("value").and_then(Value::as_str).unwrap_or_default();
             match v.get("op").and_then(Value::as_str) {
                 Some("set_name") => {
@@ -418,9 +421,13 @@ impl State {
                     }
                 }
                 Some("set_image") => {
-                    // with embedded bytes and a storage dir the reference is
-                    // the materialized logo file (sync_logo_file writes it);
-                    // session-only workspaces fall back to the display value
+                    // an applied set_image ALWAYS carries decodable bytes ≤
+                    // the cap (validate_org_payload gates local proposals;
+                    // the cmd_net_delivered guard drops undecodable/oversized
+                    // peer ones), so a cheap non-empty check suffices and
+                    // matches sync_logo_file — with a storage dir the
+                    // reference is the materialized logo file, else (session
+                    // only) the display value
                     let has_bytes =
                         v.get("bytes_b64").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
                     eff.image = match (&self.active, has_bytes) {
@@ -439,11 +446,33 @@ impl State {
         eff
     }
 
+    /// The applied Organization entries, BORROWED (legacy counted projection
+    /// then the chain projection — one is always empty for a workspace). No
+    /// clone: callers only read `op`/`value`/`bytes_b64` fields.
+    pub(crate) fn applied_org_entries(&self) -> impl Iterator<Item = &Value> {
+        self.applied
+            .get(&Surface::Organization)
+            .into_iter()
+            .flatten()
+            .chain(self.chain_applied.get(&Surface::Organization).into_iter().flatten())
+    }
+
     /// The instant before which chat content ages out of the read contract:
     /// `now - effective retention`. A timestamp of 0 (legacy/unknown age)
     /// is always kept — unknown must not silently vanish.
     pub(crate) fn chat_retention_cutoff(&self) -> u64 {
         crate::now_secs().saturating_sub(self.org_effective().retention_days * 86_400)
+    }
+
+    /// The chat messages the read contract exposes: "delete chat after N
+    /// days" is engine semantics (co-equality — GUI and MCP see the same),
+    /// so a message older than the effective window is hidden from EVERY
+    /// chat-derived view (the log, uploads, member upload counts, channel
+    /// counts) — not just the chat pane. ts 0 (unknown age) is always kept;
+    /// physical log pruning is a separate follow-up.
+    pub(crate) fn chat_visible(&self) -> impl Iterator<Item = &molt_core::ChatMessage> {
+        let cutoff = self.chat_retention_cutoff();
+        self.chat.iter().filter(move |m| m.ts == 0 || m.ts >= cutoff)
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
@@ -454,14 +483,8 @@ impl State {
     /// position-in-`applied` is not an addressing scheme.
     pub(crate) fn applied_values(&self, surface: Surface, channel: Option<&ChannelRef>) -> Vec<Value> {
         if surface == Surface::Chat {
-            // "delete chat after N days" applies at the read (co-equality:
-            // GUI and MCP consume this same snapshot); physical log pruning
-            // is a separate follow-up. ts 0 = unknown age, always kept.
-            let cutoff = self.chat_retention_cutoff();
-            self.chat
-                .iter()
+            self.chat_visible()
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
-                .filter(|m| m.ts == 0 || m.ts >= cutoff)
                 .map(|m| serde_json::to_value(m).unwrap_or_default())
                 .collect()
         } else {
@@ -476,12 +499,13 @@ impl State {
         }
     }
 
-    /// Every distinct channel in the chat log, one pass (chat-bus pin P7):
-    /// `Group` is always listed (even when empty); the rest follow in
-    /// first-appearance order, which is deterministic because the log
+    /// Every distinct channel in the visible chat log, one pass (chat-bus
+    /// pin P7): `Group` is always listed (even when empty); the rest follow
+    /// in first-appearance order, which is deterministic because the log
     /// order is canonical. Deleted (tombstoned) messages still count for
-    /// their channel — they are rows in the log, and a channel whose only
-    /// message was deleted must not silently vanish from the sidebar.
+    /// their channel — they are rows in the log. Messages past the chat
+    /// retention window are filtered ([`State::chat_visible`]) so the
+    /// sidebar counts agree with what the read exposes.
     fn chat_channels(&self) -> Vec<ChannelInfo> {
         let mut infos = vec![ChannelInfo {
             channel: ChannelRef::Group,
@@ -489,7 +513,7 @@ impl State {
             last_ts: 0,
         }];
         let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
-        for m in &self.chat {
+        for m in self.chat_visible() {
             let at = *pos.entry(m.channel.clone()).or_insert_with(|| {
                 infos.push(ChannelInfo {
                     channel: m.channel.clone(),
@@ -594,8 +618,7 @@ impl State {
                         .filter(|(pid, p)| self.waits_on(**pid, p, &member))
                         .count(),
                     uploads: self
-                        .chat
-                        .iter()
+                        .chat_visible()
                         .filter(|m| m.from == member && m.file.is_some())
                         .count(),
                     member,
@@ -608,11 +631,11 @@ impl State {
             .collect()
     }
 
-    /// The Organization → Uploads table: every file shared into the chat,
-    /// in log order. Only metadata — the bytes move user-to-user via the
-    /// share link ([`molt_core::FileMeta`]), which is why a download needs
-    /// the sharer online; the 14-day link expiry and the checksum are mocks
-    /// like the fetch itself.
+    /// The Organization → Uploads table: every file shared into the chat
+    /// (within the retention window — [`State::chat_visible`]), in log order.
+    /// Only metadata — the bytes move user-to-user over a dedicated encrypted
+    /// queue, which is why a download needs the sharer online; the checksum
+    /// is the real sha256, the 14-day link expiry is still a mock.
     pub(crate) fn uploads_view(&self) -> Vec<UploadView> {
         const MOCK_LINK_TTL_SECS: u64 = 14 * 86_400;
         let me = self.member();
@@ -627,8 +650,7 @@ impl State {
                 .map(|mi| mi.state)
                 .unwrap_or(0)
         };
-        self.chat
-            .iter()
+        self.chat_visible()
             .filter_map(|m| {
                 m.file.as_ref().map(|f| UploadView {
                     id: m.id,
@@ -678,11 +700,7 @@ impl State {
                     .count();
                 let applied = if s == Surface::Chat {
                     // count what the read contract shows (retention window)
-                    let cutoff = self.chat_retention_cutoff();
-                    self.chat
-                        .iter()
-                        .filter(|m| m.ts == 0 || m.ts >= cutoff)
-                        .count()
+                    self.chat_visible().count()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
                         + self.chain_applied.get(&s).map(|v| v.len()).unwrap_or(0)

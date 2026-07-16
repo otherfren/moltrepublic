@@ -519,17 +519,21 @@ impl State {
         let Some(active) = &self.active else {
             return;
         };
+        // scan the BORROWED entries in reverse for the last image op — decode
+        // exactly one payload (not every historical set_image), and only when
+        // it is actually the current image
         let mut want: Option<(String, Vec<u8>)> = None;
-        for v in self.applied_values(Surface::Organization, None) {
+        for v in self.applied_org_entries().collect::<Vec<_>>().into_iter().rev() {
             match v.get("op").and_then(serde_json::Value::as_str) {
+                Some("remove_image") => break, // the current image was cleared
                 Some("set_image") => {
                     let value =
                         v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
-                    if let Some(bytes) = crate::proposals::image_bytes(&v) {
+                    if let Some(bytes) = crate::proposals::image_bytes(v) {
                         want = Some((crate::proposals::logo_ext(value), bytes));
                     }
+                    break; // the last image op wins
                 }
-                Some("remove_image") => want = None,
                 _ => {}
             }
         }

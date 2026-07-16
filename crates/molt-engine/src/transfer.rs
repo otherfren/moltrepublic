@@ -87,30 +87,66 @@ pub(crate) struct DestSpec {
     pub default_dir: String,
 }
 
+/// A resolved download destination: the directory, the file name, and
+/// whether the caller named an EXACT target file (a full path). An exact
+/// target overwrites — the GUI's save dialog already confirmed the replace,
+/// and an MCP caller passing a full path means that path. A directory or
+/// the default location dodges collisions instead ("name (1).ext").
+struct ResolvedDest {
+    dir: PathBuf,
+    name: String,
+    exact: bool,
+}
+
 impl DestSpec {
-    /// Resolve to `(directory, file name)` — an explicit existing directory
-    /// keeps the share name, an explicit path is taken literally, no
-    /// explicit destination lands in the default download directory.
-    fn resolve(&self, share_name: &str) -> (PathBuf, String) {
+    /// Resolve where the fetched file lands (see [`ResolvedDest`]). An
+    /// explicit existing directory keeps the share name (collision-dodged);
+    /// an explicit path names an exact file (overwrite); no explicit
+    /// destination lands, collision-dodged, in the default directory.
+    fn resolve(&self, share_name: &str) -> ResolvedDest {
         match &self.explicit {
             Some(dest) => {
                 let p = molt_storage::expand_tilde(dest);
                 if p.is_dir() {
-                    (p, sanitize_file_name(share_name))
+                    ResolvedDest {
+                        dir: p,
+                        name: sanitize_file_name(share_name),
+                        exact: false,
+                    }
                 } else {
                     let name = p
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| sanitize_file_name(share_name));
-                    let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
-                    (dir, name)
+                    // a relative path with no parent resolves against the
+                    // default directory, never the daemon's cwd
+                    let dir = match p.parent() {
+                        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+                        _ => molt_storage::expand_tilde(&self.default_dir),
+                    };
+                    ResolvedDest {
+                        dir,
+                        name,
+                        exact: true,
+                    }
                 }
             }
-            None => (
-                molt_storage::expand_tilde(&self.default_dir),
-                sanitize_file_name(share_name),
-            ),
+            None => ResolvedDest {
+                dir: molt_storage::expand_tilde(&self.default_dir),
+                name: sanitize_file_name(share_name),
+                exact: false,
+            },
         }
+    }
+}
+
+/// The final path a resolved destination writes to: the exact file when the
+/// caller named one (overwrite), otherwise the first free collision variant.
+fn final_path(resolved: &ResolvedDest) -> PathBuf {
+    if resolved.exact {
+        resolved.dir.join(&resolved.name)
+    } else {
+        resolve_collision(&resolved.dir, &resolved.name)
     }
 }
 
@@ -191,16 +227,17 @@ pub(crate) fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
 // ---------------------------------------------------------------------------
 
 /// Serve one fetch request: stream the file at `path` to the requester's
-/// reply queue. `expected_size`/`expected_modified` are the share's
-/// recorded metadata — a file that changed since the share is refused
-/// (honest error), matching-content verification is the requester's
-/// checksum job. Returns `Err` only for tracing; the requester learns of
-/// failures via `Refused` or its own timeouts.
+/// reply queue. `expected_size` is the share's recorded size — a file whose
+/// size changed since the share is refused (honest error). Content change
+/// at the SAME size is caught by the requester's sha256 verification against
+/// the log-anchored checksum, so mtime is deliberately NOT a gate: it is
+/// fragile (a backup/restore or `touch` resets it without changing a byte,
+/// and an unreadable mtime would never round-trip). Returns `Err` only for
+/// tracing; the requester learns of failures via `Refused` or its timeouts.
 pub(crate) async fn run_file_serve<T: Transport>(
     transport: T,
     path: PathBuf,
     expected_size: u64,
-    expected_modified: u64,
     share_id_hex: String,
     reply: ReplyHandover,
 ) -> Result<(), String> {
@@ -229,20 +266,13 @@ pub(crate) async fn run_file_serve<T: Transport>(
         }
     };
 
-    // honesty checks against the recorded share: the file must still be
-    // what was shared (same size + mtime; content tampering at equal
-    // size/mtime is caught by the requester's checksum verification)
+    // honesty check against the recorded share: same size (a cheap stat;
+    // content change is the requester's checksum job)
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) => return refuse(format!("the shared file is gone: {e}")).await,
     };
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if meta.len() != expected_size || (expected_modified != 0 && modified != expected_modified) {
+    if meta.len() != expected_size {
         return refuse(format!(
             "the file changed since it was shared (size {} → {})",
             expected_size,
@@ -258,33 +288,34 @@ pub(crate) async fn run_file_serve<T: Transport>(
     // the ack queue: subscribe BEFORE advertising it in the manifest
     let ack_q = transport.create_queue().await.map_err(|e| e.to_string())?;
     let ack_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-    let mut ack_rx = transport.subscribe(&ack_q.rcv).await.map_err(|e| e.to_string())?;
-
-    let pieces = pieces_for(size);
-    let manifest = TransferFrame::Manifest {
-        id: share_id_hex.clone(),
-        size,
-        pieces,
-        sha256,
-        ack: ReplyHandover {
-            server: ack_q.snd.server.clone(),
-            queue_id: hex::encode(&ack_q.snd.id.0),
-            wrap: hex::encode(ack_wrap.to_bytes()),
-        },
-    };
-    let bytes = encode_frame(&manifest).map_err(|e| e.to_string())?;
-    supervisor::send_framed(
-        &transport,
-        &reply_snd,
-        &reply_wrap,
-        msg_id(&share_id_hex, "fetch", 0),
-        &bytes,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // stream the pieces, at most PIECE_WINDOW unacked in flight
-    let result = async {
+    // from here the ack queue exists — every exit must delete it, so the
+    // manifest send + streaming run inside one block whose result we return
+    // AFTER the cleanup (an early `?` before this would leak the queue)
+    let serve = async {
+        let mut ack_rx = transport.subscribe(&ack_q.rcv).await.map_err(|e| e.to_string())?;
+        let pieces = pieces_for(size);
+        let manifest = TransferFrame::Manifest {
+            id: share_id_hex.clone(),
+            size,
+            pieces,
+            sha256,
+            ack: ReplyHandover {
+                server: ack_q.snd.server.clone(),
+                queue_id: hex::encode(&ack_q.snd.id.0),
+                wrap: hex::encode(ack_wrap.to_bytes()),
+            },
+        };
+        let bytes = encode_frame(&manifest).map_err(|e| e.to_string())?;
+        supervisor::send_framed(
+            &transport,
+            &reply_snd,
+            &reply_wrap,
+            msg_id(&share_id_hex, "fetch", 0),
+            &bytes,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        // stream the pieces, at most PIECE_WINDOW unacked in flight
         use std::io::Read as _;
         let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
         let mut reasm = molt_net::Reassembler::new();
@@ -345,12 +376,13 @@ pub(crate) async fn run_file_serve<T: Transport>(
                 }
             }
         }
-        Ok(())
+        Ok::<(), String>(())
     }
     .await;
 
+    // always retire the ack queue, whatever the serve outcome was
     let _ = transport.delete_queue(&ack_q.rcv).await;
-    result
+    serve
 }
 
 // ---------------------------------------------------------------------------
@@ -381,33 +413,38 @@ where
     // advertising it, so the manifest cannot race our subscription
     let reply_q = transport.create_queue().await.map_err(|e| e.to_string())?;
     let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-    let mut rx = transport.subscribe(&reply_q.rcv).await.map_err(|e| e.to_string())?;
-
-    let request = FetchRequest {
-        id: target.id_hex.clone(),
-        reply: ReplyHandover {
-            server: reply_q.snd.server.clone(),
-            queue_id: hex::encode(&reply_q.snd.id.0),
-            wrap: hex::encode(reply_wrap.to_bytes()),
-        },
-        expires: crate::now_secs() + REQUEST_TTL_SECS,
-    };
-    let request_json = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-    let ct = {
-        let mut g = group.lock().map_err(|_| "mls group lock poisoned".to_string())?;
-        hex::encode(g.encrypt(&request_json).map_err(|e| e.to_string())?)
-    };
-    let result = fetch_frames(
-        &transport,
-        &reply_wrap,
-        &target,
-        &dest,
-        timeouts,
-        announce,
-        ct,
-        &mut rx,
-        &mut progress,
-    )
+    // from here the reply queue exists — every exit deletes it, so the
+    // request-build/encrypt and the receive loop run inside one block whose
+    // result we return AFTER cleanup (an early `?` would leak the queue)
+    let result = async {
+        let mut rx = transport.subscribe(&reply_q.rcv).await.map_err(|e| e.to_string())?;
+        let request = FetchRequest {
+            id: target.id_hex.clone(),
+            reply: ReplyHandover {
+                server: reply_q.snd.server.clone(),
+                queue_id: hex::encode(&reply_q.snd.id.0),
+                wrap: hex::encode(reply_wrap.to_bytes()),
+            },
+            expires: crate::now_secs() + REQUEST_TTL_SECS,
+        };
+        let request_json = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        let ct = {
+            let mut g = group.lock().map_err(|_| "mls group lock poisoned".to_string())?;
+            hex::encode(g.encrypt(&request_json).map_err(|e| e.to_string())?)
+        };
+        fetch_frames(
+            &transport,
+            &reply_wrap,
+            &target,
+            &dest,
+            timeouts,
+            announce,
+            ct,
+            &mut rx,
+            &mut progress,
+        )
+        .await
+    }
     .await;
     let _ = transport.delete_queue(&reply_q.rcv).await;
     result
@@ -437,13 +474,17 @@ where
         return Err("the fetch request could not be recorded".to_string());
     }
 
-    let (dest_dir, file_name) = dest.resolve(&target.name);
-    std::fs::create_dir_all(&dest_dir)
-        .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
-    let part_path = dest_dir.join(format!(".molt-download-{}.part", target.id_hex));
+    let resolved = dest.resolve(&target.name);
+    std::fs::create_dir_all(&resolved.dir)
+        .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
+    let part_path = resolved.dir.join(format!(".molt-download-{}.part", target.id_hex));
     let cleanup = |part: &Path| {
         let _ = std::fs::remove_file(part);
     };
+    // the sharer's ack queue, captured once the manifest arrives — so a
+    // mid-transfer failure can tell the sharer to STOP (else it blocks in
+    // its ack-wait for the full timeout, holding a serve slot)
+    let mut ack_target: Option<(SndQueueAddr, WrapKey)> = None;
 
     let result = async {
         let mut part = std::fs::File::create(&part_path)
@@ -512,6 +553,7 @@ where
                         return Err("the manifest's piece count is inconsistent".to_string());
                     }
                     let (ack_snd, ack_wrap) = parse_handover(&ack)?;
+                    ack_target = Some((ack_snd.clone(), ack_wrap.clone()));
                     manifest = Some((size, pieces, sha256, ack_snd, ack_wrap));
                 }
                 Ok(TransferFrame::Piece { index, bytes }) => {
@@ -579,7 +621,10 @@ where
         part.sync_all()
             .map_err(|e| format!("syncing {}: {e}", part_path.display()))?;
         drop(part);
-        let final_path = resolve_collision(&dest_dir, &file_name);
+        // an explicit target overwrites (the caller named that exact file —
+        // the GUI's save dialog already confirmed the replace); a directory
+        // or the default location dodges collisions instead
+        let final_path = final_path(&resolved);
         std::fs::rename(&part_path, &final_path)
             .map_err(|e| format!("moving into place: {e}"))?;
         Ok(final_path)
@@ -588,6 +633,22 @@ where
 
     if result.is_err() {
         cleanup(&part_path);
+        // tell the sharer to stop streaming instead of blocking on acks that
+        // will never come — best-effort, the sharer also has its own timeout
+        if let Some((ack_snd, ack_wrap)) = &ack_target {
+            if let Ok(bytes) = encode_ack(&TransferAck::Abort {
+                reason: result.as_ref().err().cloned().unwrap_or_default(),
+            }) {
+                let _ = supervisor::send_framed(
+                    transport,
+                    ack_snd,
+                    ack_wrap,
+                    msg_id(&target.id_hex, "ack", u64::MAX),
+                    &bytes,
+                )
+                .await;
+            }
+        }
     }
     result
 }
@@ -701,14 +762,20 @@ pub(crate) fn spawn_file_fetch(
             if pct > last_pct && now.duration_since(last_at) >= Duration::from_millis(250) {
                 last_pct = pct;
                 last_at = now;
-                let tx = progress_tx.clone();
-                let cmd = Command::NetFileProgress {
-                    id,
-                    transferred,
-                    total,
-                    generation: Some(scope),
-                };
-                tokio::spawn(async move { feed(&tx, cmd).await });
+                // try_send, not a spawned task: progress is a throttled, lossy
+                // signal — dropping one on a momentarily full queue is fine,
+                // and try_send keeps reports ORDERED (spawned sends could
+                // deliver a lower percent after a higher one)
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = progress_tx.try_send(Envelope {
+                    cmd: Command::NetFileProgress {
+                        id,
+                        transferred,
+                        total,
+                        generation: Some(scope),
+                    },
+                    reply,
+                });
             }
         };
         let result = run_file_fetch(transport, group, target, dest, timeouts, announce, progress)
@@ -735,7 +802,6 @@ pub(crate) fn spawn_file_serve(
     transport: crate::founding::RitualTransport,
     path: PathBuf,
     expected_size: u64,
-    expected_modified: u64,
     share_id_hex: String,
     reply: ReplyHandover,
     slots: Arc<tokio::sync::Semaphore>,
@@ -744,15 +810,8 @@ pub(crate) fn spawn_file_serve(
         let Ok(_permit) = slots.acquire_owned().await else {
             return; // the engine is shutting down
         };
-        if let Err(e) = run_file_serve(
-            transport,
-            path,
-            expected_size,
-            expected_modified,
-            share_id_hex.clone(),
-            reply,
-        )
-        .await
+        if let Err(e) = run_file_serve(transport, path, expected_size, share_id_hex.clone(), reply)
+            .await
         {
             tracing::warn!(share = %share_id_hex, error = %e, "serving a file download failed");
         }
@@ -799,17 +858,29 @@ pub(crate) fn spawn_local_copy(
 ) {
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-            let (dest_dir, file_name) = dest.resolve(&target.name);
-            std::fs::create_dir_all(&dest_dir)
-                .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
-            let (checksum, _) =
-                hash_file(&source).map_err(|e| format!("reading the shared file failed: {e}"))?;
-            if !target.checksum.is_empty() && checksum != target.checksum {
-                return Err("the file changed since it was shared (checksum mismatch)".to_string());
+            let resolved = dest.resolve(&target.name);
+            std::fs::create_dir_all(&resolved.dir)
+                .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
+            let part = resolved.dir.join(format!(".molt-download-{}.part", target.id_hex));
+            // copy first, then verify the bytes that ACTUALLY landed (the
+            // source may be rewritten between the hash and the copy) — the
+            // .part is removed on any failure, like the network path
+            let copy_and_verify = || -> Result<(), String> {
+                std::fs::copy(&source, &part).map_err(|e| format!("copying: {e}"))?;
+                let (landed, _) = hash_file(&part)
+                    .map_err(|e| format!("reading the copied file failed: {e}"))?;
+                if !target.checksum.is_empty() && landed != target.checksum {
+                    return Err(
+                        "the file changed since it was shared (checksum mismatch)".to_string(),
+                    );
+                }
+                Ok(())
+            };
+            if let Err(e) = copy_and_verify() {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
             }
-            let part = dest_dir.join(format!(".molt-download-{}.part", target.id_hex));
-            std::fs::copy(&source, &part).map_err(|e| format!("copying: {e}"))?;
-            let final_path = resolve_collision(&dest_dir, &file_name);
+            let final_path = final_path(&resolved);
             std::fs::rename(&part, &final_path).map_err(|e| {
                 let _ = std::fs::remove_file(&part);
                 format!("moving into place: {e}")
@@ -919,7 +990,6 @@ mod tests {
                     announce_transport,
                     source,
                     expected_size,
-                    0, // 0 = skip the mtime pin (exercised separately)
                     req.id,
                     req.reply,
                 ));
@@ -1016,7 +1086,6 @@ mod tests {
                         announce_transport,
                         source_for_serve,
                         size,
-                        0,
                         req.id,
                         req.reply,
                     ));

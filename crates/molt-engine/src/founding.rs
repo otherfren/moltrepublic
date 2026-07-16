@@ -632,10 +632,9 @@ fn spawn_smp_provisioning(
     rule_n: u8,
 ) {
     tokio::spawn(async move {
-        tracing::info!(seats = seat_setup.len(), "SMP invite-queue provisioning started");
+        tracing::debug!(seats = seat_setup.len(), "SMP invite-queue provisioning started");
         let mut materials = Vec::with_capacity(seat_setup.len());
         for (seat, ticket, invite_wrap) in seat_setup {
-            tracing::info!(seat, "creating invite queue");
             let invite_q = match transport.create_queue().await {
                 Ok(q) => q,
                 Err(e) => {

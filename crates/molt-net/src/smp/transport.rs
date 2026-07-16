@@ -249,21 +249,17 @@ impl<C: PooledConn> ConnPool<C> {
     where
         F: for<'a> FnMut(&'a mut C) -> ConnFut<'a, R>,
     {
-        tracing::debug!("pool: awaiting the connection slot");
         let mut slot = self.slot.lock().await;
-        tracing::debug!("pool: slot acquired");
         let mut last: Option<NetError> = None;
         for _ in 0..2 {
             let reused = slot.is_some();
             if slot.is_none() {
                 *slot = Some(self.open(dialer, server).await?);
             }
-            tracing::debug!(reused, "pool: running op");
             let result = {
                 let conn = slot.as_mut().expect("just ensured a connection");
                 op(conn).await
             };
-            tracing::debug!(ok = result.is_ok(), "pool: op finished");
             match result {
                 Ok(r) => return Ok(r),
                 Err(e) => {

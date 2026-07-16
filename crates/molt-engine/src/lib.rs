@@ -1994,8 +1994,9 @@ mod tests {
             "the 10-day-old message ages out of the 7-day default window"
         );
         assert_eq!(
-            snap.channels[0].count, 3,
-            "channels enumerate the full log — a channel never vanishes by aging"
+            snap.channels[0].count, 2,
+            "channel counts agree with the retention-filtered read (the stale \
+             message ages out of the count too, ts 0 stays)"
         );
         // widening the window to 30 days via an applied org change brings
         // the stale message back — the setting is REAL state
