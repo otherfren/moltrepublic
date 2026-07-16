@@ -166,7 +166,10 @@ export component AppWindow inherits Window {
     // comma-joined config keys that changed but only apply on restart
     // (session.restart_required); empty = none. Persistent, not a toast.
     in property <string> restart-keys;
-    in property <string> config-path;
+    // the config.toml location, split for display: directory (greyed) and
+    // file name (text color) — set together by the Rust side
+    in property <string> config-dir;
+    in property <string> config-file;
 
     // ---- active workspace (main header), live-mirrored from the engine ----
     in property <string> active-workspace;
@@ -243,7 +246,9 @@ export component AppWindow inherits Window {
     // an Organization change (charter / image / …): op, display title, and
     // the drafted value — Rust turns it into the same Command::Propose the
     // MCP propose tool drives (co-equality)
-    callback org-propose(string, string, string);
+    // (op, value) — the op is the language-neutral title placeholder;
+    // the Rust side never bakes a rendered title into the payload
+    callback org-propose(string, string);
     callback approve(int);
     callback decline(int);
     // select the main-view surface (routed to a SelectSurface command; the
@@ -632,6 +637,8 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-secret;
     in-out property <string> cfg-s3-bucket;
     in-out property <int> cfg-s3-interval: 60;
+    // backup retention: keep at most this many copies per workspace
+    in-out property <int> cfg-s3-copies: 5;
     property <int> set-tab: 0;
     // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
     in property <[BackupRow]> bk-rows;
@@ -4806,7 +4813,7 @@ export component AppWindow inherits Window {
                                     spacing: 10px;
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        background: Theme.panel;
+                                        background: ws-dir-ta.has-hover ? Theme.raised : Theme.panel;
                                         border-radius: Theme.radius;
                                         border-width: Theme.border-w;
                                         border-color: Theme.line;
@@ -4819,6 +4826,16 @@ export component AppWindow inherits Window {
                                             color: Theme.text;
                                             font-size: Theme.fs-cap;
                                             wrap: char-wrap;
+                                        }
+                                        // clicking the path opens the same
+                                        // folder picker as the button next
+                                        // to it
+                                        ws-dir-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.ws-dir-draft = root.cfg-workspace-dir;
+                                                root.ws-dir-modal-open = true;
+                                            }
                                         }
                                     }
                                     AppButton {
@@ -4850,8 +4867,12 @@ export component AppWindow inherits Window {
                             // wander per row. 24 = side paddings, 40 = 4 gaps.
                             property <length> name-w: (self.width - 24px - 44px - 72px - 108px - 40px) / 2;
                             // section head: plain title, the on/off switch and
-                            // the interval sit to its right
+                            // the interval sit to its right. The whole form
+                            // half is stretch-0: extra window height belongs
+                            // to the mapping table below, the field spacing
+                            // must not widen with the window.
                             HorizontalLayout {
+                                vertical-stretch: 0;
                                 spacing: 18px;
                                 alignment: start;
                                 Text {
@@ -4885,6 +4906,26 @@ export component AppWindow inherits Window {
                                         color: Theme.dim;
                                         vertical-alignment: center;
                                     }
+                                    // retention: how many copies the bucket
+                                    // keeps per workspace before pruning
+                                    Text {
+                                        text: Strings.set-s3-keep;
+                                        color: Theme.dim;
+                                        vertical-alignment: center;
+                                    }
+                                    AppStepper {
+                                        width: 110px;
+                                        height: 30px;
+                                        y: (parent.height - self.height) / 2;
+                                        value <=> root.cfg-s3-copies;
+                                        minimum: 1;
+                                        maximum: 999;
+                                    }
+                                    Text {
+                                        text: Strings.set-s3-unit-copies;
+                                        color: Theme.dim;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                             Rectangle {
@@ -4892,6 +4933,7 @@ export component AppWindow inherits Window {
                                 background: Theme.line;
                             }
                             FieldLabel {
+                                vertical-stretch: 0;
                                 label: Strings.field-s3-endpoint;
                                 AppField {
                                     text <=> root.cfg-s3-endpoint;
@@ -4899,6 +4941,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             HorizontalLayout {
+                                vertical-stretch: 0;
                                 spacing: 12px;
                                 FieldLabel {
                                     label: Strings.field-s3-access;
@@ -4918,6 +4961,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             HorizontalLayout {
+                                vertical-stretch: 0;
                                 spacing: 12px;
                                 FieldLabel {
                                     label: Strings.field-s3-bucket;
@@ -4946,6 +4990,7 @@ export component AppWindow inherits Window {
                             // greyed placeholder: routing backups over Tor to an
                             // onion endpoint is a later step (not wired yet)
                             DisabledTorRow {
+                                vertical-stretch: 0;
                                 label: Strings.field-s3-tor;
                                 onion-label: Strings.field-s3-onion;
                             }
@@ -4956,6 +5001,7 @@ export component AppWindow inherits Window {
                             // local ↔ bucket mapping: every row has at least
                             // one side; auto-backup toggles per workspace
                             HorizontalLayout {
+                                vertical-stretch: 0;
                                 padding-left: 12px;
                                 padding-right: 12px;
                                 spacing: 10px;
@@ -5308,11 +5354,21 @@ export component AppWindow inherits Window {
                         if root.set-tab != 2: Rectangle {
                             vertical-stretch: 1;
                         }
-                        Text {
-                            text: "\{Strings.set-path-label}:  \{root.config-path}";
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
+                        // the full config.toml path: directory greyed, the
+                        // file name itself in text color
+                        HorizontalLayout {
+                            alignment: start;
+                            Text {
+                                text: "\{Strings.set-path-label}:  \{root.config-dir}";
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: root.config-file;
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                            }
                         }
                         // persistent (not a toast): these values only take
                         // effect on the next start of the node
@@ -5553,12 +5609,12 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-logo-modal-open = false;
-            root.org-propose("set_image", Strings.op-change-logo, root.org-logo-draft);
+            root.org-propose("set_image", root.org-logo-draft);
             root.show-toast(Strings.toast-proposed);
         }
         alted => {
             root.org-logo-modal-open = false;
-            root.org-propose("remove_image", Strings.op-remove-logo, "");
+            root.org-propose("remove_image", "");
             root.show-toast(Strings.toast-proposed);
         }
         VerticalLayout {
@@ -5694,7 +5750,7 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-name-modal-open = false;
-            root.org-propose("set_name", Strings.op-change-name, root.org-name-draft);
+            root.org-propose("set_name", root.org-name-draft);
             root.show-toast(Strings.toast-proposed);
         }
         AppField {
@@ -5725,7 +5781,7 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-charter-modal-open = false;
-            root.org-propose("set_charter", Strings.op-change-charter, root.org-charter-draft);
+            root.org-propose("set_charter", root.org-charter-draft);
             root.show-toast(Strings.toast-proposed);
         }
         // the whole charter stays readable while editing: a big, scrolling
@@ -5800,7 +5856,7 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-retention-modal-open = false;
-            root.org-propose("set_chat_retention", Strings.op-chat-retention, "\{root.org-retention-draft} days");
+            root.org-propose("set_chat_retention", "\{root.org-retention-draft} days");
             root.show-toast(Strings.toast-proposed);
         }
         HorizontalLayout {
