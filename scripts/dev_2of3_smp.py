@@ -102,8 +102,11 @@ theme = "dark"
 
     def start(self) -> None:
         logf = open(self.dir / "moltd.log", "ab")
+        # keep stdin OPEN: headless moltd also serves MCP over stdio and
+        # exits once stdin reaches EOF — we drive it over TCP instead
         self.proc = subprocess.Popen(
             [str(self.moltd), "--config", str(self.dir / "config.toml")],
+            stdin=subprocess.PIPE,
             stdout=logf,
             stderr=logf,
             cwd=self.dir,
@@ -182,11 +185,22 @@ def found_2_of_3(a: Node, b: Node, c: Node) -> None:
         "name": DAO_NAME, "member": a.name, "threshold": 2, "members": 3,
     })
 
+    def has_handover(link: str) -> bool:
+        # a joinable link's LAST segment is the hex-encoded transport
+        # handover (server/queue/wrap/seat) — a short pre-provisioning
+        # link ends in the ticket only
+        blob = link.rsplit("/", 1)[-1]
+        return (
+            link.startswith("molt://")
+            and len(blob) >= 64
+            and all(ch in "0123456789abcdef" for ch in blob)
+        )
+
     def seat_links():
         s = a.tool("read_session")
         seats = s.get("create", {}).get("seats", [])
         links = [seat.get("link", "") for seat in seats]
-        if len(links) == 2 and all(l.startswith("molt://") and "@" in l for l in links):
+        if len(links) == 2 and all(has_handover(l) for l in links):
             return links
         return None
 
@@ -195,11 +209,20 @@ def found_2_of_3(a: Node, b: Node, c: Node) -> None:
 
     b.tool("join_start", {"invite": links[0], "member": b.name})
     c.tool("join_start", {"invite": links[1], "member": c.name})
-    a.poll(
-        "both members joined (can_propose)",
-        lambda: a.tool("read_session")["create"].get("can_propose"),
-        timeout=90,
-    )
+
+    def joined():
+        create = a.tool("read_session")["create"]
+        if create.get("can_propose"):
+            return True
+        states = [(seat.get("member") or "?", seat.get("state")) for seat in create.get("seats", [])]
+        joiner_logs = {
+            n.name: n.tool("read_session")["join"].get("log", [])[-1:]
+            for n in (b, c)
+        }
+        log(f"  … seats: {states} · joins: {joiner_logs}")
+        return False
+
+    a.poll("both members joined (can_propose)", joined, timeout=240, every=5)
     log("both members joined — founder proposes the charter")
     a.tool("create_propose", {"name": DAO_NAME, "agenda": DAO_AGENDA})
 
