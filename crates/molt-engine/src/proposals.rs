@@ -464,6 +464,21 @@ impl State {
         crate::now_secs().saturating_sub(self.org_effective().retention_days * 86_400)
     }
 
+    /// THE retention predicate: has `ts` aged out of the read contract at
+    /// `cutoff`? One definition for the bulk filter ([`State::chat_visible`])
+    /// and the point checks (download of a share, serving a fetch request),
+    /// so they cannot drift. ts 0 = unknown age, never expires.
+    pub(crate) fn aged_out_at(cutoff: u64, ts: u64) -> bool {
+        ts != 0 && ts < cutoff
+    }
+
+    /// [`State::aged_out_at`] against the current cutoff — for single-message
+    /// checks. (The bulk filter computes the cutoff once instead; this fold
+    /// of the org log is too dear per message.)
+    pub(crate) fn chat_ts_aged_out(&self, ts: u64) -> bool {
+        Self::aged_out_at(self.chat_retention_cutoff(), ts)
+    }
+
     /// The chat messages the read contract exposes: "delete chat after N
     /// days" is engine semantics (co-equality — GUI and MCP see the same),
     /// so a message older than the effective window is hidden from EVERY
@@ -472,7 +487,7 @@ impl State {
     /// physical log pruning is a separate follow-up.
     pub(crate) fn chat_visible(&self) -> impl Iterator<Item = &molt_core::ChatMessage> {
         let cutoff = self.chat_retention_cutoff();
-        self.chat.iter().filter(move |m| m.ts == 0 || m.ts >= cutoff)
+        self.chat.iter().filter(move |m| !Self::aged_out_at(cutoff, m.ts))
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
@@ -511,6 +526,7 @@ impl State {
             channel: ChannelRef::Group,
             count: 0,
             last_ts: 0,
+            state: None,
         }];
         let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
         for m in self.chat_visible() {
@@ -519,11 +535,21 @@ impl State {
                     channel: m.channel.clone(),
                     count: 0,
                     last_ts: 0,
+                    state: None,
                 });
                 infos.len() - 1
             });
             infos[at].count += 1;
             infos[at].last_ts = infos[at].last_ts.max(m.ts);
+        }
+        // annotate each patch channel with its vote's lifecycle state —
+        // the read-side twin of the write guard (`ensure_channel_writable`):
+        // a terminal state tells EVERY frontend (GUI and MCP alike) the
+        // discussion is read-only. An unknown referent stays `None` (Q4).
+        for i in &mut infos {
+            if let ChannelRef::Patch { id } = &i.channel {
+                i.state = self.proposals.get(&id.0).map(|p| p.state);
+            }
         }
         infos
     }
@@ -547,7 +573,7 @@ impl State {
             .proposals
             .iter()
             .filter(|(_, p)| p.surface == surface && p.state == ProposalState::Rejected)
-            .filter(|(_, p)| p.declined_at == 0 || p.declined_at >= cutoff)
+            .filter(|(_, p)| !Self::aged_out_at(cutoff, p.declined_at))
             .map(|(id, p)| self.view(*id, p))
             .collect();
         declined.sort_by(|a, b| b.declined_at.cmp(&a.declined_at).then(b.id.0.cmp(&a.id.0)));
@@ -635,9 +661,12 @@ impl State {
     /// (within the retention window — [`State::chat_visible`]), in log order.
     /// Only metadata — the bytes move user-to-user over a dedicated encrypted
     /// queue, which is why a download needs the sharer online; the checksum
-    /// is the real sha256, the 14-day link expiry is still a mock.
+    /// is the real sha256. Uploads are ephemeral exactly like chat:
+    /// `expires_ts` is the REAL retention deadline (`ts` + the org's
+    /// `retention_days` — the one knob chat filters on; 0 = unknown age,
+    /// no deadline), past which the share leaves every read surface.
     pub(crate) fn uploads_view(&self) -> Vec<UploadView> {
-        const MOCK_LINK_TTL_SECS: u64 = 14 * 86_400;
+        let retention_secs = self.org_effective().retention_days * 86_400;
         let me = self.member();
         let entry = self
             .session
@@ -660,7 +689,7 @@ impl State {
                     kind: f.kind.clone(),
                     size: f.size,
                     available: f.available,
-                    expires_ts: m.ts + MOCK_LINK_TTL_SECS,
+                    expires_ts: if m.ts == 0 { 0 } else { m.ts + retention_secs },
                     online: m.from == me || presence(&m.from) != 2,
                     // the sharer's log-anchored sha256 ("" = legacy share,
                     // honestly unknown) — what a download must reproduce
@@ -727,6 +756,10 @@ impl State {
             name: eff.name,
             agenda: eff.agenda,
             chat_retention_days: eff.retention_days,
+            // recovery exists exactly here — the frontends key the per-member
+            // "recovery link" action on this (never on the member's presence:
+            // a recovery link is FOR an unreachable member)
+            chain_governed: self.is_chain_governed(),
         }
     }
 }

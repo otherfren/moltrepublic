@@ -580,7 +580,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them.",
+            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY — chat_send/share_file into it are refused — but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -618,7 +618,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_uploads",
             command: "read_uploads",
-            description: "The Organization → Uploads table: every file shared into the chat (metadata only — bytes move user-to-user via the share link), with sharer, timestamp, availability, and the mock 14-day link expiry. The `id` is the chat message id `download_file` takes.",
+            description: "The Organization → Uploads table: every file shared into the chat (metadata only — bytes move user-to-user via the share link), with sharer, timestamp, availability, and the retention deadline (`expires_ts`) — uploads are ephemeral like chat and age out of the read (and become undownloadable) after the org's chat retention window. The `id` is the chat message id `download_file` takes.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -891,7 +891,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_invite_start",
             command: "recover_invite_start",
-            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The engine opens a dedicated recovery queue on the running mesh transport and listens; read_session shows the resulting molt://recover/… link to share off-band. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
+            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online — the link exists precisely because they are unreachable. The engine opens a dedicated recovery queue on this node's running mesh transport and listens; the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' (e.g. mesh-not-running — reopen the republic so this node's own mesh is up). The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1022,7 +1022,10 @@ mod tests {
         // node's own SMP probe reporting back (net_test_server is the tool);
         // net_ritual_link_ready / net_ritual_failed are the off-actor
         // provisioning task reporting a seat's real link or a provisioning
-        // failure; net_join_sealed / net_join_failed are the off-actor join
+        // failure; net_recover_link_failed is the recovery-mint provisioning
+        // task reporting its failure (recover_invite_start is the tool; the
+        // outcome — link or failure — rides the session notice);
+        // net_join_sealed / net_join_failed are the off-actor join
         // task reporting back; net_recover_sealed / net_recover_failed are the
         // off-actor rejoin task reporting back (recover_start is the tool);
         // net_recover_announced is the recovery recv loop delivering a
@@ -1036,7 +1039,7 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 30] = [
+        const INTERNAL: [&str; 31] = [
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",
@@ -1051,6 +1054,7 @@ mod tests {
             "net_seal_signed",
             "net_recover_requested",
             "net_recover_link_ready",
+            "net_recover_link_failed",
             "net_test_result",
             "net_ritual_link_ready",
             "net_ritual_failed",

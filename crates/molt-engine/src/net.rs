@@ -789,7 +789,11 @@ impl State {
                 // dropping the message — a peer's mangled tag must not
                 // suppress content anyone was meant to see, and the log
                 // keeps its "every stored topic name is normalized"
-                // invariant.
+                // invariant. Same posture for CLOSED discussions: the
+                // local send guard (`ensure_channel_writable`) is NOT
+                // applied here — a peer's message that was in flight while
+                // the vote decided must still land identically on every
+                // member (convergence over enforcement).
                 msg.channel = msg
                     .channel
                     .normalized()
@@ -1004,6 +1008,14 @@ impl State {
             refuse("the sharer removed the file — no longer available");
             return;
         }
+        // uploads are ephemeral like chat: once the share aged out of the
+        // sharer's own read contract it is not served any more, even to a
+        // requester whose engine skipped its local check (near the boundary
+        // this is an honest refusal, not a hang)
+        if self.chat_ts_aged_out(msg.ts) {
+            refuse("the share aged out of the chat retention window");
+            return;
+        }
         let size = file.size;
         let Some(path) = self.share_paths.get(&id).cloned() else {
             refuse("this node no longer knows the shared file's local path");
@@ -1093,7 +1105,11 @@ impl State {
     /// existing seat. Validate the request against the open chain-governed
     /// workspace, mint a single-use ticket (the spend-once guard registers it),
     /// then provision the dedicated recovery queue off the actor and report the
-    /// link. Rejections are surfaced to the operator; nothing is torn down.
+    /// link. Caller errors (no republic, unknown seat, no chain) reject hard;
+    /// OPERATIONAL states report on the recovery notice channel instead — the
+    /// mint's real outcome (the link, or a failure) always arrives there, and
+    /// the RETURNING member's presence is never involved: the link exists
+    /// precisely because that member is unreachable.
     pub(crate) fn cmd_recover_invite_start(
         &mut self,
         member: MemberId,
@@ -1117,12 +1133,25 @@ impl State {
         }
         let republic = replica.name.clone();
         let republic_id = replica.republic_id.clone();
+        // announce the attempt on the recovery notice channel: the frontends
+        // render a calm pending state until the real outcome (`recovery-link:`
+        // or `recovery-link-failed:`) replaces it — and because pending and
+        // outcome always differ, a REPEATED identical outcome still
+        // edge-triggers on every attempt
+        self.session.notice = format!("recovery-link-pending:{member}");
+        self.emit_session(molt_core::SessionScope::Full);
         // the recovery queue is minted on the RUNTIME transport (a clone shares
-        // its Arc, so this node can both create the queue and subscribe to it)
+        // its Arc, so this node can both create the queue and subscribe to it).
+        // No runtime mesh (e.g. the workspace was reopened without a resumable
+        // transport) is an operational state of THIS node, not a caller error:
+        // ack the decision and report the calm outcome on the notice channel.
         let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) else {
-            return Err(MoltError::Recover(
-                "the republic's mesh is not running — cannot mint a recovery queue".to_string(),
-            ));
+            return self.cmd_net_recover_link_failed(
+                member,
+                "mesh-not-running".to_string(),
+                String::new(),
+                None,
+            );
         };
         let ticket = molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
         let wrap = molt_net::wrap::WrapKey::fresh().map_err(|e| MoltError::Recover(e.to_string()))?;
@@ -1162,6 +1191,32 @@ impl State {
         }
         tracing::info!(%member, %link, "recovery link ready");
         self.session.notice = format!("recovery-link:{link}");
+        self.emit_session(molt_core::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// A recovery-link mint failed — either synchronously (no runtime mesh,
+    /// from [`Self::cmd_recover_invite_start`] itself) or from the off-actor
+    /// provisioning task (`Command::NetRecoverLinkFailed`, e.g. the SMP server
+    /// was unreachable). Surface the calm `recovery-link-failed:` notice on the
+    /// same channel the minted link rides — the operator asked for a link, so
+    /// silence would leave it waiting forever — and unregister the dead mint's
+    /// ticket (it never left this node; nothing of the attempt stays armed).
+    pub(crate) fn cmd_net_recover_link_failed(
+        &mut self,
+        member: MemberId,
+        reason: String,
+        ticket: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        if !ticket.is_empty() {
+            self.recovery_tickets.remove(&ticket);
+        }
+        tracing::warn!(%member, %reason, "recovery link mint failed");
+        self.session.notice = format!("recovery-link-failed:{reason}");
         self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1645,6 +1700,28 @@ mod tests {
     use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
     use molt_core::{ChatMessage, EventEnvelope, MessageId, WorkspaceEvent};
 
+    /// The provisioning task's failure report lands as the calm
+    /// `recovery-link-failed:` session notice (the same channel the minted
+    /// link rides), and the dead mint's ticket is unregistered — nothing of
+    /// the failed attempt stays armed.
+    #[test]
+    fn a_recover_link_failure_report_sets_the_notice_and_kills_the_ticket() {
+        let mut st = crate::tests::plain_state();
+        st.recovery_tickets.insert("t-1".to_string());
+        st.cmd_net_recover_link_failed(
+            "bob".to_string(),
+            "boom".to_string(),
+            "t-1".to_string(),
+            None,
+        )
+        .expect("the report acks");
+        assert_eq!(st.session.notice, "recovery-link-failed:boom");
+        assert!(
+            st.recovery_tickets.is_empty(),
+            "the failed mint's ticket must not stay armed"
+        );
+    }
+
     /// A wire reaction whose known target is already a tombstone is skipped
     /// ENTIRELY — no event recorded (the log gets no dead entry), nothing
     /// parked, no reaction on the tombstone. The commuting twin of the
@@ -1679,6 +1756,78 @@ mod tests {
         assert_eq!(st.next_seq, seq_before, "no event was recorded");
         assert!(st.chat[0].reactions.is_empty(), "no reaction on the tombstone");
         assert!(!st.parked.holds(&id), "a KNOWN tombstoned target parks nothing");
+    }
+
+    /// A wire chat message into a DECIDED vote's discussion still lands in
+    /// the log: closed discussions are enforced on the local send paths
+    /// only (`cmd_chat` / `cmd_share_file`) — the receive path stays
+    /// permissive so every member's log converges even when a peer's
+    /// message was in flight while the vote decided (convergence over
+    /// enforcement, same posture as the channel-claim coercion above).
+    #[test]
+    fn a_wire_chat_into_a_closed_discussion_still_lands() {
+        // a runtime context: the send path stands the demo mesh up and the
+        // delivery publishes to the transport feed (spawned tasks)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        // a proposal that is proposed, then declined — replayed as events,
+        // exactly like the log rebuild does it
+        st.apply(&EventEnvelope {
+            seq: 1,
+            ts: 100,
+            by: "me".to_string(),
+            body: WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: molt_core::Surface::Memory,
+                payload: serde_json::json!({ "op": "add_note", "title": "t" }),
+            },
+        });
+        st.apply(&EventEnvelope {
+            seq: 2,
+            ts: 101,
+            by: "peer-2".to_string(),
+            body: WorkspaceEvent::Declined {
+                id: molt_core::ProposalId(1),
+                by: "peer-2".to_string(),
+            },
+        });
+        // the local send path refuses…
+        assert!(matches!(
+            st.cmd_chat(
+                "too late".to_string(),
+                None,
+                molt_core::ChannelRef::Patch {
+                    id: molt_core::ProposalId(1)
+                },
+            ),
+            Err(molt_core::MoltError::DiscussionClosed(
+                molt_core::ProposalId(1),
+                molt_core::ProposalState::Rejected,
+            ))
+        ));
+        // …but the same message arriving over the wire lands in the log
+        let msg = ChatMessage::text(id(7), "peer-1", "was in flight", 102).with_channel(
+            molt_core::ChannelRef::Patch {
+                id: molt_core::ProposalId(1),
+            },
+        );
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope {
+                seq: 1,
+                ts: 102,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+        assert_eq!(st.chat.len(), 1, "the wire message landed");
+        assert_eq!(st.chat[0].body, "was in flight");
     }
 
     fn id(n: usize) -> MessageId {

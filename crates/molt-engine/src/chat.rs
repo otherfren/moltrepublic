@@ -19,8 +19,8 @@
 //! mesh, whose peers answer through their own engines.
 
 use molt_core::{
-    ChannelRef, ChatKind, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError, Reply,
-    WorkspaceEvent,
+    ChannelRef, ChatKind, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError,
+    ProposalState, Reply, WorkspaceEvent,
 };
 
 use crate::{now_secs, State};
@@ -48,6 +48,25 @@ pub(crate) fn sanitize_emoji(emoji: &str) -> Option<String> {
 }
 
 impl State {
+    /// Refuse a local write into the discussion of a DECIDED vote: a
+    /// `Patch` channel is read-only iff its proposal is known here and no
+    /// longer `Proposed` — the deliberation ended with the vote. UNKNOWN
+    /// patch ids stay writable (chat-bus Q4: a ref may arrive before — or
+    /// forever without — its referent, and must never error). Enforced on
+    /// the LOCAL send paths only (`cmd_chat`, `cmd_share_file`); the wire
+    /// receive path (`net.rs`) stays permissive so logs converge even when
+    /// a peer's message was in flight while the vote decided.
+    pub(crate) fn ensure_channel_writable(&self, channel: &ChannelRef) -> Result<(), MoltError> {
+        if let ChannelRef::Patch { id } = channel {
+            if let Some(p) = self.proposals.get(&id.0) {
+                if p.state != ProposalState::Proposed {
+                    return Err(MoltError::DiscussionClosed(*id, p.state));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Post as the local member.
     pub(crate) fn cmd_chat(
         &mut self,
@@ -57,6 +76,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.ensure_channel_writable(&channel)?;
         let from = self.member();
         self.post_message(from, body, quote, channel)?;
         Ok(Reply::Ack)
@@ -114,6 +134,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.ensure_channel_writable(&channel)?;
         let path = path.trim().to_string();
         if path.is_empty() {
             return Err(MoltError::BadPayload(
@@ -137,7 +158,10 @@ impl State {
     /// metadata + checksum) and remember the source path so this node can
     /// serve downloads — across restarts, via the prefs sidecar. (The arm
     /// mirrors the command's fields one-to-one; bundling them into a struct
-    /// would only rename the coupling.)
+    /// would only rename the coupling.) Deliberately NOT re-checked against
+    /// `ensure_channel_writable`: the operator's share was admitted at
+    /// `cmd_share_file` time — a vote deciding during the hash must not
+    /// retro-refuse it (same posture as a wire arrival).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_file_shared(
         &mut self,
@@ -199,6 +223,13 @@ impl State {
             let file = msg.file.as_ref().ok_or(MoltError::NoFile(id))?;
             if !file.available {
                 return Err(MoltError::FileUnavailable(id));
+            }
+            // uploads are ephemeral like chat: a share that aged out of the
+            // retention window left the read contract (it is not in the
+            // uploads table any more), so downloading it is refused too —
+            // before any task spawns or a download phase is recorded
+            if self.chat_ts_aged_out(msg.ts) {
+                return Err(MoltError::FileExpired(id));
             }
             (
                 msg.from.clone(),

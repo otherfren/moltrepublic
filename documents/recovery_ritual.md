@@ -276,6 +276,21 @@ The product never uses the seam.
   dedicated recovery queue on the runtime transport, wires the recv loop, renders
   the link) + the spend-once ticket guard in `cmd_net_recover_requested`. Proven:
   `two_instances.rs::recovery_flows_over_a_coordinator_minted_link`.
+  **The mint never involves the returning member's presence** — the link exists
+  precisely because that member is unreachable; the only live dependency is the
+  coordinator's OWN runtime mesh (the queue must be created on, and later
+  received on, the coordinator's transport). Since 2026-07-16 the mint's
+  lifecycle rides the session-notice channel: `recovery-link-pending:<member>`
+  on the attempt, then `recovery-link:<link>` or `recovery-link-failed:<reason>`
+  (`mesh-not-running` when the coordinator's mesh is not up — e.g. a reopen
+  without a resumable transport — or the transport error when the off-actor
+  queue provisioning fails, reported by the INTERNAL
+  `Command::NetRecoverLinkFailed`, which also unregisters the dead mint's
+  ticket). Operational states are notices, never raw command errors; only
+  caller errors (unknown seat, no republic, no chain) reject hard. Pinned by
+  `a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring`
+  (`two_instances.rs`) and
+  `a_failed_queue_provisioning_reports_back_instead_of_silence` (`recovery.rs`).
 - **Rejoiner driver** — ✅ `recovery.rs::run_rejoin` / `rejoin_over_smp`
   (re-derive identity → fresh KeyPackage → `RecoverRequest` → await `Welcome` →
   `join_from_welcome`). Proven with real crypto (post-rekey bidirectional
@@ -345,11 +360,15 @@ The product never uses the seam.
   visibly (`recover-failed`); the retry is a fresh `RecoverStart` with a fresh
   link.
 
-- **Recovery UI** — ✅ (2026-07-11) both surfaces in `molt-ui`, driving the
-  same co-equal commands. Coordinator: a per-member "Create recovery link"
-  action (Organization → Members) sends `RecoverInviteStart`; the
-  `recovery-link:` notice opens a copyable dialog carrying the
-  off-band/single-use/dies-with-the-session caution. Rejoiner: a "Recover"
+- **Recovery UI** — ✅ (2026-07-11, mint states 2026-07-16) both surfaces in
+  `molt-ui`, driving the same co-equal commands. Coordinator: a per-member
+  "Create recovery link" action (Organization → Members, offered only on a
+  chain-governed republic — `StatusView.chain_governed`, never keyed on the
+  member's presence) sends `RecoverInviteStart`; the mint notices drive one
+  dialog through three calm states — pending, the copyable link (with the
+  off-band/single-use/dies-with-the-session caution), or a localized failed
+  explanation (`mesh-not-running` names THIS device's condition and says the
+  returning member need not be online) — never an error toast. Rejoiner: a "Recover"
   first-run path (link + phrase → `RecoverStart`), progress rendered from the
   `recover-started:` / `recover-failed:` / `recovered:` notices. The rejoin
   notice is a real system line: `ChatMessage.kind = ChatKind::System` —

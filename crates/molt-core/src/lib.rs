@@ -2373,6 +2373,24 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A recovery link's off-actor queue provisioning failed (e.g. the SMP
+    /// server is unreachable), so no link will ever arrive (engine-internal,
+    /// from the recovery-mint task). The engine surfaces the calm
+    /// `recovery-link-failed:` notice — the flip side of
+    /// [`Command::NetRecoverLinkReady`] — and unregisters the dead mint's
+    /// ticket. Never an MCP tool.
+    NetRecoverLinkFailed {
+        /// The returning member the failed link was minted for.
+        member: MemberId,
+        /// A reason for the operator (`mesh-not-running`, or transport text).
+        reason: String,
+        /// The failed mint's single-use ticket, so the spend-once guard can
+        /// unregister it (it never left this node).
+        ticket: String,
+        /// Workspace scope (stale reports for a closed workspace are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder's off-actor SMP provisioning failed (e.g. the server is
     /// unreachable), so the founding can never seal (engine-internal). The
     /// engine fails the create run rather than leaving it stuck. Not a tool.
@@ -2773,6 +2791,13 @@ pub struct ChannelInfo {
     pub count: usize,
     /// Timestamp of its newest message (unix seconds; 0 when empty).
     pub last_ts: u64,
+    /// For a `Patch` channel whose proposal this engine knows: the vote's
+    /// lifecycle state — a terminal state means the discussion is closed
+    /// (read-only). `None` for Group/Topic channels and for patch refs
+    /// whose proposal is unknown here (chat-bus Q4: those stay writable).
+    /// Additive (`#[serde(default)]`), so older snapshots read as `None`.
+    #[serde(default)]
+    pub state: Option<ProposalState>,
 }
 
 /// A projected snapshot of one surface.
@@ -2855,8 +2880,10 @@ pub struct DownloadView {
 /// One file shared into the chat (Organization → Uploads). Only metadata
 /// travels in the chat — the bytes stay on the sharer's disk and move
 /// user-to-user over a dedicated encrypted queue when a member downloads
-/// ([`FileMeta`]), which is why a download needs the sharer online. The
-/// expiry is still a mock: links die 14 days after the share.
+/// ([`FileMeta`]), which is why a download needs the sharer online.
+/// Uploads are ephemeral exactly like chat: past `expires_ts` (the chat
+/// retention window after the share) the row leaves every read surface
+/// and a download is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadView {
     /// The carrying chat message — the address `download_file` takes.
@@ -2873,7 +2900,9 @@ pub struct UploadView {
     pub size: u64,
     /// Still present on the sharer's disk.
     pub available: bool,
-    /// When the share link expires (unix seconds; mock: `ts` + 14 days).
+    /// When the share ages out of the read contract (unix seconds): `ts` +
+    /// the org's effective chat retention window — the same knob chat
+    /// filters on. 0 = unknown age (`ts` 0), no deadline.
     pub expires_ts: u64,
     /// Whether the sharer is reachable right now — a user-to-user transfer
     /// needs the sharer online (mock presence; the own node is always
@@ -2937,6 +2966,12 @@ pub struct StatusView {
     /// hides chat messages and declined proposals older than this.
     #[serde(default = "default_chat_retention_days")]
     pub chat_retention_days: u64,
+    /// Whether the open workspace is a chain-governed republic. Recovery
+    /// (link mint + rejoin) exists only here — a frontend offers the
+    /// per-member "recovery link" action exactly when this is true (demo
+    /// and pre-chain workspaces have no chain for a rejoiner to verify).
+    #[serde(default)]
+    pub chain_governed: bool,
 }
 
 /// The chat-retention default: 7 days, the window every republic starts
@@ -3108,6 +3143,11 @@ pub enum MoltError {
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),
+    /// A write into the discussion channel of a decided vote (the
+    /// discussion stays readable, linked from the vote's card — but the
+    /// deliberation ended with the vote).
+    #[error("discussion of proposal {0:?} is read-only — the vote is {1:?}")]
+    DiscussionClosed(ProposalId, ProposalState),
     /// A settings value failed validation (nothing was stored or written).
     #[error("settings: {0}")]
     Settings(String),
@@ -3135,6 +3175,10 @@ pub enum MoltError {
     /// The shared file's owner deleted it locally; nothing to download.
     #[error("the shared file at message {0} is no longer available")]
     FileUnavailable(MessageId),
+    /// The share aged out of the chat retention window — uploads are
+    /// ephemeral exactly like chat, so an expired share is not downloadable.
+    #[error("the shared file at message {0} aged out of the chat retention window")]
+    FileExpired(MessageId),
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
     NotYourFile(MessageId),

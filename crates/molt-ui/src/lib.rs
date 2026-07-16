@@ -483,6 +483,113 @@ pub fn run_app(
             ui.set_bk_rows(ModelRc::new(VecModel::from(items)));
         });
     }
+    // The Organization tables' sort/filter. View-local presentation like
+    // the Open/backup lists — but these mirrored rows are rebuilt from the
+    // engine on every push, so the state lives in ChatUiState (toggle in
+    // Rust, single writer) and push_surfaces re-applies it each time; the
+    // engine's ReadMembers/ReadUploads stay the full projections for MCP.
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_sort_members(move |column| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.sort_members_by(column.as_str());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_sort_uploads(move |column| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.sort_uploads_by(column.as_str());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_filter_uploads(move |needle| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.set_uploads_filter(needle.to_string());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        // The proposal-outcome lists' pager (Organization → Declined, the
+        // gated surfaces' applied log): step the UI-local page, then
+        // re-push — the push clamps against the list's current length and
+        // echoes "page x of y" back into the surface tab.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_page_list(move |surface, list, delta| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.page_list_by(surface.as_str(), list.as_str(), delta);
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        // A member row's uploads count: jump to Organization → Uploads
+        // pre-filtered to that member. The view switch is the same engine
+        // command the nav issues; the filter itself stays single-writer in
+        // ChatUiState and the push echoes it into the filter box.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_jump_member_uploads(move |member| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.set_uploads_filter(member.to_string());
+            }
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::SelectView {
+                    surface: Surface::Organization,
+                    view: "uploads".to_string(),
+                },
+            );
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -718,12 +825,21 @@ pub fn run_app(
             };
             if let Some(ui) = weak.upgrade() {
                 ui.set_selected_channel(channel_key(&ch).as_str().into());
+                ui.set_selected_channel_votable(matches!(ch, ChannelRef::Patch { .. }));
                 // instant banner feedback — for a fresh (still empty) topic
                 // this is the only visible signal until its first message
                 // exists; the next push refreshes it with the lazy title
                 ui.set_selected_channel_label(
                     channel_display_label(&ch, &HashMap::new()).as_str().into(),
                 );
+                // …and the read-only flag from the proposal cache, so the
+                // compose row collapses on the click, not a push later (the
+                // push then re-decides from the engine's annotation)
+                let closed = chat_ui
+                    .lock()
+                    .map(|st| selected_channel_closed(&ch, &[], &st.proposals))
+                    .unwrap_or(false);
+                ui.set_selected_channel_closed(closed);
             }
             if let Ok(mut st) = chat_ui.lock() {
                 // bumps the push generation: every in-flight push read
@@ -737,6 +853,26 @@ pub fn run_app(
             rt.spawn(async move {
                 push_surfaces(&w, &weak, &chat_ui).await;
             });
+        });
+    }
+    {
+        // "back to the vote" from a patch channel's banner: the selected
+        // channel names the proposal, the proposal cache names its hosting
+        // surface — the jump reuses the sidebar's own SelectView /
+        // SelectSurface commands (no new engine verb).
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_jump_to_vote(move || {
+            let Some(cmd) = chat_ui
+                .lock()
+                .ok()
+                .and_then(|st| vote_jump_command(&st.selected, &st.proposals))
+            else {
+                return;
+            };
+            issue(&rt, &w, &weak, cmd);
         });
     }
     {
@@ -982,31 +1118,7 @@ pub fn run_app(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            use base64::Engine as _;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(img_b64.as_str())
-                .ok()
-                .and_then(|bytes| {
-                    // Slint decodes image formats from a file path — stage
-                    // the payload bytes in a temp file with a RANDOM name,
-                    // created O_EXCL so a pre-planted symlink of a guessable
-                    // name can never redirect the write onto a victim file
-                    use std::io::Write as _;
-                    let mut rand = [0u8; 16];
-                    getrandom::getrandom(&mut rand).ok()?;
-                    let path = std::env::temp_dir()
-                        .join(format!("molt-proposal-preview-{}.img", hex::encode(rand)));
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true) // O_EXCL: fail if it already exists
-                        .open(&path)
-                        .ok()?;
-                    f.write_all(&bytes).ok()?;
-                    drop(f);
-                    let img = slint::Image::load_from_path(&path).ok();
-                    let _ = std::fs::remove_file(&path);
-                    img
-                });
+            let decoded = proposal_image_from_b64(img_b64.as_str());
             match decoded {
                 Some(img) => {
                     ui.set_img_preview_title(title);
@@ -1152,6 +1264,45 @@ fn sync_strings(
         items.iter().map(|l| l.as_str().into()).collect(),
         set,
     );
+}
+
+/// Decode a pending `set_image` proposal's payload (base64 of the raw image
+/// file) into a renderable [`slint::Image`]. The bytes rode the proposal
+/// gossip (sign-what-you-see), so this runs locally on every member's
+/// device — no transfer, no proposer needed. `None` on any decode failure.
+fn proposal_image_from_b64(img_b64: &str) -> Option<slint::Image> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(img_b64)
+        .ok()?;
+    image_from_bytes(&bytes)
+}
+
+/// Decode raw image-file bytes into a [`slint::Image`], keyed on the
+/// CONTENT — a payload carries no file name, so an extension-keyed loader
+/// (`Image::load_from_path`, `image::open`) can never work here. Raster
+/// formats are sniffed and decoded in memory (exactly the picker's set:
+/// png/jpeg/webp/gif/bmp — pure-Rust decoders); an unsniffable payload
+/// gets one try as SVG source. Untrusted peer input: decode dimensions are
+/// capped so a tiny compressed bomb cannot balloon in memory.
+fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    if reader.format().is_some() {
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        reader.limits(limits);
+        let rgba = reader.decode().ok()?.into_rgba8();
+        let (w, h) = rgba.dimensions();
+        let buf =
+            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+        return Some(slint::Image::from_rgba8(buf));
+    }
+    // not a known raster signature — the one picker format without a magic
+    // number is SVG (plain text): let the vector loader have a try
+    slint::Image::load_from_svg_data(bytes).ok()
 }
 
 /// Map a session workspace into the Slint-side row struct.
@@ -1307,15 +1458,116 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
     }
 }
 
+/// Rows per page of the proposal-outcome lists (Organization → Declined
+/// and the gated surfaces' applied log). Below this the pager row hides.
+const LIST_PAGE_SIZE: usize = 20;
+
+/// The pure paging window: `(start, end, page, page_count)` over a list of
+/// `len` rows, `size` per page. The requested 0-based `page` clamps into
+/// range (a shrunk list re-bases onto its last page instead of showing an
+/// empty one), and an empty list is one empty page — `page_count` is never
+/// zero, so "page x of y" stays well-formed.
+fn page_slice(len: usize, page: usize, size: usize) -> (usize, usize, usize, usize) {
+    let page_count = len.div_ceil(size).max(1);
+    let page = page.min(page_count - 1);
+    let start = page * size;
+    let end = (start + size).min(len);
+    (start, end, page, page_count)
+}
+
+/// The bundle's effective page for one paged list (missing key = page 0).
+fn page_of(pages: &HashMap<String, usize>, surface: &str, list: &str) -> usize {
+    pages.get(&format!("{surface}:{list}")).copied().unwrap_or(0)
+}
+
+/// Toggle-or-switch a table's sort state: clicking the active column again
+/// flips the direction, a new column starts ascending.
+fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
+    if active == column {
+        *ascending = !*ascending;
+    } else {
+        *active = column.to_string();
+        *ascending = true;
+    }
+}
+
+/// Sort the Organization → Uploads rows by a header column key ("user" /
+/// "date" / "file" / "type" / "size" / "checksum" / "download" /
+/// "expires"); an empty or unknown key keeps the engine order. Text
+/// columns compare case-insensitively; date/size/expiry sort by the
+/// underlying numeric keys carried on the row — never the rendered label.
+fn sort_uploads(rows: &mut [UploadRowData], column: &str, ascending: bool) {
+    match column {
+        "user" => rows.sort_by_key(|r| r.user.to_lowercase()),
+        "date" => rows.sort_by_key(|r| r.ts),
+        "file" => rows.sort_by_key(|r| r.name.to_lowercase()),
+        "type" => rows.sort_by_key(|r| r.kind.to_lowercase()),
+        "size" => rows.sort_by_key(|r| r.bytes),
+        "checksum" => rows.sort_by_key(|r| r.checksum_full.to_lowercase()),
+        "download" => rows.sort_by_key(|r| r.status.to_lowercase()),
+        "expires" => rows.sort_by_key(|r| r.expires_ts),
+        _ => return,
+    }
+    if !ascending {
+        rows.reverse();
+    }
+}
+
+/// Keep the uploads rows whose user, filename or checksum contains
+/// `needle` case-insensitively; an empty needle keeps every row. The
+/// checksum matches on the full sha256 hex, so a pasted full checksum
+/// finds its row even though the cell shows a shortened prefix.
+fn filter_uploads(rows: Vec<UploadRowData>, needle: &str) -> Vec<UploadRowData> {
+    if needle.is_empty() {
+        return rows;
+    }
+    let needle = needle.to_lowercase();
+    rows.into_iter()
+        .filter(|r| {
+            r.user.to_lowercase().contains(&needle)
+                || r.name.to_lowercase().contains(&needle)
+                || r.checksum_full.to_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
+/// Sort the Organization → Members rows by a header column key ("name" /
+/// "id" / "pk" / "last" / "uploads"); an empty or unknown key keeps the
+/// roster order. Unanchored (empty) id/pk cells sort last ascending; no
+/// real last-seen timestamp exists yet (mock presence), so "last" orders
+/// by the presence state first, then the label.
+fn sort_members(rows: &mut [MemberRowData], column: &str, ascending: bool) {
+    match column {
+        "name" => rows.sort_by_key(|r| r.name.to_lowercase()),
+        "id" => rows.sort_by_key(|r| (r.id.is_empty(), r.id.to_lowercase())),
+        "pk" => rows.sort_by_key(|r| (r.pk.is_empty(), r.pk.to_lowercase())),
+        "last" => rows.sort_by_key(|r| (r.state, r.last.to_lowercase())),
+        "uploads" => rows.sort_by_key(|r| r.uploads),
+        _ => return,
+    }
+    if !ascending {
+        rows.reverse();
+    }
+}
+
 /// The recovery-flow reading of the transient session notice — the engine's
 /// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's
-/// minted link, and the rejoiner's started/failed/done lifecycle.
+/// mint lifecycle (pending → link | failed), and the rejoiner's
+/// started/failed/done lifecycle.
 #[derive(Debug, PartialEq, Eq)]
 enum RecoverNotice {
     /// Not a recovery notice (every other notice, e.g. "saved").
     None,
+    /// Coordinator: a link mint started for this member — the dialog opens in
+    /// its calm pending state until the outcome notice replaces it.
+    LinkPending(String),
     /// Coordinator: the engine minted a single-use `molt://recover/…` link.
     Link(String),
+    /// Coordinator: the mint failed for an operational reason of THIS node
+    /// (`mesh-not-running`, or a transport failure) — the returning member's
+    /// presence is never involved. Rendered as the calm failed state of the
+    /// same link dialog, not as an error toast.
+    LinkFailed(String),
     /// Rejoiner: the engine accepted link + phrase; the rejoin runs off the
     /// actor (it can span the survivors' human approval).
     Started(String),
@@ -1329,7 +1581,11 @@ enum RecoverNotice {
 /// Split a session notice into its recovery reading (verbatim payload —
 /// an error may itself contain colons).
 fn parse_recover_notice(notice: &str) -> RecoverNotice {
-    if let Some(link) = notice.strip_prefix("recovery-link:") {
+    if let Some(member) = notice.strip_prefix("recovery-link-pending:") {
+        RecoverNotice::LinkPending(member.to_string())
+    } else if let Some(reason) = notice.strip_prefix("recovery-link-failed:") {
+        RecoverNotice::LinkFailed(reason.to_string())
+    } else if let Some(link) = notice.strip_prefix("recovery-link:") {
         RecoverNotice::Link(link.to_string())
     } else if let Some(member) = notice.strip_prefix("recover-started:") {
         RecoverNotice::Started(member.to_string())
@@ -1539,9 +1795,26 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     if ui.get_recover_notice_seen() != sv.notice.as_str() {
         ui.set_recover_notice_seen(sv.notice.clone().into());
         match parse_recover_notice(&sv.notice) {
+            RecoverNotice::LinkPending(member) => {
+                // coordinator: a mint attempt started — open the dialog in
+                // its calm pending state (the outcome notice fills it in)
+                ui.set_recover_link_member(member.into());
+                ui.set_recovery_link("".into());
+                ui.set_recovery_link_error("".into());
+                ui.set_recover_link_open(true);
+            }
             RecoverNotice::Link(link) => {
                 // coordinator: present the freshly minted single-use link
                 ui.set_recovery_link(link.into());
+                ui.set_recovery_link_error("".into());
+                ui.set_recover_link_open(true);
+            }
+            RecoverNotice::LinkFailed(reason) => {
+                // coordinator: the mint failed for an operational reason of
+                // THIS node — same dialog, calm failed state (never a toast;
+                // the returning member's presence is irrelevant to a mint)
+                ui.set_recovery_link("".into());
+                ui.set_recovery_link_error(reason.into());
                 ui.set_recover_link_open(true);
             }
             RecoverNotice::Started(member) => {
@@ -1725,10 +1998,31 @@ struct SurfacesBundle {
     selected_key: String,
     /// Compose-banner label of the selected channel ("" = group).
     selected_label: String,
-    /// Organization → Members table rows (engine `ReadMembers`).
+    /// The selected channel is a decided vote's read-only discussion
+    /// (collapses the compose row, shows the banner's 🔒 note).
+    selected_closed: bool,
+    /// Organization → Members table rows (engine `ReadMembers`), already
+    /// ordered by the active sort.
     members: Vec<MemberRowData>,
-    /// Organization → Uploads table rows (engine `ReadUploads`).
+    /// Organization → Uploads table rows (engine `ReadUploads`), already
+    /// thinned by the filter and ordered by the active sort.
     uploads: Vec<UploadRowData>,
+    /// Members sort echo: active column ("" = roster order) + direction —
+    /// the headers render the ▲/▼ from these.
+    members_sort: String,
+    members_asc: bool,
+    /// Uploads sort echo (like `members_sort`).
+    uploads_sort: String,
+    uploads_asc: bool,
+    /// Uploads filter echo — lands in the filter box only when it differs
+    /// (a workspace-switch reset or the members-table uploads-jump; live
+    /// typing is guarded by the generation).
+    uploads_filter: String,
+    /// Effective (push-clamped) 0-based page per paged proposal-outcome
+    /// list, keyed `"{surface}:{list}"` — `apply_surfaces` slices the
+    /// declined/applied models with it and echoes "page x of y" into the
+    /// surface tab (see [`ChatUiState::list_pages`]).
+    list_pages: HashMap<String, usize>,
     /// The status info strip (founding date + mock activity trio).
     org_stats: OrgStats,
     /// Group-channel unread count (badges the Gruppe nav row).
@@ -1747,6 +2041,10 @@ struct OrgStats {
     /// The effective "delete chat after" window (engine
     /// `StatusView.chat_retention_days`).
     retention_days: i32,
+    /// Whether the open workspace is a chain-governed republic (engine
+    /// `StatusView.chain_governed`) — the per-member "recovery link" action
+    /// exists exactly there, so the Members table offers it only then.
+    chain_governed: bool,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -1783,6 +2081,16 @@ struct UploadRowData {
     status: String,
     /// 0 idle · 1 running · 2 done · 3 failed (drives color + button).
     status_kind: i32,
+    /// Share time (unix seconds) — the sort key behind the rendered `date`.
+    ts: u64,
+    /// Size in bytes — the sort key behind the rendered `size` label.
+    bytes: u64,
+    /// Link expiry (unix seconds) — the sort key behind `expires`.
+    expires_ts: u64,
+    /// The FULL sha256 hex ("" on legacy shares) — the filter/sort key
+    /// behind the shortened `checksum` cell, so a pasted full checksum
+    /// still finds its row.
+    checksum_full: String,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -1845,6 +2153,30 @@ struct ChatUiState {
     /// is no longer current must neither apply its bundle nor touch the
     /// unread ledger (see [`ChatUiState::begin_push`]).
     generation: u64,
+    /// Organization → Members sort: active column ("" = roster order).
+    /// Like the channel selection this is UI-LOCAL presentation state —
+    /// the engine's `ReadMembers`/`ReadUploads` stay the full projections
+    /// (MCP sees them unchanged); this window merely re-orders/thins the
+    /// mirrored rows before pushing them into the Slint models. A
+    /// workspace switch resets it with the rest of this state.
+    members_sort: String,
+    /// Members sort direction (meaningful only while `members_sort` != "").
+    members_asc: bool,
+    /// Organization → Uploads sort: active column ("" = engine order).
+    uploads_sort: String,
+    /// Uploads sort direction (meaningful only while `uploads_sort` != "").
+    uploads_asc: bool,
+    /// Uploads filter needle: case-insensitive substring across user,
+    /// filename and (full) checksum; "" = all rows.
+    uploads_filter: String,
+    /// Current 0-based page of the paged proposal-outcome lists, keyed
+    /// `"{surface}:{list}"` (list = "declined" | "applied"); a missing key
+    /// is page 0. UI-LOCAL presentation like the sorts — the engine's
+    /// reads stay the full projections (MCP sees them unchanged). The
+    /// stored page re-bases against the list's current length on every
+    /// push ([`ChatUiState::clamp_list_page`]); a workspace switch resets
+    /// it with the rest of this state.
+    list_pages: HashMap<String, usize>,
 }
 
 impl ChatUiState {
@@ -1889,6 +2221,52 @@ impl ChatUiState {
     /// stale push skips its ledger bookkeeping and its apply closure.
     fn is_current(&self, gen: u64) -> bool {
         self.generation == gen
+    }
+
+    /// Click on a Members header column: toggle-or-switch the sort. The
+    /// generation bump stales every in-flight push (its bundle carries the
+    /// previous order).
+    fn sort_members_by(&mut self, column: &str) {
+        toggle_sort(&mut self.members_sort, &mut self.members_asc, column);
+        self.generation += 1;
+    }
+
+    /// Click on an Uploads header column: toggle-or-switch the sort.
+    fn sort_uploads_by(&mut self, column: &str) {
+        toggle_sort(&mut self.uploads_sort, &mut self.uploads_asc, column);
+        self.generation += 1;
+    }
+
+    /// Set the uploads filter needle (typed, or pre-filled by the Members
+    /// table's uploads-jump).
+    fn set_uploads_filter(&mut self, needle: String) {
+        self.uploads_filter = needle;
+        self.generation += 1;
+    }
+
+    /// Step a paged proposal-outcome list by `delta` pages (the pager's
+    /// prev/next). Below the first page clamps at zero; the upper bound is
+    /// enforced at push time ([`ChatUiState::clamp_list_page`] — only the
+    /// push knows the list's current length). The generation bump stales
+    /// every in-flight push (its bundle carries the previous page).
+    fn page_list_by(&mut self, surface: &str, list: &str, delta: i32) {
+        let page = self.list_pages.entry(format!("{surface}:{list}")).or_insert(0);
+        *page = page.saturating_add_signed(delta as isize);
+        self.generation += 1;
+    }
+
+    /// Re-base a stored page against the list's CURRENT length and return
+    /// the effective 0-based page. The clamp writes back, so the next
+    /// prev/next steps from the page the user actually sees — not from a
+    /// stale out-of-range value a shrunk list left behind.
+    fn clamp_list_page(&mut self, surface: &str, list: &str, len: usize) -> usize {
+        let key = format!("{surface}:{list}");
+        let stored = self.list_pages.get(&key).copied().unwrap_or(0);
+        let (_, _, page, _) = page_slice(len, stored, LIST_PAGE_SIZE);
+        if page != stored {
+            self.list_pages.insert(key, page);
+        }
+        page
     }
 }
 struct SurfaceData {
@@ -1986,6 +2364,7 @@ async fn push_surfaces(
                 },
                 image: s.image,
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
+                chain_governed: s.chain_governed,
             },
         ),
         _ => return,
@@ -2057,6 +2436,10 @@ async fn push_surfaces(
                     .map(|s| format!("{s}…"))
                     .unwrap_or_default(),
                 expires: expires_label(upload_now, u.expires_ts, u.available),
+                ts: u.ts,
+                bytes: u.size,
+                expires_ts: u.expires_ts,
+                checksum_full: u.checksum,
                 status: match u.download.as_ref().map(|d| d.phase.as_str()) {
                     Some("requested") => "0 %".to_string(),
                     Some("transferring") => u
@@ -2094,6 +2477,13 @@ async fn push_surfaces(
         .iter()
         .flat_map(|(_, s)| s.pending.iter().cloned())
         .collect();
+    // …and the declined lists feed the cache too: a veto this UI never saw
+    // pending (fresh open, other member's decline) must still title its
+    // discussion channel and flag it closed
+    let all_declined: Vec<ProposalView> = snaps
+        .iter()
+        .flat_map(|(_, s)| s.declined.iter().cloned())
+        .collect();
     // the gated surfaces' applied logs — the proposal cache resolves a
     // vanished proposal's fate against them (the applied values ARE the
     // raw proposal payloads, for the chain and the legacy path alike)
@@ -2117,7 +2507,7 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
-    let (unread, first_seen, known) = {
+    let (unread, first_seen, known, org_view, list_pages) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
@@ -2127,13 +2517,50 @@ async fn push_surfaces(
         for p in &all_pending {
             st.first_seen.entry(p.id.0).or_insert(now);
         }
-        update_known_proposals(&mut st.proposals, &all_pending, &applied_by_surface);
+        update_known_proposals(&mut st.proposals, &all_pending, &all_declined, &applied_by_surface);
+        // the paged proposal-outcome lists: re-base every stored page
+        // against its list's CURRENT length (a shrunk list must never
+        // leave the view on a page that no longer exists), then capture
+        // the effective pages for the bundle. Chat's log is the chat
+        // pane — never paged here.
+        let mut list_pages: HashMap<String, usize> = HashMap::new();
+        for (sf, s) in &snaps {
+            if *sf == Surface::Chat {
+                continue;
+            }
+            let key = sf.as_str();
+            list_pages.insert(
+                format!("{key}:declined"),
+                st.clamp_list_page(key, "declined", s.declined.len()),
+            );
+            list_pages.insert(
+                format!("{key}:applied"),
+                st.clamp_list_page(key, "applied", s.applied.len()),
+            );
+        }
         (
             st.ledger.observe(&counts, &selected_key),
             st.first_seen.clone(),
             st.proposals.clone(),
+            (
+                st.members_sort.clone(),
+                st.members_asc,
+                st.uploads_sort.clone(),
+                st.uploads_asc,
+                st.uploads_filter.clone(),
+            ),
+            list_pages,
         )
     };
+    // the Organization tables' presentation pass (UI-local, like the
+    // channel selection): thin the uploads by the filter needle, then
+    // order both tables by their active sort column — the engine's
+    // ReadMembers/ReadUploads projections stay the full, untouched truth
+    let (members_sort, members_asc, uploads_sort, uploads_asc, uploads_filter) = org_view;
+    let mut members = members;
+    sort_members(&mut members, &members_sort, members_asc);
+    let mut uploads = filter_uploads(uploads, &uploads_filter);
+    sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(&known);
@@ -2143,6 +2570,7 @@ async fn push_surfaces(
     let group_unread =
         i32::try_from(unread.get("group").copied().unwrap_or(0)).unwrap_or(i32::MAX);
     let selected_label = channel_display_label(&selected, &titles);
+    let selected_closed = selected_channel_closed(&selected, &infos, &known);
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
@@ -2164,8 +2592,15 @@ async fn push_surfaces(
         channels,
         selected_key,
         selected_label,
+        selected_closed,
         members,
         uploads,
+        members_sort,
+        members_asc,
+        uploads_sort,
+        uploads_asc,
+        uploads_filter,
+        list_pages,
         org_stats,
         group_unread,
     };
@@ -2195,8 +2630,18 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .surfaces
         .iter()
         .map(|s| {
-            let log: Vec<LogLine> = s
-                .log
+            // the paged lists (page size LIST_PAGE_SIZE, pager row in the
+            // .slint side): a gated surface's log IS its applied/accepted
+            // history, so it pages; chat's log is the chat pane — full.
+            // Counts stay full-list so the status strip and the nav badges
+            // never shrink to a page.
+            let a_page = page_of(&b.list_pages, &s.key, "applied");
+            let (a_start, a_end, a_page, a_pages) = if s.gated {
+                page_slice(s.log.len(), a_page, LIST_PAGE_SIZE)
+            } else {
+                (0, s.log.len(), 0, 1)
+            };
+            let log: Vec<LogLine> = s.log[a_start..a_end]
                 .iter()
                 .map(|l| {
                     let reactions: Vec<ReactionItem> = l
@@ -2251,8 +2696,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 declined_by: p.declined_by.clone().into(),
                 declined_when: p.declined_when.clone().into(),
             };
+            // pending stays complete — an open vote must never hide behind
+            // a page; the declined (outcome) list pages like the applied log
             let pending: Vec<ProposalRow> = s.pending.iter().map(to_row).collect();
-            let declined: Vec<ProposalRow> = s.declined.iter().map(to_row).collect();
+            let d_page = page_of(&b.list_pages, &s.key, "declined");
+            let (d_start, d_end, d_page, d_pages) =
+                page_slice(s.declined.len(), d_page, LIST_PAGE_SIZE);
+            let declined: Vec<ProposalRow> =
+                s.declined[d_start..d_end].iter().map(to_row).collect();
             // the surface's sub-views come straight from the shared
             // molt-core vocabulary (same list select_view validates against)
             let views: Vec<ViewItem> = Surface::parse(&s.key)
@@ -2277,6 +2728,11 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 pending_my_vote_count: (s.pending.len() - s.pending_voted) as i32,
                 denied_count: s.denied as i32,
                 declined_count: s.declined.len() as i32,
+                // the pager echo, 1-based for the "page x of y" label
+                applied_page: (a_page + 1) as i32,
+                applied_pages: a_pages as i32,
+                declined_page: (d_page + 1) as i32,
+                declined_pages: d_pages as i32,
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
                 declined: ModelRc::new(VecModel::from(declined)),
@@ -2300,7 +2756,9 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_chat_channels(), channels, |m| ui.set_chat_channels(m));
     ui.set_selected_channel(b.selected_key.as_str().into());
+    ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
+    ui.set_selected_channel_closed(b.selected_closed);
 
     // the Organization tables (Members / Uploads)
     let members: Vec<MemberRow> = b
@@ -2336,21 +2794,39 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
 
+    // the tables' sort/filter echo: the headers render the ▲/▼ arrow from
+    // these; the filter box only refreshes when Rust owns the change (a
+    // workspace-switch reset or the members-table uploads-jump) — a live
+    // keystroke bumps the push generation, so a stale echo never lands
+    ui.set_om_sort_column(b.members_sort.as_str().into());
+    ui.set_om_sort_ascending(b.members_asc);
+    ui.set_ou_sort_column(b.uploads_sort.as_str().into());
+    ui.set_ou_sort_ascending(b.uploads_asc);
+    if ui.get_ou_filter().as_str() != b.uploads_filter {
+        ui.set_ou_filter(b.uploads_filter.as_str().into());
+    }
+
     ui.set_group_unread(b.group_unread);
 
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());
     ui.set_org_chat_retention(b.org_stats.retention_days);
+    // the Members table offers "recovery link" only where recovery exists
+    ui.set_org_chain_governed(b.org_stats.chain_governed);
 
     // the republic's image: (re)load the picture only when the file
-    // reference changes. The bytes are local only on the device that picked
-    // the file (mock transfer, like chat shares) — elsewhere the load fails
-    // quietly and the placeholder mark stays.
+    // reference changes. The bytes rode the applied set_image proposal, so
+    // the engine materializes the logo file on EVERY device; decode by
+    // CONTENT (image_from_bytes) — the reference's extension comes from a
+    // peer-supplied display value and must not decide the format. On a
+    // session-only workspace the reference is no local file — the read
+    // fails quietly and the placeholder mark stays.
     if ui.get_org_img_path().as_str() != b.org_stats.image {
         ui.set_org_img_path(b.org_stats.image.as_str().into());
         let loaded = (!b.org_stats.image.is_empty())
-            .then(|| slint::Image::load_from_path(std::path::Path::new(&b.org_stats.image)))
-            .and_then(Result::ok);
+            .then(|| std::fs::read(&b.org_stats.image).ok())
+            .flatten()
+            .and_then(|bytes| image_from_bytes(&bytes));
         ui.set_org_img_set(loaded.is_some());
         ui.set_org_img(loaded.unwrap_or_default());
     }
@@ -2680,10 +3156,12 @@ fn charter_columns(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// The uploads table's "expires in" cell: the mock share link dies at
-/// `expires_ts`; an unavailable share has nothing left to expire ("—").
+/// The uploads table's "expires in" cell: uploads are ephemeral like chat,
+/// so the share ages out of the read contract at `expires_ts` (share time +
+/// the org's chat retention window). 0 = unknown age, no deadline; an
+/// unavailable share has nothing left to expire (both "—").
 fn expires_label(now: u64, expires_ts: u64, available: bool) -> String {
-    if !available {
+    if !available || expires_ts == 0 {
         return "—".to_string();
     }
     if expires_ts <= now {
@@ -2845,6 +3323,30 @@ fn derive_channels(
         .collect()
 }
 
+/// The command the patch-channel banner's "back to the vote" button
+/// issues: a discussion is vote-bound (the channel key IS the proposal
+/// id), so the jump reuses the sidebar's own navigation verbs — an
+/// Organization ballot lives in the pending view (declined once closed;
+/// an applied one simply left the list), a gated surface hosts its cards
+/// on its main view (plain surface selection). A cache miss falls back to
+/// Organization → pending rather than a dead button. Non-patch channels
+/// have no vote.
+fn vote_jump_command(ch: &ChannelRef, known: &HashMap<u64, KnownProposal>) -> Option<Command> {
+    let ChannelRef::Patch { id } = ch else {
+        return None;
+    };
+    let (surface, fate) = known
+        .get(&id.0)
+        .map(|k| (k.surface, k.fate))
+        .unwrap_or((Surface::Organization, KnownFate::Pending));
+    Some(if matches!(surface, Surface::Organization) {
+        let view = if fate == KnownFate::Closed { "declined" } else { "pending" };
+        Command::SelectView { surface, view: view.to_string() }
+    } else {
+        Command::SelectSurface { surface }
+    })
+}
+
 /// The compose-banner label of the selected channel ("" = group, which
 /// needs no banner). For a fresh topic this is the ONLY visible feedback
 /// until its first message exists (a channel exists because a message
@@ -2858,6 +3360,32 @@ fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String>) -> Strin
             .unwrap_or_else(|| format!("#{}", id.0)),
         ChannelRef::Topic { name } => name.clone(),
     }
+}
+
+/// Whether the selected channel is a DECIDED vote's discussion — read-only
+/// for new messages/shares (the engine refuses them with
+/// `DiscussionClosed`; this flag collapses the compose row and shows the
+/// banner note BEFORE anyone types into a refusal). The engine's channel
+/// annotation ([`ChannelInfo::state`]) is authoritative when present; a
+/// channel not (yet) in the enumeration — or an unannotated ref — falls
+/// back to the UI's proposal cache ([`KnownProposal::fate`]). Group/Topic,
+/// open votes and unknown referents are writable (`false`).
+fn selected_channel_closed(
+    selected: &ChannelRef,
+    infos: &[ChannelInfo],
+    known: &HashMap<u64, KnownProposal>,
+) -> bool {
+    let ChannelRef::Patch { id } = selected else {
+        return false;
+    };
+    if let Some(state) = infos
+        .iter()
+        .find(|i| &i.channel == selected)
+        .and_then(|i| i.state)
+    {
+        return state != molt_core::ProposalState::Proposed;
+    }
+    known.get(&id.0).is_some_and(|k| k.fate != KnownFate::Pending)
 }
 
 /// What the UI remembers about a proposal beyond the read contract's
@@ -2910,6 +3438,7 @@ enum KnownFate {
 fn update_known_proposals(
     known: &mut HashMap<u64, KnownProposal>,
     pending: &[ProposalView],
+    declined: &[ProposalView],
     applied: &HashMap<Surface, Vec<serde_json::Value>>,
 ) {
     for p in pending {
@@ -2937,6 +3466,26 @@ fn update_known_proposals(
         } else {
             KnownFate::Closed
         };
+    }
+    // the snapshots' declined lists are AUTHORITATIVE Rejected knowledge
+    // (the engine names the veto) — fold them last: a veto this UI never
+    // saw pending still gets a titled Closed entry, an out-of-order
+    // payload-probe verdict is overridden, but an Applied fate is never
+    // downgraded (the probe proved the seal; the byte-identical-twin
+    // ambiguity must not un-seal it here).
+    for p in declined {
+        let entry = known.entry(p.id.0).or_insert_with(|| KnownProposal {
+            title: summarize(&p.payload),
+            payload: p.payload.clone(),
+            surface: p.surface,
+            approvals: p.approvals,
+            threshold: p.threshold,
+            fate: KnownFate::Closed,
+        });
+        if entry.fate != KnownFate::Applied {
+            entry.title = summarize(&p.payload);
+            entry.fate = KnownFate::Closed;
+        }
     }
 }
 
@@ -3439,12 +3988,18 @@ lexicon! {
     ou_download: "Download", "Download";
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
+    ou_filter_ph: "Filter: user, filename or checksum", "Filter: Nutzer, Dateiname oder Checksum";
+    // the paged lists' "Page x of y" label, split around the two numbers
+    pg_page: "Page", "Seite";
+    pg_of: "of", "von";
+    ou_no_match: "No uploads match the filter.", "Keine Uploads passen zum Filter.";
     orn_title: "Rename republic", "Republik umbenennen";
     orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
     op_change_name: "Rename", "Name ändern";
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
+    ch_readonly: "read-only — the vote is decided", "nur lesen — die Abstimmung ist entschieden";
     pc_proposal: "Proposal:", "Vorschlag:";
     pc_img_hint: "Click to view the proposed image", "Klicken zum Anzeigen des vorgeschlagenen Bilds";
     pc_img_missing: "The proposed image could not be decoded.", "Das vorgeschlagene Bild konnte nicht dekodiert werden.";
@@ -3514,6 +4069,10 @@ lexicon! {
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
     rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
+    rlk_pending: "Creating the link…", "Link wird erstellt…";
+    rlk_pending_hint: "The returning member does not need to be online — a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein — ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
+    rlk_failed_mesh: "The link could not be created: this device is not connected to the republic's mesh right now. Close and reopen the republic to reconnect, then try again. The returning member does not need to be online for this.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist gerade nicht mit dem Mesh der Republik verbunden. Schließe die Republik und öffne sie erneut, dann versuche es noch einmal. Das zurückkehrende Mitglied muss dafür nicht online sein.";
+    rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "Restore", "Wiederherstellen";
@@ -3598,6 +4157,7 @@ lexicon! {
     ch_new_topic: "New topic", "Neues Thema";
     ch_topic_ph: "Topic name…", "Themenname…";
     ch_topic_open: "Open topic", "Thema öffnen";
+    ch_to_vote: "To the vote", "Zur Abstimmung";
     mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
@@ -3659,6 +4219,63 @@ mod tests {
         }
     }
 
+    /// The pending-card image preview decodes the payload bytes that rode
+    /// the `set_image` proposal — for EVERY format the propose-side picker
+    /// offers (png, jpg, jpeg, webp, gif, svg, bmp). The decode must key on
+    /// the CONTENT, never on a file extension: the payload is raw bytes, no
+    /// name travels with it. (This pins the bug where the bytes were staged
+    /// as a `.img` temp file and `slint::Image::load_from_path` — which
+    /// trusts extensions — failed for every proposal, so "Click to view the
+    /// proposed image" only ever produced the failure toast.)
+    #[test]
+    fn a_proposed_image_decodes_from_the_payload_for_every_picker_format() {
+        // real minimal files, one per picker format (2x2 red, PIL-generated)
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
+        let gif = "R0lGODdhAgACAIEAAMgeHgAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7";
+        let bmp = "Qk1GAAAAAAAAADYAAAAoAAAAAgAAAAIAAAABABgAAAAAABAAAADEDgAAxA4AAAAAAAAAAAAAHh7IHh7IAAAeHsgeHsgAAA==";
+        let webp = "UklGRjoAAABXRUJQVlA4IC4AAACwAQCdASoCAAIAAUAmJaACdLoABDAAAP7x3I/4DdfFtMv/vYL/3YL/3YL/WwAA";
+        let jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDkKKKK8U/TD//Z";
+        for (fmt, b64) in [
+            ("png", png),
+            ("gif", gif),
+            ("bmp", bmp),
+            ("webp", webp),
+            ("jpeg", jpeg),
+        ] {
+            let img = proposal_image_from_b64(b64);
+            assert!(img.is_some(), "the {fmt} payload must decode");
+            let img = img.expect("checked above");
+            assert_eq!(img.size().width, 2, "{fmt} decodes to the real picture");
+            assert_eq!(img.size().height, 2, "{fmt} decodes to the real picture");
+        }
+        // svg travels as its source text
+        use base64::Engine as _;
+        let svg = base64::engine::general_purpose::STANDARD.encode(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>"##,
+        );
+        assert!(
+            proposal_image_from_b64(&svg).is_some(),
+            "an svg payload must decode"
+        );
+    }
+
+    /// Undecodable payloads answer `None` — the caller shows the honest
+    /// "could not be decoded" toast, never a broken image.
+    #[test]
+    fn an_undecodable_image_payload_is_none_not_a_panic() {
+        assert!(proposal_image_from_b64("").is_none(), "empty payload");
+        assert!(
+            proposal_image_from_b64("not base64 at all!").is_none(),
+            "not base64"
+        );
+        use base64::Engine as _;
+        let garbage = base64::engine::general_purpose::STANDARD.encode([0x00u8; 64]);
+        assert!(
+            proposal_image_from_b64(&garbage).is_none(),
+            "valid base64, but not an image"
+        );
+    }
+
     /// An engine-authored System-kind message maps onto the same per-line
     /// `system` flag the governance rows use — one quiet rendering path,
     /// never a second style; a User message stays a normal card.
@@ -3672,7 +4289,8 @@ mod tests {
     }
 
     /// The recovery flow rides the transient session notice (the engine's
-    /// contract: `recovery-link:` / `recover-started:` / `recover-failed:` /
+    /// contract: `recovery-link-pending:` / `recovery-link:` /
+    /// `recovery-link-failed:` / `recover-started:` / `recover-failed:` /
     /// `recovered:`); the parser must split each prefix off verbatim and
     /// treat everything else — including the existing notices — as none.
     #[test]
@@ -3692,6 +4310,23 @@ mod tests {
         assert_eq!(
             parse_recover_notice("recovered:ashi"),
             RecoverNotice::Done("ashi".to_string())
+        );
+        // the coordinator's mint lifecycle: pending on the attempt, then the
+        // outcome — a calm failed state (the flip side of Link) whose payload
+        // is a reason the dialog maps onto localized text
+        assert_eq!(
+            parse_recover_notice("recovery-link-pending:ashi"),
+            RecoverNotice::LinkPending("ashi".to_string())
+        );
+        assert_eq!(
+            parse_recover_notice("recovery-link-failed:mesh-not-running"),
+            RecoverNotice::LinkFailed("mesh-not-running".to_string())
+        );
+        // `recovery-link-failed:` must not be swallowed by the shorter
+        // `recovery-link:` prefix — order in the parser matters
+        assert_eq!(
+            parse_recover_notice("recovery-link-failed:transport: queue gone"),
+            RecoverNotice::LinkFailed("transport: queue gone".to_string())
         );
         // the non-recovery notices stay untouched by this path
         assert_eq!(parse_recover_notice("saved"), RecoverNotice::None);
@@ -3775,26 +4410,31 @@ mod tests {
                 channel: ChannelRef::Topic { name: "zeta".into() },
                 count: 4,
                 last_ts: 40,
+                state: None,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(7) },
                 count: 1,
                 last_ts: 30,
+                state: None,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(5) },
                 count: 2,
                 last_ts: 20,
+                state: Some(ProposalState::Applied),
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(3) },
                 count: 5,
                 last_ts: 10,
+                state: Some(ProposalState::Proposed),
             },
             ChannelInfo {
                 channel: ChannelRef::Group,
                 count: 9,
                 last_ts: 50,
+                state: None,
             },
         ];
         let known = HashMap::from([
@@ -3816,6 +4456,49 @@ mod tests {
         // nothing open → no rows (the sidebar hides the whole section)
         let rows = derive_channels(&[], &HashMap::new(), &HashMap::new());
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn vote_jump_targets_the_hosting_surface_and_fate_view() {
+        let known_of = |surface: Surface, fate: KnownFate| KnownProposal {
+            title: "t".to_string(),
+            payload: serde_json::json!({}),
+            surface,
+            approvals: 0,
+            threshold: 2,
+            fate,
+        };
+        let known = HashMap::from([
+            (5u64, known_of(Surface::Organization, KnownFate::Pending)),
+            (6u64, known_of(Surface::Organization, KnownFate::Closed)),
+            (7u64, known_of(Surface::Memory, KnownFate::Pending)),
+        ]);
+        // only a patch channel has a vote to jump back to
+        assert!(vote_jump_command(&ChannelRef::Group, &known).is_none());
+        let topic = ChannelRef::Topic { name: "zeta".to_string() };
+        assert!(vote_jump_command(&topic, &known).is_none());
+        // an open Organization vote → its card sits in the pending view
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(5) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
+        ));
+        // a closed one moved to the declined view
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(6) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "declined"
+        ));
+        // a gated surface hosts its cards on its main view — plain surface
+        // selection, exactly like the sidebar row
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(7) }, &known),
+            Some(Command::SelectSurface { surface: Surface::Memory })
+        ));
+        // a cache miss (this UI never saw the proposal) falls back to the
+        // Organization pending view — never a dead button
+        assert!(matches!(
+            vote_jump_command(&ChannelRef::Patch { id: ProposalId(99) }, &known),
+            Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
+        ));
     }
 
     #[test]
@@ -3894,14 +4577,14 @@ mod tests {
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
-        update_known_proposals(&mut known, std::slice::from_ref(&pv), &HashMap::new());
+        update_known_proposals(&mut known, std::slice::from_ref(&pv), &[], &HashMap::new());
         assert_eq!(known[&4].title, "budget", "human title, no op-code prefix");
         assert_eq!(known[&4].fate, KnownFate::Pending);
 
         // the proposal leaves the Proposed-only window and its payload
         // shows up in the surface's applied log → Applied
         let applied = HashMap::from([(Surface::Memory, vec![pv.payload.clone()])]);
-        update_known_proposals(&mut known, &[], &applied);
+        update_known_proposals(&mut known, &[], &[], &applied);
         assert_eq!(known[&4].fate, KnownFate::Applied);
 
         // the system line keeps the title and renders the sealed state
@@ -3917,6 +4600,7 @@ mod tests {
             channel: ChannelRef::Patch { id: ProposalId(4) },
             count: 1,
             last_ts: 10,
+            state: None,
         }];
         let rows = derive_channels(&infos, &known, &HashMap::new());
         assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
@@ -3929,8 +4613,8 @@ mod tests {
             payload: serde_json::json!({ "title": "drop the fee" }),
             ..pv.clone()
         };
-        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &applied);
-        update_known_proposals(&mut known, &[], &applied);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &applied);
+        update_known_proposals(&mut known, &[], &[], &applied);
         assert_eq!(known[&9].fate, KnownFate::Closed);
         let sys = patch_system_lines(9, &[], &known, &first_seen);
         let text = &sys[0].1.text;
@@ -3947,13 +4631,140 @@ mod tests {
             Surface::Memory,
             vec![serde_json::json!({ "title": "drop the fee" })],
         )]);
-        update_known_proposals(&mut known, &[], &applied9);
+        update_known_proposals(&mut known, &[], &[], &applied9);
         assert_eq!(known[&9].fate, KnownFate::Applied);
         // … while an already-Applied fate is sticky even if the surface
         // read is missing this pass
-        update_known_proposals(&mut known, &[], &HashMap::new());
+        update_known_proposals(&mut known, &[], &[], &HashMap::new());
         assert_eq!(known[&4].fate, KnownFate::Applied);
         assert_eq!(known[&9].fate, KnownFate::Applied);
+    }
+
+    /// One `ProposalView` for the cache tests, minimal noise.
+    fn view_of(id: u64, title: &str, state: ProposalState) -> ProposalView {
+        ProposalView {
+            id: ProposalId(id),
+            surface: Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "title": title }),
+            approvals: 0,
+            threshold: 3,
+            state,
+            approved_by_me: false,
+            current: String::new(),
+            proposed: String::new(),
+            votes: Vec::new(),
+            declined_at: if state == ProposalState::Rejected { 100 } else { 0 },
+            declined_by: if state == ProposalState::Rejected {
+                "ashi".to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// The snapshots' `declined` lists fold into the proposal cache: a veto
+    /// this UI never saw pending (fresh open, another member's decline)
+    /// still titles its discussion channel and flags it closed — and an
+    /// Applied fate is never downgraded by the fold.
+    #[test]
+    fn declined_votes_fold_into_the_cache_as_closed() {
+        let mut known = HashMap::new();
+        // never seen pending: the decline inserts a Closed entry, titled
+        let dv7 = view_of(7, "vetoed", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv7), &HashMap::new());
+        assert_eq!(known[&7].fate, KnownFate::Closed);
+        assert_eq!(known[&7].title, "vetoed", "human title from the summary");
+
+        // a cached Pending refreshes to Closed when its decline shows up
+        let pv8 = view_of(8, "late veto", ProposalState::Proposed);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv8), &[], &HashMap::new());
+        assert_eq!(known[&8].fate, KnownFate::Pending);
+        let dv8 = view_of(8, "late veto", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv8), &HashMap::new());
+        assert_eq!(known[&8].fate, KnownFate::Closed);
+
+        // an Applied fate is sticky against the fold (the applied-log probe
+        // proved the seal; byte-identical-twin ambiguity must not un-seal)
+        let pv9 = view_of(9, "sealed", ProposalState::Proposed);
+        update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &HashMap::new());
+        let applied = HashMap::from([(Surface::Memory, vec![pv9.payload.clone()])]);
+        update_known_proposals(&mut known, &[], &[], &applied);
+        assert_eq!(known[&9].fate, KnownFate::Applied);
+        let dv9 = view_of(9, "sealed", ProposalState::Rejected);
+        update_known_proposals(&mut known, &[], std::slice::from_ref(&dv9), &applied);
+        assert_eq!(known[&9].fate, KnownFate::Applied, "never downgraded");
+
+        // …and the derive_channels contract holds over the folded cache:
+        // the closed discussion stays OFF the sidebar
+        let infos = vec![ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(7) },
+            count: 2,
+            last_ts: 20,
+            state: Some(ProposalState::Rejected),
+        }];
+        assert!(
+            derive_channels(&infos, &known, &HashMap::new()).is_empty(),
+            "a declined vote's discussion is not a sidebar row"
+        );
+    }
+
+    /// The compose-collapse flag: only a DECIDED vote's patch channel is
+    /// read-only. The engine's enumeration annotation is authoritative when
+    /// present; otherwise the proposal cache decides; group/topic, open
+    /// votes and unknown referents (Q4) stay writable.
+    #[test]
+    fn selected_channel_closed_flags_only_decided_patch_votes() {
+        let known_of = |fate: KnownFate| KnownProposal {
+            title: "t".to_string(),
+            payload: serde_json::json!({}),
+            surface: Surface::Memory,
+            approvals: 1,
+            threshold: 2,
+            fate,
+        };
+        let info = |id: u64, state: Option<ProposalState>| ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(id) },
+            count: 1,
+            last_ts: 10,
+            state,
+        };
+        let patch = |id: u64| ChannelRef::Patch { id: ProposalId(id) };
+        let known = HashMap::from([
+            (1u64, known_of(KnownFate::Pending)),
+            (2u64, known_of(KnownFate::Closed)),
+            (3u64, known_of(KnownFate::Applied)),
+        ]);
+
+        // group/topic are never closed
+        assert!(!selected_channel_closed(&ChannelRef::Group, &[], &known));
+        assert!(!selected_channel_closed(
+            &ChannelRef::Topic { name: "x".into() },
+            &[],
+            &known
+        ));
+
+        // the engine annotation decides when present …
+        let infos = vec![
+            info(1, Some(ProposalState::Proposed)),
+            info(2, Some(ProposalState::Rejected)),
+            info(3, Some(ProposalState::Applied)),
+        ];
+        assert!(!selected_channel_closed(&patch(1), &infos, &HashMap::new()));
+        assert!(selected_channel_closed(&patch(2), &infos, &HashMap::new()));
+        assert!(selected_channel_closed(&patch(3), &infos, &HashMap::new()));
+        // … and wins over a stale cache
+        let stale = HashMap::from([(2u64, known_of(KnownFate::Pending))]);
+        assert!(selected_channel_closed(&patch(2), &infos, &stale));
+
+        // no (or unannotated) enumeration entry → the cache decides — the
+        // instant-feedback path on selection passes no infos at all
+        assert!(!selected_channel_closed(&patch(1), &[], &known));
+        assert!(selected_channel_closed(&patch(2), &[], &known));
+        assert!(selected_channel_closed(&patch(3), &[], &known));
+        assert!(selected_channel_closed(&patch(2), &[info(2, None)], &known));
+
+        // unknown everywhere stays writable (chat-bus Q4)
+        assert!(!selected_channel_closed(&patch(99), &infos, &known));
     }
 
     /// Review finding: concurrent pushes raced last-write-wins — a stale
@@ -4095,12 +4906,17 @@ mod tests {
     }
 
     #[test]
-    fn expires_labels_render_the_mock_link_ttl() {
+    fn expires_labels_render_the_retention_deadline() {
         assert_eq!(expires_label(100, 100 + 13 * 86_400, true), "in 13 days");
         assert_eq!(expires_label(100, 100 + 86_400, true), "in 1 day");
         assert_eq!(expires_label(100, 100 + 7_200, true), "in 2 h");
         assert_eq!(expires_label(100, 100 + 120, true), "in 2 min");
         assert_eq!(expires_label(500, 100, true), "expired");
+        assert_eq!(
+            expires_label(100, 0, true),
+            "—",
+            "0 = unknown share age, no deadline (the engine keeps it forever)"
+        );
         assert_eq!(
             expires_label(100, 100 + 86_400, false),
             "—",
@@ -4238,6 +5054,225 @@ mod tests {
         sort_ws_items(&mut items, "sync", true);
         let names: Vec<String> = items.iter().map(|w| w.name.to_string()).collect();
         assert_eq!(names, ["beta", "Alpha", "gamma"]);
+    }
+
+    /// Uploads-table row for the presentation tests. The DISPLAY strings
+    /// are deliberately misleading (they would sort the other way round),
+    /// pinning that date/size/expiry sort by the underlying numeric keys
+    /// and never the rendered labels.
+    fn upload(user: &str, name: &str, checksum: &str, ts: u64, bytes: u64) -> UploadRowData {
+        UploadRowData {
+            id: String::new(),
+            user: user.to_string(),
+            date: format!("{}", u64::MAX - ts),
+            name: name.to_string(),
+            kind: String::new(),
+            size: format!("{} KiB", u64::MAX - bytes),
+            available: true,
+            online: true,
+            // the cell shows a shortened prefix — the filter must still
+            // match on the full value
+            checksum: checksum.get(..4).unwrap_or(checksum).to_string(),
+            expires: String::new(),
+            status: String::new(),
+            status_kind: 0,
+            ts,
+            bytes,
+            expires_ts: ts,
+            checksum_full: checksum.to_string(),
+        }
+    }
+
+    #[test]
+    fn sort_uploads_text_columns_case_insensitive() {
+        let mut rows = vec![
+            upload("bob", "zeta.pdf", "CC99", 1, 1),
+            upload("Alice", "Alpha.PDF", "0b11", 2, 2),
+            upload("carol", "beta.txt", "aa22", 3, 3),
+        ];
+        rows[0].kind = "PDF".to_string();
+        rows[1].kind = "zip".to_string();
+        rows[2].kind = "Txt".to_string();
+        rows[0].status = "\u{2713}".to_string();
+        rows[1].status = "42 %".to_string();
+        let users = |rows: &[UploadRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.user.clone()).collect()
+        };
+        sort_uploads(&mut rows, "user", true);
+        assert_eq!(users(&rows), ["Alice", "bob", "carol"], "case-insensitive");
+        sort_uploads(&mut rows, "user", false);
+        assert_eq!(users(&rows), ["carol", "bob", "Alice"], "descending flips");
+        sort_uploads(&mut rows, "file", true);
+        assert_eq!(users(&rows), ["Alice", "carol", "bob"], "Alpha < beta < zeta");
+        sort_uploads(&mut rows, "type", true);
+        assert_eq!(users(&rows), ["bob", "carol", "Alice"], "pdf < txt < zip");
+        sort_uploads(&mut rows, "checksum", true);
+        assert_eq!(users(&rows), ["Alice", "carol", "bob"], "0b < aa < cc");
+        sort_uploads(&mut rows, "download", true);
+        assert_eq!(users(&rows), ["carol", "Alice", "bob"], "idle < 42 % < ✓");
+    }
+
+    #[test]
+    fn sort_uploads_numeric_columns_use_underlying_values() {
+        // the rendered date/size labels would sort exactly the other way
+        // round (see `upload`) — only the numeric keys give this order
+        let mut rows = vec![
+            upload("a", "x", "", 30, 10_240),
+            upload("b", "y", "", 10, 2_048),
+            upload("c", "z", "", 20, 900),
+        ];
+        let users = |rows: &[UploadRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.user.clone()).collect()
+        };
+        sort_uploads(&mut rows, "date", true);
+        assert_eq!(users(&rows), ["b", "c", "a"], "oldest share first");
+        sort_uploads(&mut rows, "date", false);
+        assert_eq!(users(&rows), ["a", "c", "b"], "newest share first");
+        sort_uploads(&mut rows, "size", true);
+        assert_eq!(users(&rows), ["c", "b", "a"], "900 B < 2 KiB < 10 KiB");
+        sort_uploads(&mut rows, "expires", true);
+        assert_eq!(users(&rows), ["b", "c", "a"], "soonest expiry first");
+        // an unknown/empty column keeps the current order
+        sort_uploads(&mut rows, "", false);
+        assert_eq!(users(&rows), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn filter_uploads_matches_user_name_or_checksum_case_insensitively() {
+        let all = || {
+            vec![
+                upload("Alice", "report.pdf", "aabb1122", 1, 1),
+                upload("bob", "photo.png", "ccdd3344", 2, 2),
+            ]
+        };
+        assert_eq!(filter_uploads(all(), "").len(), 2, "empty needle = all");
+        let f = filter_uploads(all(), "LICE");
+        assert_eq!(f.len(), 1, "user match, case-insensitive");
+        assert_eq!(f[0].user, "Alice");
+        let f = filter_uploads(all(), "PHOTO");
+        assert_eq!(f.len(), 1, "filename match");
+        assert_eq!(f[0].user, "bob");
+        // beyond the 4-char display prefix — must match the FULL checksum
+        let f = filter_uploads(all(), "DD33");
+        assert_eq!(f.len(), 1, "full-checksum match");
+        assert_eq!(f[0].user, "bob");
+        assert!(filter_uploads(all(), "zzz").is_empty(), "no match = empty");
+    }
+
+    /// Members-table row for the sort tests.
+    fn member(name: &str, id: &str, last: &str, state: i32, uploads: i32) -> MemberRowData {
+        MemberRowData {
+            name: name.to_string(),
+            id: id.to_string(),
+            pk: id.to_string(),
+            last: last.to_string(),
+            state,
+            uploads,
+        }
+    }
+
+    #[test]
+    fn sort_members_by_name_uploads_and_presence() {
+        let mut rows = vec![
+            member("bob", "0b", "just now", 0, 3),
+            member("Alice", "aa", "5 min ago", 1, 10),
+            member("carol", "", "offline", 2, 2),
+        ];
+        let names = |rows: &[MemberRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.name.clone()).collect()
+        };
+        sort_members(&mut rows, "name", true);
+        assert_eq!(names(&rows), ["Alice", "bob", "carol"], "case-insensitive");
+        sort_members(&mut rows, "uploads", true);
+        assert_eq!(names(&rows), ["carol", "bob", "Alice"], "2 < 3 < 10 numeric");
+        sort_members(&mut rows, "uploads", false);
+        assert_eq!(names(&rows), ["Alice", "bob", "carol"]);
+        // no real timestamp exists (mock presence) — recency approximates
+        // as presence state first: synced < syncing < offline
+        sort_members(&mut rows, "last", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"]);
+        // unanchored (empty) identity cells sort last ascending
+        sort_members(&mut rows, "id", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"], "0b < aa < empty");
+        sort_members(&mut rows, "", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"], "unknown = keep");
+    }
+
+    /// The Organization tables' view state: clicking the active column
+    /// flips the direction, a new column starts ascending, and every
+    /// change bumps the push generation (stales in-flight bundles).
+    #[test]
+    fn org_sort_state_toggles_and_bumps_generation() {
+        let mut st = ChatUiState::default();
+        let g = st.generation;
+        st.sort_uploads_by("size");
+        assert_eq!(st.uploads_sort, "size");
+        assert!(st.uploads_asc, "a fresh column starts ascending");
+        st.sort_uploads_by("size");
+        assert!(!st.uploads_asc, "the same column flips the direction");
+        st.sort_uploads_by("user");
+        assert_eq!(st.uploads_sort, "user");
+        assert!(st.uploads_asc, "switching columns resets to ascending");
+        st.sort_members_by("uploads");
+        assert_eq!(st.members_sort, "uploads");
+        assert!(st.members_asc);
+        st.set_uploads_filter("alice".to_string());
+        assert_eq!(st.uploads_filter, "alice");
+        assert_eq!(st.generation, g + 5, "every change stales in-flight pushes");
+    }
+
+    /// The pure paging window behind the proposal-outcome lists
+    /// (Declined / the applied log): 20 rows per page, the page clamps
+    /// into range (a shrunk list must never show an empty page), and a
+    /// list of at most one page reports `page_count == 1` — the pager
+    /// row hides on that.
+    #[test]
+    fn page_slice_windows_and_clamps() {
+        // empty list: one (empty) page, never a panic range
+        assert_eq!(page_slice(0, 0, 20), (0, 0, 0, 1));
+        // exactly one page: untouched
+        assert_eq!(page_slice(20, 0, 20), (0, 20, 0, 1));
+        // one entry over: a second page holding the remainder
+        assert_eq!(page_slice(21, 0, 20), (0, 20, 0, 2));
+        assert_eq!(page_slice(21, 1, 20), (20, 21, 1, 2));
+        // an out-of-range page clamps to the last one (the list shrank)
+        assert_eq!(page_slice(21, 9, 20), (20, 21, 1, 2));
+        // a full second page ends at the list end
+        assert_eq!(page_slice(40, 1, 20), (20, 40, 1, 2));
+        assert_eq!(page_slice(61, 3, 20), (60, 61, 3, 4));
+    }
+
+    /// The pager's UI-local state (ChatUiState, like the table sorts):
+    /// prev/next step per (surface, list) independently, below-zero
+    /// clamps at the first page, the push-time clamp re-bases a stored
+    /// page against the list's current length (and writes it back, so
+    /// the next step moves from the visible page), every step bumps the
+    /// push generation, and a workspace switch resets everything.
+    #[test]
+    fn list_page_state_steps_clamps_and_resets() {
+        let mut st = ChatUiState::default();
+        st.enter_workspace("ws-a");
+        let g = st.generation;
+        st.page_list_by("organization", "declined", 1);
+        st.page_list_by("organization", "declined", 1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 100), 2);
+        assert_eq!(st.generation, g + 2, "every step stales in-flight pushes");
+        // stepping below the first page clamps at zero
+        st.page_list_by("organization", "declined", -9);
+        assert_eq!(st.clamp_list_page("organization", "declined", 100), 0);
+        // the clamp writes back: page 3 on a 2-page list re-bases to the
+        // last page, and the next "prev" moves from THERE
+        st.page_list_by("organization", "declined", 3);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 1);
+        st.page_list_by("organization", "declined", -1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 0);
+        // per-(surface, list) independence
+        st.page_list_by("memory", "applied", 1);
+        assert_eq!(st.clamp_list_page("memory", "applied", 100), 1);
+        assert_eq!(st.clamp_list_page("organization", "declined", 30), 0);
+        // a workspace switch resets the pages with the rest of the state
+        st.enter_workspace("ws-b");
+        assert_eq!(st.clamp_list_page("memory", "applied", 100), 0);
     }
 
     /// Guard: every nav sub-view of every surface has a real icon — the

@@ -3,12 +3,13 @@
 
 //! **Cross-package chat-bus integration** (implementation plan §5.2): a
 //! chain-governed two-instance workspace where the founder proposes through
-//! real threshold governance, both sides chat in the proposal's
+//! real threshold governance, both sides deliberate in the OPEN proposal's
 //! `Patch(id)` channel AND the all-hands `Group`, the engine-side channel
 //! filter equals the client-side filter of the full read on BOTH engines, a
 //! member reaction in the patch channel converges to the founder over the
-//! mesh. One test, because the stages build on one another and the founding
-//! is the expensive part. (The MCP-tool-built read equality of §5.2 lives in
+//! mesh — and then the member co-signs, the block seals, and the decided
+//! vote's discussion turns read-only. One test, because the stages build on
+//! one another and the founding is the expensive part. (The MCP-tool-built read equality of §5.2 lives in
 //! `molt-mcp/tests/tool_reads.rs` — mcp → engine is the legal dependency
 //! direction; the engine never depends on a surface crate, not even dev-only.)
 
@@ -185,7 +186,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         Some(MlsChannel::new(member_group)),
     );
 
-    // ---- (a) real threshold governance: propose, member co-signs ------
+    // ---- (a) real threshold governance: the founder proposes ----------
     let payload = serde_json::json!({"op": "add_note", "title": "minutes"});
     let pid = match a
         .execute(Command::Propose {
@@ -202,43 +203,10 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         common::read_applied(&a, Surface::Memory).await.is_empty(),
         "the founder's own signature alone must not commit a 2-of-2 change"
     );
-    // the member co-signs the SAME change with its own identity key (the
-    // ritual salts the identity with the member's workspace-id string)
-    let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
-    let (b_sk, _b_pk) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
-    let change = molt_core::ChainChange::Applied {
-        proposal_id: pid.0,
-        surface: Surface::Memory,
-        payload: payload.clone(),
-    };
-    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
-    let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
-    member_feed.push(EventEnvelope {
-        seq: 2,
-        ts: 1_751_000_200,
-        by: "member-b".to_string(),
-        body: WorkspaceEvent::Approved {
-            id: pid,
-            by: "member-b".to_string(),
-            height: 1,
-            sig: b_sig,
-        },
-    });
-    let _ = member_wake.send(2);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let applied = common::read_applied(&a, Surface::Memory).await;
-        if applied.iter().any(|v| v["title"] == serde_json::json!("minutes")) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the mesh-approved change never committed; applied: {applied:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 
     // ---- (b) both sides chat in Patch(pid) AND Group -------------------
+    // (while the vote is still open: a DECIDED vote's discussion is
+    // read-only — the member co-signs at the end, part (f))
     let patch = ChannelRef::Patch { id: pid };
     a.execute(Command::Chat {
         body: "kickoff".to_string(),
@@ -277,13 +245,13 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     for (i, m) in b_chat.iter().enumerate() {
         let msg: ChatMessage = serde_json::from_value(m.clone()).expect("chat message decodes");
         member_feed.push(EventEnvelope {
-            seq: 3 + u64::try_from(i).expect("tiny"),
+            seq: 2 + u64::try_from(i).expect("tiny"),
             ts: msg.ts,
             by: "member-b".to_string(),
             body: WorkspaceEvent::Chat(msg),
         });
     }
-    let _ = member_wake.send(4);
+    let _ = member_wake.send(3);
 
     // both engines converge on four messages (2 own + 2 from the peer)
     common::await_chat_len(&a, 4, 15).await;
@@ -332,7 +300,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         .parse()
         .expect("valid id");
     member_feed.push(EventEnvelope {
-        seq: 5,
+        seq: 4,
         ts: 1_751_000_300,
         by: "member-b".to_string(),
         body: WorkspaceEvent::ChatReacted {
@@ -343,7 +311,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
             op: Some(molt_core::ReactOp::Add),
         },
     });
-    let _ = member_wake.send(5);
+    let _ = member_wake.send(4);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let patch_msgs = read_chat_snap(&a, Some(patch.clone())).await.applied;
@@ -395,12 +363,12 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     let share_msg: ChatMessage = serde_json::from_value(b_share).expect("share decodes");
     assert_eq!(share_msg.channel, patch, "the share is tagged before the wire");
     member_feed.push(EventEnvelope {
-        seq: 6,
+        seq: 5,
         ts: share_msg.ts,
         by: "member-b".to_string(),
         body: WorkspaceEvent::Chat(share_msg),
     });
-    let _ = member_wake.send(6);
+    let _ = member_wake.send(5);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let patch_msgs = read_chat_snap(&a, Some(patch.clone())).await.applied;
@@ -426,6 +394,68 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         "no file offer leaks into the founder's group view"
     );
 
-    // (f) of §5.2 — the MCP-tool-built read equality — lives in
+    // ---- (f) the member co-signs, the block seals — and the decided ----
+    // vote's discussion turns read-only.
+    // The member co-signs the SAME change with its own identity key (the
+    // ritual salts the identity with the member's workspace-id string).
+    let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
+    let (b_sk, _b_pk) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
+    let change = molt_core::ChainChange::Applied {
+        proposal_id: pid.0,
+        surface: Surface::Memory,
+        payload: payload.clone(),
+    };
+    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
+    member_feed.push(EventEnvelope {
+        seq: 6,
+        ts: 1_751_000_400,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Approved {
+            id: pid,
+            by: "member-b".to_string(),
+            height: 1,
+            sig: b_sig,
+        },
+    });
+    let _ = member_wake.send(6);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let applied = common::read_applied(&a, Surface::Memory).await;
+        if applied.iter().any(|v| v["title"] == serde_json::json!("minutes")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the mesh-approved change never committed; applied: {applied:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // the deliberation ended with the vote: a new local message into the
+    // decided vote's discussion is refused on the founder's engine …
+    assert!(
+        matches!(
+            a.execute(Command::Chat {
+                body: "after the seal".to_string(),
+                quote: None,
+                channel: patch.clone(),
+            })
+            .await,
+            Err(molt_core::MoltError::DiscussionClosed(
+                id,
+                molt_core::ProposalState::Applied,
+            )) if id == pid
+        ),
+        "a committed vote's discussion must be read-only"
+    );
+    // … while the channel stays readable: the deliberation is still there
+    // (two chats + the file offer)
+    assert_eq!(
+        read_chat_snap(&a, Some(patch.clone())).await.applied.len(),
+        3,
+        "the decided discussion keeps its history readable"
+    );
+
+    // (g) of §5.2 — the MCP-tool-built read equality — lives in
     // molt-mcp/tests/tool_reads.rs, on the legal side of the crate layering.
 }

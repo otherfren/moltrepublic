@@ -24,8 +24,8 @@ mod common;
 use std::time::Duration;
 
 use molt_core::{
-    ChatMessage, Command, EventEnvelope, MemberId, Reply, SessionSettings, SessionView, Surface,
-    WorkspaceEvent,
+    ChatMessage, Command, EventEnvelope, MemberId, ProposalId, Reply, SessionSettings,
+    SessionView, Surface, WorkspaceEvent,
 };
 use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
@@ -1391,6 +1391,224 @@ async fn founding_governs_over_the_direct_mesh() {
             "the mesh-approved change never committed; applied: {applied:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// **A `set_image` proposal's bytes survive the mesh, both directions.**
+/// The image rides the `Proposed` gossip itself (sign-what-you-see: every
+/// member votes on the actual bytes), so a realistic ~150 KiB logo is the
+/// first governance frame that must chunk across many transport blocks.
+/// Founder → member: the member's supervisor delivers the founder's
+/// proposal payload byte-identical. Member → founder: the founder engine
+/// records the peer proposal and its pending read serves the identical,
+/// base64-decodable bytes — exactly what the GUI's "click to view" decodes.
+/// Pins every layer against truncation/re-encoding: outbox, MLS, chunker,
+/// wrap, reassembly, and the `cmd_net_delivered` set_image guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "carry the image over the mesh".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    // --- the member's runtime supervisor on the shared hub ---
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 13),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // a realistic logo: ~150 KiB of non-repeating bytes (well over one
+    // transport block, under the 256 KiB engine cap), base64 like the GUI
+    use base64::Engine as _;
+    let founder_bytes: Vec<u8> = (0u32..150 * 1024)
+        .map(|i| u8::try_from((i.wrapping_mul(2_654_435_761) >> 13) & 0xff).unwrap_or(0))
+        .collect();
+    let founder_b64 = base64::engine::general_purpose::STANDARD.encode(&founder_bytes);
+    let payload = serde_json::json!({
+        "op": "set_image",
+        "title": "Set image to crest.png",
+        "value": "crest.png",
+        "bytes_b64": founder_b64,
+    });
+    let pid = match a
+        .execute(Command::Propose {
+            surface: Surface::Organization,
+            payload: payload.clone(),
+        })
+        .await
+        .expect("propose")
+    {
+        Reply::Proposed { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    // --- founder → member: the delivered gossip carries the identical,
+    // decodable bytes ---
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    'founder_to_member: loop {
+        for (from, env) in member_sink.messages() {
+            if let WorkspaceEvent::Proposed { id, surface, payload } = &env.body {
+                if *id == pid {
+                    assert_eq!(from, "founder-a", "the gossip is link-authenticated");
+                    assert_eq!(*surface, Surface::Organization);
+                    let got = payload["bytes_b64"].as_str().expect("bytes_b64 is a string");
+                    assert_eq!(
+                        got, founder_b64,
+                        "the member must receive the founder's image bytes verbatim"
+                    );
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(got)
+                        .expect("the delivered payload base64-decodes");
+                    assert_eq!(decoded, founder_bytes);
+                    break 'founder_to_member;
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder's set_image proposal never reached the member; got {:?}",
+            member_sink
+                .messages()
+                .iter()
+                .map(|(_, e)| std::mem::discriminant(&e.body))
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // --- member → founder: the peer proposal lands in the founder's
+    // pending read with the identical bytes (what the GUI preview decodes) ---
+    let member_bytes: Vec<u8> = (0u32..150 * 1024)
+        .map(|i| u8::try_from((i.wrapping_mul(2_246_822_519) >> 11) & 0xff).unwrap_or(0))
+        .collect();
+    let member_b64 = base64::engine::general_purpose::STANDARD.encode(&member_bytes);
+    member_feed.push(EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_300,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Proposed {
+            id: ProposalId(7),
+            surface: Surface::Organization,
+            payload: serde_json::json!({
+                "op": "set_image",
+                "title": "Set image to seal.png",
+                "value": "seal.png",
+                "bytes_b64": member_b64,
+            }),
+        },
+    });
+    let _ = member_wake.send(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let pending = match a
+            .execute(Command::ReadState {
+                surface: Surface::Organization,
+                channel: None,
+            })
+            .await
+            .expect("read pending")
+        {
+            Reply::State(s) => s.pending,
+            other => panic!("unexpected: {other:?}"),
+        };
+        if let Some(p) = pending.iter().find(|p| p.id == ProposalId(7)) {
+            let got = p.payload["bytes_b64"].as_str().expect("bytes_b64 is a string");
+            assert_eq!(
+                got, member_b64,
+                "the founder's pending read must serve the member's image bytes verbatim"
+            );
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(got)
+                .expect("the pending payload base64-decodes");
+            assert_eq!(decoded, member_bytes);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the member's set_image proposal never reached the founder; pending ids: {:?}",
+            pending.iter().map(|p| p.id).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -3835,4 +4053,118 @@ async fn a_shed_future_epoch_message_survives_via_redelivery() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// **Minting a recovery link never needs the RETURNING member online** — the
+/// link exists precisely because that member is unreachable (device lost). The
+/// only live dependency is the coordinator's OWN mesh runtime. When that mesh
+/// is not running (here: the workspace was closed and reopened over the
+/// loopback hub, whose queues cannot outlive their transport — the same state
+/// as a reopen after a crash), the mint must NOT surface as a raw command
+/// error: the engine acks the human's decision and reports the operational
+/// outcome on the same session-notice channel the minted link itself rides
+/// (`recovery-link-failed:` beside `recovery-link:`), so every operator (GUI,
+/// MCP) reads a calm, retryable state instead of a failure toast. The reopened
+/// republic stays chain-governed — recovery exists here, and the status read
+/// says so (the GUI offers the action only where it exists).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) = molt_engine::__spawn_manual_founding_bootstrap(
+        molt_core::GroupConfig::demo(),
+        session_a,
+    );
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "mint links for the absent".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founding never sealed; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    b_task.await.expect("B task");
+    a.execute(Command::CreateFinish).await.expect("enter");
+    let id = read_session(&a).await.active_workspace.clone();
+    assert!(!id.is_empty(), "the founded republic is open");
+
+    // close cleanly, reopen: the loopback mesh cannot be resumed (its queues
+    // died with the ritual transport), so the reopened workspace runs WITHOUT
+    // a real mesh — the exact state the GUI's Members table acts from after
+    // an app restart that could not resume the transport
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+
+    // recovery still exists here (chain-governed republic) — and the status
+    // read carries that fact for the frontends
+    match a.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => {
+            assert!(st.chain_governed, "a reopened republic is chain-governed");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // the human's decision is acked, not errored; the outcome is the calm
+    // notice — the returning member's presence never entered the picture
+    a.execute(Command::RecoverInviteStart {
+        member: "member-b".to_string(),
+    })
+    .await
+    .expect("a mint without a running mesh is not a command error");
+    let s = read_session(&a).await;
+    assert_eq!(
+        s.notice, "recovery-link-failed:mesh-not-running",
+        "the operational outcome rides the recovery notice channel"
+    );
 }

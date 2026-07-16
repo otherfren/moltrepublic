@@ -192,7 +192,22 @@ pub(crate) fn spawn_recovery_provisioning(
         let q = match transport.create_queue().await {
             Ok(q) => q,
             Err(e) => {
+                // report back instead of dying silently — the operator asked
+                // for a link and must see the calm failed state, and the dead
+                // mint's ticket must be unregistered on the actor
                 tracing::warn!(%member, error = %e, "recovery-queue provisioning failed");
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx
+                    .send(Envelope {
+                        cmd: Command::NetRecoverLinkFailed {
+                            member,
+                            reason: e.to_string(),
+                            ticket,
+                            generation: Some(generation),
+                        },
+                        reply,
+                    })
+                    .await;
                 return;
             }
         };
@@ -755,6 +770,50 @@ mod tests {
             "spaces in the republic travel as dashes"
         );
         assert_eq!(RecoveryInvite::parse(&link).as_ref(), Some(&inv));
+    }
+
+    /// A failed recovery-queue provisioning must REPORT back to the actor
+    /// (`Command::NetRecoverLinkFailed`) instead of dying silently — otherwise
+    /// the operator who asked for a link waits forever on a dialog that never
+    /// opens. Driven against an unreachable SMP server, so `create_queue`
+    /// fails for real.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_queue_provisioning_reports_back_instead_of_silence() {
+        let server = SmpServer::parse(
+            "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@127.0.0.1:9",
+        )
+        .expect("server url parses");
+        let transport = RitualTransport::Smp(SmpTransport::new(server));
+        let (tx, mut rx) = mpsc::channel::<Envelope>(4);
+        spawn_recovery_provisioning(
+            transport,
+            "bob".to_string(),
+            "Guild".to_string(),
+            "f00d".to_string(),
+            "cafe".repeat(4),
+            WrapKey::fresh().expect("wrap"),
+            7,
+            tx,
+            None,
+        );
+        let env = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the provisioning failure reports back in time")
+            .expect("the reporting channel stays open");
+        match env.cmd {
+            Command::NetRecoverLinkFailed {
+                member,
+                reason,
+                ticket,
+                generation,
+            } => {
+                assert_eq!(member, "bob");
+                assert_eq!(ticket, "cafe".repeat(4), "the dead mint's ticket rides along");
+                assert_eq!(generation, Some(7), "scoped to the minting workspace");
+                assert!(!reason.is_empty(), "the transport failure is named");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     /// The coordinator's welcome-send half: given the rejoiner's advertised reply

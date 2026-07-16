@@ -183,6 +183,14 @@ export struct SurfaceTab {
     pending-my-vote-count: int,
     denied-count: int, // ALL declines (status strip)
     declined-count: int, // declines inside the display-retention window
+    // the paged outcome lists' echo (page size 20, Rust-side slice):
+    // 1-based current page + page count for the "page x of y" pager row.
+    // `log`/`declined` below hold ONLY the current page; the counts above
+    // stay full-list.
+    applied-page: int,
+    applied-pages: int,
+    declined-page: int,
+    declined-pages: int,
     log: [LogLine],
     pending: [ProposalRow],
     declined: [ProposalRow], // the retained declines (Declined view)
@@ -449,7 +457,12 @@ export global Strings {
     in property <string> ou-download;
     in property <string> ou-offline;
     in property <string> ou-empty;
+    in property <string> ou-filter-ph;
+    in property <string> ou-no-match;
     in property <string> ou-note;
+    // the paged lists' "Page x of y" label parts
+    in property <string> pg-page;
+    in property <string> pg-of;
     // rename-republic modal + pending-card Ist/Soll + discussion jump
     in property <string> orn-title;
     in property <string> orn-body;
@@ -457,6 +470,7 @@ export global Strings {
     in property <string> pc-current;
     in property <string> pc-proposed;
     in property <string> pc-discuss;
+    in property <string> ch-readonly; // chat banner: decided vote's discussion
     in property <string> pc-proposal; // title prefix ("Vorschlag:")
     in property <string> pc-declined-by; // declined card: "Declined by" lead
     in property <string> mv-declined; // Organization → Declined heading
@@ -535,6 +549,10 @@ export global Strings {
     in property <string> rlk-title;
     in property <string> rlk-body;
     in property <string> rlk-caution;
+    in property <string> rlk-pending;
+    in property <string> rlk-pending-hint;
+    in property <string> rlk-failed-mesh;
+    in property <string> rlk-failed-prefix;
     in property <string> rv-running-note;
     in property <string> rv-failed-hint;
     in property <string> rw-title;
@@ -620,6 +638,7 @@ export global Strings {
     in property <string> ch-group;
     in property <string> ch-new-topic;
     in property <string> ch-topic-ph;
+    in property <string> ch-to-vote;
     in property <string> ch-topic-open;
     in property <string> mv-file-gone;
     in property <string> toast-dl-done; // "Saved:" + the landed path
