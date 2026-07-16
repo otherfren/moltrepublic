@@ -483,6 +483,92 @@ pub fn run_app(
             ui.set_bk_rows(ModelRc::new(VecModel::from(items)));
         });
     }
+    // The Organization tables' sort/filter. View-local presentation like
+    // the Open/backup lists — but these mirrored rows are rebuilt from the
+    // engine on every push, so the state lives in ChatUiState (toggle in
+    // Rust, single writer) and push_surfaces re-applies it each time; the
+    // engine's ReadMembers/ReadUploads stay the full projections for MCP.
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_sort_members(move |column| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.sort_members_by(column.as_str());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_sort_uploads(move |column| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.sort_uploads_by(column.as_str());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_filter_uploads(move |needle| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.set_uploads_filter(needle.to_string());
+            }
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
+    {
+        // A member row's uploads count: jump to Organization → Uploads
+        // pre-filtered to that member. The view switch is the same engine
+        // command the nav issues; the filter itself stays single-writer in
+        // ChatUiState and the push echoes it into the filter box.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        let chat_ui = chat_ui.clone();
+        ui.on_jump_member_uploads(move |member| {
+            if let Ok(mut st) = chat_ui.lock() {
+                st.set_uploads_filter(member.to_string());
+            }
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::SelectView {
+                    surface: Surface::Organization,
+                    view: "uploads".to_string(),
+                },
+            );
+            let w = w.clone();
+            let weak = weak.clone();
+            let chat_ui = chat_ui.clone();
+            rt.spawn(async move {
+                push_surfaces(&w, &weak, &chat_ui).await;
+            });
+        });
+    }
     {
         let rt = rt.clone();
         let w = wallet.clone();
@@ -1343,6 +1429,76 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
     }
 }
 
+/// Toggle-or-switch a table's sort state: clicking the active column again
+/// flips the direction, a new column starts ascending.
+fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
+    if active == column {
+        *ascending = !*ascending;
+    } else {
+        *active = column.to_string();
+        *ascending = true;
+    }
+}
+
+/// Sort the Organization → Uploads rows by a header column key ("user" /
+/// "date" / "file" / "type" / "size" / "checksum" / "download" /
+/// "expires"); an empty or unknown key keeps the engine order. Text
+/// columns compare case-insensitively; date/size/expiry sort by the
+/// underlying numeric keys carried on the row — never the rendered label.
+fn sort_uploads(rows: &mut [UploadRowData], column: &str, ascending: bool) {
+    match column {
+        "user" => rows.sort_by_key(|r| r.user.to_lowercase()),
+        "date" => rows.sort_by_key(|r| r.ts),
+        "file" => rows.sort_by_key(|r| r.name.to_lowercase()),
+        "type" => rows.sort_by_key(|r| r.kind.to_lowercase()),
+        "size" => rows.sort_by_key(|r| r.bytes),
+        "checksum" => rows.sort_by_key(|r| r.checksum_full.to_lowercase()),
+        "download" => rows.sort_by_key(|r| r.status.to_lowercase()),
+        "expires" => rows.sort_by_key(|r| r.expires_ts),
+        _ => return,
+    }
+    if !ascending {
+        rows.reverse();
+    }
+}
+
+/// Keep the uploads rows whose user, filename or checksum contains
+/// `needle` case-insensitively; an empty needle keeps every row. The
+/// checksum matches on the full sha256 hex, so a pasted full checksum
+/// finds its row even though the cell shows a shortened prefix.
+fn filter_uploads(rows: Vec<UploadRowData>, needle: &str) -> Vec<UploadRowData> {
+    if needle.is_empty() {
+        return rows;
+    }
+    let needle = needle.to_lowercase();
+    rows.into_iter()
+        .filter(|r| {
+            r.user.to_lowercase().contains(&needle)
+                || r.name.to_lowercase().contains(&needle)
+                || r.checksum_full.to_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
+/// Sort the Organization → Members rows by a header column key ("name" /
+/// "id" / "pk" / "last" / "uploads"); an empty or unknown key keeps the
+/// roster order. Unanchored (empty) id/pk cells sort last ascending; no
+/// real last-seen timestamp exists yet (mock presence), so "last" orders
+/// by the presence state first, then the label.
+fn sort_members(rows: &mut [MemberRowData], column: &str, ascending: bool) {
+    match column {
+        "name" => rows.sort_by_key(|r| r.name.to_lowercase()),
+        "id" => rows.sort_by_key(|r| (r.id.is_empty(), r.id.to_lowercase())),
+        "pk" => rows.sort_by_key(|r| (r.pk.is_empty(), r.pk.to_lowercase())),
+        "last" => rows.sort_by_key(|r| (r.state, r.last.to_lowercase())),
+        "uploads" => rows.sort_by_key(|r| r.uploads),
+        _ => return,
+    }
+    if !ascending {
+        rows.reverse();
+    }
+}
+
 /// The recovery-flow reading of the transient session notice — the engine's
 /// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's
 /// mint lifecycle (pending → link | failed), and the rejoiner's
@@ -1791,10 +1947,23 @@ struct SurfacesBundle {
     selected_key: String,
     /// Compose-banner label of the selected channel ("" = group).
     selected_label: String,
-    /// Organization → Members table rows (engine `ReadMembers`).
+    /// Organization → Members table rows (engine `ReadMembers`), already
+    /// ordered by the active sort.
     members: Vec<MemberRowData>,
-    /// Organization → Uploads table rows (engine `ReadUploads`).
+    /// Organization → Uploads table rows (engine `ReadUploads`), already
+    /// thinned by the filter and ordered by the active sort.
     uploads: Vec<UploadRowData>,
+    /// Members sort echo: active column ("" = roster order) + direction —
+    /// the headers render the ▲/▼ from these.
+    members_sort: String,
+    members_asc: bool,
+    /// Uploads sort echo (like `members_sort`).
+    uploads_sort: String,
+    uploads_asc: bool,
+    /// Uploads filter echo — lands in the filter box only when it differs
+    /// (a workspace-switch reset or the members-table uploads-jump; live
+    /// typing is guarded by the generation).
+    uploads_filter: String,
     /// The status info strip (founding date + mock activity trio).
     org_stats: OrgStats,
     /// Group-channel unread count (badges the Gruppe nav row).
@@ -1853,6 +2022,16 @@ struct UploadRowData {
     status: String,
     /// 0 idle · 1 running · 2 done · 3 failed (drives color + button).
     status_kind: i32,
+    /// Share time (unix seconds) — the sort key behind the rendered `date`.
+    ts: u64,
+    /// Size in bytes — the sort key behind the rendered `size` label.
+    bytes: u64,
+    /// Link expiry (unix seconds) — the sort key behind `expires`.
+    expires_ts: u64,
+    /// The FULL sha256 hex ("" on legacy shares) — the filter/sort key
+    /// behind the shortened `checksum` cell, so a pasted full checksum
+    /// still finds its row.
+    checksum_full: String,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -1915,6 +2094,22 @@ struct ChatUiState {
     /// is no longer current must neither apply its bundle nor touch the
     /// unread ledger (see [`ChatUiState::begin_push`]).
     generation: u64,
+    /// Organization → Members sort: active column ("" = roster order).
+    /// Like the channel selection this is UI-LOCAL presentation state —
+    /// the engine's `ReadMembers`/`ReadUploads` stay the full projections
+    /// (MCP sees them unchanged); this window merely re-orders/thins the
+    /// mirrored rows before pushing them into the Slint models. A
+    /// workspace switch resets it with the rest of this state.
+    members_sort: String,
+    /// Members sort direction (meaningful only while `members_sort` != "").
+    members_asc: bool,
+    /// Organization → Uploads sort: active column ("" = engine order).
+    uploads_sort: String,
+    /// Uploads sort direction (meaningful only while `uploads_sort` != "").
+    uploads_asc: bool,
+    /// Uploads filter needle: case-insensitive substring across user,
+    /// filename and (full) checksum; "" = all rows.
+    uploads_filter: String,
 }
 
 impl ChatUiState {
@@ -1959,6 +2154,27 @@ impl ChatUiState {
     /// stale push skips its ledger bookkeeping and its apply closure.
     fn is_current(&self, gen: u64) -> bool {
         self.generation == gen
+    }
+
+    /// Click on a Members header column: toggle-or-switch the sort. The
+    /// generation bump stales every in-flight push (its bundle carries the
+    /// previous order).
+    fn sort_members_by(&mut self, column: &str) {
+        toggle_sort(&mut self.members_sort, &mut self.members_asc, column);
+        self.generation += 1;
+    }
+
+    /// Click on an Uploads header column: toggle-or-switch the sort.
+    fn sort_uploads_by(&mut self, column: &str) {
+        toggle_sort(&mut self.uploads_sort, &mut self.uploads_asc, column);
+        self.generation += 1;
+    }
+
+    /// Set the uploads filter needle (typed, or pre-filled by the Members
+    /// table's uploads-jump).
+    fn set_uploads_filter(&mut self, needle: String) {
+        self.uploads_filter = needle;
+        self.generation += 1;
     }
 }
 struct SurfaceData {
@@ -2128,6 +2344,10 @@ async fn push_surfaces(
                     .map(|s| format!("{s}…"))
                     .unwrap_or_default(),
                 expires: expires_label(upload_now, u.expires_ts, u.available),
+                ts: u.ts,
+                bytes: u.size,
+                expires_ts: u.expires_ts,
+                checksum_full: u.checksum,
                 status: match u.download.as_ref().map(|d| d.phase.as_str()) {
                     Some("requested") => "0 %".to_string(),
                     Some("transferring") => u
@@ -2188,7 +2408,7 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
-    let (unread, first_seen, known) = {
+    let (unread, first_seen, known, org_view) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
@@ -2203,8 +2423,24 @@ async fn push_surfaces(
             st.ledger.observe(&counts, &selected_key),
             st.first_seen.clone(),
             st.proposals.clone(),
+            (
+                st.members_sort.clone(),
+                st.members_asc,
+                st.uploads_sort.clone(),
+                st.uploads_asc,
+                st.uploads_filter.clone(),
+            ),
         )
     };
+    // the Organization tables' presentation pass (UI-local, like the
+    // channel selection): thin the uploads by the filter needle, then
+    // order both tables by their active sort column — the engine's
+    // ReadMembers/ReadUploads projections stay the full, untouched truth
+    let (members_sort, members_asc, uploads_sort, uploads_asc, uploads_filter) = org_view;
+    let mut members = members;
+    sort_members(&mut members, &members_sort, members_asc);
+    let mut uploads = filter_uploads(uploads, &uploads_filter);
+    sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(&known);
@@ -2237,6 +2473,11 @@ async fn push_surfaces(
         selected_label,
         members,
         uploads,
+        members_sort,
+        members_asc,
+        uploads_sort,
+        uploads_asc,
+        uploads_filter,
         org_stats,
         group_unread,
     };
@@ -2407,6 +2648,18 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         })
         .collect();
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
+
+    // the tables' sort/filter echo: the headers render the ▲/▼ arrow from
+    // these; the filter box only refreshes when Rust owns the change (a
+    // workspace-switch reset or the members-table uploads-jump) — a live
+    // keystroke bumps the push generation, so a stale echo never lands
+    ui.set_om_sort_column(b.members_sort.as_str().into());
+    ui.set_om_sort_ascending(b.members_asc);
+    ui.set_ou_sort_column(b.uploads_sort.as_str().into());
+    ui.set_ou_sort_ascending(b.uploads_asc);
+    if ui.get_ou_filter().as_str() != b.uploads_filter {
+        ui.set_ou_filter(b.uploads_filter.as_str().into());
+    }
 
     ui.set_group_unread(b.group_unread);
 
@@ -3543,6 +3796,8 @@ lexicon! {
     ou_download: "Download", "Download";
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
+    ou_filter_ph: "Filter: user, filename or checksum", "Filter: Nutzer, Dateiname oder Checksum";
+    ou_no_match: "No uploads match the filter.", "Keine Uploads passen zum Filter.";
     orn_title: "Rename republic", "Republik umbenennen";
     orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
     op_change_name: "Rename", "Name ändern";
@@ -4470,6 +4725,171 @@ mod tests {
         sort_ws_items(&mut items, "sync", true);
         let names: Vec<String> = items.iter().map(|w| w.name.to_string()).collect();
         assert_eq!(names, ["beta", "Alpha", "gamma"]);
+    }
+
+    /// Uploads-table row for the presentation tests. The DISPLAY strings
+    /// are deliberately misleading (they would sort the other way round),
+    /// pinning that date/size/expiry sort by the underlying numeric keys
+    /// and never the rendered labels.
+    fn upload(user: &str, name: &str, checksum: &str, ts: u64, bytes: u64) -> UploadRowData {
+        UploadRowData {
+            id: String::new(),
+            user: user.to_string(),
+            date: format!("{}", u64::MAX - ts),
+            name: name.to_string(),
+            kind: String::new(),
+            size: format!("{} KiB", u64::MAX - bytes),
+            available: true,
+            online: true,
+            // the cell shows a shortened prefix — the filter must still
+            // match on the full value
+            checksum: checksum.get(..4).unwrap_or(checksum).to_string(),
+            expires: String::new(),
+            status: String::new(),
+            status_kind: 0,
+            ts,
+            bytes,
+            expires_ts: ts,
+            checksum_full: checksum.to_string(),
+        }
+    }
+
+    #[test]
+    fn sort_uploads_text_columns_case_insensitive() {
+        let mut rows = vec![
+            upload("bob", "zeta.pdf", "CC99", 1, 1),
+            upload("Alice", "Alpha.PDF", "0b11", 2, 2),
+            upload("carol", "beta.txt", "aa22", 3, 3),
+        ];
+        rows[0].kind = "PDF".to_string();
+        rows[1].kind = "zip".to_string();
+        rows[2].kind = "Txt".to_string();
+        rows[0].status = "\u{2713}".to_string();
+        rows[1].status = "42 %".to_string();
+        let users = |rows: &[UploadRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.user.clone()).collect()
+        };
+        sort_uploads(&mut rows, "user", true);
+        assert_eq!(users(&rows), ["Alice", "bob", "carol"], "case-insensitive");
+        sort_uploads(&mut rows, "user", false);
+        assert_eq!(users(&rows), ["carol", "bob", "Alice"], "descending flips");
+        sort_uploads(&mut rows, "file", true);
+        assert_eq!(users(&rows), ["Alice", "carol", "bob"], "Alpha < beta < zeta");
+        sort_uploads(&mut rows, "type", true);
+        assert_eq!(users(&rows), ["bob", "carol", "Alice"], "pdf < txt < zip");
+        sort_uploads(&mut rows, "checksum", true);
+        assert_eq!(users(&rows), ["Alice", "carol", "bob"], "0b < aa < cc");
+        sort_uploads(&mut rows, "download", true);
+        assert_eq!(users(&rows), ["carol", "Alice", "bob"], "idle < 42 % < ✓");
+    }
+
+    #[test]
+    fn sort_uploads_numeric_columns_use_underlying_values() {
+        // the rendered date/size labels would sort exactly the other way
+        // round (see `upload`) — only the numeric keys give this order
+        let mut rows = vec![
+            upload("a", "x", "", 30, 10_240),
+            upload("b", "y", "", 10, 2_048),
+            upload("c", "z", "", 20, 900),
+        ];
+        let users = |rows: &[UploadRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.user.clone()).collect()
+        };
+        sort_uploads(&mut rows, "date", true);
+        assert_eq!(users(&rows), ["b", "c", "a"], "oldest share first");
+        sort_uploads(&mut rows, "date", false);
+        assert_eq!(users(&rows), ["a", "c", "b"], "newest share first");
+        sort_uploads(&mut rows, "size", true);
+        assert_eq!(users(&rows), ["c", "b", "a"], "900 B < 2 KiB < 10 KiB");
+        sort_uploads(&mut rows, "expires", true);
+        assert_eq!(users(&rows), ["b", "c", "a"], "soonest expiry first");
+        // an unknown/empty column keeps the current order
+        sort_uploads(&mut rows, "", false);
+        assert_eq!(users(&rows), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn filter_uploads_matches_user_name_or_checksum_case_insensitively() {
+        let all = || {
+            vec![
+                upload("Alice", "report.pdf", "aabb1122", 1, 1),
+                upload("bob", "photo.png", "ccdd3344", 2, 2),
+            ]
+        };
+        assert_eq!(filter_uploads(all(), "").len(), 2, "empty needle = all");
+        let f = filter_uploads(all(), "LICE");
+        assert_eq!(f.len(), 1, "user match, case-insensitive");
+        assert_eq!(f[0].user, "Alice");
+        let f = filter_uploads(all(), "PHOTO");
+        assert_eq!(f.len(), 1, "filename match");
+        assert_eq!(f[0].user, "bob");
+        // beyond the 4-char display prefix — must match the FULL checksum
+        let f = filter_uploads(all(), "DD33");
+        assert_eq!(f.len(), 1, "full-checksum match");
+        assert_eq!(f[0].user, "bob");
+        assert!(filter_uploads(all(), "zzz").is_empty(), "no match = empty");
+    }
+
+    /// Members-table row for the sort tests.
+    fn member(name: &str, id: &str, last: &str, state: i32, uploads: i32) -> MemberRowData {
+        MemberRowData {
+            name: name.to_string(),
+            id: id.to_string(),
+            pk: id.to_string(),
+            last: last.to_string(),
+            state,
+            uploads,
+        }
+    }
+
+    #[test]
+    fn sort_members_by_name_uploads_and_presence() {
+        let mut rows = vec![
+            member("bob", "0b", "just now", 0, 3),
+            member("Alice", "aa", "5 min ago", 1, 10),
+            member("carol", "", "offline", 2, 2),
+        ];
+        let names = |rows: &[MemberRowData]| -> Vec<String> {
+            rows.iter().map(|r| r.name.clone()).collect()
+        };
+        sort_members(&mut rows, "name", true);
+        assert_eq!(names(&rows), ["Alice", "bob", "carol"], "case-insensitive");
+        sort_members(&mut rows, "uploads", true);
+        assert_eq!(names(&rows), ["carol", "bob", "Alice"], "2 < 3 < 10 numeric");
+        sort_members(&mut rows, "uploads", false);
+        assert_eq!(names(&rows), ["Alice", "bob", "carol"]);
+        // no real timestamp exists (mock presence) — recency approximates
+        // as presence state first: synced < syncing < offline
+        sort_members(&mut rows, "last", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"]);
+        // unanchored (empty) identity cells sort last ascending
+        sort_members(&mut rows, "id", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"], "0b < aa < empty");
+        sort_members(&mut rows, "", true);
+        assert_eq!(names(&rows), ["bob", "Alice", "carol"], "unknown = keep");
+    }
+
+    /// The Organization tables' view state: clicking the active column
+    /// flips the direction, a new column starts ascending, and every
+    /// change bumps the push generation (stales in-flight bundles).
+    #[test]
+    fn org_sort_state_toggles_and_bumps_generation() {
+        let mut st = ChatUiState::default();
+        let g = st.generation;
+        st.sort_uploads_by("size");
+        assert_eq!(st.uploads_sort, "size");
+        assert!(st.uploads_asc, "a fresh column starts ascending");
+        st.sort_uploads_by("size");
+        assert!(!st.uploads_asc, "the same column flips the direction");
+        st.sort_uploads_by("user");
+        assert_eq!(st.uploads_sort, "user");
+        assert!(st.uploads_asc, "switching columns resets to ascending");
+        st.sort_members_by("uploads");
+        assert_eq!(st.members_sort, "uploads");
+        assert!(st.members_asc);
+        st.set_uploads_filter("alice".to_string());
+        assert_eq!(st.uploads_filter, "alice");
+        assert_eq!(st.generation, g + 5, "every change stales in-flight pushes");
     }
 
     /// Guard: every nav sub-view of every surface has a real icon — the
