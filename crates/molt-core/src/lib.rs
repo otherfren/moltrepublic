@@ -238,6 +238,10 @@ pub struct SessionSettings {
     /// Automatic-backup interval in minutes.
     #[serde(default = "default_s3_interval")]
     pub s3_interval_min: u16,
+    /// How many automatic-backup copies to keep per workspace (older
+    /// copies are pruned once a newer one lands).
+    #[serde(default = "default_s3_keep_copies")]
+    pub s3_keep_copies: u16,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -273,6 +277,7 @@ impl Default for SessionSettings {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval(),
+            s3_keep_copies: default_s3_keep_copies(),
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
@@ -299,6 +304,11 @@ fn default_download_dir() -> String {
 /// Default automatic-backup interval (minutes).
 fn default_s3_interval() -> u16 {
     60
+}
+
+/// Default number of automatic-backup copies kept per workspace.
+fn default_s3_keep_copies() -> u16 {
+    5
 }
 
 /// One member of a workspace with its (mock) last-sync info.

@@ -67,7 +67,26 @@ pub fn run_app(
     embedded_tor_available: bool,
 ) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
-    ui.set_config_path(config_path.display().to_string().into());
+    // the settings footer shows the full config.toml location: directory
+    // greyed, file name in text color. Absolutize a relative discovery path
+    // (e.g. "config.toml" found in the cwd) so it reads as a full path.
+    let abs = if config_path.is_absolute() {
+        config_path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(&config_path))
+            .unwrap_or_else(|_| config_path.clone())
+    };
+    let file = abs
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let dir = abs
+        .parent()
+        .map(|p| format!("{}{}", p.display(), std::path::MAIN_SEPARATOR))
+        .unwrap_or_default();
+    ui.set_config_dir(dir.into());
+    ui.set_config_file(file.into());
     // Surface the compile-time embedded-tor availability into the tor-mode
     // dropdown's per-row enabled flags (a constant for the process lifetime).
     ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(
@@ -1016,11 +1035,10 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_org_propose(move |op, title, value| {
+        ui.on_org_propose(move |op, value| {
             if op.as_str() == "set_image" {
                 let w = w.clone();
                 let weak = weak.clone();
-                let title = title.to_string();
                 let path = value.to_string();
                 rt.spawn(async move {
                     let read = tokio::task::spawn_blocking({
@@ -1035,9 +1053,11 @@ pub fn run_app(
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| path.clone());
+                            // no baked display title: the op is the
+                            // language-neutral placeholder every UI
+                            // translates at render time (display_title)
                             serde_json::json!({
                                 "op": "set_image",
-                                "title": title,
                                 "value": name,
                                 "bytes_b64":
                                     base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -1072,7 +1092,6 @@ pub fn run_app(
             }
             let payload = serde_json::json!({
                 "op": op.as_str(),
-                "title": title.as_str(),
                 "value": value.as_str(),
             });
             issue(
@@ -1610,6 +1629,7 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         s3_secret_key: ui.get_cfg_s3_secret().to_string(),
         s3_bucket: ui.get_cfg_s3_bucket().to_string(),
         s3_interval_min: ui.get_cfg_s3_interval() as u16,
+        s3_keep_copies: ui.get_cfg_s3_copies() as u16,
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
@@ -1870,6 +1890,7 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_s3_secret(s.s3_secret_key.clone().into());
     ui.set_cfg_s3_bucket(s.s3_bucket.clone().into());
     ui.set_cfg_s3_interval(i32::from(s.s3_interval_min));
+    ui.set_cfg_s3_copies(i32::from(s.s3_keep_copies));
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
@@ -2585,8 +2606,8 @@ async fn push_surfaces(
     sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
-    let titles = known_titles(&known);
-    let channels = derive_channels(&infos, &known, &unread);
+    let titles = known_titles(lang, &known);
+    let channels = derive_channels(lang, &infos, &known, &unread);
     // the group channel has no sidebar row anymore — its unread count
     // badges the Gruppe nav row instead
     let group_unread =
@@ -2967,7 +2988,7 @@ fn surface_data(
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
                 let ctx = chat_ctx.expect("checked above");
-                patch_system_lines(id.0, &ctx.proposals, &ctx.known, &ctx.first_seen)
+                patch_system_lines(lang, id.0, &ctx.proposals, &ctx.known, &ctx.first_seen)
             }
             _ => Vec::new(),
         };
@@ -2979,7 +3000,7 @@ fn surface_data(
             .map(|(i, v)| LogLineData {
                 id: String::new(),
                 lead: String::new(),
-                text: summarize(v),
+                text: display_title(lang, v),
                 when: String::new(),
                 quote: -1,
                 quote_id: String::new(),
@@ -3003,10 +3024,12 @@ fn surface_data(
     };
     let no_quotes = HashMap::new();
     annotate_chat_log(&mut log, chat_ctx.map_or(&no_quotes, |c| &c.quotes));
-    let pending: Vec<ProposalRowData> = snap.pending.iter().map(proposal_row).collect();
+    let pending: Vec<ProposalRowData> =
+        snap.pending.iter().map(|p| proposal_row(lang, p)).collect();
     // the Declined view empties on the chat-retention rhythm — engine
     // semantics too (the read arrives pre-filtered on declined_at)
-    let declined: Vec<ProposalRowData> = snap.declined.iter().map(proposal_row).collect();
+    let declined: Vec<ProposalRowData> =
+        snap.declined.iter().map(|p| proposal_row(lang, p)).collect();
     SurfaceData {
         key: sf.as_str().to_string(),
         name: surface_name(lang, sf).to_string(),
@@ -3021,7 +3044,7 @@ fn surface_data(
 
 /// Project one proposal view into the card row the GUI renders — shared by
 /// the pending and the declined list.
-fn proposal_row(p: &molt_core::ProposalView) -> ProposalRowData {
+fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
     let op = p
         .payload
         .get("op")
@@ -3029,7 +3052,7 @@ fn proposal_row(p: &molt_core::ProposalView) -> ProposalRowData {
         .unwrap_or("");
     ProposalRowData {
         id: p.id.0 as i32,
-        text: summarize(&p.payload),
+        text: display_title(lang, &p.payload),
         approvals: p.approvals as i32,
         threshold: p.threshold as i32,
         current: p.current.clone(),
@@ -3324,6 +3347,7 @@ fn parse_channel_key(key: &str) -> Option<ChannelRef> {
 /// proposals, no free topics — the engine's channel enumeration itself
 /// stays complete (MCP reads it unfiltered).
 fn derive_channels(
+    lang: i32,
     infos: &[ChannelInfo],
     known: &HashMap<u64, KnownProposal>,
     unread: &HashMap<String, usize>,
@@ -3349,7 +3373,7 @@ fn derive_channels(
             Some(ChannelRowData {
                 unread: unread_of(&key),
                 key,
-                label: k.title.clone(),
+                label: display_title(lang, &k.payload),
                 icon: "🗳️".to_string(),
             })
         })
@@ -3434,9 +3458,11 @@ fn selected_channel_closed(
 /// patch channel the moment a block seals — this cache keeps them.
 #[derive(Clone)]
 struct KnownProposal {
-    /// `summarize(&payload)` at the last sighting — the sidebar/banner title.
-    title: String,
     /// The full payload; the fate probe matches it against the applied log.
+    /// Titles are NOT cached: they render from the payload's machine
+    /// placeholder in the active language at display time
+    /// ([`display_title`]) — a cached rendered string would freeze the
+    /// language of the moment it was seen.
     payload: serde_json::Value,
     /// The gated surface the proposal targets (whose applied log to probe).
     surface: Surface,
@@ -3484,7 +3510,6 @@ fn update_known_proposals(
         known.insert(
             p.id.0,
             KnownProposal {
-                title: summarize(&p.payload),
                 payload: p.payload.clone(),
                 surface: p.surface,
                 approvals: p.approvals,
@@ -3514,7 +3539,6 @@ fn update_known_proposals(
     // ambiguity must not un-seal it here).
     for p in declined {
         let entry = known.entry(p.id.0).or_insert_with(|| KnownProposal {
-            title: summarize(&p.payload),
             payload: p.payload.clone(),
             surface: p.surface,
             approvals: p.approvals,
@@ -3522,7 +3546,7 @@ fn update_known_proposals(
             fate: KnownFate::Closed,
         });
         if entry.fate != KnownFate::Applied {
-            entry.title = summarize(&p.payload);
+            entry.payload = p.payload.clone();
             entry.fate = KnownFate::Closed;
         }
     }
@@ -3530,8 +3554,11 @@ fn update_known_proposals(
 
 /// The lazy patch-channel titles (sidebar rows + compose banner), from the
 /// proposal cache — so a title survives the proposal leaving `pending`.
-fn known_titles(known: &HashMap<u64, KnownProposal>) -> HashMap<u64, String> {
-    known.iter().map(|(id, k)| (*id, k.title.clone())).collect()
+fn known_titles(lang: i32, known: &HashMap<u64, KnownProposal>) -> HashMap<u64, String> {
+    known
+        .iter()
+        .map(|(id, k)| (*id, display_title(lang, &k.payload)))
+        .collect()
 }
 
 /// Quote-teaser sources over the FULL chat log, keyed by hex message id.
@@ -3592,6 +3619,7 @@ fn system_line_data(text: String) -> LogLineData {
 /// contract). An id known nowhere yields a bare `⚖ #id` line and never an
 /// error (concept Q4).
 fn patch_system_lines(
+    lang: i32,
     patch: u64,
     pending: &[ProposalView],
     known: &HashMap<u64, KnownProposal>,
@@ -3600,7 +3628,7 @@ fn patch_system_lines(
     let text = match pending.iter().find(|p| p.id.0 == patch) {
         Some(p) => format!(
             "⚖ #{patch} · {} — {}/{}",
-            summarize(&p.payload),
+            display_title(lang, &p.payload),
             p.approvals,
             p.threshold
         ),
@@ -3611,7 +3639,7 @@ fn patch_system_lines(
                     KnownFate::Closed => "⊘".to_string(),
                     KnownFate::Pending => format!("{}/{}", k.approvals, k.threshold),
                 };
-                format!("⚖ #{patch} · {} — {progress}", k.title)
+                format!("⚖ #{patch} · {} — {progress}", display_title(lang, &k.payload))
             }
             None => format!("⚖ #{patch}"),
         },
@@ -3687,6 +3715,40 @@ fn summarize(v: &serde_json::Value) -> String {
     v.to_string()
 }
 
+/// The localized label of an Organization governance op (`None` = not a
+/// governance op). These live HERE, not in the payload: the payload carries
+/// only the machine `op` placeholder, so every UI renders the title in its
+/// own active language (a pre-rendered string would freeze the proposer's
+/// language and mix languages across the group).
+fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
+    Some(match (lang, op) {
+        (1, "set_name") => "Name ändern",
+        (_, "set_name") => "Rename",
+        (1, "set_charter") => "Satzung ändern",
+        (_, "set_charter") => "Change the charter",
+        (1, "set_image") => "Logo der Republik ändern",
+        (_, "set_image") => "Change the republic's image",
+        (1, "remove_image") => "Logo der Republik entfernen",
+        (_, "remove_image") => "Remove the republic's image",
+        (1, "set_chat_retention") => "Löschfrist für Chat-Logs ändern",
+        (_, "set_chat_retention") => "Change when chat logs are deleted",
+        _ => return None,
+    })
+}
+
+/// The display title of a proposal payload, in the ACTIVE language: an org
+/// governance op renders from its machine placeholder via [`org_op_label`]
+/// (even when a legacy payload carries a baked title in some language);
+/// everything else falls back to the payload's own user content
+/// ([`summarize`]).
+fn display_title(lang: i32, v: &serde_json::Value) -> String {
+    v.get("op")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|op| org_op_label(lang, op))
+        .map(str::to_string)
+        .unwrap_or_else(|| summarize(v))
+}
+
 /// Localized surface label for the sidebar (0 = English, 1 = German) —
 /// presentation, like [`seat_state_label`]; the machine key stays
 /// [`Surface::as_str`].
@@ -3695,7 +3757,7 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
         match sf {
             Surface::Organization => "Organisation",
             Surface::Chat => "Chat",
-            Surface::Memory => "Gedächtnis",
+            Surface::Memory => "Shared Memory",
             Surface::Quests => "Quests",
             Surface::Vault => "Tresor",
             Surface::Wallet => "Wallet",
@@ -3704,7 +3766,7 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
         match sf {
             Surface::Organization => "Organization",
             Surface::Chat => "Chat",
-            Surface::Memory => "Memory",
+            Surface::Memory => "Shared Memory",
             Surface::Quests => "Quests",
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
@@ -4007,9 +4069,6 @@ lexicon! {
     oc_title: "Edit charter", "Satzung bearbeiten";
     oc_body: "The charter was ratified by everyone at the founding — an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new charter; the founding charter stays immutable in block 0.", "Die Satzung wurde bei der Gründung von allen ratifiziert — eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Satzung; die Gründungssatzung bleibt unveränderlich in Block 0.";
     oc_propose: "Propose change", "Änderung vorschlagen";
-    op_change_charter: "Change the charter", "Satzung ändern";
-    op_change_logo: "Change the republic's image", "Logo der Republik ändern";
-    op_remove_logo: "Remove the republic's image", "Logo der Republik entfernen";
     toast_proposed: "Proposed — awaiting approvals", "Vorgeschlagen — wartet auf Zustimmungen";
     om_col_id: "ID", "ID";
     om_col_pk: "Public key", "Public Key";
@@ -4035,7 +4094,6 @@ lexicon! {
     ou_no_match: "No uploads match the filter.", "Keine Uploads passen zum Filter.";
     orn_title: "Rename republic", "Republik umbenennen";
     orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
-    op_change_name: "Rename", "Name ändern";
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
@@ -4051,7 +4109,6 @@ lexicon! {
     ocs_days: "days", "Tage";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
-    op_chat_retention: "Change when chat logs are deleted", "Löschfrist für Chat-Logs ändern";
     ou_note: "Only metadata is shared — the bytes move user-to-user via the share link, as long as the sharer keeps the file. (Transfer and expiry are mocks.)", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über den Share-Link, solange der Teilende die Datei behält. (Übertragung und Ablauf sind Mocks.)";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
@@ -4158,6 +4215,8 @@ lexicon! {
     set_s3_active: "active", "aktiv";
     set_s3_every: "every", "alle";
     set_s3_unit_min: "min", "Minuten";
+    set_s3_keep: "save up to", "behalte bis zu";
+    set_s3_unit_copies: "copies", "Kopien";
     toast_s3_ok: "S3 connection OK (mock)", "S3-Verbindung OK (Mock)";
     bk_col_local: "Local workspace", "Lokaler Workspace";
     bk_col_remote: "Backup in bucket", "Backup im Bucket";
@@ -4440,8 +4499,7 @@ mod tests {
     #[test]
     fn derive_channels_lists_only_open_vote_discussions() {
         let known_of = |title: &str, fate: KnownFate| KnownProposal {
-            title: title.to_string(),
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({"op": "add_note", "title": title}),
             surface: Surface::Memory,
             approvals: 1,
             threshold: 2,
@@ -4484,7 +4542,7 @@ mod tests {
             (5u64, known_of("sealed one", KnownFate::Applied)),
         ]);
         let unread = HashMap::from([("patch:3".to_string(), 2usize), ("group".to_string(), 1)]);
-        let rows = derive_channels(&infos, &known, &unread);
+        let rows = derive_channels(0, &infos, &known, &unread);
         // a discussion is vote-bound: only OPEN votes (something can still
         // be voted on) appear — no group row (the Gruppe view covers it),
         // no sealed/closed votes, no unknown proposals, no free topics
@@ -4496,15 +4554,14 @@ mod tests {
         assert_eq!(rows[0].label, "raise budget", "patch title from proposal state");
         assert_eq!(rows[0].unread, 2);
         // nothing open → no rows (the sidebar hides the whole section)
-        let rows = derive_channels(&[], &HashMap::new(), &HashMap::new());
+        let rows = derive_channels(0, &[], &HashMap::new(), &HashMap::new());
         assert!(rows.is_empty());
     }
 
     #[test]
     fn vote_jump_targets_the_hosting_surface_and_fate_view() {
         let known_of = |surface: Surface, fate: KnownFate| KnownProposal {
-            title: "t".to_string(),
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({"op": "add_note", "title": "t"}),
             surface,
             approvals: 0,
             threshold: 2,
@@ -4553,6 +4610,27 @@ mod tests {
         ));
     }
 
+    /// Discussion/card titles must never mix languages: an org governance
+    /// payload carries the machine `op` as its placeholder and the UI
+    /// translates it AT RENDER TIME in the active language — never a
+    /// pre-rendered string frozen in whatever language the proposer's UI
+    /// happened to be in. User content (note titles) passes through.
+    #[test]
+    fn org_titles_render_in_the_active_language_from_the_op_placeholder() {
+        let payload = serde_json::json!({"op": "set_name", "value": "Neu"});
+        assert_eq!(display_title(0, &payload), "Rename");
+        assert_eq!(display_title(1, &payload), "Name ändern");
+        // a legacy payload with a baked, possibly foreign-language title:
+        // the op placeholder still wins for governance ops
+        let legacy =
+            serde_json::json!({"op": "set_image", "title": "Logo ändern", "value": "x.png"});
+        assert_eq!(display_title(0, &legacy), "Change the republic's image");
+        // user content is the title — untouched, in any language
+        let note = serde_json::json!({"op": "add_note", "title": "budget"});
+        assert_eq!(display_title(0, &note), "budget");
+        assert_eq!(display_title(1, &note), "budget");
+    }
+
     /// WP1: an applied log line carries the id of the proposal that produced
     /// it (the snapshot's parallel id track), so the row can offer the 💬
     /// jump into the vote's discussion. A row with no known origin (legacy
@@ -4595,7 +4673,7 @@ mod tests {
             declined_by: String::new(),
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
-        let sys = patch_system_lines(4, &[pv], &HashMap::new(), &first_seen);
+        let sys = patch_system_lines(0, 4, &[pv], &HashMap::new(), &first_seen);
         assert_eq!(sys.len(), 1);
         assert_eq!(sys[0].0, 150, "stamped with the UI-side first-seen time");
         assert!(sys[0].1.system, "system lines carry the quiet-style flag");
@@ -4609,7 +4687,7 @@ mod tests {
 
         // an unknown/already-materialized proposal renders as a bare
         // handle, never an error (concept Q4)
-        let sys_unknown = patch_system_lines(9, &[], &HashMap::new(), &first_seen);
+        let sys_unknown = patch_system_lines(0, 9, &[], &HashMap::new(), &first_seen);
         assert!(sys_unknown[0].1.text.contains("#9"), "{}", sys_unknown[0].1.text);
         assert_eq!(sys_unknown[0].0, 0, "never seen → sorts to the top");
 
@@ -4655,7 +4733,7 @@ mod tests {
         let mut known = HashMap::new();
         // while pending: cached with title + progress
         update_known_proposals(&mut known, std::slice::from_ref(&pv), &[], &HashMap::new());
-        assert_eq!(known[&4].title, "budget", "human title, no op-code prefix");
+        assert_eq!(display_title(0, &known[&4].payload), "budget", "human title, no op-code prefix");
         assert_eq!(known[&4].fate, KnownFate::Pending);
 
         // the proposal leaves the Proposed-only window and its payload
@@ -4666,7 +4744,7 @@ mod tests {
 
         // the system line keeps the title and renders the sealed state
         let first_seen = HashMap::from([(4u64, 150u64)]);
-        let sys = patch_system_lines(4, &[], &known, &first_seen);
+        let sys = patch_system_lines(0, 4, &[], &known, &first_seen);
         let text = &sys[0].1.text;
         assert!(text.contains("budget") && text.contains('✓'), "{text}");
         assert!(text.contains("3/3"), "sealed at the threshold: {text}");
@@ -4679,7 +4757,7 @@ mod tests {
             last_ts: 10,
             state: None,
         }];
-        let rows = derive_channels(&infos, &known, &HashMap::new());
+        let rows = derive_channels(0, &infos, &known, &HashMap::new());
         assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
 
         // vanished WITHOUT an applied trace: the read contract cannot tell
@@ -4693,13 +4771,13 @@ mod tests {
         update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &applied);
         update_known_proposals(&mut known, &[], &[], &applied);
         assert_eq!(known[&9].fate, KnownFate::Closed);
-        let sys = patch_system_lines(9, &[], &known, &first_seen);
+        let sys = patch_system_lines(0, 9, &[], &known, &first_seen);
         let text = &sys[0].1.text;
         assert!(text.contains("drop the fee") && text.contains('⊘'), "{text}");
         assert!(!text.contains('✓') && !text.contains('✗'), "{text}");
 
         // an id never seen anywhere still tolerates (concept Q4)
-        let sys = patch_system_lines(77, &[], &known, &first_seen);
+        let sys = patch_system_lines(0, 77, &[], &known, &first_seen);
         assert_eq!(sys[0].1.text, "⚖ #77");
 
         // a Closed verdict corrects itself when the applied value shows up
@@ -4750,7 +4828,7 @@ mod tests {
         let dv7 = view_of(7, "vetoed", ProposalState::Rejected);
         update_known_proposals(&mut known, &[], std::slice::from_ref(&dv7), &HashMap::new());
         assert_eq!(known[&7].fate, KnownFate::Closed);
-        assert_eq!(known[&7].title, "vetoed", "human title from the summary");
+        assert_eq!(display_title(0, &known[&7].payload), "vetoed", "human title from the summary");
 
         // a cached Pending refreshes to Closed when its decline shows up
         let pv8 = view_of(8, "late veto", ProposalState::Proposed);
@@ -4780,7 +4858,7 @@ mod tests {
             state: Some(ProposalState::Rejected),
         }];
         assert!(
-            derive_channels(&infos, &known, &HashMap::new()).is_empty(),
+            derive_channels(0, &infos, &known, &HashMap::new()).is_empty(),
             "a declined vote's discussion is not a sidebar row"
         );
     }
@@ -4792,8 +4870,7 @@ mod tests {
     #[test]
     fn selected_channel_closed_flags_only_decided_patch_votes() {
         let known_of = |fate: KnownFate| KnownProposal {
-            title: "t".to_string(),
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({"op": "add_note", "title": "t"}),
             surface: Surface::Memory,
             approvals: 1,
             threshold: 2,

@@ -80,6 +80,9 @@ pub struct StorageConfig {
     /// Automatic-backup interval in minutes.
     #[serde(default = "default_s3_interval_min")]
     pub s3_interval_min: u16,
+    /// How many automatic-backup copies to keep per workspace.
+    #[serde(default = "default_s3_keep_copies")]
+    pub s3_keep_copies: u16,
     /// Where downloaded chat files land when no explicit destination is
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
@@ -96,6 +99,7 @@ impl Default for StorageConfig {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval_min(),
+            s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
         }
     }
@@ -270,6 +274,12 @@ pub fn default_s3_interval_min() -> u16 {
     60
 }
 
+/// Default number of automatic-backup copies kept per workspace. Mirrors
+/// `molt_core::SessionSettings`.
+pub fn default_s3_keep_copies() -> u16 {
+    5
+}
+
 /// Default MCP server TCP port.
 pub fn default_mcp_port() -> u16 {
     4040
@@ -343,6 +353,8 @@ pub struct Settings {
     pub s3_bucket: String,
     /// Automatic-backup interval in minutes.
     pub s3_interval_min: u16,
+    /// How many automatic-backup copies to keep per workspace.
+    pub s3_keep_copies: u16,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
     /// Anonymity network: `"tor" | "nym" | "none"`.
@@ -379,6 +391,7 @@ impl Default for Settings {
             s3_secret_key: String::new(),
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval_min(),
+            s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
@@ -429,6 +442,7 @@ impl From<&Config> for Settings {
             s3_secret_key: c.storage.s3_secret_key.clone(),
             s3_bucket: c.storage.s3_bucket.clone(),
             s3_interval_min: c.storage.s3_interval_min,
+            s3_keep_copies: c.storage.s3_keep_copies,
             download_dir: c.storage.download_dir.clone(),
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
@@ -470,6 +484,8 @@ s3_secret_key = {s3_secret_key}
 s3_bucket = {s3_bucket}
 # Automatic-backup interval in minutes.
 s3_interval_min = {s3_interval_min}
+# Keep at most this many backup copies per workspace.
+s3_keep_copies = {s3_keep_copies}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 
@@ -523,6 +539,7 @@ theme = {theme}
         s3_secret_key = toml_str(&settings.s3_secret_key),
         s3_bucket = toml_str(&settings.s3_bucket),
         s3_interval_min = settings.s3_interval_min,
+        s3_keep_copies = settings.s3_keep_copies,
         download_dir = toml_str(&settings.download_dir),
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
@@ -580,6 +597,13 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|p| u16::try_from(p).ok())
         {
             s.s3_interval_min = v;
+        }
+        if let Some(v) = storage
+            .get("s3_keep_copies")
+            .and_then(toml::Value::as_integer)
+            .and_then(|p| u16::try_from(p).ok())
+        {
+            s.s3_keep_copies = v;
         }
     }
     if let Some(anonymity) = value.get("transport").and_then(|t| t.get("anonymity")) {
@@ -729,6 +753,11 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         storage,
         "s3_interval_min",
         i64::from(settings.s3_interval_min),
+    );
+    set_int(
+        storage,
+        "s3_keep_copies",
+        i64::from(settings.s3_keep_copies),
     );
     set_str(storage, "download_dir", &settings.download_dir);
 
@@ -917,6 +946,7 @@ mod tests {
             s3_secret_key: "SK".to_string(),
             s3_bucket: "holiday-pics".to_string(),
             s3_interval_min: 15,
+            s3_keep_copies: 9,
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
