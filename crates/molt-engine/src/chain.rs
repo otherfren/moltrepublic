@@ -886,6 +886,59 @@ impl State {
         }
     }
 
+    /// The event bodies a catch-up answer re-gossips (WP2): per OPEN surface
+    /// proposal a regular `Proposed` plus every already-collected `Approved`
+    /// signature — verbatim and position-bound (`(id, by, height, sig)`),
+    /// nothing is re-signed. Pure so the unit test pins the batch;
+    /// [`State::serve_open_governance`] puts it on the wire. Membership
+    /// proposals (recovery) are deliberately absent: their window is
+    /// mesh-liveness-bound and their tickets are in-memory by design.
+    pub(crate) fn open_governance_events(&self) -> Vec<WorkspaceEvent> {
+        let mut events = Vec::new();
+        let mut open: Vec<(&u64, &molt_core::ProposalRecord)> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.state == ProposalState::Proposed)
+            .collect();
+        // deterministic order (the map is a HashMap): by id
+        open.sort_by_key(|(id, _)| **id);
+        for (id, p) in open {
+            events.push(WorkspaceEvent::Proposed {
+                id: ProposalId(*id),
+                surface: p.surface,
+                payload: p.payload.clone(),
+            });
+            if let Some(pending) = self.pending_sigs.get(id) {
+                for a in &pending.sigs {
+                    events.push(WorkspaceEvent::Approved {
+                        id: ProposalId(*id),
+                        by: a.member.clone(),
+                        height: pending.height,
+                        sig: a.sig.clone(),
+                    });
+                }
+            }
+        }
+        events
+    }
+
+    /// Answer a peer's catch-up request with the OPEN governance state, the
+    /// ephemeral twin of [`State::serve_chain_from`]: a reopened member lost
+    /// the Proposed/Approved gossip with its RAM (deliberately unpersisted —
+    /// the chain's ephemeral-until-block boundary), so whoever serves the
+    /// chain suffix re-serves the open proposals too. Re-gossip of identical
+    /// events is idempotent on every receiver (`receive_proposed` or-inserts,
+    /// `collect_sig` keeps one signature per member, `try_commit` refuses
+    /// decided proposals), so several answering peers converge harmlessly.
+    pub(crate) fn serve_open_governance(&mut self) {
+        let events = self.open_governance_events();
+        let me = self.member();
+        for body in events {
+            let env = self.make_env(me.clone(), body);
+            self.record(env);
+        }
+    }
+
     /// Resolve a competing block at a slot we already filled: identical block →
     /// a duplicate broadcast, ignore; a different block at the tip with a
     /// smaller hash wins the single branch, so adopt it and re-base the
@@ -1300,6 +1353,115 @@ mod tests {
             "the lagging member caught up to the survivor"
         );
         assert!(peer.pending_blocks.is_empty());
+    }
+
+    /// WP2 pin: the catch-up re-gossip relies on the receive side being
+    /// idempotent — a duplicated `Proposed` stays ONE pending entry, a
+    /// duplicated `Approved` stays ONE signature per member, and neither
+    /// resurrects a proposal whose block already committed.
+    #[test]
+    fn regossiped_proposals_and_approvals_are_idempotent() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let payload = json!({ "op": "add_note", "title": "minutes" });
+
+        // a re-gossiped Proposed lands once
+        walter.receive_proposed(1, Surface::Memory, payload.clone());
+        walter.receive_proposed(1, Surface::Memory, payload.clone());
+        let pending: Vec<_> = walter
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.state == ProposalState::Proposed)
+            .collect();
+        assert_eq!(pending.len(), 1, "one entry, not two");
+
+        // a re-gossiped Approved lands as ONE signature for that member
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Memory,
+            payload: payload.clone(),
+        };
+        let bytes = approval_bytes(&b.republic_id, 1, &change);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(1, "petra", 1, &petra_sig);
+        walter.receive_approval(1, "petra", 1, &petra_sig);
+        let sigs = &walter.pending_sigs.get(&1).expect("pending set").sigs;
+        assert_eq!(sigs.len(), 1, "one signature per member: {sigs:?}");
+
+        // walter co-signs — the block seals at 2-of-3
+        walter.chain_sign_and_gossip_approval(1);
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+        assert!(
+            matches!(walter.proposals.get(&1), Some(p) if p.state == ProposalState::Applied),
+            "the proposal committed"
+        );
+
+        // LATE re-gossip (another answering peer) must not resurrect it
+        walter.receive_proposed(1, Surface::Memory, payload);
+        walter.receive_approval(1, "petra", 1, &petra_sig);
+        assert!(
+            matches!(walter.proposals.get(&1), Some(p) if p.state == ProposalState::Applied),
+            "a committed proposal stays committed"
+        );
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            1,
+            "no second block for the same proposal"
+        );
+    }
+
+    /// WP2: whoever answers a `ChainRequest` also re-serves the OPEN
+    /// governance state — per open proposal a regular `Proposed` plus the
+    /// already-collected `Approved` signatures (verbatim, position-bound —
+    /// nothing is re-signed). A reopened member replays those through its
+    /// normal receive arms and can then co-sign; the block seals at m.
+    #[test]
+    fn a_catchup_answer_reserves_open_governance() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let payload = json!({ "op": "add_note", "title": "minutes" });
+        petra
+            .cmd_propose(Surface::Memory, payload.clone())
+            .expect("petra proposes");
+
+        // what petra's catch-up answer re-gossips: the open proposal and
+        // her own collected co-signature
+        let bodies = petra.open_governance_events();
+        let (mut saw_proposed, mut relayed_sig) = (false, None);
+        for body in &bodies {
+            match body {
+                WorkspaceEvent::Proposed { id, surface, payload: p } => {
+                    assert_eq!((id.0, *surface), (1, Surface::Memory));
+                    assert_eq!(p, &payload, "the payload rides unchanged");
+                    saw_proposed = true;
+                }
+                WorkspaceEvent::Approved { id, by, height, sig } => {
+                    assert_eq!((id.0, by.as_str(), *height), (1, "petra", 1));
+                    relayed_sig = Some(sig.clone());
+                }
+                other => panic!("unexpected re-gossip event: {other:?}"),
+            }
+        }
+        assert!(saw_proposed, "the open proposal is re-served");
+        let relayed_sig = relayed_sig.expect("petra's collected signature is re-served");
+
+        // walter — the reopened member: RAM lost the gossip, the chain has
+        // only the genesis. The re-gossip restores proposal + count, then
+        // his own co-signature seals the block (2-of-2).
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter.receive_proposed(1, Surface::Memory, payload);
+        walter.receive_approval(1, "petra", 1, &relayed_sig);
+        assert_eq!(
+            walter.pending_sigs.get(&1).map(|s| s.sigs.len()),
+            Some(1),
+            "the reopened member sees the collected approval count"
+        );
+        walter.chain_sign_and_gossip_approval(1);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            1,
+            "the recovered proposal is fully approvable — the block seals"
+        );
     }
 
     /// A chain-governed member that can also SIGN (holds its identity key).

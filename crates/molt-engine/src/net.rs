@@ -911,6 +911,10 @@ impl State {
             }
             WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
                 self.serve_chain_from(from_height);
+                // WP2: the requester is (re)joining the conversation — beyond
+                // the committed suffix it also lost the ephemeral open
+                // governance state with its RAM, so re-serve that too
+                self.serve_open_governance();
             }
             WorkspaceEvent::MembershipProposed {
                 id,

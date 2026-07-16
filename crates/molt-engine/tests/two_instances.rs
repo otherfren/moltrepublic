@@ -1395,6 +1395,211 @@ async fn founding_governs_over_the_direct_mesh() {
     }
 }
 
+/// **WP2: a reopened member recovers the open governance state from the
+/// mesh.** A member that closes and reopens lost the ephemeral
+/// Proposed/Approved gossip with its RAM; at open it already broadcasts a
+/// `ChainRequest` (chain catch-up). This test drives the ANSWER side over
+/// the real mesh: the founder engine holds an open 1-of-2 proposal, the
+/// member sends the exact `ChainRequest` a reopened engine records — and
+/// receives the proposal AND the founder's collected co-signature back,
+/// MLS-encrypted over the wire. The member then co-signs the recovered
+/// change and the block seals at 2-of-2, proving the re-served state is
+/// fully usable. (A literal close/reopen of a second full engine needs a
+/// resumable transport — SMP, not the loopback founding hub, whose queues
+/// die with the ritual transport; the requester side is exactly the open
+/// path `request_catchup` already pins.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let session_a = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: root_a.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let (a, material_rx) =
+        molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    a.execute(Command::CreateStart {
+        name: "Guild".to_string(),
+        member: "founder-a".to_string(),
+        threshold: 2,
+        members: 2,
+        net: "tor".to_string(),
+    })
+    .await
+    .expect("create start");
+    let materials = tokio::task::spawn_blocking(move || {
+        material_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("A hands out the invite material")
+    })
+    .await
+    .expect("join blocking");
+    let seat = materials.into_iter().next().expect("seat material");
+    let hub = seat.transport.clone();
+
+    let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
+    let b_phrase_for_sig = b_phrase.clone();
+    let b_task = tokio::spawn(async move {
+        molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, true, true, None, None)
+            .await
+            .expect("B completes the member side + bootstrap")
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if read_session(&a).await.create.can_propose {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "member-b never joined");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::CreatePropose {
+        name: "Guild".to_string(),
+        agenda: "recover open votes".to_string(),
+    })
+    .await
+    .expect("founder proposes the charter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = read_session(&a).await;
+        assert_ne!(s.create.run.outcome, 2, "ritual must not fail: {:?}", s.create.run.log);
+        if s.create.run.outcome == 1
+            && s.create.run.log.iter().any(|l| l.contains("direct mesh established"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder never bootstrapped its mesh; log: {:?}",
+            s.create.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_outcome = b_task.await.expect("B task");
+    let member_mesh = b_outcome.mesh.expect("B assembled its direct mesh");
+    let member_mls = b_outcome.mls_snapshot.expect("member post-bootstrap snapshot");
+    let sealed = b_outcome.sealed.expect("member collected the sealed roster");
+
+    a.execute(Command::CreateFinish).await.expect("enter");
+
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_feed = MemLog::new();
+    let member_sink = RecordSink::default();
+    let (member_wake, member_wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 11),
+        member_feed.clone(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        member_wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // --- the founder proposes; his self-cosign makes it 1-of-2, pending ---
+    let payload = serde_json::json!({"op": "add_note", "title": "minutes"});
+    let pid = match a
+        .execute(Command::Propose {
+            surface: Surface::Memory,
+            payload: payload.clone(),
+        })
+        .await
+        .expect("propose")
+    {
+        Reply::Proposed { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        common::read_applied(&a, Surface::Memory).await.is_empty(),
+        "1-of-2 stays pending"
+    );
+
+    // --- the member asks for catch-up: the EXACT frame a reopened engine
+    // records at open (request_catchup(head+1) — genesis head, so from 1) ---
+    member_feed.push(EventEnvelope {
+        seq: 2,
+        ts: 1_751_000_100,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::ChainRequest { from_height: 1 },
+    });
+    let _ = member_wake.send(2);
+
+    // --- the founder's answer re-serves the open governance state: the
+    // proposal and his collected co-signature arrive over the mesh ---
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let founder_sig = loop {
+        let got = member_sink.messages();
+        let proposal_back = got.iter().any(|(from, env)| {
+            from == "founder-a"
+                && matches!(&env.body,
+                    WorkspaceEvent::Proposed { id, surface, payload: p }
+                        if *id == pid && *surface == Surface::Memory && p == &payload)
+        });
+        let sig_back = got.iter().find_map(|(from, env)| match &env.body {
+            WorkspaceEvent::Approved { id, by, height, sig }
+                if from == "founder-a" && *id == pid && by == "founder-a" && *height == 1 =>
+            {
+                Some(sig.clone())
+            }
+            _ => None,
+        });
+        if let (true, Some(sig)) = (proposal_back, sig_back) {
+            break sig;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the catch-up answer never re-served the open proposal; got {:?}",
+            got.iter().map(|(f, e)| (f.clone(), e.body.clone())).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(!founder_sig.is_empty(), "a real position-bound signature rode back");
+
+    // --- the recovered state is USABLE: the member co-signs the same
+    // change and the founder seals the 2-of-2 block ---
+    let b_entropy = molt_storage::seed_entropy(&b_phrase_for_sig).expect("b entropy");
+    let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
+    let (b_sk, _b_pk) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
+    let change = molt_core::ChainChange::Applied {
+        proposal_id: pid.0,
+        surface: Surface::Memory,
+        payload: payload.clone(),
+    };
+    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
+    member_feed.push(EventEnvelope {
+        seq: 3,
+        ts: 1_751_000_200,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Approved {
+            id: pid,
+            by: "member-b".to_string(),
+            height: 1,
+            sig: b_sig,
+        },
+    });
+    let _ = member_wake.send(3);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let applied = common::read_applied(&a, Surface::Memory).await;
+        if applied.iter().any(|v| v["title"] == serde_json::json!("minutes")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recovered-then-approved change never committed; applied: {applied:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// **A `set_image` proposal's bytes survive the mesh, both directions.**
 /// The image rides the `Proposed` gossip itself (sign-what-you-see: every
 /// member votes on the actual bytes), so a realistic ~150 KiB logo is the
