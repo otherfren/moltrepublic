@@ -982,31 +982,7 @@ pub fn run_app(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            use base64::Engine as _;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(img_b64.as_str())
-                .ok()
-                .and_then(|bytes| {
-                    // Slint decodes image formats from a file path — stage
-                    // the payload bytes in a temp file with a RANDOM name,
-                    // created O_EXCL so a pre-planted symlink of a guessable
-                    // name can never redirect the write onto a victim file
-                    use std::io::Write as _;
-                    let mut rand = [0u8; 16];
-                    getrandom::getrandom(&mut rand).ok()?;
-                    let path = std::env::temp_dir()
-                        .join(format!("molt-proposal-preview-{}.img", hex::encode(rand)));
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true) // O_EXCL: fail if it already exists
-                        .open(&path)
-                        .ok()?;
-                    f.write_all(&bytes).ok()?;
-                    drop(f);
-                    let img = slint::Image::load_from_path(&path).ok();
-                    let _ = std::fs::remove_file(&path);
-                    img
-                });
+            let decoded = proposal_image_from_b64(img_b64.as_str());
             match decoded {
                 Some(img) => {
                     ui.set_img_preview_title(title);
@@ -1152,6 +1128,45 @@ fn sync_strings(
         items.iter().map(|l| l.as_str().into()).collect(),
         set,
     );
+}
+
+/// Decode a pending `set_image` proposal's payload (base64 of the raw image
+/// file) into a renderable [`slint::Image`]. The bytes rode the proposal
+/// gossip (sign-what-you-see), so this runs locally on every member's
+/// device — no transfer, no proposer needed. `None` on any decode failure.
+fn proposal_image_from_b64(img_b64: &str) -> Option<slint::Image> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(img_b64)
+        .ok()?;
+    image_from_bytes(&bytes)
+}
+
+/// Decode raw image-file bytes into a [`slint::Image`], keyed on the
+/// CONTENT — a payload carries no file name, so an extension-keyed loader
+/// (`Image::load_from_path`, `image::open`) can never work here. Raster
+/// formats are sniffed and decoded in memory (exactly the picker's set:
+/// png/jpeg/webp/gif/bmp — pure-Rust decoders); an unsniffable payload
+/// gets one try as SVG source. Untrusted peer input: decode dimensions are
+/// capped so a tiny compressed bomb cannot balloon in memory.
+fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    if reader.format().is_some() {
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        reader.limits(limits);
+        let rgba = reader.decode().ok()?.into_rgba8();
+        let (w, h) = rgba.dimensions();
+        let buf =
+            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+        return Some(slint::Image::from_rgba8(buf));
+    }
+    // not a known raster signature — the one picker format without a magic
+    // number is SVG (plain text): let the vector loader have a try
+    slint::Image::load_from_svg_data(bytes).ok()
 }
 
 /// Map a session workspace into the Slint-side row struct.
@@ -2343,14 +2358,18 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_chat_retention(b.org_stats.retention_days);
 
     // the republic's image: (re)load the picture only when the file
-    // reference changes. The bytes are local only on the device that picked
-    // the file (mock transfer, like chat shares) — elsewhere the load fails
-    // quietly and the placeholder mark stays.
+    // reference changes. The bytes rode the applied set_image proposal, so
+    // the engine materializes the logo file on EVERY device; decode by
+    // CONTENT (image_from_bytes) — the reference's extension comes from a
+    // peer-supplied display value and must not decide the format. On a
+    // session-only workspace the reference is no local file — the read
+    // fails quietly and the placeholder mark stays.
     if ui.get_org_img_path().as_str() != b.org_stats.image {
         ui.set_org_img_path(b.org_stats.image.as_str().into());
         let loaded = (!b.org_stats.image.is_empty())
-            .then(|| slint::Image::load_from_path(std::path::Path::new(&b.org_stats.image)))
-            .and_then(Result::ok);
+            .then(|| std::fs::read(&b.org_stats.image).ok())
+            .flatten()
+            .and_then(|bytes| image_from_bytes(&bytes));
         ui.set_org_img_set(loaded.is_some());
         ui.set_org_img(loaded.unwrap_or_default());
     }
@@ -3657,6 +3676,63 @@ mod tests {
             text: text.to_string(),
             deleted,
         }
+    }
+
+    /// The pending-card image preview decodes the payload bytes that rode
+    /// the `set_image` proposal — for EVERY format the propose-side picker
+    /// offers (png, jpg, jpeg, webp, gif, svg, bmp). The decode must key on
+    /// the CONTENT, never on a file extension: the payload is raw bytes, no
+    /// name travels with it. (This pins the bug where the bytes were staged
+    /// as a `.img` temp file and `slint::Image::load_from_path` — which
+    /// trusts extensions — failed for every proposal, so "Click to view the
+    /// proposed image" only ever produced the failure toast.)
+    #[test]
+    fn a_proposed_image_decodes_from_the_payload_for_every_picker_format() {
+        // real minimal files, one per picker format (2x2 red, PIL-generated)
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
+        let gif = "R0lGODdhAgACAIEAAMgeHgAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7";
+        let bmp = "Qk1GAAAAAAAAADYAAAAoAAAAAgAAAAIAAAABABgAAAAAABAAAADEDgAAxA4AAAAAAAAAAAAAHh7IHh7IAAAeHsgeHsgAAA==";
+        let webp = "UklGRjoAAABXRUJQVlA4IC4AAACwAQCdASoCAAIAAUAmJaACdLoABDAAAP7x3I/4DdfFtMv/vYL/3YL/3YL/WwAA";
+        let jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDkKKKK8U/TD//Z";
+        for (fmt, b64) in [
+            ("png", png),
+            ("gif", gif),
+            ("bmp", bmp),
+            ("webp", webp),
+            ("jpeg", jpeg),
+        ] {
+            let img = proposal_image_from_b64(b64);
+            assert!(img.is_some(), "the {fmt} payload must decode");
+            let img = img.expect("checked above");
+            assert_eq!(img.size().width, 2, "{fmt} decodes to the real picture");
+            assert_eq!(img.size().height, 2, "{fmt} decodes to the real picture");
+        }
+        // svg travels as its source text
+        use base64::Engine as _;
+        let svg = base64::engine::general_purpose::STANDARD.encode(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>"##,
+        );
+        assert!(
+            proposal_image_from_b64(&svg).is_some(),
+            "an svg payload must decode"
+        );
+    }
+
+    /// Undecodable payloads answer `None` — the caller shows the honest
+    /// "could not be decoded" toast, never a broken image.
+    #[test]
+    fn an_undecodable_image_payload_is_none_not_a_panic() {
+        assert!(proposal_image_from_b64("").is_none(), "empty payload");
+        assert!(
+            proposal_image_from_b64("not base64 at all!").is_none(),
+            "not base64"
+        );
+        use base64::Engine as _;
+        let garbage = base64::engine::general_purpose::STANDARD.encode([0x00u8; 64]);
+        assert!(
+            proposal_image_from_b64(&garbage).is_none(),
+            "valid base64, but not an image"
+        );
     }
 
     /// An engine-authored System-kind message maps onto the same per-line

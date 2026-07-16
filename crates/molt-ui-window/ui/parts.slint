@@ -924,8 +924,8 @@ component CappedStateRow inherits HorizontalLayout {
 // member: ? open · 👍 approved · 👎 declined) and the operator's approve /
 // decline decision. Shared by the generic gated panes and Organization →
 // Pending. Image changes render the current image and link the proposed
-// one like a chat file share: click = (mock-)download from the proposer's
-// device, then view.
+// one like a chat file share: the image bytes rode the proposal payload
+// (sign-what-you-see), so a click decodes and shows them locally.
 export component ProposalCard inherits Rectangle {
     in property <ProposalRow> p;
     // the republic's CURRENT image, when one is set and locally loadable —
@@ -940,8 +940,8 @@ export component ProposalCard inherits Rectangle {
     // jump into the proposal's discussion — its patch channel on the chat
     // bus (channels are views over the ONE log, chat_bus.md)
     callback discuss();
-    // image op only: download the proposed image from the proposer (the
-    // chat file-share mechanism) and show it
+    // image op only: decode the proposed image from the proposal payload
+    // (the bytes crossed the wire with it) and show it
     callback view-image();
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
@@ -1085,9 +1085,9 @@ export component ProposalCard inherits Rectangle {
                 font-size: Theme.fs-cap;
                 width: 76px;
             }
-            // the proposed image, as a chat-style share card: only the
-            // file reference travels with the proposal — clicking fetches
-            // from the proposer's device (mock) and shows the picture
+            // the proposed image, as a chat-style share card: the bytes
+            // travel with the proposal (sign-what-you-see) — clicking
+            // decodes them locally and shows the picture
             Rectangle {
                 horizontal-stretch: 1;
                 height: pi-row.preferred-height + 16px;

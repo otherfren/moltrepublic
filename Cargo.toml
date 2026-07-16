@@ -121,6 +121,11 @@ slint-build = "1"
 # cargo feature-unification would flip Slint's zbus into tokio mode — which
 # panics ("no reactor running") on any thread without a tokio context.
 rfd         = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+# decode a proposal payload's image bytes IN MEMORY (content-sniffed via
+# guess_format — a payload carries no file name, so an extension-keyed path
+# load can never work). Exactly the raster formats the logo picker offers;
+# all pure-Rust decoders. Same crate+version Slint already compiles in.
+image       = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 
 [workspace.package]
 version    = "0.0.1"

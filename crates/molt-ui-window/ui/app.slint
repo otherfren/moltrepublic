@@ -4277,6 +4277,9 @@ export component AppWindow inherits Window {
                                             root.select-view("chat", "today");
                                             root.select-channel("patch:\{p.id}");
                                         }
+                                        view-image => {
+                                            root.download-proposal-image(p.img-b64, p.text);
+                                        }
                                     }
                                 }
                             }
