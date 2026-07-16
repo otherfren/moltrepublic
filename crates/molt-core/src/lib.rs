@@ -2791,6 +2791,13 @@ pub struct ChannelInfo {
     pub count: usize,
     /// Timestamp of its newest message (unix seconds; 0 when empty).
     pub last_ts: u64,
+    /// For a `Patch` channel whose proposal this engine knows: the vote's
+    /// lifecycle state — a terminal state means the discussion is closed
+    /// (read-only). `None` for Group/Topic channels and for patch refs
+    /// whose proposal is unknown here (chat-bus Q4: those stay writable).
+    /// Additive (`#[serde(default)]`), so older snapshots read as `None`.
+    #[serde(default)]
+    pub state: Option<ProposalState>,
 }
 
 /// A projected snapshot of one surface.
@@ -3136,6 +3143,11 @@ pub enum MoltError {
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),
+    /// A write into the discussion channel of a decided vote (the
+    /// discussion stays readable, linked from the vote's card — but the
+    /// deliberation ended with the vote).
+    #[error("discussion of proposal {0:?} is read-only — the vote is {1:?}")]
+    DiscussionClosed(ProposalId, ProposalState),
     /// A settings value failed validation (nothing was stored or written).
     #[error("settings: {0}")]
     Settings(String),

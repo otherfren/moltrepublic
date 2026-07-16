@@ -526,6 +526,7 @@ impl State {
             channel: ChannelRef::Group,
             count: 0,
             last_ts: 0,
+            state: None,
         }];
         let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
         for m in self.chat_visible() {
@@ -534,11 +535,21 @@ impl State {
                     channel: m.channel.clone(),
                     count: 0,
                     last_ts: 0,
+                    state: None,
                 });
                 infos.len() - 1
             });
             infos[at].count += 1;
             infos[at].last_ts = infos[at].last_ts.max(m.ts);
+        }
+        // annotate each patch channel with its vote's lifecycle state —
+        // the read-side twin of the write guard (`ensure_channel_writable`):
+        // a terminal state tells EVERY frontend (GUI and MCP alike) the
+        // discussion is read-only. An unknown referent stays `None` (Q4).
+        for i in &mut infos {
+            if let ChannelRef::Patch { id } = &i.channel {
+                i.state = self.proposals.get(&id.0).map(|p| p.state);
+            }
         }
         infos
     }

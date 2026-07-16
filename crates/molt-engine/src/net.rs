@@ -789,7 +789,11 @@ impl State {
                 // dropping the message — a peer's mangled tag must not
                 // suppress content anyone was meant to see, and the log
                 // keeps its "every stored topic name is normalized"
-                // invariant.
+                // invariant. Same posture for CLOSED discussions: the
+                // local send guard (`ensure_channel_writable`) is NOT
+                // applied here — a peer's message that was in flight while
+                // the vote decided must still land identically on every
+                // member (convergence over enforcement).
                 msg.channel = msg
                     .channel
                     .normalized()
@@ -1752,6 +1756,78 @@ mod tests {
         assert_eq!(st.next_seq, seq_before, "no event was recorded");
         assert!(st.chat[0].reactions.is_empty(), "no reaction on the tombstone");
         assert!(!st.parked.holds(&id), "a KNOWN tombstoned target parks nothing");
+    }
+
+    /// A wire chat message into a DECIDED vote's discussion still lands in
+    /// the log: closed discussions are enforced on the local send paths
+    /// only (`cmd_chat` / `cmd_share_file`) — the receive path stays
+    /// permissive so every member's log converges even when a peer's
+    /// message was in flight while the vote decided (convergence over
+    /// enforcement, same posture as the channel-claim coercion above).
+    #[test]
+    fn a_wire_chat_into_a_closed_discussion_still_lands() {
+        // a runtime context: the send path stands the demo mesh up and the
+        // delivery publishes to the transport feed (spawned tasks)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        // a proposal that is proposed, then declined — replayed as events,
+        // exactly like the log rebuild does it
+        st.apply(&EventEnvelope {
+            seq: 1,
+            ts: 100,
+            by: "me".to_string(),
+            body: WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: molt_core::Surface::Memory,
+                payload: serde_json::json!({ "op": "add_note", "title": "t" }),
+            },
+        });
+        st.apply(&EventEnvelope {
+            seq: 2,
+            ts: 101,
+            by: "peer-2".to_string(),
+            body: WorkspaceEvent::Declined {
+                id: molt_core::ProposalId(1),
+                by: "peer-2".to_string(),
+            },
+        });
+        // the local send path refuses…
+        assert!(matches!(
+            st.cmd_chat(
+                "too late".to_string(),
+                None,
+                molt_core::ChannelRef::Patch {
+                    id: molt_core::ProposalId(1)
+                },
+            ),
+            Err(molt_core::MoltError::DiscussionClosed(
+                molt_core::ProposalId(1),
+                molt_core::ProposalState::Rejected,
+            ))
+        ));
+        // …but the same message arriving over the wire lands in the log
+        let msg = ChatMessage::text(id(7), "peer-1", "was in flight", 102).with_channel(
+            molt_core::ChannelRef::Patch {
+                id: molt_core::ProposalId(1),
+            },
+        );
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope {
+                seq: 1,
+                ts: 102,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+        assert_eq!(st.chat.len(), 1, "the wire message landed");
+        assert_eq!(st.chat[0].body, "was in flight");
     }
 
     fn id(n: usize) -> MessageId {
