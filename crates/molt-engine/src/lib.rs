@@ -1663,8 +1663,8 @@ mod tests {
 
     /// The Organization read projections behind the Members and Uploads
     /// tables: every roster member with its identity anchor + governance +
-    /// upload counters, and every file shared into the chat with its (mock)
-    /// share-link expiry. Read-only commands — MCP tools like every read,
+    /// upload counters, and every file shared into the chat with its
+    /// retention deadline. Read-only commands — MCP tools like every read,
     /// so an agent can auto-test the same tables the GUI renders.
     #[test]
     fn members_and_uploads_projections_serve_the_org_tables() {
@@ -1706,8 +1706,8 @@ mod tests {
                     assert!(!rows[0].id.is_nil(), "addressable for download_file");
                     assert_eq!(
                         rows[0].expires_ts,
-                        rows[0].ts + 14 * 86_400,
-                        "mock share links expire 14 days after the share"
+                        rows[0].ts + 7 * 86_400,
+                        "the share expires with the chat retention window (default 7 days)"
                     );
                     assert_eq!(
                         rows[0].checksum,
@@ -2044,6 +2044,114 @@ mod tests {
             org.declined
         );
         assert_eq!(org.denied, 0, "the denied count follows the filtered view");
+    }
+
+    /// Uploads are ephemeral exactly like chat: a file share is a chat
+    /// message, so it ages out of EVERY read surface on the same
+    /// `retention_days` rhythm (one knob — no separate link TTL). The
+    /// uploads table hides an expired share, its `expires_ts` is the real
+    /// retention deadline (`ts` + window; 0 = unknown age, kept forever),
+    /// and a download attempt of an expired share fails cleanly with
+    /// [`MoltError::FileExpired`] — a widened window brings both back.
+    #[test]
+    fn uploads_age_out_with_the_chat_retention_window() {
+        let mut st = plain_state();
+        let now = now_secs();
+        let stale_ts = now - 10 * 86_400;
+        let fresh_ts = now - 3_600;
+        let share = |seq: u64, ts: u64, name: &str| {
+            let mut m = molt_core::ChatMessage::text(
+                molt_core::MessageId([u8::try_from(seq).expect("small test seq"); 16]),
+                "peer-1",
+                "",
+                ts,
+            );
+            m.file = Some(molt_core::FileMeta {
+                name: name.to_string(),
+                size: 3,
+                kind: "PDF".to_string(),
+                modified: 1,
+                available: true,
+                checksum: String::new(),
+            });
+            molt_core::EventEnvelope {
+                seq,
+                ts: if ts == 0 { now } else { ts },
+                by: "peer-1".to_string(),
+                body: molt_core::WorkspaceEvent::Chat(m),
+            }
+        };
+        let stale_id = molt_core::MessageId([1u8; 16]);
+        let legacy_id = molt_core::MessageId([3u8; 16]);
+        st.apply(&share(1, stale_ts, "stale.pdf"));
+        st.apply(&share(2, fresh_ts, "fresh.pdf"));
+        st.apply(&share(3, 0, "legacy.pdf"));
+
+        // the uploads table follows the chat window (default 7 days)
+        let rows = st.uploads_view();
+        assert_eq!(
+            rows.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+            vec!["fresh.pdf", "legacy.pdf"],
+            "the 10-day-old share ages out of the 7-day default window, ts 0 stays"
+        );
+        assert_eq!(
+            rows[0].expires_ts,
+            fresh_ts + 7 * 86_400,
+            "the share expires on the retention deadline — the org window, not a mock TTL"
+        );
+        assert_eq!(
+            rows[1].expires_ts, 0,
+            "unknown age (ts 0) never ages out — 0 = no deadline"
+        );
+
+        // downloading the expired share fails cleanly, the others pass the gate
+        let err = st
+            .cmd_download_file(stale_id, None)
+            .expect_err("an expired share must not be downloadable");
+        assert!(
+            matches!(err, MoltError::FileExpired(id) if id == stale_id),
+            "unexpected: {err:?}"
+        );
+        let err = st
+            .cmd_download_file(legacy_id, None)
+            .expect_err("plain_state has no live engine to spawn the fetch");
+        assert!(
+            !matches!(err, MoltError::FileExpired(_)),
+            "ts 0 passes the retention gate: {err:?}"
+        );
+
+        // widening the window to 30 days via an applied org change brings
+        // the stale share back — same knob as chat, REAL state
+        st.apply(&molt_core::EventEnvelope {
+            seq: 4,
+            ts: now,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: Surface::Organization,
+                payload: json!({"op": "set_chat_retention", "title": "t", "value": "30 days"}),
+            },
+        });
+        st.apply(&molt_core::EventEnvelope {
+            seq: 5,
+            ts: now,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Applied { id: molt_core::ProposalId(1) },
+        });
+        let rows = st.uploads_view();
+        assert_eq!(rows.len(), 3, "the widened window re-exposes the stale share");
+        assert_eq!(
+            rows[0].expires_ts,
+            stale_ts + 30 * 86_400,
+            "the deadline follows the effective window"
+        );
+        let err = st
+            .cmd_download_file(stale_id, None)
+            .expect_err("plain_state has no live engine to spawn the fetch");
+        assert!(
+            !matches!(err, MoltError::FileExpired(_)),
+            "inside the widened window the share is downloadable again: {err:?}"
+        );
     }
 
     /// The republic's current image is derived from the applied

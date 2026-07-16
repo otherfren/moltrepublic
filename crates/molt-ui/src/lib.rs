@@ -2702,10 +2702,12 @@ fn charter_columns(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// The uploads table's "expires in" cell: the mock share link dies at
-/// `expires_ts`; an unavailable share has nothing left to expire ("—").
+/// The uploads table's "expires in" cell: uploads are ephemeral like chat,
+/// so the share ages out of the read contract at `expires_ts` (share time +
+/// the org's chat retention window). 0 = unknown age, no deadline; an
+/// unavailable share has nothing left to expire (both "—").
 fn expires_label(now: u64, expires_ts: u64, available: bool) -> String {
-    if !available {
+    if !available || expires_ts == 0 {
         return "—".to_string();
     }
     if expires_ts <= now {
@@ -4185,12 +4187,17 @@ mod tests {
     }
 
     #[test]
-    fn expires_labels_render_the_mock_link_ttl() {
+    fn expires_labels_render_the_retention_deadline() {
         assert_eq!(expires_label(100, 100 + 13 * 86_400, true), "in 13 days");
         assert_eq!(expires_label(100, 100 + 86_400, true), "in 1 day");
         assert_eq!(expires_label(100, 100 + 7_200, true), "in 2 h");
         assert_eq!(expires_label(100, 100 + 120, true), "in 2 min");
         assert_eq!(expires_label(500, 100, true), "expired");
+        assert_eq!(
+            expires_label(100, 0, true),
+            "—",
+            "0 = unknown share age, no deadline (the engine keeps it forever)"
+        );
         assert_eq!(
             expires_label(100, 100 + 86_400, false),
             "—",

@@ -266,3 +266,18 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   legacy positional index scheme (synthetic-id derivation walks positions),
   the replay floor and the outbox cursors — a rewrite of the segment story,
   deliberately not smuggled into the retention feature.
+- **Uploads are ephemeral on the same rhythm (2026-07-16).** A file share
+  IS a chat message, so it ages out with the same window, cutoff and clock
+  (`State::chat_visible` / `aged_out_at`; ts 0 = unknown age, kept) — one
+  knob, no separate link TTL (`UploadView.expires_ts` is now the real
+  retention deadline, `ts` + window). Past the deadline the share leaves
+  the uploads table, the member upload counts and the chat read together,
+  and it stops being downloadable: `download_file` refuses cleanly with
+  `FileExpired`, and the sharer refuses to serve an expired share over the
+  wire (an honest `Refused`, covering a requester whose local check was
+  skipped or lags near the boundary). Same pruning posture as chat: the
+  share's log entry rides the log-compaction follow-up above, and the
+  SHARER's local source bytes plus its `shared_files` path entry in the
+  prefs sidecar likewise stay until that follow-up forgets expired shares
+  (a downloader's saved copy is the user's file — never the engine's to
+  delete).

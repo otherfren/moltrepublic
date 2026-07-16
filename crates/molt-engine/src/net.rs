@@ -1004,6 +1004,14 @@ impl State {
             refuse("the sharer removed the file — no longer available");
             return;
         }
+        // uploads are ephemeral like chat: once the share aged out of the
+        // sharer's own read contract it is not served any more, even to a
+        // requester whose engine skipped its local check (near the boundary
+        // this is an honest refusal, not a hang)
+        if self.chat_ts_aged_out(msg.ts) {
+            refuse("the share aged out of the chat retention window");
+            return;
+        }
         let size = file.size;
         let Some(path) = self.share_paths.get(&id).cloned() else {
             refuse("this node no longer knows the shared file's local path");

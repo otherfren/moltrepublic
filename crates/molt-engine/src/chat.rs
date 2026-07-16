@@ -200,6 +200,13 @@ impl State {
             if !file.available {
                 return Err(MoltError::FileUnavailable(id));
             }
+            // uploads are ephemeral like chat: a share that aged out of the
+            // retention window left the read contract (it is not in the
+            // uploads table any more), so downloading it is refused too —
+            // before any task spawns or a download phase is recorded
+            if self.chat_ts_aged_out(msg.ts) {
+                return Err(MoltError::FileExpired(id));
+            }
             (
                 msg.from.clone(),
                 crate::transfer::FetchTarget {

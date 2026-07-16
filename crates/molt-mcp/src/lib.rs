@@ -618,7 +618,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_uploads",
             command: "read_uploads",
-            description: "The Organization → Uploads table: every file shared into the chat (metadata only — bytes move user-to-user via the share link), with sharer, timestamp, availability, and the mock 14-day link expiry. The `id` is the chat message id `download_file` takes.",
+            description: "The Organization → Uploads table: every file shared into the chat (metadata only — bytes move user-to-user via the share link), with sharer, timestamp, availability, and the retention deadline (`expires_ts`) — uploads are ephemeral like chat and age out of the read (and become undownloadable) after the org's chat retention window. The `id` is the chat message id `download_file` takes.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },

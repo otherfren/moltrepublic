@@ -2855,8 +2855,10 @@ pub struct DownloadView {
 /// One file shared into the chat (Organization → Uploads). Only metadata
 /// travels in the chat — the bytes stay on the sharer's disk and move
 /// user-to-user over a dedicated encrypted queue when a member downloads
-/// ([`FileMeta`]), which is why a download needs the sharer online. The
-/// expiry is still a mock: links die 14 days after the share.
+/// ([`FileMeta`]), which is why a download needs the sharer online.
+/// Uploads are ephemeral exactly like chat: past `expires_ts` (the chat
+/// retention window after the share) the row leaves every read surface
+/// and a download is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadView {
     /// The carrying chat message — the address `download_file` takes.
@@ -2873,7 +2875,9 @@ pub struct UploadView {
     pub size: u64,
     /// Still present on the sharer's disk.
     pub available: bool,
-    /// When the share link expires (unix seconds; mock: `ts` + 14 days).
+    /// When the share ages out of the read contract (unix seconds): `ts` +
+    /// the org's effective chat retention window — the same knob chat
+    /// filters on. 0 = unknown age (`ts` 0), no deadline.
     pub expires_ts: u64,
     /// Whether the sharer is reachable right now — a user-to-user transfer
     /// needs the sharer online (mock presence; the own node is always
@@ -3135,6 +3139,10 @@ pub enum MoltError {
     /// The shared file's owner deleted it locally; nothing to download.
     #[error("the shared file at message {0} is no longer available")]
     FileUnavailable(MessageId),
+    /// The share aged out of the chat retention window — uploads are
+    /// ephemeral exactly like chat, so an expired share is not downloadable.
+    #[error("the shared file at message {0} aged out of the chat retention window")]
+    FileExpired(MessageId),
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
     NotYourFile(MessageId),
