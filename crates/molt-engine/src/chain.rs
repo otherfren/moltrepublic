@@ -271,19 +271,71 @@ pub(crate) fn checkpoint_state(
     else {
         return Err("chain does not start with a genesis".to_string());
     };
-    let base = molt_core::CheckpointState {
-        founding_name: name.clone(),
-        rule_m: *rule_m,
-        rule_n: *rule_n,
-        founding_identities: identities.clone(),
-        agenda: agenda.clone(),
-        republic_id: republic_id.clone(),
-        roster: identities.clone(),
+    let base = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
+    fold_state(base, &blocks[1..], upto)
+}
+
+/// The empty state a genesis roots — the base every full-holder fold and
+/// walk starts from.
+fn genesis_base(
+    name: &str,
+    rule_m: u8,
+    rule_n: u8,
+    identities: &[MemberIdentity],
+    agenda: &str,
+    republic_id: &str,
+) -> molt_core::CheckpointState {
+    molt_core::CheckpointState {
+        founding_name: name.to_string(),
+        rule_m,
+        rule_n,
+        founding_identities: identities.to_vec(),
+        agenda: agenda.to_string(),
+        republic_id: republic_id.to_string(),
+        roster: identities.to_vec(),
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
         upto: 0,
-    };
-    fold_state(base, &blocks[1..], upto)
+    }
+}
+
+/// Fold ONE verified block into a running walk state (4d: the walkers
+/// carry the projection incrementally instead of refolding from the base
+/// at every checkpoint — O(n) instead of O(n·checkpoints)). Checkpoint and
+/// Genesis blocks are state-neutral; `consumed_ids` stays UNSORTED here
+/// and is sorted per hash in [`hash_walk_state`].
+fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Result<(), String> {
+    match &block.change {
+        ChainChange::Applied {
+            proposal_id,
+            surface,
+            payload,
+        } => {
+            if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
+                list.push((*proposal_id, payload.clone()));
+            }
+            state.consumed_ids.push(*proposal_id);
+        }
+        ChainChange::Membership {
+            op,
+            member,
+            identity_pk,
+        } => {
+            apply_membership(&mut state.roster, *op, member, identity_pk)?;
+        }
+        ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
+    }
+    Ok(())
+}
+
+/// Hash the running walk state as the canonical state at `upto` — the
+/// comparison a checkpoint's `state_hash` must match. Clones once to sort
+/// the consumed ids (canonical layout) without disturbing the walk.
+fn hash_walk_state(state: &molt_core::CheckpointState, upto: u64) -> String {
+    let mut at = state.clone();
+    at.upto = upto;
+    at.consumed_ids.sort_unstable();
+    checkpoint_state_hash(&at)
 }
 
 /// Fold further verified blocks (heights `<= upto`) onto a base state —
@@ -344,38 +396,6 @@ pub(crate) enum ServedChainWire {
     Full(Vec<ChainBlock>),
 }
 
-/// The content check for a checkpoint met during a chain walk: recompute
-/// the state at `upto` from the walker's own material (genesis-rooted
-/// blocks, or a blob base plus suffix blocks) and compare the hash the
-/// signers attested. Sign-what-you-see, verifier edition.
-fn verify_checkpoint_content(
-    base: Option<&molt_core::CheckpointState>,
-    blocks: &[ChainBlock],
-    upto: u64,
-    state_hash: &str,
-) -> Result<(), String> {
-    let state = match base {
-        None => checkpoint_state(blocks, upto)?,
-        Some(blob) => {
-            // a fold cannot REWIND below the blob's cut — comparing against
-            // a knowingly wrong recomputation would reject truthful hashes
-            if upto < blob.upto {
-                return Err(format!(
-                    "checkpoint upto {upto} lies below the blob coverage {}",
-                    blob.upto
-                ));
-            }
-            fold_state(blob.clone(), &blocks[1..], upto)?
-        }
-    };
-    if checkpoint_state_hash(&state) != state_hash {
-        return Err(format!(
-            "checkpoint at upto {upto} does not match this chain's own projection"
-        ));
-    }
-    Ok(())
-}
-
 /// The lowercase-hex SHA-256 a checkpoint's `state_hash` carries — over
 /// [`molt_core::checkpoint_canonical_bytes`], hashed like every other
 /// chain artifact (`molt_storage::content_hash`).
@@ -391,14 +411,34 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
         return Err("empty chain".to_string());
     };
     let mut head = verify_genesis(genesis)?;
+    let ChainChange::Genesis {
+        name,
+        republic_id,
+        rule_m,
+        rule_n,
+        identities,
+        agenda,
+    } = &genesis.change
+    else {
+        unreachable!("verify_genesis accepted a non-genesis block 0");
+    };
+    // 4d: the walk carries the projection incrementally — at a checkpoint
+    // block the running state IS the state at `upto` (upto == height - 1,
+    // enforced), so the content check needs no refold from the genesis
+    let mut running = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
     let mut seen = BTreeSet::new();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
         // WP4b: a checkpoint's CONTENT is checked against this chain's own
         // projection — a full holder accepts no summary it cannot recompute
         if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            verify_checkpoint_content(None, blocks, *upto, state_hash)?;
+            if &hash_walk_state(&running, *upto) != state_hash {
+                return Err(format!(
+                    "checkpoint at upto {upto} does not match this chain's own projection"
+                ));
+            }
         }
+        fold_one(&mut running, block)?;
     }
     Ok(head)
 }
@@ -488,12 +528,27 @@ pub(crate) fn verify_suffix_chain(
         identities: blob.roster.clone(),
     };
     let mut seen: BTreeSet<u64> = blob.consumed_ids.iter().copied().collect();
+    // 4d: the incremental walk state, seeded from the blob (the anchor
+    // block itself is state-neutral)
+    let mut running = blob.clone();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
-        // a LATER checkpoint inside the suffix recomputes from the blob base
+        // a LATER checkpoint inside the suffix: the running state IS the
+        // state at its upto (upto == height - 1, enforced)
         if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            verify_checkpoint_content(Some(blob), blocks, *upto, state_hash)?;
+            if *upto < blob.upto {
+                return Err(format!(
+                    "checkpoint upto {upto} lies below the blob coverage {}",
+                    blob.upto
+                ));
+            }
+            if &hash_walk_state(&running, *upto) != state_hash {
+                return Err(format!(
+                    "checkpoint at upto {upto} does not match this chain's own projection"
+                ));
+            }
         }
+        fold_one(&mut running, block)?;
     }
     Ok(head)
 }
