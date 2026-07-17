@@ -35,7 +35,7 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 - mcp-api for your AI agent
 - headless mode for AI only
 - chat
-- *multisig company brain* for consensus and memory
+- *multisig wiki* for consensus and memory
 - *multisig treasury* where every spend needs a majority vote
 - *multisig kanban board* for work coordination
 - *multisig secrets vault* for storage and selective disclosure of company secrets in case a member dies
