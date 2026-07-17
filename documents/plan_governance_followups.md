@@ -250,6 +250,11 @@ Bullet + Uploads-Bullet — die dort genannten Constraints sind der Vertrag).
 - **Deterministisch:** Kompaktierung ist eine lokale Hygiene-Operation,
   KEIN konvergenzrelevantes Ereignis — nichts davon kreuzt die Wire.
 
+**Etappe 1 begonnen (2026-07-17):** `documents/log_compaction.md` liegt als
+ENTWURF ZUR DISKUSSION auf master (Kernidee: Kompaktierung =
+Snapshot-Vorziehen + Segment-Drop, kein Byte-Rewrite; offene Fragen F1–F5
+in §8). **Halt: erst nach der Diskussion mit dem User beginnt Etappe 2.**
+
 **Etappen (jede einzeln mergebar):**
 1. **Analyse-Etappe (Design-Doc, discuss-before-push!):**
    `documents/log_compaction.md` — Segment-/Floor-Modell, Cursor-Umleitung,
