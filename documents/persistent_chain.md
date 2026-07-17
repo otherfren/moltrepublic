@@ -216,6 +216,23 @@ Having verified a chain, a member knows — not trusts — that:
   per member, `try_commit` refuses decided proposals), so several answering
   peers converge harmlessly; membership (recovery) proposals are deliberately
   not re-served — their window is mesh-liveness-bound by design.
+- **Real (WP4b, 2026-07-18): threshold-signed chain checkpoints.** The
+  republic compacts the way it governs: `propose_checkpoint` (a co-equal
+  verb — MCP tool + GUI button) cuts at the current head; every member
+  recomputes the canonical state (`molt-chain-checkpoint-v1`: founding
+  table for republic-id recomputation, current roster, per-surface
+  applied projection, consumed proposal ids) from its OWN chain and
+  auto-co-signs only on an exact hash match. The sealed
+  `ChainChange::Checkpoint { upto, state_hash }` block (upto == height-1,
+  enforced) lets every node drop history below the cut automatically;
+  the blob becomes the suffix's trust anchor (`verify_suffix_chain`:
+  blob hash, founding recomputation, FOUNDING-bound anchor signatures —
+  no circular roster trust — and the double-apply guard seeded across
+  the cut). Catch-up serves `CheckpointServed { blob }` + suffix;
+  recovery Welcomes carry the pruned wire shape; the first prune raises
+  the manifest version so older binaries refuse the workspace instead
+  of running chainless. Design + v1 limits: `documents/log_compaction.md`
+  Teil B.
 - **Real (Phase 4).** Recovery as catch-up-from-genesis + MLS re-key: a
   `Membership{Restored}` block re-admits the seat by threshold, the coordinator
   re-keys the group (`restore_member`) and broadcasts the raw commit over the

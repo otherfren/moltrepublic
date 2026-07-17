@@ -1123,6 +1123,15 @@ pub fn run_app(
             );
         });
     }
+    // WP4b: the checkpoint verb — same Command the MCP tool drives
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_propose_checkpoint(move || {
+            issue(&rt, &w, &weak, Command::ProposeCheckpoint);
+        });
+    }
     // pick a new republic image via the native file dialog (async XDG
     // portal, like the chat share picker) — only the path lands in the
     // draft; proposing it ships the file REFERENCE, never bytes
@@ -1230,6 +1239,26 @@ pub fn run_app(
                     // source of truth — event payloads never drive state.
                     // A finished download additionally toasts its outcome
                     // (the table repaints via the same re-read).
+                    // WP4b: checkpoint lifecycle closure for the operator —
+                    // sealed toasts the height, stale tells them to re-cut
+                    Ok(Event::CheckpointSealed { height, .. }) => {
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let msg = ui.global::<Strings>().get_toast_checkpoint_sealed();
+                            ui.invoke_show_toast(format!("{msg} #{height}").into());
+                        });
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
+                    Ok(Event::CheckpointStale { .. }) => {
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let msg = ui.global::<Strings>().get_toast_checkpoint_stale();
+                            ui.invoke_show_toast(msg);
+                        });
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
                     Ok(Event::FileTransfer { phase, .. }) => {
                         let weak2 = weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
@@ -4263,6 +4292,10 @@ lexicon! {
     pc_declined_by: "Declined by", "Abgelehnt von";
     mv_applied: "Applied", "Angewandt";
     mv_accepted: "Accepted changes", "Angenommene Änderungen";
+    org_checkpoint: "Checkpoint", "Checkpoint";
+    org_checkpoint_tip: "Propose a chain checkpoint: m-of-n confirm the summarized state, history below the cut is dropped on every device.", "Chain-Checkpoint vorschlagen: m-of-n bestätigen den zusammengefassten Zustand, die Historie unter dem Schnitt wird auf jedem Gerät gelöscht.";
+    toast_checkpoint_sealed: "Checkpoint sealed", "Checkpoint besiegelt";
+    toast_checkpoint_stale: "Checkpoint went stale — another block sealed first; propose again.", "Checkpoint veraltet — ein anderer Block kam zuerst; bitte neu vorschlagen.";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
     mv_empty_chat: "No messages yet.", "Noch keine Nachrichten.";

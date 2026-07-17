@@ -1012,6 +1012,10 @@ impl State {
                                 .handle
                                 .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
                         }
+                        self.emit(Event::CheckpointSealed {
+                            height: anchor_height,
+                            upto,
+                        });
                         tracing::info!(height = anchor_height, upto, "checkpoint sealed — history below the cut dropped");
                     }
                     Err(e) => {
@@ -1139,6 +1143,7 @@ impl State {
                 Some(ChainChange::Checkpoint { .. })
             ) {
                 self.proposal_changes.remove(&id);
+                self.emit(Event::CheckpointStale { id: ProposalId(id) });
                 tracing::debug!(%id, "dropping a stale checkpoint proposal (head moved — re-cut needed)");
                 continue;
             }

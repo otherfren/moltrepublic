@@ -120,7 +120,7 @@ pub enum StorageError {
     #[error("crypto: {0}")]
     Crypto(String),
     /// The workspace was written by a newer node version.
-    #[error("workspace version {0} is newer than supported {STORAGE_VERSION}")]
+    #[error("workspace version {0} is newer than this build supports")]
     NewerVersion(u32),
     /// The recovery phrase did not parse / carry valid entropy.
     #[error("seed: {0}")]
@@ -1000,6 +1000,18 @@ impl OpenedWorkspace {
         }
     }
 
+    /// WP4b stage 5: raise the manifest to [`molt_core::STORAGE_VERSION_PRUNED`]
+    /// once — the additive-only stop for older binaries (they refuse the
+    /// whole workspace at the manifest gate instead of running chainless
+    /// on a partial view). Idempotent.
+    pub fn bump_pruned_version(&mut self) -> Result<(), StorageError> {
+        if self.manifest.version >= molt_core::STORAGE_VERSION_PRUNED {
+            return Ok(());
+        }
+        self.manifest.version = molt_core::STORAGE_VERSION_PRUNED;
+        write_manifest(&self.dir, &self.manifest)
+    }
+
     /// Rewrite `chain.state` atomically (via `tmp/`, mode 0600). The chain is
     /// append-only in meaning but written whole each time (it is small — one
     /// block per committed governance change, not per message).
@@ -1208,7 +1220,7 @@ pub fn create_workspace(
 /// tail (recovering a torn last segment), and position the writer.
 pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), StorageError> {
     let manifest = read_manifest(ws_dir)?;
-    if manifest.version > STORAGE_VERSION {
+    if manifest.version > molt_core::STORAGE_VERSION_PRUNED {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     let lock = acquire_lock(ws_dir)?;
@@ -1905,6 +1917,14 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         if let Err(e) = ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync()) {
                             fail(&failed_flag, "chain.state write", &e);
                         }
+                        // WP4b: the FIRST prune raises the manifest version —
+                        // an older binary must refuse the whole workspace
+                        // rather than run chainless on a partial view
+                        if blob.is_some() {
+                            if let Err(e) = ws.bump_pruned_version() {
+                                fail(&failed_flag, "manifest version bump", &e);
+                            }
+                        }
                         let _ = ack.send(());
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
@@ -2044,6 +2064,41 @@ mod tests {
         }
         ws.sync().expect("sync");
         ws.dir().to_path_buf()
+    }
+
+    /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
+    /// version, so an OLDER binary refuses the whole workspace instead of
+    /// running chainless on a partial view (additive-only stop). Unpruned
+    /// workspaces keep the old version — old binaries read them unchanged.
+    #[test]
+    fn a_pruned_persist_raises_the_manifest_version_gate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION);
+        // a FULL chain persist does not bump (old binaries keep reading)
+        ws.write_chain(None, &[]).expect("full write");
+        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION);
+        // the first prune bumps, idempotently
+        ws.bump_pruned_version().expect("bump");
+        ws.bump_pruned_version().expect("bump again");
+        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION_PRUNED);
+        let on_disk = read_manifest(ws.dir()).expect("manifest reads");
+        assert_eq!(on_disk.version, molt_core::STORAGE_VERSION_PRUNED);
+        // the open gate refuses anything newer than this build supports —
+        // exactly what a pre-checkpoint binary sees on a pruned workspace
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let mut m = read_manifest(&dir).expect("manifest");
+        m.version = molt_core::STORAGE_VERSION_PRUNED + 1;
+        {
+            let text = toml::to_string_pretty(&m).expect("render");
+            fs::write(dir.join("manifest.toml"), text).expect("write");
+        }
+        assert!(
+            open_workspace(&dir).is_err(),
+            "a too-new manifest version refuses the workspace"
+        );
     }
 
     #[test]

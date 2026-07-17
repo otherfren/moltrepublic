@@ -297,8 +297,14 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
    `CheckpointProposed`-Wire-Arm (INTERNAL-Liste), Verify-vor-Sign, Seal.
 4. Drop + Serve: lokales Droppen ≤ `upto`, Catch-up mit Blob, Recovery
    über Checkpoint (Loopback-E2E).
-5. Doku (persistent_chain.md-Abschnitt; „chain compaction" von der
-   Deferred-Liste nehmen).
+5. ✅ Doku + Härtung (2026-07-18): persistent_chain.md-Abschnitt,
+   Manifest-Version-Bump beim ersten Prune (alte Binaries verweigern den
+   Workspace statt chainlos zu laufen), Checkpoint-Lebenszyklus sichtbar
+   (Event::CheckpointSealed/-Stale + Toasts), GUI-Verb im
+   Organization-Status (co-equal zum MCP-Tool). Bewusst offen geblieben:
+   kein ListProposals-Eintrag für pending Cuts (kollidiert mit dem
+   Id-Kollisions-Guard aus Etappe 3; die Events geben dem Proposer
+   Closure), Nachzügler-Buffer, per-Peer-Blob-Stashes.
 
 Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
 - `after_block_applied` braucht einen Checkpoint-Arm (Event emittieren,
