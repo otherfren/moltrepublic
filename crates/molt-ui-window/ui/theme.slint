@@ -46,6 +46,16 @@ export struct LogLine {
     patch-id: int, // the proposal an applied row came from (-1 = unknown origin: chat rows, legacy dumps) — gates the 💬 jump into its discussion
 }
 
+// One row of the Chain-History settings panel: a committed block of the
+// open republic (WP4b read_chain — the MCP tool serves the same view).
+export struct ChainRow {
+    height: string, // block number ("—" for pre-cut entries a pruned holder rebuilds from its blob)
+    kind: string, // localized kind label (founding/membership/checkpoint) or "" for applied
+    surface: string, // localized surface name for applied blocks ("" otherwise)
+    title: string, // display title (op-placeholder translated, or the membership/checkpoint text)
+    signers: string, // "petra, walter" ("" on pre-cut entries — signatures dropped with the history)
+}
+
 // One chat channel in the sidebar (chat bus): a VIEW over the one log,
 // never a boundary. Built Rust-side from the engine's channel enumeration.
 export struct ChannelItem {
@@ -614,6 +624,15 @@ export global Strings {
     in property <string> field-sound-message;
     in property <string> field-sound-vote;
     in property <string> sound-off;
+    in property <string> set-tab-chain;
+    in property <string> chain-col-height;
+    in property <string> chain-col-what;
+    in property <string> chain-col-signers;
+    in property <string> chain-kind-genesis;
+    in property <string> chain-kind-membership;
+    in property <string> chain-kind-checkpoint;
+    in property <string> chain-pre-cut;
+    in property <string> chain-empty;
     in property <string> unsaved-title;
     in property <string> unsaved-body;
     in property <string> unsaved-save;

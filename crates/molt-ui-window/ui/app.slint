@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
+import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -639,6 +639,10 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-secret;
     in-out property <string> cfg-s3-bucket;
     in-out property <int> cfg-s3-interval: 60;
+    // the Chain-History panel's rows + pager (built Rust-side, paged at 20)
+    in property <[ChainRow]> chain-rows;
+    in property <int> chain-page: 1;
+    in property <int> chain-pages: 1;
     // alert sounds (0 none, 1 bell, 2 chime, 3 pop)
     in-out property <int> cfg-sound-message-index: 0;
     in-out property <int> cfg-sound-vote-index: 0;
@@ -4786,6 +4790,13 @@ export component AppWindow inherits Window {
                             root.set-tab = 5;
                         }
                     }
+                    AppButton {
+                        label: Strings.set-tab-chain;
+                        primary: root.set-tab == 6;
+                        clicked => {
+                            root.set-tab = 6;
+                        }
+                    }
                     Rectangle {
                         horizontal-stretch: 1;
                     }
@@ -5420,6 +5431,96 @@ export component AppWindow inherits Window {
                             AppCheck {
                                 label: Strings.field-headless;
                                 checked <=> root.cfg-headless;
+                            }
+                        }
+                        // Chain-History: every committed block of the open
+                        // republic, newest first, paged at 20 — checkpoints
+                        // (compacted cuts) included; pre-cut entries a pruned
+                        // holder rebuilds from its blob show without height
+                        // and signatures (dropped with the history)
+                        if root.set-tab == 6: VerticalLayout {
+                            spacing: 8px;
+                            vertical-stretch: 1;
+                            if root.chain-rows.length == 0: Text {
+                                text: Strings.chain-empty;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                            }
+                            if root.chain-rows.length > 0: HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 10px;
+                                Text {
+                                    text: Strings.chain-col-height;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    width: 130px;
+                                }
+                                Text {
+                                    text: Strings.chain-col-what;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: Strings.chain-col-signers;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    width: 200px;
+                                }
+                            }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                ch-fl := Flickable {
+                                    VerticalLayout {
+                                        padding: 4px;
+                                        spacing: 2px;
+                                        alignment: start;
+                                        for r in root.chain-rows: HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 10px;
+                                            Text {
+                                                text: r.height;
+                                                color: Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                width: 130px;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: r.kind != "" ? "\{r.kind}: \{r.title}"
+                                                    : (r.surface != "" ? "\{r.surface} · \{r.title}" : r.title);
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: r.signers;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 200px;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: ch-fl.height;
+                                    content-h: ch-fl.viewport-height;
+                                    scroll-y: ch-fl.viewport-y;
+                                }
+                            }
+                            if root.chain-pages > 1: PagerRow {
+                                page: root.chain-page;
+                                pages: root.chain-pages;
+                                paged(delta) => {
+                                    root.page-list("chain", "history", delta);
+                                }
                             }
                         }
                         // the backup tab's table wants the leftover height

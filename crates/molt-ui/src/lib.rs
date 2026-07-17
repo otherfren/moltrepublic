@@ -2100,6 +2100,8 @@ struct SurfacesBundle {
     /// The chat surface is showing the Archive sub-view — its log pages
     /// at 20 rows (an archive can hold a whole retention half-window).
     chat_archive: bool,
+    /// Every committed chain block, newest first (the Chain-History panel).
+    chain_rows: Vec<molt_core::ChainBlockView>,
     member: String,
     threshold_badge: String,
     surfaces: Vec<SurfaceData>,
@@ -2641,6 +2643,14 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    // the Chain-History settings panel: every committed block, newest
+    // first (co-equal read — the MCP read_chain tool serves the same)
+    let chain_rows: Vec<molt_core::ChainBlockView> = match wallet.execute(Command::ReadChain).await
+    {
+        Ok(Reply::Chain { blocks }) => blocks,
+        _ => Vec::new(),
+    };
+    let chain_len = chain_rows.len();
     let (unread, first_seen, known, org_view, list_pages) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
         if !st.is_current(my_gen) {
@@ -2680,6 +2690,10 @@ async fn push_surfaces(
                 st.clamp_list_page(key, "applied", s.applied.len()),
             );
         }
+        list_pages.insert(
+            "chain:history".to_string(),
+            st.clamp_list_page("chain", "history", chain_len),
+        );
         (
             st.ledger.observe(&counts, &selected_key),
             st.first_seen.clone(),
@@ -2728,6 +2742,7 @@ async fn push_surfaces(
         .collect();
     let bundle = SurfacesBundle {
         lang,
+        chain_rows,
         chat_archive: chat_view == "archive",
         member,
         threshold_badge,
@@ -2768,6 +2783,19 @@ async fn push_surfaces(
 /// and with it drop the keyboard focus out of the chat compose box mid-typing.
 fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_node_member(b.member.clone().into());
+    // the Chain-History panel: paged at 20, newest first (rows arrive
+    // newest-first from read_chain)
+    {
+        let page = page_of(&b.list_pages, "chain", "history");
+        let (start, end, page, pages) = page_slice(b.chain_rows.len(), page, LIST_PAGE_SIZE);
+        let rows: Vec<ChainRow> = b.chain_rows[start..end]
+            .iter()
+            .map(|r| chain_row(b.lang, r))
+            .collect();
+        ui.set_chain_rows(ModelRc::new(VecModel::from(rows)));
+        ui.set_chain_page(i32::try_from(page + 1).unwrap_or(1));
+        ui.set_chain_pages(i32::try_from(pages).unwrap_or(1));
+    }
     ui.set_threshold_badge(b.threshold_badge.clone().into());
     let tabs: Vec<SurfaceTab> = b
         .surfaces
@@ -3162,6 +3190,57 @@ fn surface_data(
         denied: snap.denied,
         declined,
     }
+}
+
+/// Project one chain block into its Chain-History row — titles render in
+/// the ACTIVE language from the payload's op placeholder, exactly like the
+/// applied logs (language-neutral wire, localized display).
+fn chain_row(lang: i32, r: &molt_core::ChainBlockView) -> ChainRow {
+    let de = lang == 1;
+    let (kind, title) = match r.kind.as_str() {
+        "genesis" => (
+            strings_pick(de, "Founding", "Gründung"),
+            r.payload.as_str().unwrap_or_default().to_string(),
+        ),
+        "membership" => (
+            strings_pick(de, "Membership", "Mitgliedschaft"),
+            r.payload.as_str().unwrap_or_default().to_string(),
+        ),
+        "checkpoint" => (
+            strings_pick(de, "Checkpoint (compacted)", "Checkpoint (kompaktiert)"),
+            format!(
+                "{} {}",
+                strings_pick(de, "state up to block", "Zustand bis Block"),
+                r.payload.as_u64().unwrap_or(0)
+            ),
+        ),
+        // applied: the payload IS the proposal payload — op-placeholder title
+        _ => (String::new(), display_title(lang, &r.payload)),
+    };
+    ChainRow {
+        height: if r.height == 0 && r.kind == "applied" {
+            strings_pick(de, "— (before the cut)", "— (vor dem Schnitt)")
+        } else {
+            format!("#{}", r.height)
+        }
+        .into(),
+        kind: kind.into(),
+        surface: if r.surface.is_empty() {
+            String::new()
+        } else {
+            Surface::parse(&r.surface)
+                .map(|sf| surface_name(lang, sf).to_string())
+                .unwrap_or_else(|| r.surface.clone())
+        }
+        .into(),
+        title: title.into(),
+        signers: r.signers.join(", ").into(),
+    }
+}
+
+/// Tiny bilingual pick for labels that live in Rust-side projections.
+fn strings_pick(de: bool, en: &str, de_s: &str) -> String {
+    if de { de_s.to_string() } else { en.to_string() }
 }
 
 /// Project one proposal view into the card row the GUI renders — shared by
@@ -4412,6 +4491,15 @@ lexicon! {
     set_tab_network: "Network", "Netzwerk";
     set_tab_mcp: "MCP", "MCP";
     set_tab_node: "Node", "Node";
+    set_tab_chain: "Chain-History", "Chain-History";
+    chain_col_height: "Block", "Block";
+    chain_col_what: "Change", "Änderung";
+    chain_col_signers: "Signed by", "Signiert von";
+    chain_kind_genesis: "Founding", "Gründung";
+    chain_kind_membership: "Membership", "Mitgliedschaft";
+    chain_kind_checkpoint: "Checkpoint (compacted)", "Checkpoint (kompaktiert)";
+    chain_pre_cut: "before the cut", "vor dem Schnitt";
+    chain_empty: "No chain — this workspace is not chain-governed.", "Keine Chain — dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
     set_ws_dir_body: "Path of the folder that holds your workspaces. (Mock — no real file dialog.)", "Pfad des Ordners, der deine Workspaces enthält. (Mock — kein echter Dateidialog.)";
