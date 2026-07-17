@@ -1125,9 +1125,22 @@ impl State {
         // new head can never seal (upto == height-1 is enforced) and must
         // not linger as bookkeeping a late Approved could resurrect
         let head_height = head.height;
-        self.proposal_changes.retain(|_, c| {
-            !matches!(c, ChainChange::Checkpoint { upto, .. } if *upto < head_height)
-        });
+        let swept: Vec<u64> = self
+            .proposal_changes
+            .iter()
+            .filter(|(_, c)| {
+                matches!(c, ChainChange::Checkpoint { upto, .. } if *upto < head_height)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in swept {
+            self.proposal_changes.remove(&id);
+            self.pending_sigs.remove(&id);
+            // closure for the proposer/operator: this cut can never seal —
+            // re-propose at the new head (the stale loop below can no
+            // longer see these entries, so the emit lives HERE)
+            self.emit(Event::CheckpointStale { id: ProposalId(id) });
+        }
         for id in stale {
             let mine = self
                 .pending_sigs
@@ -1138,15 +1151,7 @@ impl State {
             // enforced by the verifier) — after the head moved, re-signing
             // the old cut could only seal an invalid block. Drop it; the
             // proposer re-proposes at the new head (doc §B.2).
-            if matches!(
-                self.proposal_changes.get(&id),
-                Some(ChainChange::Checkpoint { .. })
-            ) {
-                self.proposal_changes.remove(&id);
-                self.emit(Event::CheckpointStale { id: ProposalId(id) });
-                tracing::debug!(%id, "dropping a stale checkpoint proposal (head moved — re-cut needed)");
-                continue;
-            }
+
             // only re-sign for proposals still pending that this node approved
             if mine && matches!(self.proposals.get(&id), Some(p) if p.state == ProposalState::Proposed)
             {

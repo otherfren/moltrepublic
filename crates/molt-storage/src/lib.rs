@@ -1914,16 +1914,19 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         let _ = reply.send(ws.read_transport_state());
                     }
                     Ok(WriterMsg::PersistChain { blob, blocks, ack }) => {
-                        if let Err(e) = ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync()) {
-                            fail(&failed_flag, "chain.state write", &e);
-                        }
-                        // WP4b: the FIRST prune raises the manifest version —
-                        // an older binary must refuse the whole workspace
-                        // rather than run chainless on a partial view
-                        if blob.is_some() {
-                            if let Err(e) = ws.bump_pruned_version() {
-                                fail(&failed_flag, "manifest version bump", &e);
+                        match ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync()) {
+                            Err(e) => fail(&failed_flag, "chain.state write", &e),
+                            // WP4b: the FIRST prune raises the manifest
+                            // version — an older binary must refuse the
+                            // whole workspace rather than run chainless on
+                            // a partial view. Only after a SUCCESSFUL write:
+                            // the version must never misdescribe the layout.
+                            Ok(()) if blob.is_some() => {
+                                if let Err(e) = ws.bump_pruned_version() {
+                                    fail(&failed_flag, "manifest version bump", &e);
+                                }
                             }
+                            Ok(()) => {}
                         }
                         let _ = ack.send(());
                     }
@@ -2074,21 +2077,31 @@ mod tests {
     fn a_pruned_persist_raises_the_manifest_version_gate() {
         let tmp = tempfile::tempdir().expect("tmp");
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
-        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
         assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION);
         // a FULL chain persist does not bump (old binaries keep reading)
         ws.write_chain(None, &[]).expect("full write");
         assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION);
-        // the first prune bumps, idempotently
-        ws.bump_pruned_version().expect("bump");
-        ws.bump_pruned_version().expect("bump again");
-        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION_PRUNED);
-        let on_disk = read_manifest(ws.dir()).expect("manifest reads");
-        assert_eq!(on_disk.version, molt_core::STORAGE_VERSION_PRUNED);
-        // the open gate refuses anything newer than this build supports —
-        // exactly what a pre-checkpoint binary sees on a pruned workspace
+        // the first PRUNED persist bumps — through the real writer wiring
+        // (the production trigger), not a direct method call
         let dir = ws.dir().to_path_buf();
-        drop(ws);
+        let handle = start_writer(ws);
+        let blob = molt_core::CheckpointState {
+            founding_name: "t".to_string(),
+            rule_m: 1,
+            rule_n: 1,
+            founding_identities: Vec::new(),
+            agenda: String::new(),
+            republic_id: String::new(),
+            roster: Vec::new(),
+            applied: Vec::new(),
+            consumed_ids: Vec::new(),
+            upto: 0,
+        };
+        handle.persist_chain_blocking(Some(blob), Vec::new());
+        handle.close(None);
+        let on_disk = read_manifest(&dir).expect("manifest reads");
+        assert_eq!(on_disk.version, molt_core::STORAGE_VERSION_PRUNED);
         let mut m = read_manifest(&dir).expect("manifest");
         m.version = molt_core::STORAGE_VERSION_PRUNED + 1;
         {
