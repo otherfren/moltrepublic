@@ -395,7 +395,7 @@ impl State {
         // `opened` directly — after start_writer only the async load path
         // remains, which the sync open handler can't await
         let transport_state = opened.read_transport_state();
-        let chain = opened.read_chain();
+        let (checkpoint_blob, chain) = opened.read_chain();
         self.active = Some(ActiveStorage {
             id: id.to_string(),
             dir,
@@ -408,6 +408,9 @@ impl State {
         // BEFORE recover_pending_applies so the legacy threshold recovery knows
         // it is a chain workspace and stays out of the way.
         if !chain.is_empty() {
+            // WP4b: a pruned holder re-anchors on its persisted blob BEFORE
+            // adopting — verify_own then runs the suffix rules
+            self.checkpoint_blob = checkpoint_blob;
             self.adopt_chain(chain);
         }
         self.identity_sk = transport_state

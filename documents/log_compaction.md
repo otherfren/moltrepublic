@@ -245,16 +245,36 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
 
 ## B.6 Catch-up, Recovery, Persistenz
 
-- `serve_chain_from(from)`: hält der Server nur noch den Suffix und ist
-  `from ≤ upto`, antwortet er mit `[Blob + Checkpoint-Block + Suffix]`
-  (additives Wire-Detail: eigenes Event `CheckpointServed { blob }` oder
-  Blob-Feld am re-served Committed — Entscheid in der Implementierung,
-  beides additiv).
+- `serve_chain_from(from)`: **entschieden + gebaut (4b):** eigenes
+  additives Event `WorkspaceEvent::CheckpointServed { blob }`, serviert
+  VOR den Committed-Re-Serves, nur wenn der Requester echt unter dem
+  Anker liegt (`from < anchor`). Empfänger: first-stash-wins +
+  Invalidierung; Adopt nur nach voller Suffix-Verifikation. Bekannte
+  v1-Grenze: EIN böswilliger Sitz kann per Stash-Race das Re-Anchoring
+  eines Nachzüglers verzögern (Liveness, nie Safety) — per-Peer-Stashes
+  wären der vollere Fix. Ein Voll-Halter hinter dem Schnitt wird beim
+  Re-Anchor gepruned (die Mesh hält die Lückenblöcke nicht mehr) —
+  unter B-F2 (Auto-Drop überall) ist das konsistent: Archiv-Halter
+  existieren in diesem Design bewusst nicht, Recovery hängt seit 4c
+  nicht mehr an ihnen.
 - Recovery: das Welcome trägt Checkpoint-Blob + Suffix statt der vollen
   Chain; der Rejoiner verifiziert nach den Suffix-Regeln (§B.5).
-- Persistenz: `chain.state` additiv um den Blob erweitert; ältere Leser
-  treffen die unbekannte `ChainChange`-Variante und stoppen — gewollt
-  (additive-only-Regel).
+  **Etappe 4c GEBAUT:** Das Welcome trägt die Pruned-Wire-Form
+  (`ServedChainWire`, untagged — Voll-Koordinatoren behalten das nackte
+  Array); der Rejoiner verifiziert per Suffix-Regeln und materialisiert
+  aus der rid-gebundenen Founding-Tabelle des Blobs mit LEEREN
+  Attestations (die Genesis-Signaturen sind mit Block 0 weg; Autorität
+  ist der verifizierte Blob+Suffix, der lokale Founded-Record ist
+  Bootstrap-Metadatum).
+- Persistenz: `chain.state` additiv um den Blob erweitert (untagged:
+  Array = voll, Objekt = pruned). **Ehrliche Old-Reader-Realität
+  (Review 2026-07-18):** ein ALTES Binary liest ein pruned
+  `chain.state` als „decode failed" und läuft CHAINLOS weiter — der
+  Log-seitige `unknown_events`-Stopp greift nur, solange Checkpoint-
+  Events im Tail liegen (vor dem nächsten Snapshot-Floor). Ein altes
+  Binary auf einem pruned Workspace kann also in die Legacy-Zählpfad-
+  Falle laufen; der saubere Stopp (Manifest-Format-Bump beim ersten
+  Prune) ist als Etappe-5-Punkt gepinnt.
 
 ## B.7 Grenzen (bewusst)
 
@@ -287,11 +307,8 @@ Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
   append_committed_block, apply_next_block, tie_break, Open/Recovery) auf
   Suffix-Chains routen — heute würde `adopt_chain` eine gedroppte Chain
   beim Reopen löschen.
-- Verify ist heute O(n²) bei vielen Checkpoints (Recompute ab
-  Genesis/Blob pro Checkpoint pro Lauf); mit automatischem Droppen
-  bleiben Chains kurz, aber der inkrementelle Walk (ein gemeinsamer
-  Walker für Voll/Suffix, Zustand läuft mit) ist die richtige Form —
-  spätestens in Etappe 4 umbauen.
+-   **4d GEBAUT:** beide Walker falten inkrementell (`fold_one` +
+  `hash_walk_state`) — O(n) statt O(n·Checkpoints).
 - Proposal-Id-Namespace ist knoten-lokal gemintet; Etappe 3 entschärft
   die Checkpoint-Seite (belegte Ids werden nie auto-signiert), die
   generelle Kollision zweier gleichzeitiger Proposals bleibt offen.

@@ -335,6 +335,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
+            | WorkspaceEvent::CheckpointServed { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }
@@ -937,6 +938,12 @@ impl State {
                 if self.is_chain_governed() =>
             {
                 self.receive_checkpoint_proposal(id.0, upto, &state_hash);
+            }
+            // WP4b: a pruned peer served its blob ahead of the anchor —
+            // stash it; the adopt happens hard-verified once the anchor
+            // block (and its suffix) arrive as Committed frames
+            WorkspaceEvent::CheckpointServed { blob } if self.is_chain_governed() => {
+                self.receive_checkpoint_blob(blob);
             }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the

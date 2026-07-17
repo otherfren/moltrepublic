@@ -68,8 +68,11 @@ impl State {
         mesh: Vec<molt_core::MeshLink>,
         // a recovery adopts the FULL verified chain it caught up over the
         // recovery channel (the genesis alone would drop every later block's
-        // state); `None` = a founding/join, whose chain IS the genesis.
+        // state); `None` = a founding/join, whose chain IS the genesis. A
+        // pruned coordinator's serve carries the checkpoint blob the suffix
+        // anchors on (WP4b 4c) — persisted next to the chain.
         full_chain: Option<Vec<molt_core::ChainBlock>>,
+        checkpoint_blob: Option<molt_core::CheckpointState>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -120,7 +123,9 @@ impl State {
         // the genesis chain block goes to its own file, durably, before the
         // writer takes over — same reasoning as the MLS blob above
         if !chain.is_empty() {
-            opened.write_chain(&chain).map_err(|e| err(e.to_string()))?;
+            opened
+                .write_chain(checkpoint_blob.as_ref(), &chain)
+                .map_err(|e| err(e.to_string()))?;
         }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();
@@ -133,9 +138,14 @@ impl State {
         self.reset_workspace_state();
         self.apply(&genesis);
         self.next_seq = 2;
-        // adopt the chain + the runtime signing key (reset cleared them above)
+        // adopt the chain + the runtime signing key (reset cleared them above).
+        // A pruned recovery re-anchors on its blob BEFORE adopting — without
+        // it, verify_own would run the genesis rules against a suffix and
+        // wipe the chain (review finding: the session was chainless until
+        // the next reopen)
         if !chain.is_empty() {
             self.identity_sk = signing_key;
+            self.checkpoint_blob = checkpoint_blob;
             self.adopt_chain(chain);
             self.note_governance_readiness();
         }
@@ -267,6 +277,7 @@ impl State {
                 None,          // …and the MLS group (S4/S5)
                 Vec::new(),    // …and the mesh (S4/S5)
                 None,          // no recovered chain — this is the mock restore
+                None,          // …and no checkpoint blob either
                 MoltError::Restore,
             )?
         } else {
@@ -583,6 +594,7 @@ impl State {
                 // it is persisted then, via NetMeshReady
                 Vec::new(),
                 None, // a founding's chain IS the genesis
+                None, // …rooted, never pruned at birth
                 MoltError::Create,
             )?;
             self.persist_simulated_members(&id, true);
@@ -864,6 +876,7 @@ impl State {
                 mls_blob,
                 mesh,
                 None, // a join's chain IS the genesis
+                None, // …rooted, never pruned at birth
                 MoltError::Join,
             ) {
                 Ok(id) => id,
@@ -978,7 +991,15 @@ impl State {
                         *slot = Some(transport.clone());
                     }
                     match crate::recovery::run_rejoin(transport, inv, &phrase, true).await {
-                        Ok(outcome) => match serde_json::to_string(&outcome.chain) {
+                        Ok(outcome) => match match &outcome.checkpoint_blob {
+                            Some(blob) => {
+                                serde_json::to_string(&crate::chain::ServedChainWire::Pruned {
+                                    checkpoint_blob: blob.clone(),
+                                    blocks: outcome.chain.clone(),
+                                })
+                            }
+                            None => serde_json::to_string(&outcome.chain),
+                        } {
                             Ok(chain) => Command::NetRecoverSealed {
                                 member: outcome.member,
                                 chain,
@@ -1030,20 +1051,41 @@ impl State {
         let Some((inv, phrase)) = self.recover_ctx.clone() else {
             return Ok(Reply::Ack);
         };
-        let blocks: Vec<molt_core::ChainBlock> = match serde_json::from_str(&chain) {
+        let wire: crate::chain::ServedChainWire = match serde_json::from_str(&chain) {
             Ok(b) => b,
             Err(e) => {
                 return self
                     .cmd_net_recover_failed(format!("decoding the recovered chain: {e}"), generation)
             }
         };
-        // the whole chain, verified from block 0 (signatures, links, threshold)
-        let head = match crate::chain::verify_chain(&blocks) {
-            Ok(h) => h,
-            Err(e) => return self.cmd_net_recover_failed(e, generation),
+        let (blocks, checkpoint_blob) = match wire {
+            crate::chain::ServedChainWire::Full(blocks) => (blocks, None),
+            crate::chain::ServedChainWire::Pruned {
+                checkpoint_blob,
+                blocks,
+            } => (blocks, Some(checkpoint_blob)),
         };
-        // the genesis IS the constitution the workspace materializes from
-        let Some(sealed) = blocks.first().and_then(crate::recovery::sealed_roster_from_genesis)
+        // full chain: verified from block 0; pruned: the suffix rules run
+        // against the blob (founding-bound anchor, double-apply seed)
+        let head = match &checkpoint_blob {
+            None => match crate::chain::verify_chain(&blocks) {
+                Ok(h) => h,
+                Err(e) => return self.cmd_net_recover_failed(e, generation),
+            },
+            Some(blob) => {
+                match crate::chain::verify_suffix_chain(blob, &blocks, &inv.republic_id) {
+                    Ok(h) => h,
+                    Err(e) => return self.cmd_net_recover_failed(e, generation),
+                }
+            }
+        };
+        // the constitution the workspace materializes from: the genesis, or
+        // the blob's rid-bound founding table on a pruned serve
+        let sealed = match &checkpoint_blob {
+            None => blocks.first().and_then(crate::recovery::sealed_roster_from_genesis),
+            Some(blob) => Some(crate::recovery::sealed_roster_from_blob(blob)),
+        };
+        let Some(sealed) = sealed
         else {
             return self.cmd_net_recover_failed(
                 "the recovered chain does not root on a genesis constitution".to_string(),
@@ -1099,6 +1141,7 @@ impl State {
             mls_blob,
             mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),
+            checkpoint_blob.clone(),
             MoltError::Recover,
         ) {
             Ok(id) => id,

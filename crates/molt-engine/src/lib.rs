@@ -386,6 +386,13 @@ pub(crate) struct State {
     pub(crate) chain: Vec<molt_core::ChainBlock>,
     /// The verified head of [`State::chain`] (`None` = empty chain).
     pub(crate) chain_head: Option<chain::ChainHead>,
+    /// WP4b: a SERVED blob awaiting its anchor block (runtime-only, never
+    /// persisted — re-served on the next catch-up if lost).
+    pub(crate) pending_served_blob: Option<molt_core::CheckpointState>,
+    /// WP4b: the checkpoint blob a PRUNED holder anchors on — `Some` once
+    /// history below a sealed checkpoint was dropped locally; [`State::chain`]
+    /// then starts with the checkpoint block instead of the genesis.
+    pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
     /// The gated surfaces' applied logs **derived from the chain** — a separate
     /// projection from the legacy log-driven [`State::applied`] so the two never
     /// collide: a solo/simulation workspace keeps its counted governance in
@@ -573,6 +580,8 @@ impl State {
             identity_sk: None,
             chain: Vec::new(),
             chain_head: None,
+            pending_served_blob: None,
+            checkpoint_blob: None,
             chain_applied: HashMap::new(),
             pending_sigs: HashMap::new(),
             proposal_changes: HashMap::new(),

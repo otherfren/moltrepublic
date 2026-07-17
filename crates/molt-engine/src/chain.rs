@@ -271,19 +271,71 @@ pub(crate) fn checkpoint_state(
     else {
         return Err("chain does not start with a genesis".to_string());
     };
-    let base = molt_core::CheckpointState {
-        founding_name: name.clone(),
-        rule_m: *rule_m,
-        rule_n: *rule_n,
-        founding_identities: identities.clone(),
-        agenda: agenda.clone(),
-        republic_id: republic_id.clone(),
-        roster: identities.clone(),
+    let base = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
+    fold_state(base, &blocks[1..], upto)
+}
+
+/// The empty state a genesis roots — the base every full-holder fold and
+/// walk starts from.
+fn genesis_base(
+    name: &str,
+    rule_m: u8,
+    rule_n: u8,
+    identities: &[MemberIdentity],
+    agenda: &str,
+    republic_id: &str,
+) -> molt_core::CheckpointState {
+    molt_core::CheckpointState {
+        founding_name: name.to_string(),
+        rule_m,
+        rule_n,
+        founding_identities: identities.to_vec(),
+        agenda: agenda.to_string(),
+        republic_id: republic_id.to_string(),
+        roster: identities.to_vec(),
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
         upto: 0,
-    };
-    fold_state(base, &blocks[1..], upto)
+    }
+}
+
+/// Fold ONE verified block into a running walk state (4d: the walkers
+/// carry the projection incrementally instead of refolding from the base
+/// at every checkpoint — O(n) instead of O(n·checkpoints)). Checkpoint and
+/// Genesis blocks are state-neutral; `consumed_ids` stays UNSORTED here
+/// and is sorted per hash in [`hash_walk_state`].
+fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Result<(), String> {
+    match &block.change {
+        ChainChange::Applied {
+            proposal_id,
+            surface,
+            payload,
+        } => {
+            if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
+                list.push((*proposal_id, payload.clone()));
+            }
+            state.consumed_ids.push(*proposal_id);
+        }
+        ChainChange::Membership {
+            op,
+            member,
+            identity_pk,
+        } => {
+            apply_membership(&mut state.roster, *op, member, identity_pk)?;
+        }
+        ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
+    }
+    Ok(())
+}
+
+/// Hash the running walk state as the canonical state at `upto` — the
+/// comparison a checkpoint's `state_hash` must match. Clones once to sort
+/// the consumed ids (canonical layout) without disturbing the walk.
+fn hash_walk_state(state: &molt_core::CheckpointState, upto: u64) -> String {
+    let mut at = state.clone();
+    at.upto = upto;
+    at.consumed_ids.sort_unstable();
+    checkpoint_state_hash(&at)
 }
 
 /// Fold further verified blocks (heights `<= upto`) onto a base state —
@@ -329,36 +381,19 @@ fn fold_state(
     Ok(state)
 }
 
-/// The content check for a checkpoint met during a chain walk: recompute
-/// the state at `upto` from the walker's own material (genesis-rooted
-/// blocks, or a blob base plus suffix blocks) and compare the hash the
-/// signers attested. Sign-what-you-see, verifier edition.
-fn verify_checkpoint_content(
-    base: Option<&molt_core::CheckpointState>,
-    blocks: &[ChainBlock],
-    upto: u64,
-    state_hash: &str,
-) -> Result<(), String> {
-    let state = match base {
-        None => checkpoint_state(blocks, upto)?,
-        Some(blob) => {
-            // a fold cannot REWIND below the blob's cut — comparing against
-            // a knowingly wrong recomputation would reject truthful hashes
-            if upto < blob.upto {
-                return Err(format!(
-                    "checkpoint upto {upto} lies below the blob coverage {}",
-                    blob.upto
-                ));
-            }
-            fold_state(blob.clone(), &blocks[1..], upto)?
-        }
-    };
-    if checkpoint_state_hash(&state) != state_hash {
-        return Err(format!(
-            "checkpoint at upto {upto} does not match this chain's own projection"
-        ));
-    }
-    Ok(())
+/// WP4b 4c: the wire shape a recovery coordinator serves its chain in —
+/// the Welcome twin of storage's `ChainStateFile`. Untagged: an array is
+/// a genesis-rooted chain (the historical shape, old rejoiners keep
+/// working against full coordinators), an object carries the checkpoint
+/// blob a PRUNED coordinator anchors on.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ServedChainWire {
+    Pruned {
+        checkpoint_blob: molt_core::CheckpointState,
+        blocks: Vec<ChainBlock>,
+    },
+    Full(Vec<ChainBlock>),
 }
 
 /// The lowercase-hex SHA-256 a checkpoint's `state_hash` carries — over
@@ -376,14 +411,34 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
         return Err("empty chain".to_string());
     };
     let mut head = verify_genesis(genesis)?;
+    let ChainChange::Genesis {
+        name,
+        republic_id,
+        rule_m,
+        rule_n,
+        identities,
+        agenda,
+    } = &genesis.change
+    else {
+        unreachable!("verify_genesis accepted a non-genesis block 0");
+    };
+    // 4d: the walk carries the projection incrementally — at a checkpoint
+    // block the running state IS the state at `upto` (upto == height - 1,
+    // enforced), so the content check needs no refold from the genesis
+    let mut running = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
     let mut seen = BTreeSet::new();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
         // WP4b: a checkpoint's CONTENT is checked against this chain's own
         // projection — a full holder accepts no summary it cannot recompute
         if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            verify_checkpoint_content(None, blocks, *upto, state_hash)?;
+            if &hash_walk_state(&running, *upto) != state_hash {
+                return Err(format!(
+                    "checkpoint at upto {upto} does not match this chain's own projection"
+                ));
+            }
         }
+        fold_one(&mut running, block)?;
     }
     Ok(head)
 }
@@ -399,7 +454,6 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
 /// [`verify_chain`]. Trust model (documented, deliberate): the roster
 /// evolution below `upto` is attested by m-of-n instead of replayed —
 /// the same honest-majority assumption threshold governance stands on.
-#[allow(dead_code)] // consumed by WP4b stage 4 (drop + serve + recovery)
 pub(crate) fn verify_suffix_chain(
     blob: &molt_core::CheckpointState,
     blocks: &[ChainBlock],
@@ -474,12 +528,27 @@ pub(crate) fn verify_suffix_chain(
         identities: blob.roster.clone(),
     };
     let mut seen: BTreeSet<u64> = blob.consumed_ids.iter().copied().collect();
+    // 4d: the incremental walk state, seeded from the blob (the anchor
+    // block itself is state-neutral)
+    let mut running = blob.clone();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
-        // a LATER checkpoint inside the suffix recomputes from the blob base
+        // a LATER checkpoint inside the suffix: the running state IS the
+        // state at its upto (upto == height - 1, enforced)
         if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            verify_checkpoint_content(Some(blob), blocks, *upto, state_hash)?;
+            if *upto < blob.upto {
+                return Err(format!(
+                    "checkpoint upto {upto} lies below the blob coverage {}",
+                    blob.upto
+                ));
+            }
+            if &hash_walk_state(&running, *upto) != state_hash {
+                return Err(format!(
+                    "checkpoint at upto {upto} does not match this chain's own projection"
+                ));
+            }
         }
+        fold_one(&mut running, block)?;
     }
     Ok(head)
 }
@@ -517,7 +586,7 @@ impl State {
     /// `None` and nothing is projected (a partially-trusted chain could fork
     /// state — `documents/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
-        match verify_chain(&chain) {
+        match self.verify_own(&chain) {
             Ok(head) => {
                 self.chain = chain;
                 self.chain_head = Some(head);
@@ -527,6 +596,7 @@ impl State {
                 tracing::warn!(error = %e, "rejecting an unverifiable chain");
                 self.chain.clear();
                 self.chain_head = None;
+                self.checkpoint_blob = None;
             }
         }
     }
@@ -542,6 +612,16 @@ impl State {
             Surface,
             Vec<(Option<u64>, serde_json::Value)>,
         > = std::collections::HashMap::new();
+        // WP4b: a pruned holder seeds the projection from the checkpoint
+        // blob — the pre-cut applied entries stay readable after the drop
+        if let Some(blob) = &self.checkpoint_blob {
+            for (surface, entries) in &blob.applied {
+                let list = projected.entry(*surface).or_default();
+                for (id, payload) in entries {
+                    list.push((Some(*id), payload.clone()));
+                }
+            }
+        }
         for block in &self.chain {
             if let ChainChange::Applied {
                 proposal_id,
@@ -840,13 +920,15 @@ impl State {
     /// full-chain verification is refused and rolled back).
     fn append_committed_block(&mut self, block: ChainBlock) -> bool {
         self.chain.push(block);
-        match verify_chain(&self.chain) {
+        match self.verify_own(&self.chain) {
             Ok(head) => {
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 let chain = self.chain.clone();
                 if let Some(active) = &self.active {
-                    active.handle.persist_chain_blocking(chain);
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
                 }
                 true
             }
@@ -901,7 +983,7 @@ impl State {
             // proposal bookkeeping (the committer also cleans by id in
             // adopt_committed_block; receivers find it by content). Local
             // block-dropping below `upto` is stage 4.
-            ChainChange::Checkpoint { .. } => {
+            ChainChange::Checkpoint { upto, .. } => {
                 let sealed = &block.change;
                 let ids: Vec<u64> = self
                     .proposal_changes
@@ -913,7 +995,32 @@ impl State {
                     self.proposal_changes.remove(&id);
                     self.pending_sigs.remove(&id);
                 }
-                tracing::info!(height = block.height, "checkpoint sealed");
+                // B-F2: drop the summarized history locally, automatically —
+                // the vote just confirmed this summary is correct. The blob
+                // becomes the holder's trust anchor; the chain keeps the
+                // checkpoint block and everything after it.
+                let upto = *upto;
+                let anchor_height = block.height;
+                match self.own_checkpoint_state(upto) {
+                    Ok(blob) => {
+                        self.checkpoint_blob = Some(blob);
+                        self.chain.retain(|b| b.height >= anchor_height);
+                        self.apply_chain_to_state();
+                        let chain = self.chain.clone();
+                        if let Some(active) = &self.active {
+                            active
+                                .handle
+                                .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
+                        }
+                        tracing::info!(height = anchor_height, upto, "checkpoint sealed — history below the cut dropped");
+                    }
+                    Err(e) => {
+                        // keep full history rather than drop on a state we
+                        // could not recompute (should be impossible: the
+                        // verifier just matched this very state)
+                        tracing::warn!(error = %e, "checkpoint sealed but the blob could not be built — keeping full history");
+                    }
+                }
             }
             _ => {}
         }
@@ -950,7 +1057,16 @@ impl State {
                 // member's reply queue so it rejoins the group AND catches its
                 // state up over this same channel (option A). Off the actor.
                 if let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) {
-                    let chain_json = serde_json::to_string(&self.chain).unwrap_or_default();
+                    let chain_json = match &self.checkpoint_blob {
+                        // a pruned coordinator serves blob + suffix — the
+                        // rejoiner verifies via the suffix rules (4c)
+                        Some(blob) => serde_json::to_string(&ServedChainWire::Pruned {
+                            checkpoint_blob: blob.clone(),
+                            blocks: self.chain.clone(),
+                        }),
+                        None => serde_json::to_string(&self.chain),
+                    }
+                    .unwrap_or_default();
                     crate::recovery::spawn_welcome_send(
                         transport,
                         pending.reply.clone(),
@@ -1034,6 +1150,31 @@ impl State {
         }
     }
 
+    /// WP4b stage 4: verify a candidate chain in THIS holder's context —
+    /// a full holder verifies from the genesis, a pruned holder from its
+    /// checkpoint blob (`verify_suffix_chain`). The one entry every
+    /// adopt/append/probe path routes through.
+    pub(crate) fn verify_own(&self, blocks: &[ChainBlock]) -> Result<ChainHead, String> {
+        match &self.checkpoint_blob {
+            None => verify_chain(blocks),
+            Some(blob) => verify_suffix_chain(blob, blocks, &self.republic_id()),
+        }
+    }
+
+    /// The canonical state at `upto` from THIS holder's own material —
+    /// genesis-rooted for a full holder, blob-based for a pruned one.
+    /// What the propose/verify-before-sign paths hash.
+    pub(crate) fn own_checkpoint_state(
+        &self,
+        upto: u64,
+    ) -> Result<molt_core::CheckpointState, String> {
+        match &self.checkpoint_blob {
+            None => checkpoint_state(&self.chain, upto),
+            // the anchor block in chain[0] is state-neutral for the fold
+            Some(blob) => fold_state(blob.clone(), &self.chain, upto),
+        }
+    }
+
     /// WP4b stage 3: the human verb — propose the compaction cut at the
     /// CURRENT head (`upto` = head height, B-F1). The engine computes the
     /// canonical state hash itself, announces it, and co-signs; every
@@ -1050,7 +1191,8 @@ impl State {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
         };
         let upto = head.height;
-        let state = checkpoint_state(&self.chain, upto)
+        let state = self
+            .own_checkpoint_state(upto)
             .map_err(molt_core::MoltError::BadPayload)?;
         let state_hash = checkpoint_state_hash(&state);
         let id = self.next_id;
@@ -1094,7 +1236,7 @@ impl State {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
             return;
         }
-        let ours = match checkpoint_state(&self.chain, upto) {
+        let ours = match self.own_checkpoint_state(upto) {
             Ok(state) => checkpoint_state_hash(&state),
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
@@ -1184,6 +1326,9 @@ impl State {
                 }
             } else {
                 self.pending_blocks.insert(block.height, block);
+                // WP4b: with a served blob stashed, the buffered block may
+                // be the missing anchor/suffix piece
+                self.try_adopt_from_blob();
             }
             return;
         };
@@ -1197,6 +1342,7 @@ impl State {
             // a gap: we are behind. Buffer this block and ask the mesh for the
             // blocks we are missing (any survivor re-serves them).
             self.pending_blocks.insert(block.height, block);
+            self.try_adopt_from_blob();
             self.request_catchup(head.height + 1);
         }
     }
@@ -1206,7 +1352,7 @@ impl State {
     fn apply_next_block(&mut self, block: ChainBlock) -> bool {
         let mut probe = self.chain.clone();
         probe.push(block.clone());
-        if verify_chain(&probe).is_err() {
+        if self.verify_own(&probe).is_err() {
             tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
             return false;
         }
@@ -1265,9 +1411,170 @@ impl State {
             return;
         }
         let me = self.member();
+        // WP4b: a pruned holder cannot serve below its anchor — it serves
+        // the BLOB instead, ahead of the anchor/suffix, so the requester
+        // can hard-verify and re-anchor (suffix rules)
+        if let (Some(blob), Some(anchor)) = (&self.checkpoint_blob, self.chain.first()) {
+            // strictly below: a requester missing only the anchor block can
+            // verify it against its own history — the full-state blob would
+            // be pure fan-out amplification
+            if from < anchor.height {
+                let env = self.make_env(
+                    me.clone(),
+                    WorkspaceEvent::CheckpointServed { blob: blob.clone() },
+                );
+                self.record(env);
+            }
+        }
         for block in blocks {
             let env = self.make_env(me.clone(), WorkspaceEvent::Committed(block));
             self.record(env);
+        }
+    }
+
+    /// WP4b: a served blob arrives ahead of its anchor. Stash it (runtime
+    /// only) after the cheap forgery check — the REAL verification happens
+    /// in [`State::try_adopt_from_blob`] once the anchor block is here.
+    pub(crate) fn receive_checkpoint_blob(&mut self, blob: molt_core::CheckpointState) {
+        // only useful when we are strictly BEHIND the served cut (head ==
+        // upto means only the anchor is missing — the normal apply path
+        // covers that without the full-state blob)
+        let behind = match &self.chain_head {
+            None => true,
+            Some(head) => head.height < blob.upto,
+        };
+        if !behind {
+            return;
+        }
+        // first stash wins until it is consumed or invalidated — an
+        // overwritable slot would let one insider race garbage over a
+        // legitimate blob forever (griefing; per-peer stashes are the
+        // fuller fix, doc §B.6)
+        if self.pending_served_blob.is_some() {
+            return;
+        }
+        let rid = molt_storage::republic_id(
+            &blob.founding_name,
+            blob.rule_m,
+            blob.rule_n,
+            &blob.founding_identities,
+        );
+        if rid != self.republic_id() || rid != blob.republic_id {
+            tracing::warn!("dropping a served checkpoint blob that does not recompute to this republic");
+            return;
+        }
+        self.pending_served_blob = Some(blob);
+        self.try_adopt_from_blob();
+    }
+
+    /// Adopt blob + buffered anchor/suffix once both are here: build the
+    /// longest consecutive candidate from the buffer and run the FULL
+    /// suffix verification — all-or-nothing, nothing is trusted from the
+    /// stash until it passes.
+    pub(crate) fn try_adopt_from_blob(&mut self) {
+        let Some(blob) = self.pending_served_blob.clone() else {
+            return;
+        };
+        // the chain advanced past the cut through the normal apply path —
+        // the stash is dead weight now
+        if self
+            .chain_head
+            .as_ref()
+            .is_some_and(|h| h.height > blob.upto)
+        {
+            self.pending_served_blob = None;
+            return;
+        }
+        let anchor_height = blob.upto + 1;
+        if !self.pending_blocks.contains_key(&anchor_height) {
+            return;
+        }
+        let mut candidate = Vec::new();
+        let mut h = anchor_height;
+        while let Some(b) = self.pending_blocks.get(&h) {
+            candidate.push(b.clone());
+            h += 1;
+        }
+        match verify_suffix_chain(&blob, &candidate, &self.republic_id()) {
+            Ok(head) => {
+                let new_height = head.height;
+                self.checkpoint_blob = Some(blob);
+                self.chain = candidate.clone();
+                self.chain_head = Some(head);
+                self.pending_served_blob = None;
+                self.pending_blocks.retain(|h, _| *h > new_height);
+                self.apply_chain_to_state();
+                // the post-apply bookkeeping the block-by-block path runs in
+                // after_block_applied: sealed proposals get their terminal
+                // state + event, PRE-CUT consumed proposals resolve too
+                // (else they zombie as Proposed and re-base re-signs them
+                // into dead gossip — review finding), org effects refresh,
+                // a Restored seat's stale announce-cooldown clears, and
+                // stale signatures re-base once at the end
+                let consumed: Vec<u64> = self
+                    .checkpoint_blob
+                    .as_ref()
+                    .map(|b| b.consumed_ids.clone())
+                    .unwrap_or_default();
+                for id in consumed {
+                    if let Some(p) = self.proposals.get_mut(&id) {
+                        if p.state == ProposalState::Proposed {
+                            p.state = ProposalState::Applied;
+                        }
+                    }
+                    self.pending_sigs.remove(&id);
+                }
+                let mut org_touched = false;
+                for block in &candidate {
+                    match &block.change {
+                        ChainChange::Applied {
+                            proposal_id,
+                            surface,
+                            ..
+                        } => {
+                            if let Some(p) = self.proposals.get_mut(proposal_id) {
+                                p.state = ProposalState::Applied;
+                            }
+                            self.pending_sigs.remove(proposal_id);
+                            self.emit(Event::Applied {
+                                id: ProposalId(*proposal_id),
+                                surface: *surface,
+                            });
+                            if *surface == Surface::Organization {
+                                org_touched = true;
+                            }
+                        }
+                        ChainChange::Membership {
+                            op: MembershipOp::Restored,
+                            member,
+                            ..
+                        } => {
+                            self.mesh_extension_at.remove(member);
+                        }
+                        _ => {}
+                    }
+                }
+                if org_touched {
+                    self.after_org_applied();
+                }
+                self.rebase_pending_approvals();
+                let chain = self.chain.clone();
+                if let Some(active) = &self.active {
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
+                }
+                if self.catchup_from.is_some_and(|f| f <= new_height) {
+                    self.catchup_from = None;
+                }
+                tracing::info!(height = new_height, "re-anchored on a served checkpoint");
+            }
+            Err(e) => {
+                // drop THIS stash so a later honest re-serve can land — a
+                // failed pairing must not wedge the slot forever
+                self.pending_served_blob = None;
+                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify — stash cleared");
+            }
         }
     }
 
@@ -1343,14 +1650,14 @@ impl State {
             // the incoming block wins the tip; swap it in and re-verify
             let displaced = self.chain.pop();
             self.chain.push(block.clone());
-            if verify_chain(&self.chain).is_ok() {
-                if let Ok(head) = verify_chain(&self.chain) {
-                    self.chain_head = Some(head);
-                }
+            if let Ok(head) = self.verify_own(&self.chain) {
+                self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 let chain = self.chain.clone();
                 if let Some(active) = &self.active {
-                    active.handle.persist_chain_blocking(chain);
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
                 }
                 // the displaced proposal returns to pending and re-bases
                 if let Some(ChainChange::Applied { proposal_id, .. }) =
@@ -1978,6 +2285,118 @@ mod tests {
         // the sealed proposal's bookkeeping is gone on both
         assert!(!petra.proposal_changes.contains_key(&id));
         assert!(!walter.proposal_changes.contains_key(&id));
+    }
+
+    /// WP4b stage 4: sealing a checkpoint DROPS the summarized history
+    /// locally (B-F2), the blob becomes the trust anchor, pre-cut applied
+    /// entries stay readable, and the pruned holder keeps verifying and
+    /// extending its suffix chain — including a reopen-style re-adopt.
+    #[test]
+    fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // the propose flow seals the cut at 2-of-2 (stage-3 mechanics)
+        let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+        walter.receive_checkpoint_proposal(40, 1, &hash);
+        let change = ChainChange::Checkpoint { upto: 1, state_hash: hash };
+        let bytes = approval_bytes(&b.republic_id, 2, &change);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(40, "petra", 2, &petra_sig);
+        // sealed AND pruned: only the anchor remains, the blob anchors
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 2);
+        assert_eq!(walter.chain.len(), 1, "history below the cut is dropped");
+        assert!(matches!(
+            walter.chain.first().expect("anchor").change,
+            ChainChange::Checkpoint { .. }
+        ));
+        let blob = walter.checkpoint_blob.clone().expect("blob anchors the holder");
+        assert_eq!(blob.upto, 1);
+        // pre-cut applied entries survive in the read projection
+        let mem = walter.chain_applied.get(&Surface::Memory).expect("projection");
+        assert_eq!(mem.len(), 1, "the pre-cut applied entry stays readable");
+        // the pruned holder keeps governing: a fresh applied change seals
+        // on top of the suffix (verify runs the suffix rules)
+        let payload = json!({"op": "add_note", "title": "post-cut"});
+        walter.receive_proposed(41, Surface::Memory, payload.clone());
+        let post = ChainChange::Applied {
+            proposal_id: 41,
+            surface: Surface::Memory,
+            payload,
+        };
+        let bytes = approval_bytes(&b.republic_id, 3, &post);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(41, "petra", 3, &petra_sig);
+        walter.chain_sign_and_gossip_approval(41);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            3,
+            "the pruned holder extends its suffix"
+        );
+        assert_eq!(
+            walter.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2),
+            "pre- and post-cut entries read together"
+        );
+        // reopen-style: a fresh holder re-anchors on blob + suffix
+        let mut reopened = chain_peer("walter", &b, b.blocks.clone());
+        reopened.checkpoint_blob = Some(blob);
+        reopened.adopt_chain(walter.chain.clone());
+        assert_eq!(
+            reopened.chain_head.as_ref().expect("head").height,
+            3,
+            "a pruned chain re-adopts from the persisted blob"
+        );
+        assert_eq!(
+            reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2)
+        );
+    }
+
+    /// WP4b stage 4b: a holder that is BEHIND a served cut re-anchors on
+    /// blob + anchor + suffix (hard-verified), and a forged blob is
+    /// dropped at the cheap rid check.
+    #[test]
+    fn a_lagging_holder_re_anchors_on_a_served_blob() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let anchor = b.seal(
+            2,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor.clone());
+        b.commit_applied(7, &["petra", "walter"]);
+        let suffix_tail = b.blocks.last().expect("tail").clone();
+
+        // the laggard holds only the genesis
+        let mut lag = chain_peer("walter", &b, b.blocks[..1].to_vec());
+        assert_eq!(lag.chain_head.as_ref().expect("head").height, 0);
+        // a forged blob (wrong founding) dies at the rid check
+        let mut forged = blob.clone();
+        forged.founding_name = "Fake".to_string();
+        lag.receive_checkpoint_blob(forged);
+        assert!(lag.pending_served_blob.is_none());
+        // the served pieces arrive in any order: blob, tail, anchor
+        lag.receive_checkpoint_blob(blob.clone());
+        lag.receive_block(suffix_tail);
+        assert_eq!(lag.chain_head.as_ref().expect("head").height, 0, "waits for the anchor");
+        lag.receive_block(anchor);
+        assert_eq!(
+            lag.chain_head.as_ref().expect("head").height,
+            3,
+            "re-anchored on blob + anchor + suffix"
+        );
+        assert!(lag.checkpoint_blob.is_some());
+        assert_eq!(
+            lag.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2),
+            "pre-cut and post-cut entries both readable"
+        );
     }
 
     /// Review pins: an id collision must never turn the auto-cosign into
