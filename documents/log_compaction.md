@@ -191,8 +191,10 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
 
 ## B.4 Ablauf (Sign-what-you-see, das Membership-Muster)
 
-1. **Propose:** menschliches Verb `propose_checkpoint { upto }` — MCP-Tool
-   UND GUI, co-equal; Default-`upto` = aktuelle Head-Höhe. Der Proposer
+1. **Propose:** menschliches Verb `propose_checkpoint` (parameterlos —
+   `upto` ist IMMER die aktuelle Head-Höhe, B-F1). Etappe 3 liefert das
+   MCP-Tool; die GUI-Affordance + Sichtbarkeit (pending-Anzeige,
+   Seal-/Stale-Ereignis) ist Etappe 5. Der Proposer
    berechnet `state_hash` aus der eigenen Chain und announced
    `WorkspaceEvent::CheckpointProposed { id, upto, state_hash }`
    (additiv; der Empfangs-Arm ist INTERNAL, wie `MembershipProposed`).
@@ -290,9 +292,15 @@ Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
   bleiben Chains kurz, aber der inkrementelle Walk (ein gemeinsamer
   Walker für Voll/Suffix, Zustand läuft mit) ist die richtige Form —
   spätestens in Etappe 4 umbauen.
-- Proposal-Id-Namespace ist knoten-lokal gemintet (Kollision zweier
-  gleichzeitiger Proposals verschiedener Nodes ist heute schon möglich,
-  auch ohne Checkpoints) — bei Etappe 3 dokumentieren/entschärfen.
+- Proposal-Id-Namespace ist knoten-lokal gemintet; Etappe 3 entschärft
+  die Checkpoint-Seite (belegte Ids werden nie auto-signiert), die
+  generelle Kollision zweier gleichzeitiger Proposals bleibt offen.
+- Etappe-3-Review, offen für Etappe 5: (a) Checkpoint-Lebenszyklus ist
+  unbeobachtbar (kein ListProposals-Eintrag, kein Event bei
+  Seal/Stale-Drop — Operator muss Status/Chain lesen); (b) Liveness:
+  ein Nachzügler verwirft den Cut und bekommt ihn nie re-served (kein
+  Buffer, kein Re-Gossip) — bei < m aktuellen Nodes sealt nichts, der
+  Proposer muss neu proposen. Beides bewusst v1, ehrlich dokumentiert.
 
 ## B.9 Vorgaben (einspruchsfähig)
 

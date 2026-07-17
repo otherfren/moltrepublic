@@ -1498,6 +1498,19 @@ pub enum WorkspaceEvent {
         /// The member's anchored identity pk the change carries.
         identity_pk: String,
     },
+    /// WP4b: a checkpoint cut was put forward — the gossip that lets every
+    /// member recompute and co-sign the SAME state hash. Transport-only,
+    /// like [`WorkspaceEvent::MembershipProposed`] (`apply` is a no-op);
+    /// the committed result is a `Checkpoint` chain block.
+    CheckpointProposed {
+        /// The proposal id (per-node, matched to its approvals).
+        id: ProposalId,
+        /// The cut: the checkpoint attests the state AFTER block `upto`.
+        upto: u64,
+        /// The proposer's canonical state hash — receivers recompute their
+        /// own and refuse to sign on mismatch.
+        state_hash: String,
+    },
     /// A member wants a shared file's BYTES: its fetch request, carried as
     /// **MLS ciphertext** (hex of the group-encrypted
     /// `molt_net::transfer::FetchRequest` JSON — share id, reply-queue
@@ -2112,6 +2125,12 @@ pub enum Command {
     },
     /// List every proposal the engine currently knows about.
     ListProposals,
+    /// WP4b: put a chain CHECKPOINT forward for threshold approval — the
+    /// compaction cut at the CURRENT head (`upto` = head height, B-F1 in
+    /// `documents/log_compaction.md`). The engine computes the canonical
+    /// state hash itself; every receiver recomputes it from its own chain
+    /// before co-signing (sign-what-you-see), and the block seals at m.
+    ProposeCheckpoint,
     /// Read a one-shot status summary of the group and surfaces.
     Status,
     /// Read the member table of the open workspace (Organization → Members):

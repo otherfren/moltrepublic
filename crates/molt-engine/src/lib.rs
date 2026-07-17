@@ -743,6 +743,7 @@ impl State {
                 }
                 Ok(Reply::State(self.snapshot(surface, channel, view.as_deref())))
             }
+            Command::ProposeCheckpoint => self.cmd_propose_checkpoint(),
             Command::ListProposals => {
                 let mut views: Vec<_> = self
                     .proposals
