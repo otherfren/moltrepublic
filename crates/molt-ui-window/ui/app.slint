@@ -23,7 +23,7 @@ import "assets/fonts/Twemoji.Mozilla.ttf";
 import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, DotLabel, DisabledTorRow
+    ConfirmModal, DotLabel
 } from "components.slint";
 import {
     ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard
@@ -639,6 +639,11 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-secret;
     in-out property <string> cfg-s3-bucket;
     in-out property <int> cfg-s3-interval: 60;
+    // alert sounds (0 none, 1 bell, 2 chime, 3 pop)
+    in-out property <int> cfg-sound-message-index: 0;
+    in-out property <int> cfg-sound-vote-index: 0;
+    // preview the picked alert once ("bell" | "chime" | "pop")
+    callback test-sound(string);
     // backup retention: keep at most this many copies per workspace
     in-out property <int> cfg-s3-copies: 5;
     property <int> set-tab: 0;
@@ -1483,7 +1488,7 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             AppDropdown {
                                 width: 110px;
-                                model: ["tor", "nym", "none"];
+                                model: ["tor", "none"];
                                 current-index <=> root.cw-net-index;
                             }
                             if root.cw-net-index == 0: AppDropdown {
@@ -1508,12 +1513,11 @@ export component AppWindow inherits Window {
                                     height: 9px;
                                     border-radius: 4.5px;
                                     y: (parent.height - self.height) / 2;
-                                    background: root.cw-net-index == 2 ? Theme.warn : Theme.good;
+                                    background: root.cw-net-index == 1 ? Theme.warn : Theme.good;
                                 }
                                 Text {
-                                    text: root.cw-net-index == 0 ? Strings.cw-net-ok-tor
-                                        : (root.cw-net-index == 1 ? Strings.cw-net-ok-nym : Strings.cw-net-warn);
-                                    color: root.cw-net-index == 2 ? Theme.warn : Theme.good;
+                                    text: root.cw-net-index == 0 ? Strings.cw-net-ok-tor : Strings.cw-net-warn;
+                                    color: root.cw-net-index == 1 ? Theme.warn : Theme.good;
                                     font-size: Theme.fs-cap;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -1536,7 +1540,7 @@ export component AppWindow inherits Window {
                             enabled: root.cw-name != "" && root.cw-member != "";
                             clicked => {
                                 root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members,
-                                    root.cw-net-index == 0 ? "tor" : (root.cw-net-index == 1 ? "nym" : "none"));
+                                    root.cw-net-index == 0 ? "tor" : "none");
                             }
                         }
                     }
@@ -2770,12 +2774,6 @@ export component AppWindow inherits Window {
                                 root.restore-start("s3", root.cfg-s3-endpoint);
                             }
                         }
-                    }
-                    // greyed placeholder: restoring from an onion endpoint over
-                    // Tor is a later step (not wired yet)
-                    DisabledTorRow {
-                        label: Strings.field-s3-tor;
-                        onion-label: Strings.field-s3-onion;
                     }
                 }
 
@@ -4804,25 +4802,75 @@ export component AppWindow inherits Window {
                         if root.set-tab == 0: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            FieldLabel {
-                                label: Strings.field-language;
-                                AppDropdown {
-                                    width: 200px;
-                                    model: ["English", "Deutsch"];
-                                    current-index: root.lang-index;
-                                    changed(i) => {
-                                        root.set-language(i);
+                            DetailGroup {
+                                title: Strings.set-panel-appearance;
+                                FieldLabel {
+                                    label: Strings.field-language;
+                                    AppDropdown {
+                                        width: 200px;
+                                        model: ["English", "Deutsch"];
+                                        current-index: root.lang-index;
+                                        changed(i) => {
+                                            root.set-language(i);
+                                        }
+                                    }
+                                }
+                                FieldLabel {
+                                    label: Strings.field-theme;
+                                    AppDropdown {
+                                        width: 200px;
+                                        model: ["Classic", "Dark", "Brutalism"];
+                                        current-index <=> Theme.theme-index;
+                                        changed(i) => {
+                                            Theme.picked(i);
+                                        }
                                     }
                                 }
                             }
-                            FieldLabel {
-                                label: Strings.field-theme;
-                                AppDropdown {
-                                    width: 200px;
-                                    model: ["Classic", "Dark", "Brutalism"];
-                                    current-index <=> Theme.theme-index;
-                                    changed(i) => {
-                                        Theme.picked(i);
+                            DetailGroup {
+                                title: Strings.set-panel-sounds;
+                                FieldLabel {
+                                    label: Strings.field-sound-message;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        AppDropdown {
+                                            width: 200px;
+                                            model: [Strings.sound-off, "Bell", "Chime", "Pop"];
+                                            current-index <=> root.cfg-sound-message-index;
+                                        }
+                                        if root.cfg-sound-message-index > 0: AppButton {
+                                            width: 32px;
+                                            height: 32px;
+                                            pad: 0px;
+                                            label: "🔊";
+                                            clicked => {
+                                                root.test-sound(
+                                                    root.cfg-sound-message-index == 1 ? "bell"
+                                                    : (root.cfg-sound-message-index == 2 ? "chime" : "pop"));
+                                            }
+                                        }
+                                    }
+                                }
+                                FieldLabel {
+                                    label: Strings.field-sound-vote;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        AppDropdown {
+                                            width: 200px;
+                                            model: [Strings.sound-off, "Bell", "Chime", "Pop"];
+                                            current-index <=> root.cfg-sound-vote-index;
+                                        }
+                                        if root.cfg-sound-vote-index > 0: AppButton {
+                                            width: 32px;
+                                            height: 32px;
+                                            pad: 0px;
+                                            label: "🔊";
+                                            clicked => {
+                                                root.test-sound(
+                                                    root.cfg-sound-vote-index == 1 ? "bell"
+                                                    : (root.cfg-sound-vote-index == 2 ? "chime" : "pop"));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -4913,6 +4961,7 @@ export component AppWindow inherits Window {
                                 }
                                 if root.cfg-s3-backup: HorizontalLayout {
                                     spacing: 8px;
+                                    horizontal-stretch: 1;
                                     Text {
                                         text: Strings.set-s3-every;
                                         color: Theme.dim;
@@ -4931,8 +4980,9 @@ export component AppWindow inherits Window {
                                         color: Theme.dim;
                                         vertical-alignment: center;
                                     }
-                                    // retention: how many copies the bucket
-                                    // keeps per workspace before pruning
+                                    // retention sits right-aligned, visually
+                                    // apart from the interval group
+                                    Rectangle { horizontal-stretch: 1; }
                                     Text {
                                         text: Strings.set-s3-keep;
                                         color: Theme.dim;
@@ -4962,7 +5012,7 @@ export component AppWindow inherits Window {
                                 label: Strings.field-s3-endpoint;
                                 AppField {
                                     text <=> root.cfg-s3-endpoint;
-                                    placeholder: "https://s3.example.org";
+                                    placeholder: "https://s3.example.org · http://….onion";
                                 }
                             }
                             HorizontalLayout {
@@ -5011,13 +5061,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                            }
-                            // greyed placeholder: routing backups over Tor to an
-                            // onion endpoint is a later step (not wired yet)
-                            DisabledTorRow {
-                                vertical-stretch: 0;
-                                label: Strings.field-s3-tor;
-                                onion-label: Strings.field-s3-onion;
                             }
                             Rectangle {
                                 height: 1px;
@@ -5191,9 +5234,7 @@ export component AppWindow inherits Window {
                                 label: Strings.field-network;
                                 AppDropdown {
                                     width: 200px;
-                                    model: ["tor", "nym", "none"];
-                                    // nym is not implemented yet — greyed, non-selectable
-                                    enabled: [true, false, true];
+                                    model: ["tor", "none"];
                                     current-index <=> root.cfg-network-index;
                                 }
                             }
@@ -5209,6 +5250,13 @@ export component AppWindow inherits Window {
                                     // was built with the embedded-tor feature
                                     enabled: root.tor-mode-enabled;
                                     current-index <=> root.cfg-tor-mode-index;
+                                }
+                                // honest copy: say WHY embedded is greyed
+                                if !root.tor-mode-enabled[1]: Text {
+                                    text: Strings.set-tor-embedded-missing;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
                                 }
                             }
                             if root.cfg-network-index == 0 && root.cfg-tor-mode-index == 0: FieldLabel {

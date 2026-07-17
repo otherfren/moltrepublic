@@ -1123,6 +1123,12 @@ pub fn run_app(
             );
         });
     }
+    // sound preview in the settings panel — plays the picked alert once
+    {
+        ui.on_test_sound(move |kind| {
+            play_alert(kind.as_str());
+        });
+    }
     // WP4b: the checkpoint verb — same Command the MCP tool drives
     {
         let rt = rt.clone();
@@ -1239,6 +1245,37 @@ pub fn run_app(
                     // source of truth — event payloads never drive state.
                     // A finished download additionally toasts its outcome
                     // (the table repaints via the same re-read).
+                    // alert sounds: an INCOMING chat message (never our own
+                    // echo) and a new vote play the configured alert — read
+                    // from the last APPLIED settings, so an unsaved draft
+                    // never changes behavior
+                    Ok(Event::Chat { from, .. }) => {
+                        let sound = last_settings
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.as_ref().map(|s| s.sound_message.clone()))
+                            .unwrap_or_default();
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            if ui.get_node_member() != from.as_str() {
+                                play_alert(&sound);
+                            }
+                        });
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
+                    Ok(Event::Proposed { .. }) => {
+                        // the engine emits Proposed for our own proposals
+                        // too — a beep on one's own act is acceptable
+                        // feedback (and the event carries no author)
+                        let sound = last_settings
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.as_ref().map(|s| s.sound_vote.clone()))
+                            .unwrap_or_default();
+                        play_alert(&sound);
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
                     // WP4b: checkpoint lifecycle closure for the operator —
                     // sealed toasts the height, stale tells them to re-cut
                     Ok(Event::CheckpointSealed { height, .. }) => {
@@ -1670,6 +1707,8 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         headless: ui.get_cfg_headless(),
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
+        sound_message: sound_name(ui.get_cfg_sound_message_index()),
+        sound_vote: sound_name(ui.get_cfg_sound_vote_index()),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
         s3_access_key: ui.get_cfg_s3_access().to_string(),
@@ -1941,6 +1980,8 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
+    ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
+    ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
@@ -3945,25 +3986,115 @@ fn theme_name(i: i32) -> String {
     .to_string()
 }
 
-/// Map an anonymity-network name to its ComboBox index. The dropdown offers
-/// tor, nym (greyed — not implemented yet), and none; a lingering "nym" from
-/// an old config still displays on its own row rather than masquerading as
-/// tor.
-fn net_index(s: &str) -> i32 {
+/// Map an alert-sound name to its ComboBox index (none/bell/chime/pop).
+fn sound_index(s: &str) -> i32 {
     match s {
-        "nym" => 1,
-        "none" => 2,
+        "bell" => 1,
+        "chime" => 2,
+        "pop" => 3,
         _ => 0,
     }
 }
 
-/// Map a ComboBox index back to an anonymity-network name. Index 1 (nym) is
-/// non-selectable in the UI, so it is only ever produced by round-tripping an
-/// existing nym config.
+/// Map a ComboBox index back to an alert-sound name.
+fn sound_name(i: i32) -> String {
+    match i {
+        1 => "bell",
+        2 => "chime",
+        3 => "pop",
+        _ => "none",
+    }
+    .to_string()
+}
+
+/// Play a short alert sound, fire-and-forget. The sample is synthesized in
+/// pure Rust (a tiny WAV, cached in the temp dir) and handed to the system
+/// player — pw-play/paplay/aplay, runtime-detected, silently a no-op when
+/// none exists. Deliberately NO compiled audio stack: cpal/rodio would pull
+/// ALSA's C bindings, and the pure-Rust posture stands (CLAUDE.md).
+fn play_alert(kind: &str) {
+    if kind == "none" || kind.is_empty() {
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("molt-alert-{kind}.wav"));
+    if !path.exists() && write_alert_wav(&path, kind).is_err() {
+        return;
+    }
+    for player in ["pw-play", "paplay", "aplay"] {
+        if std::process::Command::new(player)
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+/// Synthesize one alert as a 44.1 kHz mono 16-bit WAV: a few decaying
+/// sine partials per kind — bell (bright fifth), chime (rising triad),
+/// pop (short thump).
+fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
+    let (freqs, dur): (&[f32], f32) = match kind {
+        "bell" => (&[880.0, 1318.5], 0.35),
+        "chime" => (&[523.25, 659.25, 783.99], 0.5),
+        _ => (&[220.0, 440.0], 0.12), // pop
+    };
+    let rate = 44_100u32;
+    let n = (dur * rate as f32) as usize;
+    let mut samples = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / rate as f32;
+        let env = (-6.0 * t / dur).exp();
+        let mut v = 0.0f32;
+        for (k, f) in freqs.iter().enumerate() {
+            // chime arpeggiates: each partial enters a beat later
+            let start = if kind == "chime" { k as f32 * 0.12 } else { 0.0 };
+            if t >= start {
+                v += ((t - start) * f * std::f32::consts::TAU).sin() * env;
+            }
+        }
+        let v = (v / freqs.len() as f32 * 0.4 * f32::from(i16::MAX)) as i16;
+        samples.push(v);
+    }
+    let data_len = u32::try_from(samples.len() * 2).unwrap_or(0);
+    let mut wav = Vec::with_capacity(44 + samples.len() * 2);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, wav)
+}
+
+/// Map an anonymity-network name to its ComboBox index. The dropdown
+/// offers tor and none (nym was removed from the UI 2026-07-18 — never
+/// implemented); a lingering "nym" in an old config displays as none
+/// (fail-closed would silently DIAL, so the honest reading is "no
+/// anonymity network configured").
+fn net_index(s: &str) -> i32 {
+    match s {
+        "none" | "nym" => 1,
+        _ => 0,
+    }
+}
+
+/// Map a ComboBox index back to an anonymity-network name.
 fn net_name(i: i32) -> String {
     match i {
-        1 => "nym",
-        2 => "none",
+        1 => "none",
         _ => "tor",
     }
     .to_string()
@@ -4066,8 +4197,6 @@ lexicon! {
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
-    field_s3_tor: "Route over Tor (onion endpoint)", "Über Tor (Onion-Endpoint)";
-    field_s3_onion: "Onion endpoint", "Onion-Endpoint";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
     field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";
@@ -4108,7 +4237,6 @@ lexicon! {
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members.", "Wie dieser Node die anderen Mitglieder erreicht.";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
-    cw_net_ok_nym: "Anonymized via the Nym mixnet.", "Anonymisiert via Nym-Mixnet.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
@@ -4311,6 +4439,12 @@ lexicon! {
     set_reloaded_note: "config.toml changed on disk — settings reloaded.", "config.toml wurde auf der Platte geändert — Einstellungen neu geladen.";
     set_conflict_note: "config.toml on disk is invalid — the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig — die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
     set_restart_note: "Takes effect after a restart:", "Wirkt erst nach einem Neustart:";
+    set_panel_appearance: "Language & appearance", "Sprache & Design";
+    set_panel_sounds: "Sound alerts", "Sound-Alerts";
+    field_sound_message: "New message", "Neue Nachricht";
+    field_sound_vote: "New vote", "Neues Vote";
+    sound_off: "off", "aus";
+    set_tor_embedded_missing: "\"embedded\" is greyed out: this build was compiled without the embedded-tor feature (in-process Tor). Rebuild with --features embedded-tor, or use a local Tor daemon.", "\"embedded\" ist ausgegraut: dieses Binary wurde ohne das embedded-tor-Feature (In-Prozess-Tor) gebaut. Mit --features embedded-tor neu bauen oder einen lokalen Tor-Daemon nutzen.";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
     unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
     unsaved_save: "Save & continue", "Speichern & weiter";

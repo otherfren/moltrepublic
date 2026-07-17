@@ -364,61 +364,6 @@ export component AppCheck inherits Rectangle {
     }
 }
 
-// A greyed-out, non-interactive "route over Tor (onion endpoint)" control —
-// a placeholder for the S3 backup/restore Tor support that is not wired yet
-// (`tor_transport_implementation.md` §7). Shows a dimmed checkbox glyph, the
-// label, a "not yet" tag, and a dead onion-address field so the surface is
-// visible but honestly disabled.
-export component DisabledTorRow inherits VerticalLayout {
-    in property <string> label;
-    in property <string> onion-label;
-    spacing: 6px;
-    HorizontalLayout {
-        spacing: 10px;
-        alignment: start;
-        Rectangle {
-            width: 20px;
-            height: 20px;
-            y: (parent.height - 20px) / 2;
-            border-radius: Theme.win95 ? 0px : 4px;
-            border-width: Theme.border-w;
-            border-color: Theme.line;
-            background: Theme.panel;
-            opacity: 0.5;
-        }
-        Text {
-            text: root.label;
-            color: Theme.dim;
-            font-size: Theme.fs-body;
-            vertical-alignment: center;
-        }
-        Text {
-            text: Strings.not-implemented-yet;
-            color: Theme.dim;
-            font-size: Theme.fs-cap;
-            vertical-alignment: center;
-        }
-    }
-    // dead onion-address field: visible, greyed, not editable
-    Rectangle {
-        height: 38px;
-        background: Theme.panel;
-        border-radius: Theme.radius;
-        border-width: Theme.border-w;
-        border-color: Theme.line;
-        opacity: 0.5;
-        HorizontalLayout {
-            padding-left: 12px;
-            Text {
-                text: root.onion-label + ": …onion";
-                color: Theme.dim;
-                font-size: Theme.fs-body;
-                vertical-alignment: center;
-            }
-        }
-    }
-}
-
 // A small national flag (SVG asset): 0 = English (GB), 1 = German.
 export component FlagIcon inherits Image {
     in property <int> lang;

@@ -265,6 +265,18 @@ pub struct SessionSettings {
     /// given (`~` expands).
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
+    /// Alert sound for an incoming chat message:
+    /// `"none" | "bell" | "chime" | "pop"`.
+    #[serde(default = "default_sound")]
+    pub sound_message: String,
+    /// Alert sound for a new incoming vote (proposal), same vocabulary.
+    #[serde(default = "default_sound")]
+    pub sound_vote: String,
+}
+
+/// Default alert sound: silent until the operator opts in.
+fn default_sound() -> String {
+    "none".to_string()
 }
 
 impl Default for SessionSettings {
@@ -288,6 +300,8 @@ impl Default for SessionSettings {
             smp_server: "public".to_string(),
             smp_url: String::new(),
             download_dir: default_download_dir(),
+            sound_message: default_sound(),
+            sound_vote: default_sound(),
         }
     }
 }

@@ -87,6 +87,17 @@ pub struct StorageConfig {
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
+    /// Alert sound for an incoming chat message ("none"|"bell"|"chime"|"pop").
+    #[serde(default = "default_sound")]
+    pub sound_message: String,
+    /// Alert sound for a new incoming vote, same vocabulary.
+    #[serde(default = "default_sound")]
+    pub sound_vote: String,
+}
+
+/// Default alert sound — silent. Mirrors `molt_core::SessionSettings`.
+pub fn default_sound() -> String {
+    "none".to_string()
 }
 
 impl Default for StorageConfig {
@@ -101,6 +112,8 @@ impl Default for StorageConfig {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
+            sound_message: default_sound(),
+            sound_vote: default_sound(),
         }
     }
 }
@@ -357,6 +370,10 @@ pub struct Settings {
     pub s3_keep_copies: u16,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
+    /// Alert sound for an incoming chat message.
+    pub sound_message: String,
+    /// Alert sound for a new incoming vote.
+    pub sound_vote: String,
     /// Anonymity network: `"tor" | "nym" | "none"`.
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
@@ -393,6 +410,8 @@ impl Default for Settings {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
+            sound_message: default_sound(),
+            sound_vote: default_sound(),
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
@@ -444,6 +463,8 @@ impl From<&Config> for Settings {
             s3_interval_min: c.storage.s3_interval_min,
             s3_keep_copies: c.storage.s3_keep_copies,
             download_dir: c.storage.download_dir.clone(),
+            sound_message: c.storage.sound_message.clone(),
+            sound_vote: c.storage.sound_vote.clone(),
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
@@ -488,6 +509,9 @@ s3_interval_min = {s3_interval_min}
 s3_keep_copies = {s3_keep_copies}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
+# Alert sounds: "none" | "bell" | "chime" | "pop".
+sound_message = {sound_message}
+sound_vote = {sound_vote}
 
 [mcp]
 # MCP server TCP port. Always served (UI + headless).
@@ -541,6 +565,8 @@ theme = {theme}
         s3_interval_min = settings.s3_interval_min,
         s3_keep_copies = settings.s3_keep_copies,
         download_dir = toml_str(&settings.download_dir),
+        sound_message = toml_str(&settings.sound_message),
+        sound_vote = toml_str(&settings.sound_vote),
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
         mcp_token = toml_str(&settings.mcp_token),
@@ -604,6 +630,17 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|p| u16::try_from(p).ok())
         {
             s.s3_keep_copies = v;
+        }
+        let valid_sound = |v: &str| matches!(v, "none" | "bell" | "chime" | "pop");
+        if let Some(v) = storage.get("sound_message").and_then(toml::Value::as_str) {
+            if valid_sound(v) {
+                s.sound_message = v.to_string();
+            }
+        }
+        if let Some(v) = storage.get("sound_vote").and_then(toml::Value::as_str) {
+            if valid_sound(v) {
+                s.sound_vote = v.to_string();
+            }
         }
     }
     if let Some(anonymity) = value.get("transport").and_then(|t| t.get("anonymity")) {
@@ -760,6 +797,8 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         i64::from(settings.s3_keep_copies),
     );
     set_str(storage, "download_dir", &settings.download_dir);
+    set_str(storage, "sound_message", &settings.sound_message);
+    set_str(storage, "sound_vote", &settings.sound_vote);
 
     let mcp = table_at(doc.as_table_mut(), &["mcp"]);
     set_int(mcp, "port", i64::from(settings.mcp_port));
@@ -947,6 +986,8 @@ mod tests {
             s3_bucket: "holiday-pics".to_string(),
             s3_interval_min: 15,
             s3_keep_copies: 9,
+            sound_message: "chime".to_string(),
+            sound_vote: "pop".to_string(),
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
