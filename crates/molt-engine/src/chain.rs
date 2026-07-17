@@ -202,14 +202,22 @@ fn verify_next(
             }
         }
         ChainChange::Membership { .. } => {}
-        // WP4b stage 2 brings the real content verification (recompute the
-        // projection at `upto`, compare `state_hash`, suffix trust anchor).
-        // Until it lands, a checkpoint block is REFUSED — safe (no forged
-        // checkpoint can slip in) and honest (no fake acceptance).
-        ChainChange::Checkpoint { .. } => {
-            return Err(
-                "checkpoint blocks are not accepted yet (WP4b stage 2)".to_string(),
-            );
+        // structural checks only — the CONTENT check (recompute the
+        // projection at `upto`, compare `state_hash`) runs in the chain
+        // walkers, which hold the blocks/base needed to recompute
+        ChainChange::Checkpoint { upto, .. } => {
+            // EXACTLY the predecessor: a smaller upto would leave blocks in
+            // (upto, height) that neither the blob nor a suffix carries —
+            // their applied ids would escape the double-apply guard and
+            // their membership changes the roster, forking full holders
+            // from suffix holders. A re-based checkpoint proposal must
+            // therefore re-cut (recompute state + hash at the new head).
+            if *upto != block.height - 1 {
+                return Err(format!(
+                    "checkpoint upto {upto} must be exactly its block height {} minus one",
+                    block.height
+                ));
+            }
         }
     }
     let bytes = approval_bytes(&head.republic_id, block.height, &block.change);
@@ -244,7 +252,6 @@ fn verify_next(
 /// (callers run [`verify_chain`] first — this fold trusts its input). Equal
 /// chains yield equal states yield equal canonical bytes on every node —
 /// which is exactly what makes the m-of-n checkpoint signature meaningful.
-#[allow(dead_code)] // consumed by WP4b stage 3 (propose/verify-before-sign)
 pub(crate) fn checkpoint_state(
     blocks: &[ChainBlock],
     upto: u64,
@@ -264,13 +271,32 @@ pub(crate) fn checkpoint_state(
     else {
         return Err("chain does not start with a genesis".to_string());
     };
-    let mut roster = identities.clone();
-    let mut applied: Vec<(Surface, Vec<(u64, serde_json::Value)>)> = Surface::ALL
-        .into_iter()
-        .map(|s| (s, Vec::new()))
-        .collect();
-    let mut consumed: Vec<u64> = Vec::new();
-    for b in blocks.iter().skip(1) {
+    let base = molt_core::CheckpointState {
+        founding_name: name.clone(),
+        rule_m: *rule_m,
+        rule_n: *rule_n,
+        founding_identities: identities.clone(),
+        agenda: agenda.clone(),
+        republic_id: republic_id.clone(),
+        roster: identities.clone(),
+        applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
+        consumed_ids: Vec::new(),
+        upto: 0,
+    };
+    fold_state(base, &blocks[1..], upto)
+}
+
+/// Fold further verified blocks (heights `<= upto`) onto a base state —
+/// the SAME fold whether the base is the genesis (full holder) or a
+/// checkpoint blob (suffix holder), so chained checkpoints recompute
+/// identically on both. Checkpoint/Genesis blocks in the range are
+/// state-neutral.
+fn fold_state(
+    mut state: molt_core::CheckpointState,
+    blocks: &[ChainBlock],
+    upto: u64,
+) -> Result<molt_core::CheckpointState, String> {
+    for b in blocks {
         if b.height > upto {
             break;
         }
@@ -280,40 +306,64 @@ pub(crate) fn checkpoint_state(
                 surface,
                 payload,
             } => {
-                if let Some((_, list)) = applied.iter_mut().find(|(s, _)| s == surface) {
+                if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
                     list.push((*proposal_id, payload.clone()));
                 }
-                consumed.push(*proposal_id);
+                state.consumed_ids.push(*proposal_id);
             }
             ChainChange::Membership {
                 op,
                 member,
                 identity_pk,
             } => {
-                apply_membership(&mut roster, *op, member, identity_pk)?;
+                apply_membership(&mut state.roster, *op, member, identity_pk)?;
             }
-            _ => {}
+            // exhaustive on purpose (additive-only rule): a FUTURE
+            // state-bearing variant must not silently fold as neutral —
+            // adding one forces a decision here at compile time
+            ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
         }
     }
-    consumed.sort_unstable();
-    Ok(molt_core::CheckpointState {
-        founding_name: name.clone(),
-        rule_m: *rule_m,
-        rule_n: *rule_n,
-        founding_identities: identities.clone(),
-        agenda: agenda.clone(),
-        republic_id: republic_id.clone(),
-        roster,
-        applied,
-        consumed_ids: consumed,
-        upto,
-    })
+    state.consumed_ids.sort_unstable();
+    state.upto = upto;
+    Ok(state)
+}
+
+/// The content check for a checkpoint met during a chain walk: recompute
+/// the state at `upto` from the walker's own material (genesis-rooted
+/// blocks, or a blob base plus suffix blocks) and compare the hash the
+/// signers attested. Sign-what-you-see, verifier edition.
+fn verify_checkpoint_content(
+    base: Option<&molt_core::CheckpointState>,
+    blocks: &[ChainBlock],
+    upto: u64,
+    state_hash: &str,
+) -> Result<(), String> {
+    let state = match base {
+        None => checkpoint_state(blocks, upto)?,
+        Some(blob) => {
+            // a fold cannot REWIND below the blob's cut — comparing against
+            // a knowingly wrong recomputation would reject truthful hashes
+            if upto < blob.upto {
+                return Err(format!(
+                    "checkpoint upto {upto} lies below the blob coverage {}",
+                    blob.upto
+                ));
+            }
+            fold_state(blob.clone(), &blocks[1..], upto)?
+        }
+    };
+    if checkpoint_state_hash(&state) != state_hash {
+        return Err(format!(
+            "checkpoint at upto {upto} does not match this chain's own projection"
+        ));
+    }
+    Ok(())
 }
 
 /// The lowercase-hex SHA-256 a checkpoint's `state_hash` carries — over
 /// [`molt_core::checkpoint_canonical_bytes`], hashed like every other
 /// chain artifact (`molt_storage::content_hash`).
-#[allow(dead_code)] // consumed by WP4b stage 3 (propose/verify-before-sign)
 pub(crate) fn checkpoint_state_hash(state: &molt_core::CheckpointState) -> String {
     molt_storage::content_hash(&molt_core::checkpoint_canonical_bytes(state))
 }
@@ -329,6 +379,107 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
     let mut seen = BTreeSet::new();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
+        // WP4b: a checkpoint's CONTENT is checked against this chain's own
+        // projection — a full holder accepts no summary it cannot recompute
+        if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
+            verify_checkpoint_content(None, blocks, *upto, state_hash)?;
+        }
+    }
+    Ok(head)
+}
+
+/// WP4b: verify a SUFFIX chain — one that begins with a checkpoint block
+/// instead of the genesis (`documents/log_compaction.md` §B.5). The
+/// checkpoint is the trust anchor: its blob must hash to the signed
+/// `state_hash`, its founding table must RECOMPUTE to the expected
+/// republic id (the genesis forgery check without the genesis), and the
+/// anchor signatures must reach m over the blob's CURRENT roster. The
+/// suffix then verifies exactly like any chain, with the double-apply
+/// guard seeded from the blob's consumed ids. All-or-nothing, like
+/// [`verify_chain`]. Trust model (documented, deliberate): the roster
+/// evolution below `upto` is attested by m-of-n instead of replayed —
+/// the same honest-majority assumption threshold governance stands on.
+#[allow(dead_code)] // consumed by WP4b stage 4 (drop + serve + recovery)
+pub(crate) fn verify_suffix_chain(
+    blob: &molt_core::CheckpointState,
+    blocks: &[ChainBlock],
+    expected_republic_id: &str,
+) -> Result<ChainHead, String> {
+    let Some((anchor, rest)) = blocks.split_first() else {
+        return Err("empty suffix chain".to_string());
+    };
+    let ChainChange::Checkpoint { upto, state_hash } = &anchor.change else {
+        return Err("suffix chain does not start with a checkpoint".to_string());
+    };
+    if blob.upto != *upto {
+        return Err("checkpoint blob does not cover the anchored upto".to_string());
+    }
+    if &checkpoint_state_hash(blob) != state_hash {
+        return Err("checkpoint blob does not match the signed state hash".to_string());
+    }
+    if *upto != anchor.height - 1 {
+        return Err(
+            "checkpoint upto must be exactly the anchor height minus one".to_string(),
+        );
+    }
+    // founding recomputation — forging the founding changes the id
+    let rid = molt_storage::republic_id(
+        &blob.founding_name,
+        blob.rule_m,
+        blob.rule_n,
+        &blob.founding_identities,
+    );
+    if rid != expected_republic_id || rid != blob.republic_id {
+        return Err(
+            "checkpoint founding table does not recompute to the republic id".to_string(),
+        );
+    }
+    if blob.rule_m == 0 || blob.roster.is_empty() {
+        return Err("checkpoint roster/threshold out of range".to_string());
+    }
+    // NO circular trust: the blob's roster is only bound by the state hash
+    // the anchor sigs attest — so the roster itself must chain back to the
+    // rid-bound FOUNDING table, and the anchor signatures must verify
+    // against founding keys. Seats are fixed at founding (product decision)
+    // and a Restored re-key keeps the anchored identity, so every roster
+    // entry must literally appear in the founding table; forging an anchor
+    // therefore needs m REAL founding keys — the honest-majority assumption
+    // threshold governance already stands on, not less.
+    for entry in &blob.roster {
+        if !blob
+            .founding_identities
+            .iter()
+            .any(|f| f.member == entry.member && f.identity_pk == entry.identity_pk)
+        {
+            return Err(format!(
+                "checkpoint roster member {} is not anchored in the founding table",
+                entry.member
+            ));
+        }
+    }
+    let bytes = approval_bytes(&blob.republic_id, anchor.height, &anchor.change);
+    let signers = valid_signers(&blob.founding_identities, &bytes, &anchor.sigs);
+    if signers.len() < usize::from(blob.rule_m) {
+        return Err(format!(
+            "checkpoint anchor has {} valid approvals, threshold is {}",
+            signers.len(),
+            blob.rule_m
+        ));
+    }
+    let mut head = ChainHead {
+        height: anchor.height,
+        hash: block_hash(&blob.republic_id, anchor),
+        republic_id: blob.republic_id.clone(),
+        rule_m: blob.rule_m,
+        identities: blob.roster.clone(),
+    };
+    let mut seen: BTreeSet<u64> = blob.consumed_ids.iter().copied().collect();
+    for block in rest {
+        head = verify_next(&head, block, &mut seen)?;
+        // a LATER checkpoint inside the suffix recomputes from the blob base
+        if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
+            verify_checkpoint_content(Some(blob), blocks, *upto, state_hash)?;
+        }
     }
     Ok(head)
 }
@@ -1085,6 +1236,7 @@ mod tests {
     /// seals the genesis with everyone (n-of-n) and appends later blocks signed
     /// by a chosen subset — exactly what the real founding + threshold path
     /// will produce.
+    #[derive(Clone)]
     struct Builder {
         republic_id: String,
         keys: Vec<(String, SigningKey)>,
@@ -1481,14 +1633,235 @@ mod tests {
         );
     }
 
+    /// WP4b stage 2, full holders: a committed checkpoint block verifies
+    /// only when its `state_hash` matches THIS chain's own recomputed
+    /// projection — a forged or drifted summary is hard-rejected with the
+    /// whole chain (all-or-nothing, like every other violation).
+    #[test]
+    fn a_checkpoint_block_verifies_against_the_own_projection() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["walter", "dora"]);
+        let state = checkpoint_state(&b.blocks, 2).expect("state@2");
+        let good = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&state),
+            },
+            &["petra", "walter"],
+        );
+        let mut chain = b.blocks.clone();
+        chain.push(good.clone());
+        let head = verify_chain(&chain).expect("a truthful checkpoint verifies");
+        assert_eq!(head.height, 3);
+        // a forged state hash is rejected with the whole chain
+        let forged = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: molt_storage::content_hash(b"not the projection"),
+            },
+            &["petra", "walter"],
+        );
+        let mut bad = b.blocks.clone();
+        bad.push(forged);
+        assert!(verify_chain(&bad).is_err(), "a forged checkpoint kills the chain");
+        // upto must precede the block height
+        let self_ref = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 3,
+                state_hash: checkpoint_state_hash(&state),
+            },
+            &["petra", "walter"],
+        );
+        let mut bad = b.blocks.clone();
+        bad.push(self_ref);
+        assert!(verify_chain(&bad).is_err(), "upto >= height is structural nonsense");
+    }
+
+    /// WP4b stage 2, suffix holders: a chain that BEGINS with a checkpoint
+    /// verifies from the blob as trust anchor — blob hash, founding
+    /// recomputation (forgery check without the genesis), current-roster
+    /// threshold on the anchor block, double-apply seeded across the cut.
+    #[test]
+    fn a_suffix_chain_bootstraps_from_a_checkpoint() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["walter", "dora"]);
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+        let anchor = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor.clone());
+        // one more applied block on top — the suffix a dropped-history
+        // holder keeps
+        b.commit_applied(7, &["petra", "dora"]);
+        let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
+        assert_eq!(suffix.len(), 2, "anchor + one applied block");
+
+        let head = verify_suffix_chain(&blob, &suffix, &b.republic_id)
+            .expect("the suffix verifies from the checkpoint anchor");
+        assert_eq!(head.height, 4);
+        assert_eq!(head.identities.len(), 3, "roster comes from the blob");
+
+        // a doctored blob (foreign roster key) fails the hash check
+        let mut forged = blob.clone();
+        forged.roster[0].identity_pk = "00".repeat(32);
+        assert!(
+            verify_suffix_chain(&forged, &suffix, &b.republic_id).is_err(),
+            "a doctored roster no longer hashes to the signed state"
+        );
+        // a wholly self-consistent forged blob still fails the founding
+        // recomputation against the expected republic id
+        let mut alien = blob.clone();
+        alien.founding_name = "Fake Club".to_string();
+        let alien_anchor_hash = checkpoint_state_hash(&alien);
+        let mut alien_suffix = suffix.clone();
+        if let ChainChange::Checkpoint { state_hash, .. } = &mut alien_suffix[0].change {
+            *state_hash = alien_anchor_hash;
+        }
+        assert!(
+            verify_suffix_chain(&alien, &alien_suffix, &b.republic_id).is_err(),
+            "a forged founding does not recompute to the real republic id"
+        );
+        // double-apply across the cut: proposal 1 was consumed below upto
+        let mut replay = b.clone();
+        replay.commit_applied(1, &["petra", "walter"]);
+        let replay_suffix: Vec<ChainBlock> = replay.blocks[3..].to_vec();
+        assert!(
+            verify_suffix_chain(&blob, &replay_suffix, &b.republic_id).is_err(),
+            "an id consumed below the cut cannot re-apply in the suffix"
+        );
+        // below-threshold anchor signatures are refused
+        let weak_anchor = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra"],
+        );
+        assert!(
+            verify_suffix_chain(&blob, &[weak_anchor], &b.republic_id).is_err(),
+            "one signature is not a threshold"
+        );
+    }
+
+    /// Review findings, pinned: (1) the anchor must not be circularly
+    /// trusted — a blob whose roster is m sock-puppet keys (with the
+    /// GENUINE public founding table, so the republic id recomputes!) is
+    /// rejected even though its hash and "signatures" are self-consistent;
+    /// (2) a checkpoint whose `upto` leaves a gap below its height is
+    /// refused (gap blocks would escape blob AND suffix); (3) a SECOND
+    /// checkpoint inside a suffix recomputes from the blob base and
+    /// verifies.
+    #[test]
+    fn a_forged_roster_anchor_and_a_gap_upto_are_rejected() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["walter", "dora"]);
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+
+        // sock-puppet forge: genuine founding fields, attacker-owned roster
+        let mut forged = blob.clone();
+        let (evil_sk1, evil_pk1) = derive_identity_key(&[9u8; 32], "petra");
+        let (evil_sk2, evil_pk2) = derive_identity_key(&[8u8; 32], "walter");
+        forged.roster = vec![
+            MemberIdentity { member: "petra".to_string(), identity_pk: evil_pk1 },
+            MemberIdentity { member: "walter".to_string(), identity_pk: evil_pk2 },
+        ];
+        let change = ChainChange::Checkpoint {
+            upto: 2,
+            state_hash: checkpoint_state_hash(&forged),
+        };
+        let bytes = approval_bytes(&b.republic_id, 3, &change);
+        let anchor = ChainBlock {
+            height: 3,
+            prev: "00".repeat(32),
+            change,
+            sigs: vec![
+                RosterAttestation { member: "petra".to_string(), sig: identity_sign(&evil_sk1, &bytes) },
+                RosterAttestation { member: "walter".to_string(), sig: identity_sign(&evil_sk2, &bytes) },
+            ],
+        };
+        assert!(
+            verify_suffix_chain(&forged, &[anchor], &b.republic_id).is_err(),
+            "a sock-puppet roster must never bootstrap a rejoiner"
+        );
+
+        // a gap upto (blocks between cut and block height) is refused on
+        // both verify paths
+        let gap = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(
+                    &checkpoint_state(&b.blocks, 1).expect("state@1"),
+                ),
+            },
+            &["petra", "walter"],
+        );
+        let mut chain = b.blocks.clone();
+        chain.push(gap.clone());
+        assert!(verify_chain(&chain).is_err(), "full holders refuse a gap upto");
+        assert!(
+            verify_suffix_chain(&blob, &[gap], &b.republic_id).is_err(),
+            "suffix holders refuse a gap upto"
+        );
+    }
+
+    /// A second checkpoint INSIDE a suffix recomputes from the blob base
+    /// and verifies — the chained-compaction path both holder types must
+    /// agree on.
+    #[test]
+    fn a_second_checkpoint_inside_a_suffix_verifies_from_the_blob() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let anchor = b.seal(
+            2,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor);
+        b.commit_applied(9, &["petra", "walter"]);
+        // the second cut, at the new head
+        let state4 = checkpoint_state(&b.blocks, 3).expect("state@3");
+        let second = b.seal(
+            4,
+            ChainChange::Checkpoint {
+                upto: 3,
+                state_hash: checkpoint_state_hash(&state4),
+            },
+            &["petra", "walter"],
+        );
+        b.push(second);
+        // full holders accept the chained compaction…
+        verify_chain(&b.blocks).expect("full holders verify the chained checkpoints");
+        // …and so do suffix holders recomputing the second cut from the blob
+        let suffix: Vec<ChainBlock> = b.blocks[2..].to_vec();
+        let head = verify_suffix_chain(&blob, &suffix, &b.republic_id)
+            .expect("suffix holders verify the second checkpoint from the blob base");
+        assert_eq!(head.height, 4);
+    }
+
     /// WP4b stage 1: two nodes that hold the SAME chain compute the SAME
     /// checkpoint state, canonical bytes and hash — the property that
     /// makes an m-of-n signature over the hash meaningful. Different
     /// content ⇒ different hash; the founding table inside the state
     /// recomputes to the real republic id (the genesis forgery check
     /// survives the genesis block being dropped later); consumed ids ride
-    /// sorted. Until stage 2, a Checkpoint BLOCK is refused by
-    /// `verify_chain` — pinned here too.
+    /// sorted.
     #[test]
     fn checkpoint_state_is_deterministic_and_binds_the_founding() {
         let mut b1 = Builder::new(&["petra", "walter", "dora"], 2);
@@ -1525,21 +1898,9 @@ mod tests {
         let shorter = checkpoint_state(&b1.blocks, 1).expect("shorter cut");
         assert_ne!(checkpoint_state_hash(&s1), checkpoint_state_hash(&shorter));
 
-        // stage-2 guard: a Checkpoint block is refused by verify_chain
-        let block = b1.seal(
-            3,
-            ChainChange::Checkpoint {
-                upto: 2,
-                state_hash: checkpoint_state_hash(&s1),
-            },
-            &["petra", "walter"],
-        );
-        let mut chain = b1.blocks.clone();
-        chain.push(block);
-        assert!(
-            verify_chain(&chain).is_err(),
-            "checkpoint blocks stay refused until stage 2 verification lands"
-        );
+        // acceptance of checkpoint BLOCKS is pinned by the stage-2 tests
+        // (a_checkpoint_block_verifies_against_the_own_projection,
+        // a_suffix_chain_bootstraps_from_a_checkpoint)
     }
 
     /// WP2 pin: the catch-up re-gossip relies on the receive side being

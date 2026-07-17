@@ -31,6 +31,10 @@ user could mistake for real.
   ritual/crypto/chain — the invariants belong in a red test first.)
 - **Proceed on greenlit multi-step work — don't keep asking "weiter?".** Once a
   task is agreed, carry it through; commit at meaningful checkpoints.
+- **Code-review every finished change-set, then land it green on master.**
+  After finishing a chunk of work, run a code review over the diff (and fix
+  the findings) BEFORE merging; the end state of a session is always
+  tested-green on master — never unreviewed, never on a side branch.
 - **But for a genuine fork or ambiguity, ask EARLY rather than guess.** The cost
   of a wrong guess in the ritual/crypto/state-model is high; a quick question up
   front is cheaper than building the wrong thing. Only stop for real
