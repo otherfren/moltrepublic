@@ -329,6 +329,21 @@ fn fold_state(
     Ok(state)
 }
 
+/// WP4b 4c: the wire shape a recovery coordinator serves its chain in —
+/// the Welcome twin of storage's `ChainStateFile`. Untagged: an array is
+/// a genesis-rooted chain (the historical shape, old rejoiners keep
+/// working against full coordinators), an object carries the checkpoint
+/// blob a PRUNED coordinator anchors on.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ServedChainWire {
+    Pruned {
+        checkpoint_blob: molt_core::CheckpointState,
+        blocks: Vec<ChainBlock>,
+    },
+    Full(Vec<ChainBlock>),
+}
+
 /// The content check for a checkpoint met during a chain walk: recompute
 /// the state at `upto` from the walker's own material (genesis-rooted
 /// blocks, or a blob base plus suffix blocks) and compare the hash the
@@ -987,7 +1002,16 @@ impl State {
                 // member's reply queue so it rejoins the group AND catches its
                 // state up over this same channel (option A). Off the actor.
                 if let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) {
-                    let chain_json = serde_json::to_string(&self.chain).unwrap_or_default();
+                    let chain_json = match &self.checkpoint_blob {
+                        // a pruned coordinator serves blob + suffix — the
+                        // rejoiner verifies via the suffix rules (4c)
+                        Some(blob) => serde_json::to_string(&ServedChainWire::Pruned {
+                            checkpoint_blob: blob.clone(),
+                            blocks: self.chain.clone(),
+                        }),
+                        None => serde_json::to_string(&self.chain),
+                    }
+                    .unwrap_or_default();
                     crate::recovery::spawn_welcome_send(
                         transport,
                         pending.reply.clone(),
@@ -1336,7 +1360,10 @@ impl State {
         // the BLOB instead, ahead of the anchor/suffix, so the requester
         // can hard-verify and re-anchor (suffix rules)
         if let (Some(blob), Some(anchor)) = (&self.checkpoint_blob, self.chain.first()) {
-            if from <= anchor.height {
+            // strictly below: a requester missing only the anchor block can
+            // verify it against its own history — the full-state blob would
+            // be pure fan-out amplification
+            if from < anchor.height {
                 let env = self.make_env(
                     me.clone(),
                     WorkspaceEvent::CheckpointServed { blob: blob.clone() },
@@ -1354,12 +1381,21 @@ impl State {
     /// only) after the cheap forgery check — the REAL verification happens
     /// in [`State::try_adopt_from_blob`] once the anchor block is here.
     pub(crate) fn receive_checkpoint_blob(&mut self, blob: molt_core::CheckpointState) {
-        // only useful when we are BEHIND the served cut
+        // only useful when we are strictly BEHIND the served cut (head ==
+        // upto means only the anchor is missing — the normal apply path
+        // covers that without the full-state blob)
         let behind = match &self.chain_head {
             None => true,
-            Some(head) => head.height <= blob.upto,
+            Some(head) => head.height < blob.upto,
         };
         if !behind {
+            return;
+        }
+        // first stash wins until it is consumed or invalidated — an
+        // overwritable slot would let one insider race garbage over a
+        // legitimate blob forever (griefing; per-peer stashes are the
+        // fuller fix, doc §B.6)
+        if self.pending_served_blob.is_some() {
             return;
         }
         let rid = molt_storage::republic_id(
@@ -1384,6 +1420,16 @@ impl State {
         let Some(blob) = self.pending_served_blob.clone() else {
             return;
         };
+        // the chain advanced past the cut through the normal apply path —
+        // the stash is dead weight now
+        if self
+            .chain_head
+            .as_ref()
+            .is_some_and(|h| h.height > blob.upto)
+        {
+            self.pending_served_blob = None;
+            return;
+        }
         let anchor_height = blob.upto + 1;
         if !self.pending_blocks.contains_key(&anchor_height) {
             return;
@@ -1398,11 +1444,32 @@ impl State {
             Ok(head) => {
                 let new_height = head.height;
                 self.checkpoint_blob = Some(blob);
-                self.chain = candidate;
+                self.chain = candidate.clone();
                 self.chain_head = Some(head);
                 self.pending_served_blob = None;
                 self.pending_blocks.retain(|h, _| *h > new_height);
                 self.apply_chain_to_state();
+                // the post-apply bookkeeping the block-by-block path runs in
+                // after_block_applied: sealed proposals get their terminal
+                // state + event, stale signatures re-base once at the end
+                for block in &candidate {
+                    if let ChainChange::Applied {
+                        proposal_id,
+                        surface,
+                        ..
+                    } = &block.change
+                    {
+                        if let Some(p) = self.proposals.get_mut(proposal_id) {
+                            p.state = ProposalState::Applied;
+                        }
+                        self.pending_sigs.remove(proposal_id);
+                        self.emit(Event::Applied {
+                            id: ProposalId(*proposal_id),
+                            surface: *surface,
+                        });
+                    }
+                }
+                self.rebase_pending_approvals();
                 let chain = self.chain.clone();
                 if let Some(active) = &self.active {
                     active
@@ -1415,7 +1482,10 @@ impl State {
                 tracing::info!(height = new_height, "re-anchored on a served checkpoint");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify — kept waiting");
+                // drop THIS stash so a later honest re-serve can land — a
+                // failed pairing must not wedge the slot forever
+                self.pending_served_blob = None;
+                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify — stash cleared");
             }
         }
     }

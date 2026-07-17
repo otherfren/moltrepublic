@@ -18,6 +18,7 @@ molt-config.workspace = true
 molt-storage.workspace = true
 molt-net.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 getrandom.workspace = true

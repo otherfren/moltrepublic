@@ -4543,6 +4543,7 @@ dependencies = [
  "molt-core",
  "molt-net",
  "molt-storage",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

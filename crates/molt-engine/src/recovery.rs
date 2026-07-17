@@ -330,9 +330,13 @@ pub struct RejoinOutcome {
     /// The MLS group snapshot after processing the Welcome — the rejoiner can
     /// decrypt live group traffic again.
     pub mls_snapshot: Vec<u8>,
-    /// The full persistent chain, **verified from block 0** (signatures, links,
-    /// threshold). Empty on a chain-less republic.
+    /// The verified persistent chain: from block 0 for a full coordinator,
+    /// or the SUFFIX a pruned coordinator serves (then `checkpoint_blob`
+    /// carries the verified anchor state). Empty on a chain-less republic.
     pub chain: Vec<molt_core::ChainBlock>,
+    /// WP4b 4c: the checkpoint blob the suffix anchors on (`None` = the
+    /// chain roots on the genesis).
+    pub checkpoint_blob: Option<molt_core::CheckpointState>,
     /// The founding roster reconstructed from the genesis block — what the
     /// engine materializes the local workspace from. `None` on a chain-less
     /// republic (no genesis to rebuild it).
@@ -477,7 +481,8 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
             // deliverer is safe — the signatures + links + threshold are checked
             // here, not trusted), then reconstruct the founding roster from the
             // genesis for the engine to materialize from.
-            let (verified_chain, sealed, live_roster) = verify_served_chain(&chain, &inv, &pk)?;
+            let (verified_chain, sealed, live_roster, checkpoint_blob) =
+                verify_served_chain(&chain, &inv, &pk)?;
             // re-establish the runtime mesh (best-effort — the recovered STATE
             // is already safe, so a mesh failure degrades to option A, never
             // fails the recovery). Only after the chain verified: the survivor
@@ -519,6 +524,7 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
                 mls_snapshot: snap,
                 chain: verified_chain,
                 sealed,
+                checkpoint_blob,
                 mesh,
             });
         }
@@ -533,6 +539,7 @@ type ServedChain = (
     Vec<molt_core::ChainBlock>,
     Option<molt_core::SealedRoster>,
     Vec<molt_core::MemberIdentity>,
+    Option<molt_core::CheckpointState>,
 );
 
 /// Verify a coordinator-served chain from block 0 — the rejoiner's catch-up
@@ -547,16 +554,33 @@ type ServedChain = (
 /// survivor set). An empty chain (chain-less/demo) verifies trivially.
 fn verify_served_chain(chain_json: &str, inv: &RecoveryInvite, pk: &str) -> Result<ServedChain, String> {
     if chain_json.is_empty() {
-        return Ok((Vec::new(), None, Vec::new()));
+        return Ok((Vec::new(), None, Vec::new(), None));
     }
-    let blocks: Vec<molt_core::ChainBlock> =
+    let wire: crate::chain::ServedChainWire =
         serde_json::from_str(chain_json).map_err(|e| format!("decoding the served chain: {e}"))?;
-    // the WHOLE chain, verified from block 0 (signatures, prev-links,
-    // threshold) — the head carries the roster after every membership block
-    let head = crate::chain::verify_chain(&blocks)?;
-    let genesis = blocks.first().ok_or("the served chain is empty")?;
-    let sealed = sealed_roster_from_genesis(genesis)
-        .ok_or("the served chain does not root on a genesis block")?;
+    let (blocks, head, sealed, blob) = match wire {
+        crate::chain::ServedChainWire::Full(blocks) => {
+            // the WHOLE chain, verified from block 0 (signatures, prev-links,
+            // threshold) — the head carries the roster after every membership
+            let head = crate::chain::verify_chain(&blocks)?;
+            let genesis = blocks.first().ok_or("the served chain is empty")?;
+            let sealed = sealed_roster_from_genesis(genesis)
+                .ok_or("the served chain does not root on a genesis block")?;
+            (blocks, head, sealed, None)
+        }
+        crate::chain::ServedChainWire::Pruned {
+            checkpoint_blob,
+            blocks,
+        } => {
+            // WP4b 4c: a pruned coordinator — the blob is the trust anchor,
+            // hard-verified by the suffix rules (founding recomputation,
+            // founding-bound anchor signatures, double-apply seed)
+            let head =
+                crate::chain::verify_suffix_chain(&checkpoint_blob, &blocks, &inv.republic_id)?;
+            let sealed = sealed_roster_from_blob(&checkpoint_blob);
+            (blocks, head, sealed, Some(checkpoint_blob))
+        }
+    };
     if head.republic_id != inv.republic_id {
         return Err("the served chain's republic id does not match the recovery link".to_string());
     }
@@ -569,7 +593,25 @@ fn verify_served_chain(chain_json: &str, inv: &RecoveryInvite, pk: &str) -> Resu
             "the served chain's live roster does not anchor our own (name, key)".to_string(),
         );
     }
-    Ok((blocks, Some(sealed), head.identities))
+    Ok((blocks, Some(sealed), head.identities, blob))
+}
+
+/// The constitution a checkpoint rejoiner materializes from — rebuilt from
+/// the blob's rid-bound FOUNDING table. The genesis attestations are gone
+/// with block 0 (deliberately dropped history); authority rests on the
+/// verified blob + suffix, so the local Founded record carries an empty
+/// attestation set — display/bootstrap metadata, never consensus input.
+pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt_core::SealedRoster {
+    molt_core::SealedRoster {
+        name: blob.founding_name.clone(),
+        republic_id: blob.republic_id.clone(),
+        rule_m: blob.rule_m,
+        rule_n: blob.rule_n,
+        roster: blob.roster.iter().map(|i| i.member.clone()).collect(),
+        identities: blob.roster.clone(),
+        attestations: Vec::new(),
+        agenda: blob.agenda.clone(),
+    }
 }
 
 /// Re-join the **runtime mesh** after recovery — the rejoiner side of dynamic
@@ -1357,7 +1399,7 @@ mod tests {
 
         // dave lost his device — his recovery must verify against the HEAD
         let inv = recovery_inv("dave", &republic_id);
-        let (blocks, sealed, roster) = verify_served_chain(&chain_json, &inv, &dave_pk)
+        let (blocks, sealed, roster, _) = verify_served_chain(&chain_json, &inv, &dave_pk)
             .expect("a post-genesis member recovers");
         assert_eq!(blocks.len(), 2);
         // the genesis constitution stays what the workspace materializes from …
@@ -1369,6 +1411,65 @@ mod tests {
         // … while the LIVE roster (survivor set, anchor base) is the head's
         let names: Vec<&str> = roster.iter().map(|i| i.member.as_str()).collect();
         assert_eq!(names, vec!["coordinator", "bob", "dave"]);
+    }
+
+    /// WP4b 4c: a PRUNED coordinator serves blob + suffix — the rejoiner
+    /// verifies via the suffix rules and materializes from the blob's
+    /// rid-bound founding table (empty attestations: authority is the
+    /// verified blob, not the local Founded record). A forged blob dies.
+    #[test]
+    fn a_pruned_coordinator_serves_blob_and_suffix_for_recovery() {
+        let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let (chain, republic_id) = signed_genesis(
+            &[("coordinator", &coord_sk, &coord_pk), ("bob", &bob_sk, &bob_pk)],
+            2,
+        );
+        // the cut at the genesis head, anchored at height 1
+        let blob = crate::chain::checkpoint_state(&chain, 0).expect("state@0");
+        let change = molt_core::ChainChange::Checkpoint {
+            upto: 0,
+            state_hash: crate::chain::checkpoint_state_hash(&blob),
+        };
+        let bytes = molt_core::approval_bytes(&republic_id, 1, &change);
+        let anchor = molt_core::ChainBlock {
+            height: 1,
+            prev: crate::chain::block_hash(&republic_id, &chain[0]),
+            change,
+            sigs: vec![
+                molt_core::RosterAttestation {
+                    member: "coordinator".to_string(),
+                    sig: molt_storage::identity_sign(&coord_sk, &bytes),
+                },
+                molt_core::RosterAttestation {
+                    member: "bob".to_string(),
+                    sig: molt_storage::identity_sign(&bob_sk, &bytes),
+                },
+            ],
+        };
+        let wire = crate::chain::ServedChainWire::Pruned {
+            checkpoint_blob: blob.clone(),
+            blocks: vec![anchor.clone()],
+        };
+        let chain_json = serde_json::to_string(&wire).expect("wire json");
+        let inv = recovery_inv("bob", &republic_id);
+        let (blocks, sealed, roster, served_blob) =
+            verify_served_chain(&chain_json, &inv, &bob_pk).expect("pruned serve verifies");
+        assert_eq!(blocks.len(), 1);
+        let sealed = sealed.expect("blob constitution");
+        assert_eq!(sealed.identities.len(), 2);
+        assert!(sealed.attestations.is_empty(), "genesis attestations are gone with block 0");
+        assert_eq!(roster.len(), 2);
+        assert_eq!(served_blob.expect("blob returned").upto, 0);
+        // a forged blob (sock-puppet roster) is hard-rejected
+        let mut forged = blob.clone();
+        forged.roster[1].identity_pk = "00".repeat(32);
+        let forged_wire = crate::chain::ServedChainWire::Pruned {
+            checkpoint_blob: forged,
+            blocks: vec![anchor],
+        };
+        let forged_json = serde_json::to_string(&forged_wire).expect("wire json");
+        assert!(verify_served_chain(&forged_json, &inv, &bob_pk).is_err());
     }
 
     /// The rejoiner's catch-up check: a served chain is verified from block 0,
@@ -1386,7 +1487,7 @@ mod tests {
         let inv = recovery_inv("bob", &republic_id);
 
         // valid: verifies + reconstructs the roster that anchors bob
-        let (blocks, sealed, roster) =
+        let (blocks, sealed, roster, _) =
             verify_served_chain(&chain_json, &inv, &bob_pk).expect("a valid served chain");
         assert_eq!(blocks.len(), 1);
         let sealed = sealed.expect("a genesis roster");
