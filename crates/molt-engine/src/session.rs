@@ -353,7 +353,7 @@ impl State {
                 root.display()
             ))
         })?;
-        let (opened, loaded) =
+        let (mut opened, loaded) =
             molt_storage::open_workspace(&dir).map_err(molt_storage::StorageError::into_molt)?;
         if loaded.unknown_events > 0 {
             return Err(MoltError::Storage(format!(
@@ -396,6 +396,13 @@ impl State {
         // remains, which the sync open handler can't await
         let transport_state = opened.read_transport_state();
         let (checkpoint_blob, chain) = opened.read_chain();
+        // heal the crash window between a pruned chain write and its
+        // manifest bump: a pruned workspace must never sit at v1
+        if checkpoint_blob.is_some() {
+            if let Err(e) = opened.bump_pruned_version() {
+                tracing::warn!(error = %e, "manifest bump on reopen failed");
+            }
+        }
         self.active = Some(ActiveStorage {
             id: id.to_string(),
             dir,

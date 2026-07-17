@@ -969,6 +969,14 @@ pub const PREFS_FORMAT: &str = "molt-workspace-prefs";
 /// is a feature of the list screen, not of opening).
 pub const STORAGE_VERSION: u32 = 1;
 
+/// The manifest version a workspace is RAISED to on its first chain prune
+/// (WP4b stage 5): an older binary — which would read a pruned
+/// `chain.state` as "no chain" and happily run the legacy counted path
+/// with a partial view — refuses the whole workspace at the manifest gate
+/// instead ("newer than supported"). Unpruned workspaces keep
+/// [`STORAGE_VERSION`], so old binaries read them unchanged.
+pub const STORAGE_VERSION_PRUNED: u32 = 2;
+
 /// `manifest.toml` — the plaintext identity card of a workspace directory.
 /// Deliberately *minimal*: what the Open screen needs before the user
 /// authorizes decryption, and nothing that leaks content (no roster, no
@@ -3100,6 +3108,22 @@ pub enum TransferPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    /// WP4b: a checkpoint block sealed — the summarized history below
+    /// `upto` was dropped locally; frontends refresh their chain/status
+    /// views and a waiting proposer gets closure.
+    CheckpointSealed {
+        /// The checkpoint block's height.
+        height: u64,
+        /// The cut it attests (last folded-in block).
+        upto: u64,
+    },
+    /// WP4b: a pending checkpoint cut went STALE — another block sealed
+    /// first, the cut cannot commit anymore; the proposer re-proposes at
+    /// the new head.
+    CheckpointStale {
+        /// The stale checkpoint proposal's id.
+        id: ProposalId,
+    },
     /// A file download's lifecycle (requester side; [`TransferPhase`]):
     /// kicked off, moving, landed, or failed — what a GUI toasts and
     /// re-reads uploads on.

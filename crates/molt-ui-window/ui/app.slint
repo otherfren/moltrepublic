@@ -267,6 +267,8 @@ export component AppWindow inherits Window {
     // wipe a chat message (by stable id) and leave the deletion notice
     // (DeleteChat)
     callback delete-chat(string);
+    // WP4b: propose a chain checkpoint (threshold compaction cut)
+    callback propose-checkpoint();
     // jump from a patch channel's discussion back to its vote — Rust
     // resolves the hosting surface from the proposal cache
     callback jump-to-vote();
@@ -3687,6 +3689,19 @@ export component AppWindow inherits Window {
                                     edit => {
                                         root.org-retention-draft = root.org-chat-retention;
                                         root.org-retention-modal-open = true;
+                                    }
+                                }
+                                // WP4b: the checkpoint verb — a normal
+                                // threshold act; every member auto-confirms
+                                // only what its own chain recomputes
+                                if root.org-chain-governed: HorizontalLayout {
+                                    alignment: start;
+                                    AppButton {
+                                        label: "✂ \{Strings.org-checkpoint}";
+                                        tooltip: Strings.org-checkpoint-tip;
+                                        clicked => {
+                                            root.propose-checkpoint();
+                                        }
                                     }
                                 }
                                 // the approvals table shrink-wraps: its

@@ -103,7 +103,7 @@ impl State {
         };
         let sk_bytes = signing_key.as_ref().map(|sk| sk.to_bytes().to_vec());
         let root = self.workspace_root();
-        let opened = molt_storage::create_workspace(&root, &entropy, &genesis)
+        let mut opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
         // seal the node's own MLS group state + assembled mesh into
         // transport.state **durably and synchronously**, before the writer task
@@ -126,6 +126,11 @@ impl State {
             opened
                 .write_chain(checkpoint_blob.as_ref(), &chain)
                 .map_err(|e| err(e.to_string()))?;
+            // a pruned chain under a v1 manifest would let an OLD binary
+            // open this fresh workspace chainless — raise the gate now
+            if checkpoint_blob.is_some() {
+                opened.bump_pruned_version().map_err(|e| err(e.to_string()))?;
+            }
         }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();
