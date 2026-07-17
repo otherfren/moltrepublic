@@ -3283,6 +3283,16 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // the Archive sub-view pages its (long) history
+                            // at 20 rows — same pager as the outcome lists
+                            if root.selected-view == "archive" && s.applied-pages > 1: PagerRow {
+                                page: s.applied-page;
+                                pages: s.applied-pages;
+                                paged(delta) => {
+                                    root.page-list("chat", "archive", delta);
+                                }
+                            }
+
                             // compose: Enter sends; Alt+Enter breaks the line
                             // and the box grows to show the extra text.
                             // Hidden (collapsed) in the Archive sub-view —

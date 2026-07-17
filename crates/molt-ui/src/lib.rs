@@ -2056,6 +2056,9 @@ struct SurfacesBundle {
     /// Language the labels were rendered for (0 = en, 1 = de) — the nav's
     /// sub-view names are localized when the bundle lands.
     lang: i32,
+    /// The chat surface is showing the Archive sub-view — its log pages
+    /// at 20 rows (an archive can hold a whole retention half-window).
+    chat_archive: bool,
     member: String,
     threshold_badge: String,
     surfaces: Vec<SurfaceData>,
@@ -2616,6 +2619,14 @@ async fn push_surfaces(
         let mut list_pages: HashMap<String, usize> = HashMap::new();
         for (sf, s) in &snaps {
             if *sf == Surface::Chat {
+                // the Archive sub-view pages like the outcome lists — the
+                // General pane stays the full scrollback
+                if chat_view == "archive" {
+                    list_pages.insert(
+                        "chat:archive".to_string(),
+                        st.clamp_list_page("chat", "archive", s.applied.len()),
+                    );
+                }
                 continue;
             }
             let key = sf.as_str();
@@ -2676,6 +2687,7 @@ async fn push_surfaces(
         .collect();
     let bundle = SurfacesBundle {
         lang,
+        chat_archive: chat_view == "archive",
         member,
         threshold_badge,
         surfaces,
@@ -2728,6 +2740,13 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             let a_page = page_of(&b.list_pages, &s.key, "applied");
             let (a_start, a_end, a_page, a_pages) = if s.gated {
                 page_slice(s.log.len(), a_page, LIST_PAGE_SIZE)
+            } else if s.key == "chat" && b.chat_archive {
+                // the Archive sub-view pages at 20 (a half-window of
+                // retention can be long); quotes pointing outside the
+                // current page degrade to teaser-only — acceptable in a
+                // read-only archive
+                let page = page_of(&b.list_pages, "chat", "archive");
+                page_slice(s.log.len(), page, LIST_PAGE_SIZE)
             } else {
                 (0, s.log.len(), 0, 1)
             };
@@ -2930,12 +2949,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
-fn when_label(ts: u64) -> String {
-    when_label_at(ts, chrono::Utc::now().timestamp())
+fn when_label(lang: i32, ts: u64) -> String {
+    when_label_at(lang, ts, chrono::Utc::now().timestamp())
 }
 
-/// [`when_label`] against an explicit "now" (testable).
-fn when_label_at(ts: u64, now: i64) -> String {
+/// [`when_label`] against an explicit "now" (testable). The relative part
+/// renders in the ACTIVE language (a cached English "(~2 days ago)" was
+/// leaking into the German UI — user report 2026-07-18).
+fn when_label_at(lang: i32, ts: u64, now: i64) -> String {
     let Ok(secs) = i64::try_from(ts) else {
         return String::new();
     };
@@ -2944,17 +2965,30 @@ fn when_label_at(ts: u64, now: i64) -> String {
     };
     let local = utc.with_timezone(&chrono::Local);
     let ago = (now - secs).max(0);
+    let de = lang == 1;
     let rel = if ago < 60 {
-        "just now".to_string()
+        if de { "gerade eben".to_string() } else { "just now".to_string() }
     } else if ago < 3600 {
         let m = ago / 60;
-        format!("~{m} minute{} ago", if m == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{m} Minute{}", if m == 1 { "" } else { "n" })
+        } else {
+            format!("~{m} minute{} ago", if m == 1 { "" } else { "s" })
+        }
     } else if ago < 86_400 {
         let h = ago / 3600;
-        format!("~{h} hour{} ago", if h == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{h} Stunde{}", if h == 1 { "" } else { "n" })
+        } else {
+            format!("~{h} hour{} ago", if h == 1 { "" } else { "s" })
+        }
     } else {
         let d = ago / 86_400;
-        format!("~{d} day{} ago", if d == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{d} Tag{}", if d == 1 { "" } else { "en" })
+        } else {
+            format!("~{d} day{} ago", if d == 1 { "" } else { "s" })
+        }
     };
     format!("{} ({rel})", local.format("%Y-%m-%d %H:%M"))
 }
@@ -3030,7 +3064,7 @@ fn surface_data(
         // for the GUI and an MCP agent (co-equality)
         let pairs: Vec<(u64, LogLineData)> = msgs
             .iter()
-            .map(|m| (m.ts, chat_line(m, me)))
+            .map(|m| (m.ts, chat_line(lang, m, me)))
             .collect();
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
@@ -3126,7 +3160,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             .collect(),
         declined_by: p.declined_by.clone(),
         declined_when: if p.declined_at > 0 {
-            when_label(p.declined_at)
+            when_label(lang, p.declined_at)
         } else {
             String::new()
         },
@@ -3137,7 +3171,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
 /// teaser) happens later in [`annotate_chat_log`]: the row index can only
 /// be known once system lines are merged in, and the teaser may resolve
 /// against a message outside the displayed (filtered) log.
-fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
+fn chat_line(lang: i32, m: &ChatMessage, me: &str) -> LogLineData {
     let mut mine_emoji = String::new();
     // the BTreeMap iterates sorted by emoji, so the pill order is
     // deterministic across re-renders
@@ -3180,7 +3214,7 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         lead: m.from.clone(),
         text: m.body.clone(),
         when: if m.ts > 0 {
-            when_label(m.ts)
+            when_label(lang, m.ts)
         } else {
             String::new()
         },
@@ -4434,10 +4468,10 @@ mod tests {
     #[test]
     fn a_system_kind_message_maps_onto_the_quiet_line_flag() {
         let user = ChatMessage::text(MessageId([1; 16]), "petra", "gm", 100);
-        assert!(!chat_line(&user, "me").system);
+        assert!(!chat_line(0, &user, "me").system);
         let notice = ChatMessage::text(MessageId([2; 16]), "petra", "🔑 back", 101)
             .with_kind(molt_core::ChatKind::System);
-        assert!(chat_line(&notice, "me").system);
+        assert!(chat_line(0, &notice, "me").system);
     }
 
     /// The recovery flow rides the transient session notice (the engine's
@@ -5132,7 +5166,7 @@ mod tests {
     #[test]
     fn when_label_relative_part() {
         let ts = 1_750_000_000_u64;
-        let at = |offset: i64| when_label_at(ts, 1_750_000_000 + offset);
+        let at = |offset: i64| when_label_at(0, ts, 1_750_000_000 + offset);
         assert!(at(5).ends_with("(just now)"), "{}", at(5));
         assert!(at(60).ends_with("(~1 minute ago)"), "{}", at(60));
         assert!(at(20 * 60).ends_with("(~20 minutes ago)"), "{}", at(1200));
