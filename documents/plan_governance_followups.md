@@ -112,6 +112,13 @@ Banner funktioniert); Testsuiten + Clippy 0 + autoritativer Window-Build;
 
 ## WP2 — Pending-Proposals überleben den Neustart (Option b: Catch-up, keine Persistenz)
 
+**✅ ERLEDIGT (2026-07-17, master `b82aa37`).** `serve_open_governance`
+(chain.rs) beantwortet jeden `ChainRequest` zusätzlich mit den offenen
+Proposals + gesammelten Signaturen (verbatim, positionsgebunden);
+Idempotenz-Pins + E2E-Test über die echte Mesh
+(`a_reopened_member_recovers_open_proposals_from_the_mesh`).
+Membership-Proposals werden bewusst nicht re-gossipt.
+
 **Symptom:** Ein über die Wire empfangenes `Proposed` lebt nur im Speicher
 (`crates/molt-engine/src/net.rs:886–900`, `receive_proposed` ohne
 `record`-Schritt). Reopen ⇒ Pending-Karte weg bis zum nächsten Gossip.
@@ -164,6 +171,12 @@ Catch-up-Absatz ergänzt (Stil der bestehenden Phase-3-Notizen).
 ---
 
 ## WP3 — set_image-Proposals validieren die Decodierbarkeit beim Proposen
+
+**✅ ERLEDIGT (2026-07-17).** `image_decodable` in molt-engine
+(Format-Sniff + Header-Dimensionen ≤ 8192², SVG-Prefix; nie Voll-Decode),
+eingehängt in `validate_org_payload` + Wire-Guard; GUI-Pre-Check mit dem
+echten Preview-Decoder (lokalisierter Toast); MCP-`propose`-Beschreibung
+ergänzt. Der Mesh-Bytes-Test nutzt jetzt ein echtes 147-KiB-BMP.
 
 **Symptom:** Eine defekte/exotische Bilddatei wird anstandslos proposet;
 jeder Voter bekommt nur den `pc_img_missing`-Toast. Sign-what-you-see läuft

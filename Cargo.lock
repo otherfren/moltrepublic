@@ -4538,6 +4538,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "hex",
+ "image",
  "molt-config",
  "molt-core",
  "molt-net",
