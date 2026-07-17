@@ -167,8 +167,11 @@ async fn an_applied_set_image_materializes_the_logo_file() {
     let id = read_session(&w).await.active_workspace.clone();
     let dir = molt_storage::find_workspace_dir(&root, &id).expect("workspace dir");
 
-    let image_bytes: Vec<u8> = b"\x89PNG fake test image bytes".to_vec();
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    // a real 2x2 PNG — since WP3 the bytes must decode as a picture
+    let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==".to_string();
+    let image_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(&b64)
+        .expect("fixture decodes");
     w.execute(Command::Propose {
         surface: Surface::Organization,
         payload: serde_json::json!({
