@@ -1511,6 +1511,14 @@ pub enum WorkspaceEvent {
         /// own and refuse to sign on mismatch.
         state_hash: String,
     },
+    /// WP4b: a pruned holder answers a catch-up request — the checkpoint
+    /// blob its suffix anchors on, served BEFORE the anchor + suffix ride
+    /// as `Committed` re-serves. Transport-only (`apply` is a no-op); the
+    /// receiver hard-verifies via the suffix rules before adopting.
+    CheckpointServed {
+        /// The full checkpoint state the anchored `state_hash` commits.
+        blob: chain::CheckpointState,
+    },
     /// A member wants a shared file's BYTES: its fetch request, carried as
     /// **MLS ciphertext** (hex of the group-encrypted
     /// `molt_net::transfer::FetchRequest` JSON — share id, reply-queue

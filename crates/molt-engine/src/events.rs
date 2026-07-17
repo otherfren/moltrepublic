@@ -280,6 +280,7 @@ impl State {
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
+            | WorkspaceEvent::CheckpointServed { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. } => {
@@ -473,6 +474,7 @@ impl State {
         self.chain.clear();
         self.chain_head = None;
         self.checkpoint_blob = None;
+        self.pending_served_blob = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();
         self.proposal_changes.clear();

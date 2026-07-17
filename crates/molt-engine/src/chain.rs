@@ -1247,6 +1247,9 @@ impl State {
                 }
             } else {
                 self.pending_blocks.insert(block.height, block);
+                // WP4b: with a served blob stashed, the buffered block may
+                // be the missing anchor/suffix piece
+                self.try_adopt_from_blob();
             }
             return;
         };
@@ -1260,6 +1263,7 @@ impl State {
             // a gap: we are behind. Buffer this block and ask the mesh for the
             // blocks we are missing (any survivor re-serves them).
             self.pending_blocks.insert(block.height, block);
+            self.try_adopt_from_blob();
             self.request_catchup(head.height + 1);
         }
     }
@@ -1328,9 +1332,91 @@ impl State {
             return;
         }
         let me = self.member();
+        // WP4b: a pruned holder cannot serve below its anchor — it serves
+        // the BLOB instead, ahead of the anchor/suffix, so the requester
+        // can hard-verify and re-anchor (suffix rules)
+        if let (Some(blob), Some(anchor)) = (&self.checkpoint_blob, self.chain.first()) {
+            if from <= anchor.height {
+                let env = self.make_env(
+                    me.clone(),
+                    WorkspaceEvent::CheckpointServed { blob: blob.clone() },
+                );
+                self.record(env);
+            }
+        }
         for block in blocks {
             let env = self.make_env(me.clone(), WorkspaceEvent::Committed(block));
             self.record(env);
+        }
+    }
+
+    /// WP4b: a served blob arrives ahead of its anchor. Stash it (runtime
+    /// only) after the cheap forgery check — the REAL verification happens
+    /// in [`State::try_adopt_from_blob`] once the anchor block is here.
+    pub(crate) fn receive_checkpoint_blob(&mut self, blob: molt_core::CheckpointState) {
+        // only useful when we are BEHIND the served cut
+        let behind = match &self.chain_head {
+            None => true,
+            Some(head) => head.height <= blob.upto,
+        };
+        if !behind {
+            return;
+        }
+        let rid = molt_storage::republic_id(
+            &blob.founding_name,
+            blob.rule_m,
+            blob.rule_n,
+            &blob.founding_identities,
+        );
+        if rid != self.republic_id() || rid != blob.republic_id {
+            tracing::warn!("dropping a served checkpoint blob that does not recompute to this republic");
+            return;
+        }
+        self.pending_served_blob = Some(blob);
+        self.try_adopt_from_blob();
+    }
+
+    /// Adopt blob + buffered anchor/suffix once both are here: build the
+    /// longest consecutive candidate from the buffer and run the FULL
+    /// suffix verification — all-or-nothing, nothing is trusted from the
+    /// stash until it passes.
+    pub(crate) fn try_adopt_from_blob(&mut self) {
+        let Some(blob) = self.pending_served_blob.clone() else {
+            return;
+        };
+        let anchor_height = blob.upto + 1;
+        if !self.pending_blocks.contains_key(&anchor_height) {
+            return;
+        }
+        let mut candidate = Vec::new();
+        let mut h = anchor_height;
+        while let Some(b) = self.pending_blocks.get(&h) {
+            candidate.push(b.clone());
+            h += 1;
+        }
+        match verify_suffix_chain(&blob, &candidate, &self.republic_id()) {
+            Ok(head) => {
+                let new_height = head.height;
+                self.checkpoint_blob = Some(blob);
+                self.chain = candidate;
+                self.chain_head = Some(head);
+                self.pending_served_blob = None;
+                self.pending_blocks.retain(|h, _| *h > new_height);
+                self.apply_chain_to_state();
+                let chain = self.chain.clone();
+                if let Some(active) = &self.active {
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
+                }
+                if self.catchup_from.is_some_and(|f| f <= new_height) {
+                    self.catchup_from = None;
+                }
+                tracing::info!(height = new_height, "re-anchored on a served checkpoint");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify — kept waiting");
+            }
         }
     }
 
@@ -2106,6 +2192,52 @@ mod tests {
         assert_eq!(
             reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
             Some(2)
+        );
+    }
+
+    /// WP4b stage 4b: a holder that is BEHIND a served cut re-anchors on
+    /// blob + anchor + suffix (hard-verified), and a forged blob is
+    /// dropped at the cheap rid check.
+    #[test]
+    fn a_lagging_holder_re_anchors_on_a_served_blob() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let anchor = b.seal(
+            2,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor.clone());
+        b.commit_applied(7, &["petra", "walter"]);
+        let suffix_tail = b.blocks.last().expect("tail").clone();
+
+        // the laggard holds only the genesis
+        let mut lag = chain_peer("walter", &b, b.blocks[..1].to_vec());
+        assert_eq!(lag.chain_head.as_ref().expect("head").height, 0);
+        // a forged blob (wrong founding) dies at the rid check
+        let mut forged = blob.clone();
+        forged.founding_name = "Fake".to_string();
+        lag.receive_checkpoint_blob(forged);
+        assert!(lag.pending_served_blob.is_none());
+        // the served pieces arrive in any order: blob, tail, anchor
+        lag.receive_checkpoint_blob(blob.clone());
+        lag.receive_block(suffix_tail);
+        assert_eq!(lag.chain_head.as_ref().expect("head").height, 0, "waits for the anchor");
+        lag.receive_block(anchor);
+        assert_eq!(
+            lag.chain_head.as_ref().expect("head").height,
+            3,
+            "re-anchored on blob + anchor + suffix"
+        );
+        assert!(lag.checkpoint_blob.is_some());
+        assert_eq!(
+            lag.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2),
+            "pre-cut and post-cut entries both readable"
         );
     }
 
