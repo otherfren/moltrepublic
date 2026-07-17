@@ -23,7 +23,8 @@ use serde_json::Value;
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
 pub mod chain;
 pub use chain::{
-    approval_bytes, block_link_bytes, ChainBlock, ChainChange, MembershipOp, GENESIS_PREV,
+    approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock, ChainChange,
+    CheckpointState, MembershipOp, GENESIS_PREV,
 };
 
 /// A member of the republic (the holder of one threshold share). In this

@@ -202,6 +202,15 @@ fn verify_next(
             }
         }
         ChainChange::Membership { .. } => {}
+        // WP4b stage 2 brings the real content verification (recompute the
+        // projection at `upto`, compare `state_hash`, suffix trust anchor).
+        // Until it lands, a checkpoint block is REFUSED — safe (no forged
+        // checkpoint can slip in) and honest (no fake acceptance).
+        ChainChange::Checkpoint { .. } => {
+            return Err(
+                "checkpoint blocks are not accepted yet (WP4b stage 2)".to_string(),
+            );
+        }
     }
     let bytes = approval_bytes(&head.republic_id, block.height, &block.change);
     let signers = valid_signers(&head.identities, &bytes, &block.sigs);
@@ -229,6 +238,84 @@ fn verify_next(
         rule_m: head.rule_m,
         identities,
     })
+}
+
+/// WP4b: fold the checkpoint state a signer attests from a VERIFIED chain
+/// (callers run [`verify_chain`] first — this fold trusts its input). Equal
+/// chains yield equal states yield equal canonical bytes on every node —
+/// which is exactly what makes the m-of-n checkpoint signature meaningful.
+#[allow(dead_code)] // consumed by WP4b stage 3 (propose/verify-before-sign)
+pub(crate) fn checkpoint_state(
+    blocks: &[ChainBlock],
+    upto: u64,
+) -> Result<molt_core::CheckpointState, String> {
+    let Some(ChainBlock {
+        change:
+            ChainChange::Genesis {
+                name,
+                republic_id,
+                rule_m,
+                rule_n,
+                identities,
+                agenda,
+            },
+        ..
+    }) = blocks.first()
+    else {
+        return Err("chain does not start with a genesis".to_string());
+    };
+    let mut roster = identities.clone();
+    let mut applied: Vec<(Surface, Vec<(u64, serde_json::Value)>)> = Surface::ALL
+        .into_iter()
+        .map(|s| (s, Vec::new()))
+        .collect();
+    let mut consumed: Vec<u64> = Vec::new();
+    for b in blocks.iter().skip(1) {
+        if b.height > upto {
+            break;
+        }
+        match &b.change {
+            ChainChange::Applied {
+                proposal_id,
+                surface,
+                payload,
+            } => {
+                if let Some((_, list)) = applied.iter_mut().find(|(s, _)| s == surface) {
+                    list.push((*proposal_id, payload.clone()));
+                }
+                consumed.push(*proposal_id);
+            }
+            ChainChange::Membership {
+                op,
+                member,
+                identity_pk,
+            } => {
+                apply_membership(&mut roster, *op, member, identity_pk)?;
+            }
+            _ => {}
+        }
+    }
+    consumed.sort_unstable();
+    Ok(molt_core::CheckpointState {
+        founding_name: name.clone(),
+        rule_m: *rule_m,
+        rule_n: *rule_n,
+        founding_identities: identities.clone(),
+        agenda: agenda.clone(),
+        republic_id: republic_id.clone(),
+        roster,
+        applied,
+        consumed_ids: consumed,
+        upto,
+    })
+}
+
+/// The lowercase-hex SHA-256 a checkpoint's `state_hash` carries — over
+/// [`molt_core::checkpoint_canonical_bytes`], hashed like every other
+/// chain artifact (`molt_storage::content_hash`).
+#[allow(dead_code)] // consumed by WP4b stage 3 (propose/verify-before-sign)
+pub(crate) fn checkpoint_state_hash(state: &molt_core::CheckpointState) -> String {
+    molt_storage::content_hash(&molt_core::checkpoint_canonical_bytes(state))
 }
 
 /// Verify a whole chain from its genesis and return its head. Any failure is
@@ -1391,6 +1478,67 @@ mod tests {
         assert!(
             peer.proposals.contains_key(&10),
             "a decodable peer set_image is recorded as pending"
+        );
+    }
+
+    /// WP4b stage 1: two nodes that hold the SAME chain compute the SAME
+    /// checkpoint state, canonical bytes and hash — the property that
+    /// makes an m-of-n signature over the hash meaningful. Different
+    /// content ⇒ different hash; the founding table inside the state
+    /// recomputes to the real republic id (the genesis forgery check
+    /// survives the genesis block being dropped later); consumed ids ride
+    /// sorted. Until stage 2, a Checkpoint BLOCK is refused by
+    /// `verify_chain` — pinned here too.
+    #[test]
+    fn checkpoint_state_is_deterministic_and_binds_the_founding() {
+        let mut b1 = Builder::new(&["petra", "walter", "dora"], 2);
+        b1.commit_applied(2, &["petra", "walter"]);
+        b1.commit_applied(1, &["walter", "dora"]);
+        let mut b2 = Builder::new(&["petra", "walter", "dora"], 2);
+        b2.commit_applied(2, &["petra", "walter"]);
+        b2.commit_applied(1, &["walter", "dora"]);
+
+        let s1 = checkpoint_state(&b1.blocks, 2).expect("state 1");
+        let s2 = checkpoint_state(&b2.blocks, 2).expect("state 2");
+        assert_eq!(
+            checkpoint_state_hash(&s1),
+            checkpoint_state_hash(&s2),
+            "equal chains yield the identical checkpoint hash"
+        );
+        // the canonical bytes carry the versioned tag
+        let bytes = molt_core::checkpoint_canonical_bytes(&s1);
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v1\0"));
+        // consumed ids are sorted regardless of commit order
+        assert_eq!(s1.consumed_ids, vec![1, 2]);
+        // the founding table recomputes to the real republic id — the
+        // forgery check a suffix bootstrapper will rely on
+        assert_eq!(
+            molt_storage::republic_id(
+                &s1.founding_name,
+                s1.rule_m,
+                s1.rule_n,
+                &s1.founding_identities
+            ),
+            s1.republic_id
+        );
+        // a different cut or different content changes the hash
+        let shorter = checkpoint_state(&b1.blocks, 1).expect("shorter cut");
+        assert_ne!(checkpoint_state_hash(&s1), checkpoint_state_hash(&shorter));
+
+        // stage-2 guard: a Checkpoint block is refused by verify_chain
+        let block = b1.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&s1),
+            },
+            &["petra", "walter"],
+        );
+        let mut chain = b1.blocks.clone();
+        chain.push(block);
+        assert!(
+            verify_chain(&chain).is_err(),
+            "checkpoint blocks stay refused until stage 2 verification lands"
         );
     }
 

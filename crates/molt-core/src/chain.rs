@@ -102,6 +102,21 @@ pub enum ChainChange {
         /// The member's anchored Ed25519 identity key, lowercase hex.
         identity_pk: String,
     },
+    /// WP4b: a threshold-signed compaction cut. m-of-n members signed the
+    /// SHA-256 of the deterministically serialized republic state after
+    /// block `upto` ([`checkpoint_canonical_bytes`]) — confirming the
+    /// CORRECTNESS of the compaction, sign-what-you-see (every signer
+    /// recomputes the bytes from its own chain before signing). Once
+    /// committed, blocks `<= upto` may be dropped locally; a newcomer
+    /// bootstraps from checkpoint + suffix (`documents/log_compaction.md`
+    /// Teil B).
+    Checkpoint {
+        /// The last folded-in block: the checkpoint attests the state
+        /// AFTER applying block `upto`.
+        upto: u64,
+        /// SHA-256 (lowercase hex) over the canonical state bytes.
+        state_hash: String,
+    },
 }
 
 /// One committed block in the persistent chain: a threshold-signed change plus
@@ -179,7 +194,91 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             put_bytes(&mut out, identity_pk.as_bytes());
             out
         }
+        ChainChange::Checkpoint { upto, state_hash } => {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"molt-chain-change-v1\0");
+            put_bytes(&mut out, republic_id.as_bytes());
+            out.extend_from_slice(&height.to_le_bytes());
+            out.push(3); // variant tag: checkpoint
+            out.extend_from_slice(&upto.to_le_bytes());
+            put_bytes(&mut out, state_hash.as_bytes());
+            out
+        }
     }
+}
+
+/// The projected republic state a checkpoint attests — everything a
+/// suffix-only bootstrapper needs, and nothing a node could disagree on:
+/// every field is derived from the totally ordered chain, so equal chains
+/// yield equal structs yield equal [`checkpoint_canonical_bytes`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointState {
+    /// The founding display name (genesis).
+    pub founding_name: String,
+    /// Approval threshold m (genesis; immutable for the republic's life).
+    pub rule_m: u8,
+    /// Founding member count n (genesis).
+    pub rule_n: u8,
+    /// The GENESIS identity table, founding order — lets every verifier
+    /// RECOMPUTE `republic_id` from content (the genesis forgery check
+    /// survives the genesis block being dropped).
+    pub founding_identities: Vec<MemberIdentity>,
+    /// The ratified founding charter (genesis).
+    pub agenda: String,
+    /// The content-derived republic id (must equal the recomputation).
+    pub republic_id: String,
+    /// The CURRENT roster after every membership block `<= upto`, in
+    /// chain order (deterministic — the block sequence is totally ordered).
+    pub roster: Vec<MemberIdentity>,
+    /// The applied projection: per surface (in [`Surface::ALL`] order,
+    /// surfaces without entries included empty), the `(proposal id,
+    /// payload)` list in block order.
+    pub applied: Vec<(Surface, Vec<(u64, Value)>)>,
+    /// Every proposal id consumed by an `Applied` block `<= upto`, sorted —
+    /// seeds the double-apply guard of a suffix verifier.
+    pub consumed_ids: Vec<u64>,
+    /// The last folded-in block height.
+    pub upto: u64,
+}
+
+/// **What checkpoint signers hash.** The canonical, versioned
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v1`) —
+/// same length-prefixed framing as [`roster_canonical_bytes`], so the
+/// layouts stay siblings. JSON payloads serialize canonically because
+/// `serde_json::Map` is a BTreeMap here (no `preserve_order` feature —
+/// pinned by test).
+pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-chain-checkpoint-v1\0");
+    put_bytes(&mut out, s.republic_id.as_bytes());
+    put_bytes(&mut out, s.founding_name.as_bytes());
+    out.push(s.rule_m);
+    out.push(s.rule_n);
+    out.extend_from_slice(&u64::try_from(s.founding_identities.len()).unwrap_or(0).to_le_bytes());
+    for i in &s.founding_identities {
+        put_bytes(&mut out, i.member.as_bytes());
+        put_bytes(&mut out, i.identity_pk.as_bytes());
+    }
+    put_bytes(&mut out, s.agenda.as_bytes());
+    out.extend_from_slice(&u64::try_from(s.roster.len()).unwrap_or(0).to_le_bytes());
+    for i in &s.roster {
+        put_bytes(&mut out, i.member.as_bytes());
+        put_bytes(&mut out, i.identity_pk.as_bytes());
+    }
+    for (surface, entries) in &s.applied {
+        put_bytes(&mut out, surface.as_str().as_bytes());
+        out.extend_from_slice(&u64::try_from(entries.len()).unwrap_or(0).to_le_bytes());
+        for (id, payload) in entries {
+            out.extend_from_slice(&id.to_le_bytes());
+            put_bytes(&mut out, &serde_json::to_vec(payload).unwrap_or_default());
+        }
+    }
+    out.extend_from_slice(&u64::try_from(s.consumed_ids.len()).unwrap_or(0).to_le_bytes());
+    for id in &s.consumed_ids {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out.extend_from_slice(&s.upto.to_le_bytes());
+    out
 }
 
 /// **What a block's content hash is taken over** — the bytes whose SHA-256
