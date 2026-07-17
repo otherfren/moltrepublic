@@ -1000,6 +1000,14 @@ impl State {
             .filter(|(_, p)| p.height < target)
             .map(|(id, _)| *id)
             .collect();
+        // sweep checkpoint entries that never made it into pending_sigs
+        // (a proposer without self-cosign, a bailed sign): a cut below the
+        // new head can never seal (upto == height-1 is enforced) and must
+        // not linger as bookkeeping a late Approved could resurrect
+        let head_height = head.height;
+        self.proposal_changes.retain(|_, c| {
+            !matches!(c, ChainChange::Checkpoint { upto, .. } if *upto < head_height)
+        });
         for id in stale {
             let mine = self
                 .pending_sigs
@@ -1073,8 +1081,10 @@ impl State {
     /// WP4b stage 3, receive side: verify BEFORE sign. Recompute the
     /// canonical state from OUR OWN chain at the proposed cut and co-sign
     /// only on an exact hash match — nobody ever signs a foreign blob. A
-    /// cut that is not our current head is skipped (a lagging node catches
-    /// up first; a stale cut dies on re-base anyway).
+    /// cut that is not our current head is skipped and NOT buffered: a
+    /// lagging node simply misses this cut (v1 liveness limit, stage-5
+    /// pin in `documents/log_compaction.md`) — the proposer re-proposes
+    /// at the then-current head; a stale cut dies on re-base anyway.
     pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str) {
         self.next_id = self.next_id.max(id + 1);
         let Some(head) = self.chain_head.as_ref() else {
@@ -1095,10 +1105,40 @@ impl State {
             tracing::warn!(%id, "refusing to co-sign a checkpoint that does not match our own projection");
             return;
         }
-        self.proposal_changes.entry(id).or_insert(ChainChange::Checkpoint {
+        // NO id-collision signing (review finding): the peer chose the id,
+        // and chain_sign_and_gossip_approval signs whatever change the id
+        // RESOLVES to — an id that already names a surface or membership
+        // proposal would turn this auto-cosign into an unattended approval
+        // of a human-decision change (or let human approvals of that
+        // proposal silently sign checkpoint bytes). Refuse any occupied id
+        // that is not this exact checkpoint.
+        let this = ChainChange::Checkpoint {
             upto,
             state_hash: state_hash.to_string(),
-        });
+        };
+        if self.proposals.contains_key(&id) {
+            tracing::warn!(%id, "refusing a checkpoint proposal whose id names a surface proposal");
+            return;
+        }
+        match self.proposal_changes.get(&id) {
+            Some(existing) if *existing != this => {
+                tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
+                return;
+            }
+            _ => {}
+        }
+        self.proposal_changes.insert(id, this);
+        // replay guard: one signature per member per cut — a re-received
+        // frame must not amplify into fresh Approved gossip
+        let me = self.member();
+        let target = head.height + 1;
+        if self
+            .pending_sigs
+            .get(&id)
+            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
+        {
+            return;
+        }
         // correctness attestation, not a product decision: co-sign directly
         self.chain_sign_and_gossip_approval(id);
     }
@@ -1938,6 +1978,43 @@ mod tests {
         // the sealed proposal's bookkeeping is gone on both
         assert!(!petra.proposal_changes.contains_key(&id));
         assert!(!walter.proposal_changes.contains_key(&id));
+    }
+
+    /// Review pins: an id collision must never turn the auto-cosign into
+    /// an unattended approval of a DIFFERENT change, and the gossip frame
+    /// crosses the wire.
+    #[test]
+    fn a_checkpoint_proposal_never_signs_a_colliding_id() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+        // id already names a pending MEMBERSHIP change → refused, unsigned
+        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"));
+        walter.receive_checkpoint_proposal(5, 1, &hash);
+        assert!(
+            !walter.pending_sigs.contains_key(&5),
+            "an occupied id must never be auto-signed"
+        );
+        assert!(matches!(
+            walter.proposal_changes.get(&5),
+            Some(ChainChange::Membership { .. })
+        ));
+        // id already names a SURFACE proposal → refused too
+        walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
+        walter.receive_checkpoint_proposal(6, 1, &hash);
+        assert!(!walter.pending_sigs.contains_key(&6));
+        // a replayed valid frame does not amplify into more signatures
+        walter.receive_checkpoint_proposal(9, 1, &hash);
+        let sigs = walter.pending_sigs.get(&9).map(|p| p.sigs.len());
+        walter.receive_checkpoint_proposal(9, 1, &hash);
+        assert_eq!(walter.pending_sigs.get(&9).map(|p| p.sigs.len()), sigs);
+        // the gossip frame is wire-scoped
+        assert!(crate::net::crosses_wire(&WorkspaceEvent::CheckpointProposed {
+            id: ProposalId(1),
+            upto: 1,
+            state_hash: hash,
+        }));
     }
 
     /// A checkpoint cut pinned at the old head dies when another block
