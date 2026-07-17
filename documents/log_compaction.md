@@ -146,7 +146,13 @@ Checkpoint {
 }
 ```
 
-Der Checkpoint-Block sitzt an einer normalen Höhe H > `upto`, mit
+Der Checkpoint-Block sitzt an Höhe H mit **`upto` = H − 1, hart erzwungen**
+(Review-Finding 2026-07-18: ein kleineres `upto` ließe Blöcke in
+(`upto`, H) entstehen, die weder Blob noch Suffix tragen — ihre applied
+Ids entkämen dem Double-Apply-Guard, ihre Membership-Änderungen dem
+Roster; ein re-based Checkpoint-Proposal muss deshalb NEU schneiden:
+Zustand + Hash an der neuen Head-Höhe rekomputieren, nicht nur die
+Signaturhöhe wechseln). Signiert wird mit
 normalen positionsgebundenen Signaturen über
 `republic_id ‖ H ‖ change` (`approval_bytes` bekommt nur die neue
 Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
@@ -217,8 +223,14 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
   2. `republic_id`-Rekomputation aus der Founding-Tabelle im Blob ==
      erwartete Id (aus Invite/Recovery-Link) — Founding fälschen ändert
      die Id, exakt der Genesis-Schutz.
-  3. Die Block-Signaturen verifizieren gegen den AKTUELLEN Roster aus
-     dem Blob, ≥ m distinct, m aus der Founding-Tabelle.
+  3. **Kein zirkuläres Vertrauen** (Review-Finding 2026-07-18): Der
+     Blob-Roster ist nur durch den Hash gebunden, den die Anker-Signaturen
+     selbst attestieren — deshalb verifizieren die Anker-Signaturen gegen
+     die **Founding-Identities** (rid-gebunden), und jeder Roster-Eintrag
+     muss wörtlich in der Founding-Tabelle stehen (Sitze sind ab Gründung
+     fix; Restored behält den verankerten Key). Fälschung erfordert damit
+     m ECHTE Gründungs-Keys — die Honest-Majority-Annahme, nicht weniger.
+     ≥ m distinct, m aus der Founding-Tabelle.
   4. Suffix ab H normal (prev-Links, Höhen, Signaturen); Double-Apply-
      Guard geseedet mit der Id-Liste aus dem Blob.
 - **Explizites Vertrauensmodell (dokumentierte Änderung):** Ein
@@ -265,6 +277,22 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
    über Checkpoint (Loopback-E2E).
 5. Doku (persistent_chain.md-Abschnitt; „chain compaction" von der
    Deferred-Liste nehmen).
+
+Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
+- `after_block_applied` braucht einen Checkpoint-Arm (Event emittieren,
+  `proposal_changes`/`pending_sigs` des Checkpoint-Proposals räumen).
+- Etappe 4 muss ALLE `verify_chain`-Aufrufer (adopt_chain,
+  append_committed_block, apply_next_block, tie_break, Open/Recovery) auf
+  Suffix-Chains routen — heute würde `adopt_chain` eine gedroppte Chain
+  beim Reopen löschen.
+- Verify ist heute O(n²) bei vielen Checkpoints (Recompute ab
+  Genesis/Blob pro Checkpoint pro Lauf); mit automatischem Droppen
+  bleiben Chains kurz, aber der inkrementelle Walk (ein gemeinsamer
+  Walker für Voll/Suffix, Zustand läuft mit) ist die richtige Form —
+  spätestens in Etappe 4 umbauen.
+- Proposal-Id-Namespace ist knoten-lokal gemintet (Kollision zweier
+  gleichzeitiger Proposals verschiedener Nodes ist heute schon möglich,
+  auch ohne Checkpoints) — bei Etappe 3 dokumentieren/entschärfen.
 
 ## B.9 Vorgaben (einspruchsfähig)
 

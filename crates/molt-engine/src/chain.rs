@@ -206,9 +206,15 @@ fn verify_next(
         // projection at `upto`, compare `state_hash`) runs in the chain
         // walkers, which hold the blocks/base needed to recompute
         ChainChange::Checkpoint { upto, .. } => {
-            if *upto >= block.height {
+            // EXACTLY the predecessor: a smaller upto would leave blocks in
+            // (upto, height) that neither the blob nor a suffix carries —
+            // their applied ids would escape the double-apply guard and
+            // their membership changes the roster, forking full holders
+            // from suffix holders. A re-based checkpoint proposal must
+            // therefore re-cut (recompute state + hash at the new head).
+            if *upto != block.height - 1 {
                 return Err(format!(
-                    "checkpoint upto {upto} must precede its block height {}",
+                    "checkpoint upto {upto} must be exactly its block height {} minus one",
                     block.height
                 ));
             }
@@ -312,7 +318,10 @@ fn fold_state(
             } => {
                 apply_membership(&mut state.roster, *op, member, identity_pk)?;
             }
-            _ => {}
+            // exhaustive on purpose (additive-only rule): a FUTURE
+            // state-bearing variant must not silently fold as neutral —
+            // adding one forces a decision here at compile time
+            ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
         }
     }
     state.consumed_ids.sort_unstable();
@@ -332,7 +341,17 @@ fn verify_checkpoint_content(
 ) -> Result<(), String> {
     let state = match base {
         None => checkpoint_state(blocks, upto)?,
-        Some(blob) => fold_state(blob.clone(), &blocks[1..], upto)?,
+        Some(blob) => {
+            // a fold cannot REWIND below the blob's cut — comparing against
+            // a knowingly wrong recomputation would reject truthful hashes
+            if upto < blob.upto {
+                return Err(format!(
+                    "checkpoint upto {upto} lies below the blob coverage {}",
+                    blob.upto
+                ));
+            }
+            fold_state(blob.clone(), &blocks[1..], upto)?
+        }
     };
     if checkpoint_state_hash(&state) != state_hash {
         return Err(format!(
@@ -398,8 +417,10 @@ pub(crate) fn verify_suffix_chain(
     if &checkpoint_state_hash(blob) != state_hash {
         return Err("checkpoint blob does not match the signed state hash".to_string());
     }
-    if *upto >= anchor.height {
-        return Err("checkpoint upto must precede its block height".to_string());
+    if *upto != anchor.height - 1 {
+        return Err(
+            "checkpoint upto must be exactly the anchor height minus one".to_string(),
+        );
     }
     // founding recomputation — forging the founding changes the id
     let rid = molt_storage::republic_id(
@@ -416,8 +437,28 @@ pub(crate) fn verify_suffix_chain(
     if blob.rule_m == 0 || blob.roster.is_empty() {
         return Err("checkpoint roster/threshold out of range".to_string());
     }
+    // NO circular trust: the blob's roster is only bound by the state hash
+    // the anchor sigs attest — so the roster itself must chain back to the
+    // rid-bound FOUNDING table, and the anchor signatures must verify
+    // against founding keys. Seats are fixed at founding (product decision)
+    // and a Restored re-key keeps the anchored identity, so every roster
+    // entry must literally appear in the founding table; forging an anchor
+    // therefore needs m REAL founding keys — the honest-majority assumption
+    // threshold governance already stands on, not less.
+    for entry in &blob.roster {
+        if !blob
+            .founding_identities
+            .iter()
+            .any(|f| f.member == entry.member && f.identity_pk == entry.identity_pk)
+        {
+            return Err(format!(
+                "checkpoint roster member {} is not anchored in the founding table",
+                entry.member
+            ));
+        }
+    }
     let bytes = approval_bytes(&blob.republic_id, anchor.height, &anchor.change);
-    let signers = valid_signers(&blob.roster, &bytes, &anchor.sigs);
+    let signers = valid_signers(&blob.founding_identities, &bytes, &anchor.sigs);
     if signers.len() < usize::from(blob.rule_m) {
         return Err(format!(
             "checkpoint anchor has {} valid approvals, threshold is {}",
@@ -1711,6 +1752,107 @@ mod tests {
             verify_suffix_chain(&blob, &[weak_anchor], &b.republic_id).is_err(),
             "one signature is not a threshold"
         );
+    }
+
+    /// Review findings, pinned: (1) the anchor must not be circularly
+    /// trusted — a blob whose roster is m sock-puppet keys (with the
+    /// GENUINE public founding table, so the republic id recomputes!) is
+    /// rejected even though its hash and "signatures" are self-consistent;
+    /// (2) a checkpoint whose `upto` leaves a gap below its height is
+    /// refused (gap blocks would escape blob AND suffix); (3) a SECOND
+    /// checkpoint inside a suffix recomputes from the blob base and
+    /// verifies.
+    #[test]
+    fn a_forged_roster_anchor_and_a_gap_upto_are_rejected() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["walter", "dora"]);
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+
+        // sock-puppet forge: genuine founding fields, attacker-owned roster
+        let mut forged = blob.clone();
+        let (evil_sk1, evil_pk1) = derive_identity_key(&[9u8; 32], "petra");
+        let (evil_sk2, evil_pk2) = derive_identity_key(&[8u8; 32], "walter");
+        forged.roster = vec![
+            MemberIdentity { member: "petra".to_string(), identity_pk: evil_pk1 },
+            MemberIdentity { member: "walter".to_string(), identity_pk: evil_pk2 },
+        ];
+        let change = ChainChange::Checkpoint {
+            upto: 2,
+            state_hash: checkpoint_state_hash(&forged),
+        };
+        let bytes = approval_bytes(&b.republic_id, 3, &change);
+        let anchor = ChainBlock {
+            height: 3,
+            prev: "00".repeat(32),
+            change,
+            sigs: vec![
+                RosterAttestation { member: "petra".to_string(), sig: identity_sign(&evil_sk1, &bytes) },
+                RosterAttestation { member: "walter".to_string(), sig: identity_sign(&evil_sk2, &bytes) },
+            ],
+        };
+        assert!(
+            verify_suffix_chain(&forged, &[anchor], &b.republic_id).is_err(),
+            "a sock-puppet roster must never bootstrap a rejoiner"
+        );
+
+        // a gap upto (blocks between cut and block height) is refused on
+        // both verify paths
+        let gap = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(
+                    &checkpoint_state(&b.blocks, 1).expect("state@1"),
+                ),
+            },
+            &["petra", "walter"],
+        );
+        let mut chain = b.blocks.clone();
+        chain.push(gap.clone());
+        assert!(verify_chain(&chain).is_err(), "full holders refuse a gap upto");
+        assert!(
+            verify_suffix_chain(&blob, &[gap], &b.republic_id).is_err(),
+            "suffix holders refuse a gap upto"
+        );
+    }
+
+    /// A second checkpoint INSIDE a suffix recomputes from the blob base
+    /// and verifies — the chained-compaction path both holder types must
+    /// agree on.
+    #[test]
+    fn a_second_checkpoint_inside_a_suffix_verifies_from_the_blob() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let anchor = b.seal(
+            2,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor);
+        b.commit_applied(9, &["petra", "walter"]);
+        // the second cut, at the new head
+        let state4 = checkpoint_state(&b.blocks, 3).expect("state@3");
+        let second = b.seal(
+            4,
+            ChainChange::Checkpoint {
+                upto: 3,
+                state_hash: checkpoint_state_hash(&state4),
+            },
+            &["petra", "walter"],
+        );
+        b.push(second);
+        // full holders accept the chained compaction…
+        verify_chain(&b.blocks).expect("full holders verify the chained checkpoints");
+        // …and so do suffix holders recomputing the second cut from the blob
+        let suffix: Vec<ChainBlock> = b.blocks[2..].to_vec();
+        let head = verify_suffix_chain(&blob, &suffix, &b.republic_id)
+            .expect("suffix holders verify the second checkpoint from the blob base");
+        assert_eq!(head.height, 4);
     }
 
     /// WP4b stage 1: two nodes that hold the SAME chain compute the SAME
