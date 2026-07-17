@@ -58,6 +58,46 @@ pub(crate) fn logo_ext(value: &str) -> String {
     }
 }
 
+/// The dimension ceiling of the decodability sniff — the same 8192² the
+/// molt-ui preview decoder enforces, so the engine never accepts an image
+/// the GUI could not render.
+const IMAGE_MAX_DIM: u32 = 8192;
+
+/// WP3: can these bytes become a picture on every member's screen? A cheap
+/// sniff, never a full decode (decode bombs): `guess_format` reads magic
+/// bytes, `into_dimensions` reads only the header, and the dimensions are
+/// capped. An SVG (not an `image`-crate format) travels as source text and
+/// is sniffed by prefix. Sign-what-you-see runs empty if a voter can only
+/// ever get the "cannot decode" toast — so refuse at propose, drop on the
+/// wire. (The GUI additionally runs its real preview decoder before
+/// proposing — deliberate duplication: the UI really renders, this engine
+/// gate is the co-equal contract every frontend and the wire fold share.)
+pub(crate) fn image_decodable(bytes: &[u8]) -> Result<(), MoltError> {
+    let refuse = || {
+        MoltError::BadPayload(
+            "the image cannot be decoded (png/jpeg/webp/gif/bmp/svg)".into(),
+        )
+    };
+    // an SVG travels as its source text: prefix sniff
+    let head = std::str::from_utf8(&bytes[..bytes.len().min(1024)]).unwrap_or("");
+    let trimmed = head.trim_start();
+    if trimmed.starts_with("<svg") || trimmed.starts_with("<?xml") {
+        return Ok(());
+    }
+    image::guess_format(bytes).map_err(|_| refuse())?;
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| refuse())?
+        .into_dimensions()
+        .map_err(|_| refuse())?;
+    if w == 0 || h == 0 || w > IMAGE_MAX_DIM || h > IMAGE_MAX_DIM {
+        return Err(MoltError::BadPayload(format!(
+            "the image is {w}x{h} — the limit is {IMAGE_MAX_DIM}x{IMAGE_MAX_DIM}"
+        )));
+    }
+    Ok(())
+}
+
 /// Decode a `set_image` payload's embedded bytes (`None` when absent,
 /// empty or undecodable — the defensive twin of the propose validation).
 pub(crate) fn image_bytes(payload: &Value) -> Option<Vec<u8>> {
@@ -128,7 +168,8 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
                     ORG_IMAGE_MAX_BYTES / 1024
                 ),
             )),
-            Some(_) => Ok(()),
+            // WP3: within the cap, the bytes must also decode as a picture
+            Some(bytes) => image_decodable(&bytes),
         },
         _ => Ok(()),
     }

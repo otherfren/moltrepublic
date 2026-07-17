@@ -2371,7 +2371,8 @@ mod tests {
                     }
                 }
             };
-            let b64 = base64::engine::general_purpose::STANDARD.encode(b"tiny test image");
+            // a real 2x2 PNG — since WP3 the bytes must decode as a picture
+            let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==".to_string();
             let propose = |op: &'static str, value: &'static str, with_bytes: bool| {
                 let w = w.clone();
                 let b64 = b64.clone();
@@ -2430,6 +2431,69 @@ mod tests {
                 .await
                 .expect_err("an oversized image is refused");
             assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
+        });
+    }
+
+    /// A BMP whose HEADER declares the given dimensions; carries no pixel
+    /// data (dimension sniffs read only the header, so none is needed).
+    pub(crate) fn tiny_bmp_header(w: u32, h: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&54u32.to_le_bytes()); // "file size" (header only)
+        b.extend_from_slice(&[0; 4]); // reserved
+        b.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+        b.extend_from_slice(&40u32.to_le_bytes()); // BITMAPINFOHEADER size
+        b.extend_from_slice(&i32::try_from(w).expect("small dims").to_le_bytes());
+        b.extend_from_slice(&i32::try_from(h).expect("small dims").to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+        b.extend_from_slice(&[0; 24]); // compression/size/ppm/palette zeros
+        b
+    }
+
+    /// WP3: a `set_image` proposal must carry DECODABLE bytes — a member
+    /// asked to sign-what-they-see must be able to see it. The engine
+    /// sniffs format + header dimensions (never a full decode — decode
+    /// bombs); real 2×2 fixtures of every picker format pass, garbage and
+    /// a dimension bomb are refused with an honest error.
+    #[test]
+    fn an_undecodable_set_image_proposal_is_refused() {
+        use base64::Engine as _;
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let propose = |b64: String| {
+                let w = w.clone();
+                async move {
+                    w.execute(Command::Propose {
+                        surface: Surface::Organization,
+                        payload: json!({
+                            "op": "set_image", "value": "x.png", "bytes_b64": b64,
+                        }),
+                    })
+                    .await
+                }
+            };
+            // garbage bytes: refused with a clear error
+            let garbage =
+                base64::engine::general_purpose::STANDARD.encode(b"definitely not an image");
+            let err = propose(garbage).await.expect_err("garbage is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
+            // a dimension bomb: a valid BMP HEADER declaring 20000x20000 —
+            // the sniff reads only the header and refuses before any decode
+            let bomb = base64::engine::general_purpose::STANDARD
+                .encode(tiny_bmp_header(20_000, 20_000));
+            let err = propose(bomb).await.expect_err("a dimension bomb is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
+            // real minimal files (2x2, PIL-generated — the molt-ui preview
+            // fixtures) pass for every picker format, svg by prefix sniff
+            let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
+            let webp = "UklGRjoAAABXRUJQVlA4IC4AAACwAQCdASoCAAIAAUAmJaACdLoABDAAAP7x3I/4DdfFtMv/vYL/3YL/3YL/WwAA";
+            let svg = base64::engine::general_purpose::STANDARD.encode(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>"##,
+            );
+            for (fmt, b64) in [("png", png.to_string()), ("webp", webp.to_string()), ("svg", svg)] {
+                propose(b64).await.unwrap_or_else(|e| panic!("{fmt} must pass: {e:?}"));
+            }
         });
     }
 

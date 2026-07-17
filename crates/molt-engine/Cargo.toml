@@ -24,6 +24,9 @@ getrandom.workspace = true
 hex.workspace = true
 sha2.workspace = true
 base64.workspace = true
+# set_image decodability sniff (guess_format + header dimensions, never a
+# full decode) — same pure-Rust decoder set as the molt-ui preview
+image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

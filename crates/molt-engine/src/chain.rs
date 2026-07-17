@@ -1355,6 +1355,45 @@ mod tests {
         assert!(peer.pending_blocks.is_empty());
     }
 
+    /// WP3, the wire side of the decodability gate: a peer's `set_image`
+    /// gossip with undecodable bytes is dropped with a warning, never
+    /// recorded as a pending proposal (convergence before enforcement —
+    /// the same posture as the byte-cap guard it extends).
+    #[test]
+    fn an_undecodable_peer_set_image_is_dropped_not_recorded() {
+        use base64::Engine as _;
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut peer = chain_peer("walter", &b, b.blocks.clone());
+        let deliver = |peer: &mut crate::State, id: u64, b64: String| {
+            let env = molt_core::EventEnvelope {
+                seq: 90 + id,
+                ts: 1_751_000_000,
+                by: "petra".to_string(),
+                body: WorkspaceEvent::Proposed {
+                    id: ProposalId(id),
+                    surface: Surface::Organization,
+                    payload: json!({ "op": "set_image", "value": "x.png", "bytes_b64": b64 }),
+                },
+            };
+            peer.cmd_net_delivered("petra".to_string(), env, None)
+                .expect("a wire drop acks, never errors");
+        };
+        // garbage within the byte cap: dropped, not recorded
+        let garbage = base64::engine::general_purpose::STANDARD.encode(b"not an image");
+        deliver(&mut peer, 9, garbage);
+        assert!(
+            !peer.proposals.contains_key(&9),
+            "undecodable peer bytes must never become a pending proposal"
+        );
+        // a real 2x2 png is recorded
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
+        deliver(&mut peer, 10, png.to_string());
+        assert!(
+            peer.proposals.contains_key(&10),
+            "a decodable peer set_image is recorded as pending"
+        );
+    }
+
     /// WP2 pin: the catch-up re-gossip relies on the receive side being
     /// idempotent — a duplicated `Proposed` stays ONE pending entry, a
     /// duplicated `Approved` stays ONE signature per member, and neither

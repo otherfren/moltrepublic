@@ -885,14 +885,18 @@ impl State {
             // workspace acts on it (the transport carries it; the chain decides)
             WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
                 // defense in depth: a peer's set_image must respect the same
-                // byte cap the propose validation enforces locally — an
-                // oversized payload is dropped, never recorded
+                // byte cap AND decodability sniff the propose validation
+                // enforces locally (WP3) — an oversized or undecodable
+                // payload is dropped, never recorded (convergence before
+                // enforcement, like every wire guard)
                 if surface == molt_core::Surface::Organization
                     && payload.get("op").and_then(serde_json::Value::as_str) == Some("set_image")
-                    && !crate::proposals::image_bytes(&payload)
-                        .is_some_and(|b| b.len() <= crate::proposals::ORG_IMAGE_MAX_BYTES)
+                    && !crate::proposals::image_bytes(&payload).is_some_and(|b| {
+                        b.len() <= crate::proposals::ORG_IMAGE_MAX_BYTES
+                            && crate::proposals::image_decodable(&b).is_ok()
+                    })
                 {
-                    tracing::warn!(from = %from, "dropping a set_image proposal without valid bytes within the cap");
+                    tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes within the cap");
                     return Ok(Reply::Ack);
                 }
                 self.receive_proposed(id.0, surface, payload);

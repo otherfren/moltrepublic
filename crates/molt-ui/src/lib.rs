@@ -1049,6 +1049,24 @@ pub fn run_app(
                     let payload = match read {
                         Ok(Ok(bytes)) => {
                             use base64::Engine as _;
+                            // WP3 pre-check with the REAL preview decoder:
+                            // instant, localized feedback instead of an
+                            // engine-error round-trip. The engine's co-equal
+                            // sniff (molt-engine proposals.rs
+                            // `image_decodable`) still guards the command
+                            // path for every frontend — deliberate
+                            // duplication, each side references the other.
+                            if image_from_bytes(&bytes).is_none() {
+                                let weak = weak.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        let msg =
+                                            ui.global::<Strings>().get_pc_img_missing();
+                                        ui.invoke_show_toast(msg);
+                                    }
+                                });
+                                return;
+                            }
                             let name = std::path::Path::new(&path)
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
