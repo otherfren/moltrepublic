@@ -1506,23 +1506,56 @@ impl State {
                 self.apply_chain_to_state();
                 // the post-apply bookkeeping the block-by-block path runs in
                 // after_block_applied: sealed proposals get their terminal
-                // state + event, stale signatures re-base once at the end
-                for block in &candidate {
-                    if let ChainChange::Applied {
-                        proposal_id,
-                        surface,
-                        ..
-                    } = &block.change
-                    {
-                        if let Some(p) = self.proposals.get_mut(proposal_id) {
+                // state + event, PRE-CUT consumed proposals resolve too
+                // (else they zombie as Proposed and re-base re-signs them
+                // into dead gossip — review finding), org effects refresh,
+                // a Restored seat's stale announce-cooldown clears, and
+                // stale signatures re-base once at the end
+                let consumed: Vec<u64> = self
+                    .checkpoint_blob
+                    .as_ref()
+                    .map(|b| b.consumed_ids.clone())
+                    .unwrap_or_default();
+                for id in consumed {
+                    if let Some(p) = self.proposals.get_mut(&id) {
+                        if p.state == ProposalState::Proposed {
                             p.state = ProposalState::Applied;
                         }
-                        self.pending_sigs.remove(proposal_id);
-                        self.emit(Event::Applied {
-                            id: ProposalId(*proposal_id),
-                            surface: *surface,
-                        });
                     }
+                    self.pending_sigs.remove(&id);
+                }
+                let mut org_touched = false;
+                for block in &candidate {
+                    match &block.change {
+                        ChainChange::Applied {
+                            proposal_id,
+                            surface,
+                            ..
+                        } => {
+                            if let Some(p) = self.proposals.get_mut(proposal_id) {
+                                p.state = ProposalState::Applied;
+                            }
+                            self.pending_sigs.remove(proposal_id);
+                            self.emit(Event::Applied {
+                                id: ProposalId(*proposal_id),
+                                surface: *surface,
+                            });
+                            if *surface == Surface::Organization {
+                                org_touched = true;
+                            }
+                        }
+                        ChainChange::Membership {
+                            op: MembershipOp::Restored,
+                            member,
+                            ..
+                        } => {
+                            self.mesh_extension_at.remove(member);
+                        }
+                        _ => {}
+                    }
+                }
+                if org_touched {
+                    self.after_org_applied();
                 }
                 self.rebase_pending_approvals();
                 let chain = self.chain.clone();

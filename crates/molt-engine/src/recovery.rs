@@ -601,6 +601,10 @@ fn verify_served_chain(chain_json: &str, inv: &RecoveryInvite, pk: &str) -> Resu
 /// with block 0 (deliberately dropped history); authority rests on the
 /// verified blob + suffix, so the local Founded record carries an empty
 /// attestation set — display/bootstrap metadata, never consensus input.
+/// CAUTION: never route this roster through `verify_sealed_roster` or
+/// `genesis_chain` (both require one attestation per member and would
+/// silently degrade); a pruned-recovered workspace must always carry its
+/// chain + blob explicitly.
 pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt_core::SealedRoster {
     molt_core::SealedRoster {
         name: blob.founding_name.clone(),
