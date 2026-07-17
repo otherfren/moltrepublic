@@ -498,6 +498,10 @@ where
         let mut ack_seq: u64 = 0;
         let mut deadline = tokio::time::Instant::now() + timeouts.manifest;
 
+        // the piece indices accepted THIS loop pass, to flow-ack after the
+        // shared drain below (empty while the manifest — and with it the
+        // ack queue — is still unknown)
+        let mut newly: Vec<u32> = Vec::new();
         loop {
             // an empty file completes right after its manifest
             if let Some((size, pieces, _, _, _)) = &manifest {
@@ -555,40 +559,29 @@ where
                     let (ack_snd, ack_wrap) = parse_handover(&ack)?;
                     ack_target = Some((ack_snd.clone(), ack_wrap.clone()));
                     manifest = Some((size, pieces, sha256, ack_snd, ack_wrap));
+                    // pieces that RACED AHEAD of this manifest sit parked in
+                    // `pending` — drain + flow-ack them now (below)
+                    newly = pending.keys().copied().collect();
                 }
                 Ok(TransferFrame::Piece { index, bytes }) => {
-                    let Some((size, pieces, _, ack_snd, ack_wrap)) = &manifest else {
-                        continue; // pieces before the manifest — drop
+                    // the transport chunk is already acked (the only copy —
+                    // it will never redeliver), so a piece arriving BEFORE
+                    // its manifest must be PARKED, never dropped: delivery
+                    // order is not guaranteed, and a dropped piece stalls
+                    // the transfer until both sides time out. The bound is
+                    // the LOG-ANCHORED size (the manifest must match it, or
+                    // the transfer is refused anyway).
+                    let pieces = match &manifest {
+                        Some((_, pieces, _, _, _)) => *pieces,
+                        None => pieces_for(target.size),
                     };
-                    if index >= *pieces || index < next_write || pending.contains_key(&index) {
+                    if index >= pieces || index < next_write || pending.contains_key(&index) {
                         continue; // out of range or duplicate
                     }
                     pending.insert(index, bytes);
-                    // write in order, hash as we go
-                    while let Some(chunk) = pending.remove(&next_write) {
-                        hasher.update(&chunk);
-                        part.write_all(&chunk)
-                            .map_err(|e| format!("writing {}: {e}", part_path.display()))?;
-                        written += u64::try_from(chunk.len()).unwrap_or(0);
-                        next_write += 1;
+                    if manifest.is_some() {
+                        newly.push(index);
                     }
-                    if written > *size {
-                        return Err("the sharer sent more bytes than announced".to_string());
-                    }
-                    progress(written, *size);
-                    // ack the piece (flow control)
-                    ack_seq += 1;
-                    let ack_frame = encode_ack(&TransferAck::Received { index })
-                        .map_err(|e| e.to_string())?;
-                    supervisor::send_framed(
-                        transport,
-                        ack_snd,
-                        ack_wrap,
-                        msg_id(&target.id_hex, "ack", ack_seq),
-                        &ack_frame,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
                 }
                 Ok(TransferFrame::Refused { id, reason }) => {
                     if id == target.id_hex {
@@ -596,6 +589,42 @@ where
                     }
                 }
                 Err(_) => continue,
+            }
+            // the shared drain: once the manifest (and with it the ack
+            // queue) is known, write accepted pieces in order, hash as we
+            // go, and flow-ack every NEWLY accepted index — for a piece
+            // that arrived after the manifest exactly as before, for the
+            // parked early ones the moment the manifest lands
+            if newly.is_empty() {
+                continue;
+            }
+            let Some((size, _, _, ack_snd, ack_wrap)) = &manifest else {
+                continue;
+            };
+            while let Some(chunk) = pending.remove(&next_write) {
+                hasher.update(&chunk);
+                part.write_all(&chunk)
+                    .map_err(|e| format!("writing {}: {e}", part_path.display()))?;
+                written += u64::try_from(chunk.len()).unwrap_or(0);
+                next_write += 1;
+            }
+            if written > *size {
+                return Err("the sharer sent more bytes than announced".to_string());
+            }
+            progress(written, *size);
+            for index in newly.drain(..) {
+                ack_seq += 1;
+                let ack_frame =
+                    encode_ack(&TransferAck::Received { index }).map_err(|e| e.to_string())?;
+                supervisor::send_framed(
+                    transport,
+                    ack_snd,
+                    ack_wrap,
+                    msg_id(&target.id_hex, "ack", ack_seq),
+                    &ack_frame,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             }
         }
 
@@ -998,6 +1027,119 @@ mod tests {
             |_, _| {},
         )
         .await
+    }
+
+    /// A piece that RACES AHEAD of its manifest must be parked, not lost:
+    /// the requester acks the transport chunk before decoding (the only
+    /// copy — no redelivery), so a dropped early piece stalls the whole
+    /// transfer until both sides time out. Delivery order is not
+    /// guaranteed (independent delivery tasks — found as a load-dependent
+    /// whole-suite flake at --test-threads=32), so the requester must
+    /// tolerate the swap. The hook plays a sharer that sends piece 0
+    /// FIRST and the manifest after a beat.
+    #[test]
+    fn a_piece_racing_ahead_of_its_manifest_is_parked_not_lost() {
+        rt().block_on(async {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let bytes = content(8 * 1024);
+            let dest = tmp.path().join("dl");
+            std::fs::create_dir_all(&dest).expect("dest");
+            let (sharer, requester) = mls_pair();
+            let hub = LoopbackHub::calm();
+            let transport = hub.transport();
+            let share_id = "ab".repeat(16);
+            let sha = sha_hex(&bytes);
+            let size = u64::try_from(bytes.len()).expect("len fits u64");
+            let announce_transport = transport.clone();
+            let announce_bytes = bytes.clone();
+            let announce_share = share_id.clone();
+            let announce_sha = sha.clone();
+            let got = run_file_fetch(
+                transport,
+                requester,
+                FetchTarget {
+                    id_hex: share_id.clone(),
+                    name: "doc.pdf".to_string(),
+                    size,
+                    checksum: sha,
+                },
+                DestSpec {
+                    explicit: Some(dest.display().to_string()),
+                    default_dir: "~/Downloads".to_string(),
+                },
+                FetchTimeouts {
+                    manifest: Duration::from_secs(10),
+                    idle: Duration::from_secs(3),
+                },
+                move |ct: String| async move {
+                    let raw = hex::decode(&ct).expect("ct hex");
+                    let (_, plain) = match sharer
+                        .lock()
+                        .expect("lock")
+                        .decrypt(&raw)
+                        .expect("group decrypt")
+                    {
+                        molt_net::MlsIncoming::Application { from, plaintext } => {
+                            (from, plaintext)
+                        }
+                        other => panic!("unexpected mls message: {other:?}"),
+                    };
+                    let req: FetchRequest =
+                        serde_json::from_slice(&plain).expect("request json");
+                    let (reply_snd, reply_wrap) =
+                        parse_handover(&req.reply).expect("handover");
+                    let t = announce_transport;
+                    tokio::spawn(async move {
+                        // the racy order: piece 0 first…
+                        let piece = encode_frame(&TransferFrame::Piece {
+                            index: 0,
+                            bytes: announce_bytes.clone(),
+                        })
+                        .expect("piece frame");
+                        supervisor::send_framed(
+                            &t,
+                            &reply_snd,
+                            &reply_wrap,
+                            msg_id(&announce_share, "fetch", 1),
+                            &piece,
+                        )
+                        .await
+                        .expect("send piece");
+                        // …give it time to land (and be processed) before
+                        // the manifest follows
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let ack_q = t.create_queue().await.expect("ack queue");
+                        let ack_wrap = WrapKey::fresh().expect("wrap");
+                        let manifest = encode_frame(&TransferFrame::Manifest {
+                            id: announce_share.clone(),
+                            size,
+                            pieces: pieces_for(size),
+                            sha256: announce_sha,
+                            ack: ReplyHandover {
+                                server: ack_q.snd.server.clone(),
+                                queue_id: hex::encode(&ack_q.snd.id.0),
+                                wrap: hex::encode(ack_wrap.to_bytes()),
+                            },
+                        })
+                        .expect("manifest frame");
+                        supervisor::send_framed(
+                            &t,
+                            &reply_snd,
+                            &reply_wrap,
+                            msg_id(&announce_share, "fetch", 0),
+                            &manifest,
+                        )
+                        .await
+                        .expect("send manifest");
+                    });
+                    true
+                },
+                |_, _| {},
+            )
+            .await
+            .expect("the early piece is parked and the transfer completes");
+            assert_eq!(std::fs::read(&got).expect("read"), bytes);
+        });
     }
 
     /// The keystone: bytes leave the sharer's disk and land byte-identical
