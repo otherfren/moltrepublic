@@ -613,6 +613,13 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "propose_checkpoint",
+            command: "propose_checkpoint",
+            description: "Propose a chain CHECKPOINT: a threshold-signed compaction cut at the current head. The engine computes the canonical state hash; every member recomputes it from its own chain and co-signs only on an exact match (m confirm the compaction's correctness). Once the block seals, history below the cut may be dropped locally and newcomers bootstrap from checkpoint + suffix.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ProposeCheckpoint),
+        },
+        ToolDef {
             name: "list_proposals",
             command: "list_proposals",
             description: "List every proposal the engine currently knows about.",

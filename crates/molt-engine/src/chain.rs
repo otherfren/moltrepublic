@@ -897,6 +897,24 @@ impl State {
                     self.coordinator_rekey(&member);
                 }
             }
+            // WP4b: a checkpoint sealed — on EVERY node, drop the matching
+            // proposal bookkeeping (the committer also cleans by id in
+            // adopt_committed_block; receivers find it by content). Local
+            // block-dropping below `upto` is stage 4.
+            ChainChange::Checkpoint { .. } => {
+                let sealed = &block.change;
+                let ids: Vec<u64> = self
+                    .proposal_changes
+                    .iter()
+                    .filter(|(_, c)| *c == sealed)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    self.proposal_changes.remove(&id);
+                    self.pending_sigs.remove(&id);
+                }
+                tracing::info!(height = block.height, "checkpoint sealed");
+            }
             _ => {}
         }
         self.rebase_pending_approvals();
@@ -988,12 +1006,101 @@ impl State {
                 .get(&id)
                 .is_some_and(|p| p.sigs.iter().any(|a| a.member == me));
             self.pending_sigs.remove(&id);
+            // WP4b: a checkpoint's change is CUT-bound (upto == height - 1,
+            // enforced by the verifier) — after the head moved, re-signing
+            // the old cut could only seal an invalid block. Drop it; the
+            // proposer re-proposes at the new head (doc §B.2).
+            if matches!(
+                self.proposal_changes.get(&id),
+                Some(ChainChange::Checkpoint { .. })
+            ) {
+                self.proposal_changes.remove(&id);
+                tracing::debug!(%id, "dropping a stale checkpoint proposal (head moved — re-cut needed)");
+                continue;
+            }
             // only re-sign for proposals still pending that this node approved
             if mine && matches!(self.proposals.get(&id), Some(p) if p.state == ProposalState::Proposed)
             {
                 self.chain_sign_and_gossip_approval(id);
             }
         }
+    }
+
+    /// WP4b stage 3: the human verb — propose the compaction cut at the
+    /// CURRENT head (`upto` = head height, B-F1). The engine computes the
+    /// canonical state hash itself, announces it, and co-signs; every
+    /// receiver recomputes before signing (`receive_checkpoint_proposal`).
+    pub(crate) fn cmd_propose_checkpoint(
+        &mut self,
+    ) -> Result<molt_core::Reply, molt_core::MoltError> {
+        if !self.is_chain_governed() {
+            return Err(molt_core::MoltError::BadPayload(
+                "checkpoints need a chain-governed republic".into(),
+            ));
+        }
+        let Some(head) = self.chain_head.as_ref() else {
+            return Err(molt_core::MoltError::BadPayload("no chain head".into()));
+        };
+        let upto = head.height;
+        let state = checkpoint_state(&self.chain, upto)
+            .map_err(molt_core::MoltError::BadPayload)?;
+        let state_hash = checkpoint_state_hash(&state);
+        let id = self.next_id;
+        self.next_id += 1;
+        self.proposal_changes.insert(
+            id,
+            ChainChange::Checkpoint {
+                upto,
+                state_hash: state_hash.clone(),
+            },
+        );
+        let me = self.member();
+        let env = self.make_env(
+            me,
+            WorkspaceEvent::CheckpointProposed {
+                id: ProposalId(id),
+                upto,
+                state_hash,
+            },
+        );
+        self.record(env);
+        if self.config.self_cosign {
+            self.chain_sign_and_gossip_approval(id);
+        }
+        Ok(molt_core::Reply::Proposed { id: ProposalId(id) })
+    }
+
+    /// WP4b stage 3, receive side: verify BEFORE sign. Recompute the
+    /// canonical state from OUR OWN chain at the proposed cut and co-sign
+    /// only on an exact hash match — nobody ever signs a foreign blob. A
+    /// cut that is not our current head is skipped (a lagging node catches
+    /// up first; a stale cut dies on re-base anyway).
+    pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str) {
+        self.next_id = self.next_id.max(id + 1);
+        let Some(head) = self.chain_head.as_ref() else {
+            return;
+        };
+        if head.height != upto {
+            tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
+            return;
+        }
+        let ours = match checkpoint_state(&self.chain, upto) {
+            Ok(state) => checkpoint_state_hash(&state),
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
+                return;
+            }
+        };
+        if ours != state_hash {
+            tracing::warn!(%id, "refusing to co-sign a checkpoint that does not match our own projection");
+            return;
+        }
+        self.proposal_changes.entry(id).or_insert(ChainChange::Checkpoint {
+            upto,
+            state_hash: state_hash.to_string(),
+        });
+        // correctness attestation, not a product decision: co-sign directly
+        self.chain_sign_and_gossip_approval(id);
     }
 
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
@@ -1751,6 +1858,108 @@ mod tests {
         assert!(
             verify_suffix_chain(&blob, &[weak_anchor], &b.republic_id).is_err(),
             "one signature is not a threshold"
+        );
+    }
+
+    /// WP4b stage 3: the propose flow end to end at the state level.
+    /// Petra proposes the cut (self-cosign = 1 of 2); Walter receives the
+    /// gossip, RECOMPUTES the hash from his own chain, auto-co-signs on
+    /// the match, and the checkpoint block seals at 2-of-2 — on both
+    /// nodes, byte-identically. A mismatched hash is never signed; a
+    /// stale cut dies on re-base instead of sealing an invalid block.
+    #[test]
+    fn a_checkpoint_proposal_seals_via_verify_before_sign() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+
+        let id = match petra.cmd_propose_checkpoint().expect("propose") {
+            molt_core::Reply::Proposed { id } => id.0,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(
+            petra.pending_sigs.get(&id).map(|p| p.sigs.len()),
+            Some(1),
+            "the proposer co-signed its own cut"
+        );
+        let (upto, state_hash) = match petra.proposal_changes.get(&id) {
+            Some(ChainChange::Checkpoint { upto, state_hash }) => {
+                (*upto, state_hash.clone())
+            }
+            other => panic!("unexpected change: {other:?}"),
+        };
+        assert_eq!(upto, 1, "the cut is the current head (B-F1)");
+
+        // a WRONG hash is refused: nothing registered, nothing signed
+        walter.receive_checkpoint_proposal(id, upto, "00");
+        assert!(!walter.proposal_changes.contains_key(&id));
+        assert!(!walter.pending_sigs.contains_key(&id));
+
+        // the truthful gossip: walter recomputes, matches, auto-co-signs
+        walter.receive_checkpoint_proposal(id, upto, &state_hash);
+        let petra_sig = petra
+            .pending_sigs
+            .get(&id)
+            .expect("petra's set")
+            .sigs
+            .first()
+            .expect("petra signed")
+            .sig
+            .clone();
+        walter.receive_approval(id, "petra", 2, &petra_sig);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            2,
+            "the checkpoint sealed at 2-of-2 on walter"
+        );
+        assert!(matches!(
+            walter.chain.last().expect("block").change,
+            ChainChange::Checkpoint { .. }
+        ));
+        // petra converges from walter's signature the same way
+        let walter_sig = walter
+            .chain
+            .last()
+            .expect("block")
+            .sigs
+            .iter()
+            .find(|a| a.member == "walter")
+            .expect("walter signed")
+            .sig
+            .clone();
+        petra.receive_approval(id, "walter", 2, &walter_sig);
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 2);
+        assert_eq!(
+            block_hash(&b.republic_id, petra.chain.last().expect("b")),
+            block_hash(&b.republic_id, walter.chain.last().expect("b")),
+            "both nodes sealed the byte-identical checkpoint block"
+        );
+        // the sealed proposal's bookkeeping is gone on both
+        assert!(!petra.proposal_changes.contains_key(&id));
+        assert!(!walter.proposal_changes.contains_key(&id));
+    }
+
+    /// A checkpoint cut pinned at the old head dies when another block
+    /// commits first — dropped on re-base (re-cut needed), never re-signed
+    /// into an invalid block.
+    #[test]
+    fn a_stale_checkpoint_proposal_dies_on_rebase() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let id = match petra.cmd_propose_checkpoint().expect("propose") {
+            molt_core::Reply::Proposed { id } => id.0,
+            other => panic!("unexpected: {other:?}"),
+        };
+        // another applied block races the checkpoint to height 2
+        b.commit_applied(7, &["petra", "walter"]);
+        petra.receive_block(b.blocks.last().expect("block").clone());
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 2);
+        assert!(
+            !petra.proposal_changes.contains_key(&id)
+                && !petra.pending_sigs.contains_key(&id),
+            "the stale cut is dropped, not re-signed"
         );
     }
 

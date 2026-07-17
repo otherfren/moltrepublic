@@ -928,6 +928,15 @@ impl State {
             } if self.is_chain_governed() => {
                 self.receive_membership_proposal(id.0, op, &member, &identity_pk);
             }
+            // WP4b: a peer proposed a compaction cut — recompute the state
+            // hash from OUR chain and auto-co-sign only on a match
+            // (verify-before-sign; correctness attestation, not a product
+            // decision, so no human round-trip)
+            WorkspaceEvent::CheckpointProposed { id, upto, state_hash }
+                if self.is_chain_governed() =>
+            {
+                self.receive_checkpoint_proposal(id.0, upto, &state_hash);
+            }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
             // relay) and extend this node's own mesh toward it
