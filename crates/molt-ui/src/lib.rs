@@ -1123,6 +1123,12 @@ pub fn run_app(
             );
         });
     }
+    // sound preview in the settings panel — plays the picked alert once
+    {
+        ui.on_test_sound(move |kind| {
+            play_alert(kind.as_str());
+        });
+    }
     // WP4b: the checkpoint verb — same Command the MCP tool drives
     {
         let rt = rt.clone();
@@ -1239,6 +1245,37 @@ pub fn run_app(
                     // source of truth — event payloads never drive state.
                     // A finished download additionally toasts its outcome
                     // (the table repaints via the same re-read).
+                    // alert sounds: an INCOMING chat message (never our own
+                    // echo) and a new vote play the configured alert — read
+                    // from the last APPLIED settings, so an unsaved draft
+                    // never changes behavior
+                    Ok(Event::Chat { from, .. }) => {
+                        let sound = last_settings
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.as_ref().map(|s| s.sound_message.clone()))
+                            .unwrap_or_default();
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            if ui.get_node_member() != from.as_str() {
+                                play_alert(&sound);
+                            }
+                        });
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
+                    Ok(Event::Proposed { .. }) => {
+                        // the engine emits Proposed for our own proposals
+                        // too — a beep on one's own act is acceptable
+                        // feedback (and the event carries no author)
+                        let sound = last_settings
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.as_ref().map(|s| s.sound_vote.clone()))
+                            .unwrap_or_default();
+                        play_alert(&sound);
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
                     // WP4b: checkpoint lifecycle closure for the operator —
                     // sealed toasts the height, stale tells them to re-cut
                     Ok(Event::CheckpointSealed { height, .. }) => {
@@ -1670,6 +1707,8 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         headless: ui.get_cfg_headless(),
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
+        sound_message: sound_name(ui.get_cfg_sound_message_index()),
+        sound_vote: sound_name(ui.get_cfg_sound_vote_index()),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
         s3_access_key: ui.get_cfg_s3_access().to_string(),
@@ -1941,6 +1980,8 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
+    ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
+    ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
@@ -2056,6 +2097,11 @@ struct SurfacesBundle {
     /// Language the labels were rendered for (0 = en, 1 = de) — the nav's
     /// sub-view names are localized when the bundle lands.
     lang: i32,
+    /// The chat surface is showing the Archive sub-view — its log pages
+    /// at 20 rows (an archive can hold a whole retention half-window).
+    chat_archive: bool,
+    /// Every committed chain block, newest first (the Chain-History panel).
+    chain_rows: Vec<molt_core::ChainBlockView>,
     member: String,
     threshold_badge: String,
     surfaces: Vec<SurfaceData>,
@@ -2597,6 +2643,14 @@ async fn push_surfaces(
         .collect();
     let selected_key = channel_key(&selected);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    // the Chain-History settings panel: every committed block, newest
+    // first (co-equal read — the MCP read_chain tool serves the same)
+    let chain_rows: Vec<molt_core::ChainBlockView> = match wallet.execute(Command::ReadChain).await
+    {
+        Ok(Reply::Chain { blocks }) => blocks,
+        _ => Vec::new(),
+    };
+    let chain_len = chain_rows.len();
     let (unread, first_seen, known, org_view, list_pages) = {
         let mut st = chat_ui.lock().expect("chat ui state poisoned");
         if !st.is_current(my_gen) {
@@ -2616,6 +2670,14 @@ async fn push_surfaces(
         let mut list_pages: HashMap<String, usize> = HashMap::new();
         for (sf, s) in &snaps {
             if *sf == Surface::Chat {
+                // the Archive sub-view pages like the outcome lists — the
+                // General pane stays the full scrollback
+                if chat_view == "archive" {
+                    list_pages.insert(
+                        "chat:archive".to_string(),
+                        st.clamp_list_page("chat", "archive", s.applied.len()),
+                    );
+                }
                 continue;
             }
             let key = sf.as_str();
@@ -2628,6 +2690,10 @@ async fn push_surfaces(
                 st.clamp_list_page(key, "applied", s.applied.len()),
             );
         }
+        list_pages.insert(
+            "chain:history".to_string(),
+            st.clamp_list_page("chain", "history", chain_len),
+        );
         (
             st.ledger.observe(&counts, &selected_key),
             st.first_seen.clone(),
@@ -2676,6 +2742,8 @@ async fn push_surfaces(
         .collect();
     let bundle = SurfacesBundle {
         lang,
+        chain_rows,
+        chat_archive: chat_view == "archive",
         member,
         threshold_badge,
         surfaces,
@@ -2715,6 +2783,19 @@ async fn push_surfaces(
 /// and with it drop the keyboard focus out of the chat compose box mid-typing.
 fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_node_member(b.member.clone().into());
+    // the Chain-History panel: paged at 20, newest first (rows arrive
+    // newest-first from read_chain)
+    {
+        let page = page_of(&b.list_pages, "chain", "history");
+        let (start, end, page, pages) = page_slice(b.chain_rows.len(), page, LIST_PAGE_SIZE);
+        let rows: Vec<ChainRow> = b.chain_rows[start..end]
+            .iter()
+            .map(|r| chain_row(b.lang, r))
+            .collect();
+        ui.set_chain_rows(ModelRc::new(VecModel::from(rows)));
+        ui.set_chain_page(i32::try_from(page + 1).unwrap_or(1));
+        ui.set_chain_pages(i32::try_from(pages).unwrap_or(1));
+    }
     ui.set_threshold_badge(b.threshold_badge.clone().into());
     let tabs: Vec<SurfaceTab> = b
         .surfaces
@@ -2728,6 +2809,13 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             let a_page = page_of(&b.list_pages, &s.key, "applied");
             let (a_start, a_end, a_page, a_pages) = if s.gated {
                 page_slice(s.log.len(), a_page, LIST_PAGE_SIZE)
+            } else if s.key == "chat" && b.chat_archive {
+                // the Archive sub-view pages at 20 (a half-window of
+                // retention can be long); quotes pointing outside the
+                // current page degrade to teaser-only — acceptable in a
+                // read-only archive
+                let page = page_of(&b.list_pages, "chat", "archive");
+                page_slice(s.log.len(), page, LIST_PAGE_SIZE)
             } else {
                 (0, s.log.len(), 0, 1)
             };
@@ -2930,12 +3018,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
-fn when_label(ts: u64) -> String {
-    when_label_at(ts, chrono::Utc::now().timestamp())
+fn when_label(lang: i32, ts: u64) -> String {
+    when_label_at(lang, ts, chrono::Utc::now().timestamp())
 }
 
-/// [`when_label`] against an explicit "now" (testable).
-fn when_label_at(ts: u64, now: i64) -> String {
+/// [`when_label`] against an explicit "now" (testable). The relative part
+/// renders in the ACTIVE language (a cached English "(~2 days ago)" was
+/// leaking into the German UI — user report 2026-07-18).
+fn when_label_at(lang: i32, ts: u64, now: i64) -> String {
     let Ok(secs) = i64::try_from(ts) else {
         return String::new();
     };
@@ -2944,17 +3034,30 @@ fn when_label_at(ts: u64, now: i64) -> String {
     };
     let local = utc.with_timezone(&chrono::Local);
     let ago = (now - secs).max(0);
+    let de = lang == 1;
     let rel = if ago < 60 {
-        "just now".to_string()
+        if de { "gerade eben".to_string() } else { "just now".to_string() }
     } else if ago < 3600 {
         let m = ago / 60;
-        format!("~{m} minute{} ago", if m == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{m} Minute{}", if m == 1 { "" } else { "n" })
+        } else {
+            format!("~{m} minute{} ago", if m == 1 { "" } else { "s" })
+        }
     } else if ago < 86_400 {
         let h = ago / 3600;
-        format!("~{h} hour{} ago", if h == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{h} Stunde{}", if h == 1 { "" } else { "n" })
+        } else {
+            format!("~{h} hour{} ago", if h == 1 { "" } else { "s" })
+        }
     } else {
         let d = ago / 86_400;
-        format!("~{d} day{} ago", if d == 1 { "" } else { "s" })
+        if de {
+            format!("vor ~{d} Tag{}", if d == 1 { "" } else { "en" })
+        } else {
+            format!("~{d} day{} ago", if d == 1 { "" } else { "s" })
+        }
     };
     format!("{} ({rel})", local.format("%Y-%m-%d %H:%M"))
 }
@@ -3030,7 +3133,7 @@ fn surface_data(
         // for the GUI and an MCP agent (co-equality)
         let pairs: Vec<(u64, LogLineData)> = msgs
             .iter()
-            .map(|m| (m.ts, chat_line(m, me)))
+            .map(|m| (m.ts, chat_line(lang, m, me)))
             .collect();
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
@@ -3089,6 +3192,57 @@ fn surface_data(
     }
 }
 
+/// Project one chain block into its Chain-History row — titles render in
+/// the ACTIVE language from the payload's op placeholder, exactly like the
+/// applied logs (language-neutral wire, localized display).
+fn chain_row(lang: i32, r: &molt_core::ChainBlockView) -> ChainRow {
+    let de = lang == 1;
+    let (kind, title) = match r.kind.as_str() {
+        "genesis" => (
+            strings_pick(de, "Founding", "Gründung"),
+            r.payload.as_str().unwrap_or_default().to_string(),
+        ),
+        "membership" => (
+            strings_pick(de, "Membership", "Mitgliedschaft"),
+            r.payload.as_str().unwrap_or_default().to_string(),
+        ),
+        "checkpoint" => (
+            strings_pick(de, "Checkpoint (compacted)", "Checkpoint (kompaktiert)"),
+            format!(
+                "{} {}",
+                strings_pick(de, "state up to block", "Zustand bis Block"),
+                r.payload.as_u64().unwrap_or(0)
+            ),
+        ),
+        // applied: the payload IS the proposal payload — op-placeholder title
+        _ => (String::new(), display_title(lang, &r.payload)),
+    };
+    ChainRow {
+        height: if r.height == 0 && r.kind == "applied" {
+            strings_pick(de, "— (before the cut)", "— (vor dem Schnitt)")
+        } else {
+            format!("#{}", r.height)
+        }
+        .into(),
+        kind: kind.into(),
+        surface: if r.surface.is_empty() {
+            String::new()
+        } else {
+            Surface::parse(&r.surface)
+                .map(|sf| surface_name(lang, sf).to_string())
+                .unwrap_or_else(|| r.surface.clone())
+        }
+        .into(),
+        title: title.into(),
+        signers: r.signers.join(", ").into(),
+    }
+}
+
+/// Tiny bilingual pick for labels that live in Rust-side projections.
+fn strings_pick(de: bool, en: &str, de_s: &str) -> String {
+    if de { de_s.to_string() } else { en.to_string() }
+}
+
 /// Project one proposal view into the card row the GUI renders — shared by
 /// the pending and the declined list.
 fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
@@ -3126,7 +3280,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             .collect(),
         declined_by: p.declined_by.clone(),
         declined_when: if p.declined_at > 0 {
-            when_label(p.declined_at)
+            when_label(lang, p.declined_at)
         } else {
             String::new()
         },
@@ -3137,7 +3291,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
 /// teaser) happens later in [`annotate_chat_log`]: the row index can only
 /// be known once system lines are merged in, and the teaser may resolve
 /// against a message outside the displayed (filtered) log.
-fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
+fn chat_line(lang: i32, m: &ChatMessage, me: &str) -> LogLineData {
     let mut mine_emoji = String::new();
     // the BTreeMap iterates sorted by emoji, so the pill order is
     // deterministic across re-renders
@@ -3180,7 +3334,7 @@ fn chat_line(m: &ChatMessage, me: &str) -> LogLineData {
         lead: m.from.clone(),
         text: m.body.clone(),
         when: if m.ts > 0 {
-            when_label(m.ts)
+            when_label(lang, m.ts)
         } else {
             String::new()
         },
@@ -3911,25 +4065,115 @@ fn theme_name(i: i32) -> String {
     .to_string()
 }
 
-/// Map an anonymity-network name to its ComboBox index. The dropdown offers
-/// tor, nym (greyed — not implemented yet), and none; a lingering "nym" from
-/// an old config still displays on its own row rather than masquerading as
-/// tor.
-fn net_index(s: &str) -> i32 {
+/// Map an alert-sound name to its ComboBox index (none/bell/chime/pop).
+fn sound_index(s: &str) -> i32 {
     match s {
-        "nym" => 1,
-        "none" => 2,
+        "bell" => 1,
+        "chime" => 2,
+        "pop" => 3,
         _ => 0,
     }
 }
 
-/// Map a ComboBox index back to an anonymity-network name. Index 1 (nym) is
-/// non-selectable in the UI, so it is only ever produced by round-tripping an
-/// existing nym config.
+/// Map a ComboBox index back to an alert-sound name.
+fn sound_name(i: i32) -> String {
+    match i {
+        1 => "bell",
+        2 => "chime",
+        3 => "pop",
+        _ => "none",
+    }
+    .to_string()
+}
+
+/// Play a short alert sound, fire-and-forget. The sample is synthesized in
+/// pure Rust (a tiny WAV, cached in the temp dir) and handed to the system
+/// player — pw-play/paplay/aplay, runtime-detected, silently a no-op when
+/// none exists. Deliberately NO compiled audio stack: cpal/rodio would pull
+/// ALSA's C bindings, and the pure-Rust posture stands (CLAUDE.md).
+fn play_alert(kind: &str) {
+    if kind == "none" || kind.is_empty() {
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("molt-alert-{kind}.wav"));
+    if !path.exists() && write_alert_wav(&path, kind).is_err() {
+        return;
+    }
+    for player in ["pw-play", "paplay", "aplay"] {
+        if std::process::Command::new(player)
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+/// Synthesize one alert as a 44.1 kHz mono 16-bit WAV: a few decaying
+/// sine partials per kind — bell (bright fifth), chime (rising triad),
+/// pop (short thump).
+fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
+    let (freqs, dur): (&[f32], f32) = match kind {
+        "bell" => (&[880.0, 1318.5], 0.35),
+        "chime" => (&[523.25, 659.25, 783.99], 0.5),
+        _ => (&[220.0, 440.0], 0.12), // pop
+    };
+    let rate = 44_100u32;
+    let n = (dur * rate as f32) as usize;
+    let mut samples = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / rate as f32;
+        let env = (-6.0 * t / dur).exp();
+        let mut v = 0.0f32;
+        for (k, f) in freqs.iter().enumerate() {
+            // chime arpeggiates: each partial enters a beat later
+            let start = if kind == "chime" { k as f32 * 0.12 } else { 0.0 };
+            if t >= start {
+                v += ((t - start) * f * std::f32::consts::TAU).sin() * env;
+            }
+        }
+        let v = (v / freqs.len() as f32 * 0.4 * f32::from(i16::MAX)) as i16;
+        samples.push(v);
+    }
+    let data_len = u32::try_from(samples.len() * 2).unwrap_or(0);
+    let mut wav = Vec::with_capacity(44 + samples.len() * 2);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, wav)
+}
+
+/// Map an anonymity-network name to its ComboBox index. The dropdown
+/// offers tor and none (nym was removed from the UI 2026-07-18 — never
+/// implemented); a lingering "nym" in an old config displays as none
+/// (fail-closed would silently DIAL, so the honest reading is "no
+/// anonymity network configured").
+fn net_index(s: &str) -> i32 {
+    match s {
+        "none" | "nym" => 1,
+        _ => 0,
+    }
+}
+
+/// Map a ComboBox index back to an anonymity-network name.
 fn net_name(i: i32) -> String {
     match i {
-        1 => "nym",
-        2 => "none",
+        1 => "none",
         _ => "tor",
     }
     .to_string()
@@ -4032,8 +4276,6 @@ lexicon! {
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
-    field_s3_tor: "Route over Tor (onion endpoint)", "Über Tor (Onion-Endpoint)";
-    field_s3_onion: "Onion endpoint", "Onion-Endpoint";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
     field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";
@@ -4074,7 +4316,6 @@ lexicon! {
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members.", "Wie dieser Node die anderen Mitglieder erreicht.";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
-    cw_net_ok_nym: "Anonymized via the Nym mixnet.", "Anonymisiert via Nym-Mixnet.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
@@ -4250,6 +4491,15 @@ lexicon! {
     set_tab_network: "Network", "Netzwerk";
     set_tab_mcp: "MCP", "MCP";
     set_tab_node: "Node", "Node";
+    set_tab_chain: "Chain-History", "Chain-History";
+    chain_col_height: "Block", "Block";
+    chain_col_what: "Change", "Änderung";
+    chain_col_signers: "Signed by", "Signiert von";
+    chain_kind_genesis: "Founding", "Gründung";
+    chain_kind_membership: "Membership", "Mitgliedschaft";
+    chain_kind_checkpoint: "Checkpoint (compacted)", "Checkpoint (kompaktiert)";
+    chain_pre_cut: "before the cut", "vor dem Schnitt";
+    chain_empty: "No chain — this workspace is not chain-governed.", "Keine Chain — dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
     set_ws_dir_body: "Path of the folder that holds your workspaces. (Mock — no real file dialog.)", "Pfad des Ordners, der deine Workspaces enthält. (Mock — kein echter Dateidialog.)";
@@ -4277,6 +4527,12 @@ lexicon! {
     set_reloaded_note: "config.toml changed on disk — settings reloaded.", "config.toml wurde auf der Platte geändert — Einstellungen neu geladen.";
     set_conflict_note: "config.toml on disk is invalid — the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig — die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
     set_restart_note: "Takes effect after a restart:", "Wirkt erst nach einem Neustart:";
+    set_panel_appearance: "Language & appearance", "Sprache & Design";
+    set_panel_sounds: "Sound alerts", "Sound-Alerts";
+    field_sound_message: "New message", "Neue Nachricht";
+    field_sound_vote: "New vote", "Neues Vote";
+    sound_off: "off", "aus";
+    set_tor_embedded_missing: "\"embedded\" is greyed out: this build was compiled without the embedded-tor feature (in-process Tor). Rebuild with --features embedded-tor, or use a local Tor daemon.", "\"embedded\" ist ausgegraut: dieses Binary wurde ohne das embedded-tor-Feature (In-Prozess-Tor) gebaut. Mit --features embedded-tor neu bauen oder einen lokalen Tor-Daemon nutzen.";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
     unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
     unsaved_save: "Save & continue", "Speichern & weiter";
@@ -4434,10 +4690,10 @@ mod tests {
     #[test]
     fn a_system_kind_message_maps_onto_the_quiet_line_flag() {
         let user = ChatMessage::text(MessageId([1; 16]), "petra", "gm", 100);
-        assert!(!chat_line(&user, "me").system);
+        assert!(!chat_line(0, &user, "me").system);
         let notice = ChatMessage::text(MessageId([2; 16]), "petra", "🔑 back", 101)
             .with_kind(molt_core::ChatKind::System);
-        assert!(chat_line(&notice, "me").system);
+        assert!(chat_line(0, &notice, "me").system);
     }
 
     /// The recovery flow rides the transient session notice (the engine's
@@ -5132,7 +5388,7 @@ mod tests {
     #[test]
     fn when_label_relative_part() {
         let ts = 1_750_000_000_u64;
-        let at = |offset: i64| when_label_at(ts, 1_750_000_000 + offset);
+        let at = |offset: i64| when_label_at(0, ts, 1_750_000_000 + offset);
         assert!(at(5).ends_with("(just now)"), "{}", at(5));
         assert!(at(60).ends_with("(~1 minute ago)"), "{}", at(60));
         assert!(at(20 * 60).ends_with("(~20 minutes ago)"), "{}", at(1200));

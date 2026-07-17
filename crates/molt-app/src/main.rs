@@ -150,6 +150,8 @@ fn main() -> anyhow::Result<()> {
             s3_bucket: config.storage.s3_bucket.clone(),
             s3_interval_min: config.storage.s3_interval_min,
             s3_keep_copies: config.storage.s3_keep_copies,
+            sound_message: config.storage.sound_message.clone(),
+            sound_vote: config.storage.sound_vote.clone(),
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),

@@ -765,6 +765,7 @@ impl State {
             Command::Status => Ok(Reply::Status(self.status())),
             Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
+            Command::ReadChain => self.cmd_read_chain(),
 
             // net.rs (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {
