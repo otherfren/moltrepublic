@@ -252,6 +252,14 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
   beides additiv).
 - Recovery: das Welcome trägt Checkpoint-Blob + Suffix statt der vollen
   Chain; der Rejoiner verifiziert nach den Suffix-Regeln (§B.5).
+  **Etappe 4c, noch offen:** Ein gedroppter Koordinator hat die
+  GENESIS-ATTESTATIONS nicht mehr (sie stecken in Block 0, den er
+  verworfen hat) — `RejoinOutcome.sealed`/`materialize_workspace`
+  brauchen eine Checkpoint-Variante (Founded aus der Founding-Tabelle
+  des Blobs, Attestations leer, Autorität = Blob+Suffix). Bis dahin:
+  Recovery braucht einen Koordinator mit voller Historie (Droppen ist
+  Erlaubnis, nie Pflicht — mindestens ein Archiv-Halter pro Republik
+  ist ohnehin ratsam).
 - Persistenz: `chain.state` additiv um den Blob erweitert; ältere Leser
   treffen die unbekannte `ChainChange`-Variante und stoppen — gewollt
   (additive-only-Regel).
@@ -291,7 +299,8 @@ Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
   Genesis/Blob pro Checkpoint pro Lauf); mit automatischem Droppen
   bleiben Chains kurz, aber der inkrementelle Walk (ein gemeinsamer
   Walker für Voll/Suffix, Zustand läuft mit) ist die richtige Form —
-  spätestens in Etappe 4 umbauen.
+  spätestens beim Etappe-4-Abschluss (4d) umbauen — Stand 4a/4b: noch
+  Recompute, Chains sind durch das automatische Droppen aber kurz.
 - Proposal-Id-Namespace ist knoten-lokal gemintet; Etappe 3 entschärft
   die Checkpoint-Seite (belegte Ids werden nie auto-signiert), die
   generelle Kollision zweier gleichzeitiger Proposals bleibt offen.
