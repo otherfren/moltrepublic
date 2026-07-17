@@ -622,6 +622,13 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::ProposeCheckpoint),
         },
         ToolDef {
+            name: "read_chain",
+            command: "read_chain",
+            description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first — genesis, applied changes, membership transitions, and checkpoint compaction cuts — each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 — the per-block positions and signatures were dropped with the history).",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ReadChain),
+        },
+        ToolDef {
             name: "list_proposals",
             command: "list_proposals",
             description: "List every proposal the engine currently knows about.",

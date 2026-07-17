@@ -74,6 +74,58 @@ pub(crate) fn block_hash(republic_id: &str, block: &ChainBlock) -> String {
     molt_storage::content_hash(&block_link_bytes(republic_id, block))
 }
 
+/// One real chain block as the Chain-History display row
+/// ([`molt_core::ChainBlockView`]): kind + surface + display payload +
+/// consumed proposal id + the signer names in block order. Pure projection —
+/// display data, never consensus input.
+fn chain_block_view(block: &ChainBlock) -> molt_core::ChainBlockView {
+    let signers = block.sigs.iter().map(|a| a.member.clone()).collect();
+    let (kind, surface, payload, proposal_id) = match &block.change {
+        ChainChange::Genesis { name, .. } => (
+            "genesis",
+            String::new(),
+            serde_json::Value::String(name.clone()),
+            0,
+        ),
+        ChainChange::Applied {
+            proposal_id,
+            surface,
+            payload,
+        } => (
+            "applied",
+            surface.as_str().to_string(),
+            payload.clone(),
+            *proposal_id,
+        ),
+        ChainChange::Membership { op, member, .. } => {
+            let verb = match op {
+                MembershipOp::Joined => "joined",
+                MembershipOp::Restored => "restored",
+            };
+            (
+                "membership",
+                String::new(),
+                serde_json::Value::String(format!("{verb} {member}")),
+                0,
+            )
+        }
+        ChainChange::Checkpoint { upto, .. } => (
+            "checkpoint",
+            String::new(),
+            serde_json::Value::from(*upto),
+            0,
+        ),
+    };
+    molt_core::ChainBlockView {
+        height: block.height,
+        kind: kind.to_string(),
+        surface,
+        payload,
+        proposal_id,
+        signers,
+    }
+}
+
 /// The distinct roster members who validly signed `bytes`. A signature from an
 /// unknown member, a bad signature, or the same member signing twice can never
 /// inflate the count past the number of real, distinct approvers.
@@ -1183,6 +1235,60 @@ impl State {
             // the anchor block in chain[0] is state-neutral for the fold
             Some(blob) => fold_state(blob.clone(), &self.chain, upto),
         }
+    }
+
+    /// The co-equal Chain-History read (`Command::ReadChain`): every
+    /// committed block of the open republic as a display view, newest
+    /// first — checkpoint blocks included. Read-only and synchronous.
+    ///
+    /// A PRUNED holder (`checkpoint_blob` is `Some`) APPENDS synthetic
+    /// views for the history below the cut, rebuilt from the blob: the
+    /// pre-cut applied entries (newest first, per the blob's per-surface
+    /// projections) and one genesis view from the founding table. Pre-cut
+    /// heights are NOT reconstructible per entry — the blob folds the
+    /// dropped blocks into per-surface `(proposal_id, payload)` lists and
+    /// loses each block's position (and its signature set, so `signers`
+    /// stays empty), which is why every synthetic entry carries height 0:
+    /// it marks "below the cut", not a real chain position. The blob also
+    /// loses the cross-surface interleaving, so the synthetic ordering is
+    /// per-surface block order, best-effort.
+    pub(crate) fn cmd_read_chain(&self) -> Result<molt_core::Reply, molt_core::MoltError> {
+        let mut blocks: Vec<molt_core::ChainBlockView> =
+            self.chain.iter().rev().map(chain_block_view).collect();
+        if let Some(blob) = &self.checkpoint_blob {
+            let mut pre: Vec<molt_core::ChainBlockView> = Vec::new();
+            for (surface, entries) in &blob.applied {
+                for (id, payload) in entries {
+                    pre.push(molt_core::ChainBlockView {
+                        height: 0,
+                        kind: "applied".to_string(),
+                        surface: surface.as_str().to_string(),
+                        payload: payload.clone(),
+                        proposal_id: *id,
+                        signers: Vec::new(),
+                    });
+                }
+            }
+            pre.reverse(); // blob order is oldest-first; the read is newest-first
+            blocks.extend(pre);
+            // the founding constitution, rebuilt from the blob's (rid-pinned)
+            // founding table — the genesis is n-of-n by chain invariant, so
+            // the founding members ARE its signers even though the block
+            // (and its attestation bytes) were dropped with the history
+            blocks.push(molt_core::ChainBlockView {
+                height: 0,
+                kind: "genesis".to_string(),
+                surface: String::new(),
+                payload: serde_json::Value::String(blob.founding_name.clone()),
+                proposal_id: 0,
+                signers: blob
+                    .founding_identities
+                    .iter()
+                    .map(|i| i.member.clone())
+                    .collect(),
+            });
+        }
+        Ok(molt_core::Reply::Chain { blocks })
     }
 
     /// WP4b stage 3: the human verb — propose the compaction cut at the
@@ -2994,5 +3100,78 @@ mod tests {
             "the rejoiner caught up the full chain from genesis"
         );
         assert!(rejoiner.pending_blocks.is_empty());
+    }
+
+    /// The co-equal Chain-History read (`Command::ReadChain`): every committed
+    /// block newest first with the right kinds, the checkpoint block visible —
+    /// and after the auto-drop, the pruned holder still lists the pre-cut
+    /// applied entries as synthetic views from its checkpoint blob (height 0:
+    /// the per-entry heights are gone with the history).
+    #[test]
+    fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+
+        // full holder: genesis + the two applied blocks, newest first
+        let molt_core::Reply::Chain { blocks } = walter.cmd_read_chain().expect("read") else {
+            panic!("read_chain answers Reply::Chain");
+        };
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|v| (v.height, v.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, "applied"), (1, "applied"), (0, "genesis")]
+        );
+        assert_eq!(blocks[0].proposal_id, 2, "the applied view names its proposal");
+        assert_eq!(blocks[0].surface, "memory");
+        assert_eq!(blocks[0].payload["op"], json!("add_note"));
+        assert_eq!(
+            blocks[0].signers,
+            vec!["petra".to_string(), "walter".to_string()],
+            "the signers ride the view in block order"
+        );
+        assert_eq!(blocks[2].payload, json!("Chess Club"), "the genesis shows the name");
+        assert_eq!(blocks[2].surface, "");
+        assert_eq!(blocks[2].proposal_id, 0);
+
+        // seal the checkpoint cut at the head (stage-3 mechanics) → auto-drop
+        let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 2).expect("state"));
+        walter.receive_checkpoint_proposal(40, 2, &hash);
+        let change = ChainChange::Checkpoint { upto: 2, state_hash: hash };
+        let bytes = approval_bytes(&b.republic_id, 3, &change);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(40, "petra", 3, &petra_sig);
+        assert_eq!(walter.chain.len(), 1, "history below the cut is dropped");
+
+        // pruned holder: the real anchor keeps its height, then the synthetic
+        // pre-cut applied views (newest first, signers gone), genesis last
+        let molt_core::Reply::Chain { blocks } = walter.cmd_read_chain().expect("read") else {
+            panic!("read_chain answers Reply::Chain");
+        };
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|v| (v.height, v.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "checkpoint"), (0, "applied"), (0, "applied"), (0, "genesis")]
+        );
+        assert_eq!(blocks[0].payload, json!(2), "the checkpoint view shows the upto");
+        assert_eq!(blocks[0].signers.len(), 2, "the anchor block keeps its m signers");
+        assert_eq!(blocks[1].proposal_id, 2, "pre-cut entries stay listed, newest first");
+        assert_eq!(blocks[2].proposal_id, 1);
+        assert_eq!(blocks[1].surface, "memory");
+        assert!(
+            blocks[1].signers.is_empty() && blocks[2].signers.is_empty(),
+            "the pre-cut block signatures are gone with the history"
+        );
+        assert_eq!(blocks[3].payload, json!("Chess Club"));
+        assert_eq!(
+            blocks[3].signers,
+            vec!["petra".to_string(), "walter".to_string()],
+            "the genesis view rebuilds from the blob's founding table"
+        );
     }
 }

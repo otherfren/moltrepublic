@@ -2169,6 +2169,11 @@ pub enum Command {
     /// Read every file shared into the chat (Organization → Uploads): one
     /// [`UploadView`] per share, newest last (log order).
     ReadUploads,
+    /// Read the persistent chain as display data (the Chain-History view):
+    /// one [`ChainBlockView`] per committed block of the open republic,
+    /// newest first — checkpoint blocks included. A pruned holder appends
+    /// summarized pre-cut entries rebuilt from its checkpoint blob.
+    ReadChain,
 
     // --- session / app-level commands (co-equal with the GUI) ---
     /// Read the whole shared session state (screen, language, settings, …).
@@ -2774,6 +2779,15 @@ pub enum Reply {
     },
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
+    /// The persistent chain as display views (the Chain-History read),
+    /// newest first. Struct variant for the same reason as
+    /// [`Reply::Members`]: the internally-tagged `reply` repr cannot
+    /// serialize a bare sequence.
+    Chain {
+        /// One view per committed block — plus, on a pruned holder, the
+        /// synthetic pre-cut entries from the checkpoint blob — newest first.
+        blocks: Vec<ChainBlockView>,
+    },
 }
 
 /// Lifecycle state of a proposal (a deliberately collapsed subset of the full
@@ -2913,6 +2927,30 @@ pub struct SurfaceSnapshot {
     /// a filtered read; `Group` is always present). Empty on other surfaces.
     #[serde(default)]
     pub channels: Vec<ChannelInfo>,
+}
+
+/// One block of the persistent chain as display data — the row a
+/// Chain-History view renders ([`Reply::Chain`]). Display data, never
+/// consensus input: the verified [`chain::ChainBlock`]s stay the truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainBlockView {
+    /// The block's chain height. Synthetic pre-cut entries a pruned holder
+    /// rebuilds from its checkpoint blob carry 0 (their real heights are
+    /// not reconstructible — the blob folds them away).
+    pub height: u64,
+    /// "genesis" | "applied" | "membership" | "checkpoint"
+    pub kind: String,
+    /// The gated surface an applied block targets ("" otherwise).
+    pub surface: String,
+    /// Display payload: for applied blocks the payload JSON (so frontends
+    /// render titles via their op-placeholder lexicon — language-neutral,
+    /// like [`SurfaceSnapshot::applied`]); for membership "op member"; for
+    /// checkpoint the upto; for genesis the republic name.
+    pub payload: Value,
+    /// The proposal id an applied block consumed (0 = none).
+    pub proposal_id: u64,
+    /// The m signers, roster order as on the block.
+    pub signers: Vec<String>,
 }
 
 /// Per-surface counters for the status summary.
@@ -3324,6 +3362,7 @@ mod tests {
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },
             Reply::Session(Box::default()),
+            Reply::Chain { blocks: vec![] },
         ];
         for r in replies {
             let json = serde_json::to_string(&r);
