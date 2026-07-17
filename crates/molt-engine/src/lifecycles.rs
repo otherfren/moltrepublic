@@ -120,7 +120,7 @@ impl State {
         // the genesis chain block goes to its own file, durably, before the
         // writer takes over — same reasoning as the MLS blob above
         if !chain.is_empty() {
-            opened.write_chain(&chain).map_err(|e| err(e.to_string()))?;
+            opened.write_chain(None, &chain).map_err(|e| err(e.to_string()))?;
         }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();

@@ -472,6 +472,7 @@ impl State {
         self.identity_sk = None;
         self.chain.clear();
         self.chain_head = None;
+        self.checkpoint_blob = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();
         self.proposal_changes.clear();

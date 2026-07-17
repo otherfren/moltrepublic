@@ -399,7 +399,6 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
 /// [`verify_chain`]. Trust model (documented, deliberate): the roster
 /// evolution below `upto` is attested by m-of-n instead of replayed —
 /// the same honest-majority assumption threshold governance stands on.
-#[allow(dead_code)] // consumed by WP4b stage 4 (drop + serve + recovery)
 pub(crate) fn verify_suffix_chain(
     blob: &molt_core::CheckpointState,
     blocks: &[ChainBlock],
@@ -517,7 +516,7 @@ impl State {
     /// `None` and nothing is projected (a partially-trusted chain could fork
     /// state — `documents/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
-        match verify_chain(&chain) {
+        match self.verify_own(&chain) {
             Ok(head) => {
                 self.chain = chain;
                 self.chain_head = Some(head);
@@ -527,6 +526,7 @@ impl State {
                 tracing::warn!(error = %e, "rejecting an unverifiable chain");
                 self.chain.clear();
                 self.chain_head = None;
+                self.checkpoint_blob = None;
             }
         }
     }
@@ -542,6 +542,16 @@ impl State {
             Surface,
             Vec<(Option<u64>, serde_json::Value)>,
         > = std::collections::HashMap::new();
+        // WP4b: a pruned holder seeds the projection from the checkpoint
+        // blob — the pre-cut applied entries stay readable after the drop
+        if let Some(blob) = &self.checkpoint_blob {
+            for (surface, entries) in &blob.applied {
+                let list = projected.entry(*surface).or_default();
+                for (id, payload) in entries {
+                    list.push((Some(*id), payload.clone()));
+                }
+            }
+        }
         for block in &self.chain {
             if let ChainChange::Applied {
                 proposal_id,
@@ -840,13 +850,15 @@ impl State {
     /// full-chain verification is refused and rolled back).
     fn append_committed_block(&mut self, block: ChainBlock) -> bool {
         self.chain.push(block);
-        match verify_chain(&self.chain) {
+        match self.verify_own(&self.chain) {
             Ok(head) => {
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 let chain = self.chain.clone();
                 if let Some(active) = &self.active {
-                    active.handle.persist_chain_blocking(chain);
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
                 }
                 true
             }
@@ -901,7 +913,7 @@ impl State {
             // proposal bookkeeping (the committer also cleans by id in
             // adopt_committed_block; receivers find it by content). Local
             // block-dropping below `upto` is stage 4.
-            ChainChange::Checkpoint { .. } => {
+            ChainChange::Checkpoint { upto, .. } => {
                 let sealed = &block.change;
                 let ids: Vec<u64> = self
                     .proposal_changes
@@ -913,7 +925,32 @@ impl State {
                     self.proposal_changes.remove(&id);
                     self.pending_sigs.remove(&id);
                 }
-                tracing::info!(height = block.height, "checkpoint sealed");
+                // B-F2: drop the summarized history locally, automatically —
+                // the vote just confirmed this summary is correct. The blob
+                // becomes the holder's trust anchor; the chain keeps the
+                // checkpoint block and everything after it.
+                let upto = *upto;
+                let anchor_height = block.height;
+                match self.own_checkpoint_state(upto) {
+                    Ok(blob) => {
+                        self.checkpoint_blob = Some(blob);
+                        self.chain.retain(|b| b.height >= anchor_height);
+                        self.apply_chain_to_state();
+                        let chain = self.chain.clone();
+                        if let Some(active) = &self.active {
+                            active
+                                .handle
+                                .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
+                        }
+                        tracing::info!(height = anchor_height, upto, "checkpoint sealed — history below the cut dropped");
+                    }
+                    Err(e) => {
+                        // keep full history rather than drop on a state we
+                        // could not recompute (should be impossible: the
+                        // verifier just matched this very state)
+                        tracing::warn!(error = %e, "checkpoint sealed but the blob could not be built — keeping full history");
+                    }
+                }
             }
             _ => {}
         }
@@ -1034,6 +1071,31 @@ impl State {
         }
     }
 
+    /// WP4b stage 4: verify a candidate chain in THIS holder's context —
+    /// a full holder verifies from the genesis, a pruned holder from its
+    /// checkpoint blob (`verify_suffix_chain`). The one entry every
+    /// adopt/append/probe path routes through.
+    pub(crate) fn verify_own(&self, blocks: &[ChainBlock]) -> Result<ChainHead, String> {
+        match &self.checkpoint_blob {
+            None => verify_chain(blocks),
+            Some(blob) => verify_suffix_chain(blob, blocks, &self.republic_id()),
+        }
+    }
+
+    /// The canonical state at `upto` from THIS holder's own material —
+    /// genesis-rooted for a full holder, blob-based for a pruned one.
+    /// What the propose/verify-before-sign paths hash.
+    pub(crate) fn own_checkpoint_state(
+        &self,
+        upto: u64,
+    ) -> Result<molt_core::CheckpointState, String> {
+        match &self.checkpoint_blob {
+            None => checkpoint_state(&self.chain, upto),
+            // the anchor block in chain[0] is state-neutral for the fold
+            Some(blob) => fold_state(blob.clone(), &self.chain, upto),
+        }
+    }
+
     /// WP4b stage 3: the human verb — propose the compaction cut at the
     /// CURRENT head (`upto` = head height, B-F1). The engine computes the
     /// canonical state hash itself, announces it, and co-signs; every
@@ -1050,7 +1112,8 @@ impl State {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
         };
         let upto = head.height;
-        let state = checkpoint_state(&self.chain, upto)
+        let state = self
+            .own_checkpoint_state(upto)
             .map_err(molt_core::MoltError::BadPayload)?;
         let state_hash = checkpoint_state_hash(&state);
         let id = self.next_id;
@@ -1094,7 +1157,7 @@ impl State {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
             return;
         }
-        let ours = match checkpoint_state(&self.chain, upto) {
+        let ours = match self.own_checkpoint_state(upto) {
             Ok(state) => checkpoint_state_hash(&state),
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
@@ -1206,7 +1269,7 @@ impl State {
     fn apply_next_block(&mut self, block: ChainBlock) -> bool {
         let mut probe = self.chain.clone();
         probe.push(block.clone());
-        if verify_chain(&probe).is_err() {
+        if self.verify_own(&probe).is_err() {
             tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
             return false;
         }
@@ -1343,14 +1406,14 @@ impl State {
             // the incoming block wins the tip; swap it in and re-verify
             let displaced = self.chain.pop();
             self.chain.push(block.clone());
-            if verify_chain(&self.chain).is_ok() {
-                if let Ok(head) = verify_chain(&self.chain) {
-                    self.chain_head = Some(head);
-                }
+            if let Ok(head) = self.verify_own(&self.chain) {
+                self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 let chain = self.chain.clone();
                 if let Some(active) = &self.active {
-                    active.handle.persist_chain_blocking(chain);
+                    active
+                        .handle
+                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
                 }
                 // the displaced proposal returns to pending and re-bases
                 if let Some(ChainChange::Applied { proposal_id, .. }) =
@@ -1978,6 +2041,72 @@ mod tests {
         // the sealed proposal's bookkeeping is gone on both
         assert!(!petra.proposal_changes.contains_key(&id));
         assert!(!walter.proposal_changes.contains_key(&id));
+    }
+
+    /// WP4b stage 4: sealing a checkpoint DROPS the summarized history
+    /// locally (B-F2), the blob becomes the trust anchor, pre-cut applied
+    /// entries stay readable, and the pruned holder keeps verifying and
+    /// extending its suffix chain — including a reopen-style re-adopt.
+    #[test]
+    fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // the propose flow seals the cut at 2-of-2 (stage-3 mechanics)
+        let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+        walter.receive_checkpoint_proposal(40, 1, &hash);
+        let change = ChainChange::Checkpoint { upto: 1, state_hash: hash };
+        let bytes = approval_bytes(&b.republic_id, 2, &change);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(40, "petra", 2, &petra_sig);
+        // sealed AND pruned: only the anchor remains, the blob anchors
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 2);
+        assert_eq!(walter.chain.len(), 1, "history below the cut is dropped");
+        assert!(matches!(
+            walter.chain.first().expect("anchor").change,
+            ChainChange::Checkpoint { .. }
+        ));
+        let blob = walter.checkpoint_blob.clone().expect("blob anchors the holder");
+        assert_eq!(blob.upto, 1);
+        // pre-cut applied entries survive in the read projection
+        let mem = walter.chain_applied.get(&Surface::Memory).expect("projection");
+        assert_eq!(mem.len(), 1, "the pre-cut applied entry stays readable");
+        // the pruned holder keeps governing: a fresh applied change seals
+        // on top of the suffix (verify runs the suffix rules)
+        let payload = json!({"op": "add_note", "title": "post-cut"});
+        walter.receive_proposed(41, Surface::Memory, payload.clone());
+        let post = ChainChange::Applied {
+            proposal_id: 41,
+            surface: Surface::Memory,
+            payload,
+        };
+        let bytes = approval_bytes(&b.republic_id, 3, &post);
+        let petra_sig = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(41, "petra", 3, &petra_sig);
+        walter.chain_sign_and_gossip_approval(41);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            3,
+            "the pruned holder extends its suffix"
+        );
+        assert_eq!(
+            walter.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2),
+            "pre- and post-cut entries read together"
+        );
+        // reopen-style: a fresh holder re-anchors on blob + suffix
+        let mut reopened = chain_peer("walter", &b, b.blocks.clone());
+        reopened.checkpoint_blob = Some(blob);
+        reopened.adopt_chain(walter.chain.clone());
+        assert_eq!(
+            reopened.chain_head.as_ref().expect("head").height,
+            3,
+            "a pruned chain re-adopts from the persisted blob"
+        );
+        assert_eq!(
+            reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+            Some(2)
+        );
     }
 
     /// Review pins: an id collision must never turn the auto-cosign into
