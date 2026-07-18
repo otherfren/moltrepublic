@@ -4086,30 +4086,61 @@ fn sound_name(i: i32) -> String {
     .to_string()
 }
 
+/// The last time an alert actually played — a debounce so a reconnect
+/// catch-up of hundreds of queued messages cannot spawn a player storm.
+static LAST_ALERT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 /// Play a short alert sound, fire-and-forget. The sample is synthesized in
 /// pure Rust (a tiny WAV, cached in the temp dir) and handed to the system
 /// player — pw-play/paplay/aplay, runtime-detected, silently a no-op when
 /// none exists. Deliberately NO compiled audio stack: cpal/rodio would pull
 /// ALSA's C bindings, and the pure-Rust posture stands (CLAUDE.md).
+///
+/// Total-review hardening: (1) at most one alert per 400 ms (a message
+/// burst plays once, not hundreds of times); (2) ALL work — the first-play
+/// WAV synthesis and the player spawn — runs on a detached thread, never
+/// the caller's UI/runtime thread; (3) the spawned player is REAPED (its
+/// `wait()` runs on that thread) so no zombies accumulate.
 fn play_alert(kind: &str) {
     if kind == "none" || kind.is_empty() {
         return;
     }
-    let path = std::env::temp_dir().join(format!("molt-alert-{kind}.wav"));
-    if !path.exists() && write_alert_wav(&path, kind).is_err() {
-        return;
-    }
-    for player in ["pw-play", "paplay", "aplay"] {
-        if std::process::Command::new(player)
-            .arg(&path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-        {
+    {
+        let now = std::time::Instant::now();
+        let mut last = match LAST_ALERT.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400)) {
             return;
         }
+        *last = Some(now);
     }
+    let kind = kind.to_string();
+    std::thread::spawn(move || {
+        // a per-process, per-kind path (the pid keeps two instances from
+        // racing the same file, and avoids trusting a world-writable name
+        // another local user could pre-plant)
+        let path = std::env::temp_dir()
+            .join(format!("molt-alert-{}-{kind}.wav", std::process::id()));
+        if !path.exists() && write_alert_wav(&path, &kind).is_err() {
+            return;
+        }
+        for player in ["pw-play", "paplay", "aplay"] {
+            match std::process::Command::new(player)
+                .arg(&path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.wait(); // reap — no zombie
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    });
 }
 
 /// Synthesize one alert as a 44.1 kHz mono 16-bit WAV: a few decaying
@@ -4514,7 +4545,7 @@ lexicon! {
     set_s3_unit_min: "min", "Minuten";
     set_s3_keep: "save up to", "behalte bis zu";
     set_s3_unit_copies: "copies", "Kopien";
-    toast_s3_ok: "S3 connection OK (mock)", "S3-Verbindung OK (Mock)";
+    toast_s3_ok: "S3 backup isn't wired up yet — nothing was tested.", "S3-Backup ist noch nicht angebunden — es wurde nichts getestet.";
     bk_col_local: "Local workspace", "Lokaler Workspace";
     bk_col_remote: "Backup in bucket", "Backup im Bucket";
     bk_col_auto: "Auto", "Auto";

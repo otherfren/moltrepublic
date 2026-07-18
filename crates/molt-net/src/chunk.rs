@@ -106,11 +106,13 @@ pub enum PushOutcome {
     Duplicate(MsgId),
 }
 
-/// One partially received message.
+/// One partially received message. `chunks` is a SPARSE map keyed by chunk
+/// index — its memory grows with chunks actually received, never with the
+/// attacker-controlled `count` in the header (a hostile count=65535 with
+/// one real chunk must not pin ~1.5 MB of empty slots).
 struct Partial {
     count: u16,
-    have: usize,
-    chunks: Vec<Option<Vec<u8>>>,
+    chunks: std::collections::BTreeMap<u16, Vec<u8>>,
 }
 
 /// Reassembles chunks into messages, deduplicating by
@@ -185,18 +187,15 @@ impl Reassembler {
                 self.order.push_back(id);
                 self.partial.entry(id).or_insert(Partial {
                     count,
-                    have: 0,
-                    chunks: vec![None; usize::from(count)],
+                    chunks: std::collections::BTreeMap::new(),
                 })
             }
         };
-        let slot = &mut partial.chunks[usize::from(index)];
-        if slot.is_some() {
+        if partial.chunks.contains_key(&index) {
             return Ok(PushOutcome::Duplicate(id));
         }
-        *slot = Some(payload);
-        partial.have += 1;
-        if partial.have < usize::from(partial.count) {
+        partial.chunks.insert(index, payload);
+        if partial.chunks.len() < usize::from(partial.count) {
             return Ok(PushOutcome::Buffered(id));
         }
 
@@ -215,7 +214,7 @@ impl Reassembler {
             self.completed.pop_front();
         }
         let mut msg = Vec::new();
-        for c in done.chunks.into_iter().flatten() {
+        for (_, c) in done.chunks {
             msg.extend_from_slice(&c);
         }
         Ok(PushOutcome::Complete(id, msg))

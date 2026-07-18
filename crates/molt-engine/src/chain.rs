@@ -264,7 +264,8 @@ fn verify_next(
             // their membership changes the roster, forking full holders
             // from suffix holders. A re-based checkpoint proposal must
             // therefore re-cut (recompute state + hash at the new head).
-            if *upto != block.height - 1 {
+            // upto == height - 1; height 0 is the genesis, never a checkpoint
+            if block.height == 0 || *upto != block.height - 1 {
                 return Err(format!(
                     "checkpoint upto {upto} must be exactly its block height {} minus one",
                     block.height
@@ -523,7 +524,10 @@ pub(crate) fn verify_suffix_chain(
     if &checkpoint_state_hash(blob) != state_hash {
         return Err("checkpoint blob does not match the signed state hash".to_string());
     }
-    if *upto != anchor.height - 1 {
+    // a checkpoint anchor can never be the genesis (height 0); the checked
+    // subtraction also rejects an attacker-served height-0 anchor instead
+    // of underflowing (overflow-checks=true → abort)
+    if anchor.height.checked_sub(1) != Some(*upto) {
         return Err(
             "checkpoint upto must be exactly the anchor height minus one".to_string(),
         );
@@ -784,12 +788,40 @@ impl State {
         member: &str,
         identity_pk: &str,
     ) {
-        self.proposal_changes.entry(id).or_insert_with(|| ChainChange::Membership {
+        self.next_id = self.next_id.max(id.saturating_add(1));
+        let change = ChainChange::Membership {
             op,
             member: member.to_string(),
             identity_pk: identity_pk.to_string(),
-        });
-        self.next_id = self.next_id.max(id + 1);
+        };
+        // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
+        // to `proposal_changes` first, so registering a Membership under an
+        // id that already names a SURFACE proposal (or a different pending
+        // change) would make honest members' later Approve of THAT proposal
+        // sign these membership bytes instead — a threshold-gate bypass that
+        // injects a roster member with no human ever approving a membership
+        // change. Refuse any occupied id that is not this exact change.
+        if !self.id_free_for(id, &change) {
+            tracing::warn!(%id, "refusing a membership proposal whose id names a different change");
+            return;
+        }
+        self.proposal_changes.insert(id, change);
+    }
+
+    /// Whether `id` may register `change`: free unless it already names a
+    /// surface proposal (`self.proposals`) or a *different* pending chain
+    /// change. Re-gossip of the identical change is idempotent (true). The
+    /// shared collision guard for every peer-chosen proposal id
+    /// (`receive_proposed` / `receive_membership_proposal` /
+    /// `receive_checkpoint_proposal`) — see the security note there.
+    pub(crate) fn id_free_for(&self, id: u64, change: &ChainChange) -> bool {
+        if self.proposals.contains_key(&id) {
+            return false;
+        }
+        match self.proposal_changes.get(&id) {
+            Some(existing) => existing == change,
+            None => true,
+        }
     }
 
     /// A recovery coordinator's re-admit decision (recovery step ❸): verify a
@@ -1374,8 +1406,8 @@ impl State {
             upto,
             state_hash: state_hash.to_string(),
         };
-        if self.proposals.contains_key(&id) {
-            tracing::warn!(%id, "refusing a checkpoint proposal whose id names a surface proposal");
+        if !self.id_free_for(id, &this) {
+            tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
             return;
         }
         match self.proposal_changes.get(&id) {
@@ -1404,6 +1436,16 @@ impl State {
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
     /// shows up and can be approved here.
     pub(crate) fn receive_proposed(&mut self, id: u64, surface: Surface, payload: serde_json::Value) {
+        self.next_id = self.next_id.max(id.saturating_add(1));
+        // SECURITY (symmetric to receive_membership_proposal): an id already
+        // registered in `proposal_changes` (a membership/checkpoint change)
+        // must not also become a surface proposal — `proposal_change` would
+        // keep resolving it to the chain change, so approvals of this
+        // "surface proposal" would sign that change's bytes.
+        if self.proposal_changes.contains_key(&id) {
+            tracing::warn!(%id, "refusing a surface proposal whose id names a chain change");
+            return;
+        }
         self.proposals
             .entry(id)
             .or_insert_with(|| molt_core::ProposalRecord {
@@ -1414,12 +1456,22 @@ impl State {
                 declined_at: 0,
                 declined_by: String::new(),
             });
-        self.next_id = self.next_id.max(id + 1);
     }
 
     /// Inbound: a peer's signed approval (gossip). Collect + try to seal.
     pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) {
         if sig.is_empty() {
+            return;
+        }
+        // SECURITY: `height` is peer-supplied. A legitimate approval can
+        // only be for the current target (head + 1) or a value we already
+        // hold; an out-of-range height (e.g. u64::MAX) would let collect_sig
+        // adopt it, clear the real signatures, and — since rebase only
+        // sweeps heights BELOW the target — never recover, permanently
+        // freezing the proposal (governance-liveness DoS). Bound it here.
+        let target = self.chain_head.as_ref().map(|h| h.height + 1);
+        if target.is_some_and(|t| height > t) {
+            tracing::warn!(%id, height, "dropping an approval for an implausible future height");
             return;
         }
         self.collect_sig(id, height, by, sig);
@@ -1601,7 +1653,12 @@ impl State {
             self.pending_served_blob = None;
             return;
         }
-        let anchor_height = blob.upto + 1;
+        // an attacker-served blob.upto could be u64::MAX; a saturating add
+        // makes the lookup miss rather than overflow (overflow-checks abort)
+        let Some(anchor_height) = blob.upto.checked_add(1) else {
+            self.pending_served_blob = None;
+            return;
+        };
         if !self.pending_blocks.contains_key(&anchor_height) {
             return;
         }
@@ -1609,7 +1666,8 @@ impl State {
         let mut h = anchor_height;
         while let Some(b) = self.pending_blocks.get(&h) {
             candidate.push(b.clone());
-            h += 1;
+            let Some(next) = h.checked_add(1) else { break };
+            h = next;
         }
         match verify_suffix_chain(&blob, &candidate, &self.republic_id()) {
             Ok(head) => {
@@ -2513,6 +2571,66 @@ mod tests {
             Some(2),
             "pre-cut and post-cut entries both readable"
         );
+    }
+
+    /// SECURITY (total-review 2026-07-18): a peer-chosen id must never let
+    /// a MEMBERSHIP proposal hijack a surface proposal's approvals — the
+    /// same forge the checkpoint arm was hardened against, on the older
+    /// membership arm. And symmetrically a surface proposal must not shadow
+    /// a pending chain change.
+    #[test]
+    fn a_membership_proposal_cannot_hijack_a_colliding_surface_id() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // honest surface proposal id 5, awaiting approvals
+        walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}));
+        // attacker gossips a membership change under the SAME id
+        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32));
+        // the id still resolves to the SURFACE proposal — approving it can
+        // never sign membership bytes
+        assert!(matches!(
+            walter.proposal_change(5),
+            Some(ChainChange::Applied { .. })
+        ));
+        // the reverse: a surface proposal cannot shadow a pending membership
+        let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
+        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32));
+        walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
+        assert!(matches!(
+            walter2.proposal_change(6),
+            Some(ChainChange::Membership { .. })
+        ));
+        assert!(!walter2.proposals.contains_key(&6), "surface proposal refused");
+    }
+
+    /// SECURITY: attacker-served checkpoint data with a height-0 anchor or
+    /// upto = u64::MAX must be REFUSED, never underflow/overflow into a
+    /// process abort (overflow-checks=true).
+    #[test]
+    fn malicious_checkpoint_heights_are_refused_not_panics() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let blob = checkpoint_state(&b.blocks, 0).expect("state@0");
+        // a height-0 "checkpoint anchor" (anchor.height - 1 would underflow)
+        let anchor0 = ChainBlock {
+            height: 0,
+            prev: GENESIS_PREV.to_string(),
+            change: ChainChange::Checkpoint {
+                upto: u64::MAX,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            sigs: Vec::new(),
+        };
+        assert!(
+            verify_suffix_chain(&blob, &[anchor0], &b.republic_id).is_err(),
+            "a height-0 anchor is refused, not an underflow abort"
+        );
+        // a served blob with upto = u64::MAX (blob.upto + 1 would overflow)
+        let mut peer = chain_peer("walter", &b, b.blocks.clone());
+        let mut bomb = blob.clone();
+        bomb.upto = u64::MAX;
+        peer.pending_served_blob = Some(bomb);
+        peer.try_adopt_from_blob(); // must not panic
+        assert!(peer.pending_served_blob.is_none(), "the overflow blob is dropped");
     }
 
     /// Review pins: an id collision must never turn the auto-cosign into

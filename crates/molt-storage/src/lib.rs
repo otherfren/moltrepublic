@@ -1914,19 +1914,23 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         let _ = reply.send(ws.read_transport_state());
                     }
                     Ok(WriterMsg::PersistChain { blob, blocks, ack }) => {
-                        match ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync()) {
-                            Err(e) => fail(&failed_flag, "chain.state write", &e),
-                            // WP4b: the FIRST prune raises the manifest
-                            // version — an older binary must refuse the
-                            // whole workspace rather than run chainless on
-                            // a partial view. Only after a SUCCESSFUL write:
-                            // the version must never misdescribe the layout.
-                            Ok(()) if blob.is_some() => {
-                                if let Err(e) = ws.bump_pruned_version() {
-                                    fail(&failed_flag, "manifest version bump", &e);
-                                }
+                        // WP4b: raise the manifest version BEFORE writing a
+                        // pruned chain.state (total-review fix). Bumping
+                        // first is strictly safe — a crash in between only
+                        // OVER-describes (an old binary refuses a still-full
+                        // workspace: availability loss). The reverse order
+                        // left a window where a pruned chain.state sat under
+                        // the old version, and an old binary would run
+                        // chainless on it (a governance fork).
+                        if blob.is_some() {
+                            if let Err(e) = ws.bump_pruned_version() {
+                                fail(&failed_flag, "manifest version bump", &e);
                             }
-                            Ok(()) => {}
+                        }
+                        if let Err(e) =
+                            ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync())
+                        {
+                            fail(&failed_flag, "chain.state write", &e);
                         }
                         let _ = ack.send(());
                     }
