@@ -282,8 +282,40 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
   ephemere Logs sind zwischen Nodes nicht identisch (Q4-Rejoiner ohne
   Backfill, Ankunftsreihenfolgen, lokale Uhren). Dafür bleibt WP4a
   zuständig — lokal, Policy-vollziehend.
-- Checkpoint-Auslösung ist Governance-Sache (menschliches Verb); keine
-  Automatik in v1.
+- ~~Checkpoint-Auslösung ist Governance-Sache (menschliches Verb); keine
+  Automatik in v1.~~ **Revidiert (Produktentscheidung 2026-07-18): die
+  Auslösung ist AUTOMATIK** (`maybe_auto_checkpoint`, molt-engine
+  chain.rs) — der GUI-Knopf ist entfernt, `propose_checkpoint` bleibt
+  als co-equales MCP-Verb (manueller Override). Die Signier-Seite war
+  immer schon mechanisch (verify-before-sign); automatisiert wurde nur
+  der Trigger, kollisionsfrei und deterministisch:
+  - Es triggert ausschließlich der **alphabetisch namenskleinste
+    Roster-Member** (ein Proposer — Proposal-Ids sind knoten-lokal;
+    zwei gleichzeitige Auto-Proposer würden kollidieren). Ist er
+    offline, passiert nichts — wie bei einem abwesenden manuellen
+    Proposer; das MCP-Verb bleibt der Ausweg.
+  - Nur wenn dieser Knoten **selbst am Live-Head versiegelt hat**
+    (`adopt_committed_block`, nach dem Re-Base): alle Co-Signer stehen
+    dann am selben Head — genau was `receive_checkpoint_proposal` zum
+    Nachrechnen braucht. Passiv angewendete Blöcke (`apply_next_block`:
+    Catch-up-Serve, Broadcast eines anderen Sealers) triggern NIE — ein
+    aufholender Knoten würde am veralteten Zwischen-Head schneiden, und
+    ein im Gleichschritt aufholendes Quorum könnte diesen Cut sogar
+    co-signieren und einen Holder NACH dem History-Drop forken
+    (Review-Fund 2026-07-18; per Test gepinnt). Kein Trigger beim Open
+    in ein kaltes Mesh (ohne Re-Serve wäre der Cut nur verloren).
+  - Nie **während offener Abstimmungen** (offene Surface-Proposals,
+    laufende Signatur-Sammlungen, oder ein bereits schwebender Cut) —
+    ein dazwischen siegelnder Block würde den Cut nur stale machen.
+    Der Commit, der die letzte offene Abstimmung auflöst, feuert den
+    Check erneut.
+  - **Stale braucht keinen Timer/Backoff**: der Block, der den Cut
+    stale macht, durchläuft denselben Hook und re-proposed am neuen
+    Head — maximal ein Auto-Propose pro committetem Block. Der
+    Stale-Toast in der GUI ist entfernt (das Event bleibt für MCP);
+    sichtbar bleibt nur „Checkpoint besiegelt #X".
+  - Schwelle: `AUTO_CHECKPOINT_MIN_LEN = 32` lokal gehaltene Blöcke —
+    Konstante, keine Einstellung (Kompaktion ist Hygiene, nicht Policy).
 
 ## B.8 Etappen WP4b (je einzeln mergebar, TDD)
 

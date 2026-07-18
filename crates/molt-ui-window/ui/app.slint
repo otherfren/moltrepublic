@@ -470,7 +470,6 @@ export component AppWindow inherits Window {
     // (DeleteChat)
     callback delete-chat(string);
     // WP4b: propose a chain checkpoint (threshold compaction cut)
-    callback propose-checkpoint();
     // jump from a patch channel's discussion back to its vote — Rust
     // resolves the hosting surface from the proposal cache
     callback jump-to-vote();
@@ -3886,19 +3885,10 @@ export component AppWindow inherits Window {
                                         root.org-retention-modal-open = true;
                                     }
                                 }
-                                // WP4b: the checkpoint verb — a normal
-                                // threshold act; every member auto-confirms
-                                // only what its own chain recomputes
-                                if root.org-chain-governed: HorizontalLayout {
-                                    alignment: start;
-                                    AppButton {
-                                        label: "✂ \{Strings.org-checkpoint}";
-                                        tooltip: Strings.org-checkpoint-tip;
-                                        clicked => {
-                                            root.propose-checkpoint();
-                                        }
-                                    }
-                                }
+                                // WP4b: chain compaction (checkpoints) runs
+                                // AUTOMATICALLY in the engine — no operator
+                                // verb here; the sealed toast is the only
+                                // surface (MCP keeps propose_checkpoint)
                                 // the approvals table shrink-wraps: its
                                 // content is a handful of counts — spread
                                 // over the full pane it read as empty

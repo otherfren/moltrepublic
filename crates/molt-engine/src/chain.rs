@@ -27,6 +27,14 @@ use molt_core::{
 
 use crate::State;
 
+/// WP4b automation: the chain length (blocks held locally, anchor
+/// included) at which the lowest-named member auto-proposes the next
+/// compaction cut. Blocks are governance decisions — rare — so this is
+/// months of activity for a small republic, and after each cut the local
+/// chain shrinks back to the anchor + suffix. A constant, not a setting:
+/// compaction is hygiene, not policy (`documents/log_compaction.md`).
+pub(crate) const AUTO_CHECKPOINT_MIN_LEN: usize = 32;
+
 /// The **ephemeral** signature collection for one pending proposal on a
 /// chain-governed republic (never persisted; rebuilt from gossip). The
 /// committer bundles these into a block once `sigs` reaches the threshold. A
@@ -997,6 +1005,17 @@ impl State {
         self.pending_sigs.remove(&proposal_id);
         self.proposal_changes.remove(&proposal_id);
         tracing::debug!(height = block.height, %proposal_id, "sealed and broadcast a chain block");
+        // WP4b automation (2026-07-18): checkpoints trigger themselves —
+        // HERE and only here, because reaching adopt_committed_block means
+        // THIS node just sealed at the live head with fresh signatures. A
+        // passively applied block (apply_next_block: catch-up serve,
+        // another sealer's broadcast) must never trigger: a node draining
+        // a catch-up would propose at a stale intermediate head, and in a
+        // lockstep whole-republic catch-up m nodes could even co-sign that
+        // stale cut and fork a holder AFTER it dropped its history. After
+        // the re-base above, so a cut this very block staled is swept (and
+        // announced stale) before the re-propose at the new head.
+        self.maybe_auto_checkpoint();
     }
 
     /// Verify a block against the current chain, append + persist it, and
@@ -1113,6 +1132,71 @@ impl State {
             _ => {}
         }
         self.rebase_pending_approvals();
+    }
+
+    /// WP4b automation (product decision 2026-07-18): the compaction cut
+    /// proposes ITSELF — the GUI button is gone; `propose_checkpoint`
+    /// stays as the co-equal MCP verb (manual override). Collision-free
+    /// and deterministic by construction:
+    ///
+    /// - only the alphabetically LOWEST-named roster member triggers
+    ///   (one proposer — proposal ids are node-local, two simultaneous
+    ///   auto-proposers would collide); if that member is offline no cut
+    ///   happens, exactly like a manual proposer being away,
+    /// - only right after THIS node itself sealed a block at the live
+    ///   head (`adopt_committed_block`) — every member that just
+    ///   co-signed is at the same head, which is what the receivers'
+    ///   verify-before-sign recomputation needs. Passively applied
+    ///   blocks (`apply_next_block`: catch-up serves, another sealer's
+    ///   broadcast) never trigger — a catching-up node would propose at
+    ///   a stale intermediate head (the `catchup_from`/`pending_blocks`
+    ///   guard below is defense in depth only: the first served block
+    ///   already clears `catchup_from`),
+    /// - never while a vote is open (an interfering seal would stale
+    ///   the cut; the commit resolving the last open vote re-fires
+    ///   this check),
+    /// - a staled cut needs no timer or backoff: the very block that
+    ///   staled it lands here again and re-proposes at the new head, so
+    ///   there is at most one auto-propose per committed block.
+    fn maybe_auto_checkpoint(&mut self) {
+        if self.chain.len() < AUTO_CHECKPOINT_MIN_LEN {
+            return;
+        }
+        if self.catchup_from.is_some() || !self.pending_blocks.is_empty() {
+            return;
+        }
+        let Some(head) = self.chain_head.as_ref() else {
+            return;
+        };
+        let me = self.member();
+        let lowest = head.identities.iter().map(|i| i.member.as_str()).min();
+        if lowest != Some(me.as_str()) {
+            return;
+        }
+        // "a vote is open": a surface proposal still Proposed, signatures
+        // still being collected, or a cut already in flight. Committed
+        // membership residue in `proposal_changes` (never swept on
+        // receivers) must NOT block the automation forever, so registered
+        // changes only count via their pending signatures — except a
+        // checkpoint entry, which means a cut is already pending.
+        let vote_open = self
+            .proposals
+            .values()
+            .any(|p| p.state == ProposalState::Proposed)
+            || !self.pending_sigs.is_empty()
+            || self
+                .proposal_changes
+                .values()
+                .any(|c| matches!(c, ChainChange::Checkpoint { .. }));
+        if vote_open {
+            return;
+        }
+        match self.cmd_propose_checkpoint() {
+            Ok(_) => {
+                tracing::info!(len = self.chain.len(), "auto-proposed a compaction checkpoint");
+            }
+            Err(e) => tracing::warn!(error = %e, "auto-checkpoint propose failed"),
+        }
     }
 
     /// The coordinator's MLS re-key once a `Restored` block committed: run
@@ -2537,6 +2621,159 @@ mod tests {
             reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
             Some(2)
         );
+    }
+
+    /// Grow a builder chain to exactly `len` blocks (genesis included).
+    fn grown_chain(len: usize) -> Builder {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        for id in 0..len.saturating_sub(1) {
+            b.commit_applied(u64::try_from(id + 100).expect("small id"), &["petra", "walter"]);
+        }
+        assert_eq!(b.blocks.len(), len);
+        b
+    }
+
+    /// Drive one gated proposal through `s` to a sealed block: peer
+    /// approval first, then the local co-sign seals at 2-of-2.
+    fn seal_one(s: &mut crate::State, b: &Builder, peer: &str, id: u64) {
+        let target = s.chain_head.as_ref().expect("head").height + 1;
+        let payload = json!({"op": "add_note", "id": id});
+        s.receive_proposed(id, Surface::Memory, payload.clone());
+        let change = ChainChange::Applied {
+            proposal_id: id,
+            surface: Surface::Memory,
+            payload,
+        };
+        let bytes = approval_bytes(&b.republic_id, target, &change);
+        let sig = identity_sign(b.key(peer), &bytes);
+        s.receive_approval(id, peer, target, &sig);
+        s.chain_sign_and_gossip_approval(id);
+        assert_eq!(
+            s.chain_head.as_ref().expect("head").height,
+            target,
+            "the driven proposal seals"
+        );
+    }
+
+    /// The pending checkpoint cut registered in `s`, if any.
+    fn pending_cut(s: &crate::State) -> Option<u64> {
+        s.proposal_changes.values().find_map(|c| match c {
+            ChainChange::Checkpoint { upto, .. } => Some(*upto),
+            _ => None,
+        })
+    }
+
+    /// WP4b automation: once the chain reaches the trigger length, the
+    /// alphabetically LOWEST-named roster member auto-proposes the
+    /// compaction cut right after a block commit (every co-signer is at
+    /// the same head then) — and co-signs it like a manual propose. A
+    /// non-lowest member never auto-proposes: one deterministic
+    /// proposer, no node-local id collisions.
+    #[test]
+    fn the_lowest_member_auto_proposes_a_checkpoint_at_the_trigger_length() {
+        let b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 2);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        // one below the trigger: a commit runs the hook, but no cut yet —
+        // pins the length lower bound THROUGH the hook, not just at init
+        seal_one(&mut petra, &b, "walter", 90);
+        assert_eq!(pending_cut(&petra), None, "below the trigger: no cut");
+        seal_one(&mut petra, &b, "walter", 300);
+        let head = petra.chain_head.as_ref().expect("head").height;
+        assert_eq!(
+            pending_cut(&petra),
+            Some(head),
+            "the lowest member proposes the cut at the fresh head"
+        );
+
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        seal_one(&mut walter, &b, "petra", 90);
+        seal_one(&mut walter, &b, "petra", 300);
+        assert_eq!(
+            pending_cut(&walter),
+            None,
+            "a non-lowest member never auto-proposes"
+        );
+    }
+
+    /// The trigger is bound to SEALING at the live head: a passively
+    /// applied block (catch-up serve, another sealer's broadcast) never
+    /// auto-proposes — a catching-up node would cut at a stale
+    /// intermediate head, and a lockstep-catching-up quorum could even
+    /// co-sign that cut and fork a holder after it dropped history.
+    #[test]
+    fn a_passively_applied_block_never_auto_proposes() {
+        let mut b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 1);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        // the trigger length arrives via the PASSIVE path — no cut
+        b.commit_applied(400, &["petra", "walter"]);
+        petra.receive_block(b.blocks.last().expect("built block").clone());
+        assert_eq!(petra.chain.len(), AUTO_CHECKPOINT_MIN_LEN, "passively at length");
+        assert_eq!(
+            pending_cut(&petra),
+            None,
+            "a passively applied block never triggers the cut"
+        );
+        // the next SELF-sealed block fires it
+        seal_one(&mut petra, &b, "walter", 90);
+        let head = petra.chain_head.as_ref().expect("head").height;
+        assert_eq!(
+            pending_cut(&petra),
+            Some(head),
+            "the node's own seal at the live head triggers the cut"
+        );
+    }
+
+    /// The automation never cuts while a vote is open: an interfering
+    /// seal would only stale the cut. The trigger re-fires on the commit
+    /// that resolves the last open vote.
+    #[test]
+    fn no_auto_checkpoint_while_a_vote_is_open() {
+        let b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 1);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        // a second, still-open vote holds the cut back
+        petra.receive_proposed(91, Surface::Memory, json!({"op": "add_note", "id": 91}));
+        seal_one(&mut petra, &b, "walter", 90);
+        assert_eq!(
+            pending_cut(&petra),
+            None,
+            "no cut while another vote is open"
+        );
+        // resolving the open vote triggers the cut on ITS commit
+        let target = petra.chain_head.as_ref().expect("head").height + 1;
+        let change = ChainChange::Applied {
+            proposal_id: 91,
+            surface: Surface::Memory,
+            payload: json!({"op": "add_note", "id": 91}),
+        };
+        let bytes = approval_bytes(&b.republic_id, target, &change);
+        let sig = identity_sign(b.key("walter"), &bytes);
+        petra.receive_approval(91, "walter", target, &sig);
+        petra.chain_sign_and_gossip_approval(91);
+        assert_eq!(
+            pending_cut(&petra),
+            Some(target),
+            "the commit that clears the last open vote fires the cut"
+        );
+    }
+
+    /// A staled cut needs no timer: the very block that staled it re-runs
+    /// the trigger and re-proposes at the new head.
+    #[test]
+    fn a_staled_auto_cut_re_proposes_on_the_next_commit() {
+        let b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 1);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        seal_one(&mut petra, &b, "walter", 90);
+        let first_cut = pending_cut(&petra).expect("auto cut pending");
+        // an interfering surface vote seals first — the cut goes stale
+        // (id 300: well clear of the auto-cut's freshly minted next_id)
+        seal_one(&mut petra, &b, "walter", 300);
+        let head = petra.chain_head.as_ref().expect("head").height;
+        assert_eq!(
+            pending_cut(&petra),
+            Some(head),
+            "the staled cut is re-proposed at the new head"
+        );
+        assert!(first_cut < head, "the old cut was swept, not resurrected");
     }
 
     /// WP4b stage 4b: a holder that is BEHIND a served cut re-anchors on
