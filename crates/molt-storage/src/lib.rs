@@ -41,6 +41,8 @@
 //! workspace dir, not a fully compromised home directory (passphrase sealing
 //! is the opt-in v2, milestone S6).
 
+pub mod export;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -409,6 +411,31 @@ fn seal_seed_entropy(
     Ok(out)
 }
 
+/// Unseal a `keys/seed.sealed` blob with the device key (AAD
+/// [`seed_seal_aad`]). The ONE unseal path for the sealed seed — the phrase
+/// readout and the export both go through here, so the wire format never
+/// forks (S6 changes it in exactly one place).
+fn unseal_seed_entropy(
+    device_key: &[u8; 32],
+    id: &[u8; 32],
+    blob: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    if blob.len() <= NONCE_LEN {
+        return Err(StorageError::BadFile("sealed seed is too short".to_string()));
+    }
+    let (nonce, ct) = blob.split_at(NONCE_LEN);
+    let cipher = XChaCha20Poly1305::new(device_key.into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ct,
+                aad: &seed_seal_aad(id),
+            },
+        )
+        .map_err(|_| StorageError::Crypto("unsealing the stored seed failed".to_string()))
+}
+
 /// Read a workspace's recovery phrase back from `keys/seed.sealed`.
 /// `None` for anything that isn't a healthy sealed seed — absent file
 /// (pre-seed-storage workspace), foreign device key, tampered blob —
@@ -422,10 +449,6 @@ pub fn read_sealed_seed(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<Stri
             return None;
         }
     };
-    if blob.len() <= NONCE_LEN {
-        tracing::warn!(dir = %ws_dir.display(), "sealed seed is too short");
-        return None;
-    }
     let id = id_bytes(id_hex).ok()?;
     let device_key = match load_or_create_device_key(&device_key_path(root)) {
         Ok(k) => k,
@@ -434,17 +457,13 @@ pub fn read_sealed_seed(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<Stri
             return None;
         }
     };
-    let (nonce, ct) = blob.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new((&device_key).into());
-    let entropy = cipher
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ct,
-                aad: &seed_seal_aad(&id),
-            },
-        )
-        .ok()?;
+    let entropy = match unseal_seed_entropy(&device_key, &id, &blob) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(dir = %ws_dir.display(), error = %e, "sealed seed unusable");
+            return None;
+        }
+    };
     Some(bip39::Mnemonic::from_entropy(&entropy).ok()?.to_string())
 }
 

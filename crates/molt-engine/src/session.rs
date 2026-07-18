@@ -875,6 +875,122 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Manual workspace export (story 9): synchronous validation, then the
+    /// blocking blob build (Argon2 + file I/O) runs OFF the actor via
+    /// `spawn_blocking`; the real outcome returns as
+    /// [`molt_core::Command::NetExportDone`] / `NetExportFailed` — the
+    /// engine never fakes a success. Exporting the OPEN workspace is fine:
+    /// log segments are append-only and the state files atomic-rename, so a
+    /// concurrent copy is crash-consistent (design §6.1).
+    pub(crate) fn cmd_export_workspace(
+        &mut self,
+        id: WorkspaceId,
+        dest: String,
+        passphrase: String,
+    ) -> Result<Reply, MoltError> {
+        let Some(entry) = self.session.workspaces.iter().find(|w| w.id == id) else {
+            return Err(MoltError::UnknownWorkspace(id));
+        };
+        if entry.encrypted {
+            return Err(MoltError::WorkspaceEncrypted(id));
+        }
+        if dest.trim().is_empty() {
+            return Err(MoltError::BadPayload(
+                "an export needs a target file path".to_string(),
+            ));
+        }
+        // the engine-enforced passphrase policy (design §3.4) — fail fast,
+        // before any state changes
+        molt_storage::export::check_passphrase_policy(&passphrase)
+            .map_err(|e| MoltError::BadPayload(e.to_string()))?;
+        if self.session.export.running {
+            return Err(MoltError::WorkspaceBusy(
+                "an export is already running".to_string(),
+            ));
+        }
+        let root = self.workspace_root();
+        let Some(dir) = molt_storage::find_workspace_dir(&root, &id) else {
+            return Err(MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            )));
+        };
+        let dest_path = molt_storage::expand_tilde(dest.trim());
+        let dest_str = dest_path.display().to_string();
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("engine is shutting down".to_string()));
+        };
+        self.session.export = molt_core::ExportState {
+            running: true,
+            workspace: id.clone(),
+            dest: dest_str.clone(),
+            result: String::new(),
+            bytes: 0,
+            skipped: Vec::new(),
+        };
+        self.emit_session(SessionScope::Full);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || {
+                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
+            })
+            .await;
+            let cmd = match res {
+                Ok(Ok(outcome)) => molt_core::Command::NetExportDone {
+                    id,
+                    dest: dest_str,
+                    bytes: outcome.bytes,
+                    skipped: outcome.skipped,
+                },
+                Ok(Err(e)) => molt_core::Command::NetExportFailed { id, error: e.to_string() },
+                Err(e) => molt_core::Command::NetExportFailed {
+                    id,
+                    error: format!("export task failed: {e}"),
+                },
+            };
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The export task confirmed the blob on disk, fsynced (engine-internal).
+    pub(crate) fn cmd_net_export_done(
+        &mut self,
+        id: WorkspaceId,
+        dest: String,
+        bytes: u64,
+        skipped: Vec<String>,
+    ) -> Result<Reply, MoltError> {
+        self.session.export = molt_core::ExportState {
+            running: false,
+            workspace: id,
+            dest,
+            result: "ok".to_string(),
+            bytes,
+            skipped,
+        };
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The export task failed (engine-internal) — the reason is surfaced
+    /// verbatim; the stamp of a previous success does not survive (the
+    /// state always describes the LAST attempt).
+    pub(crate) fn cmd_net_export_failed(
+        &mut self,
+        id: WorkspaceId,
+        error: String,
+    ) -> Result<Reply, MoltError> {
+        let ex = &mut self.session.export;
+        ex.running = false;
+        ex.workspace = id;
+        ex.result = format!("error: {error}");
+        ex.bytes = 0;
+        ex.skipped = Vec::new();
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_set_workspace_backup(
         &mut self,
         id: WorkspaceId,
@@ -992,6 +1108,56 @@ impl State {
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
+}
+
+/// Blocking half of the manual export (runs inside `spawn_blocking`): build
+/// the blob into `<name>.part` next to the destination, fsync it, then
+/// atomically rename onto `dest` — a crash or failure never leaves a
+/// half-written file under the target name. Missing parent directories are
+/// created; an existing target file is replaced.
+fn export_to_file(
+    root: &std::path::Path,
+    ws_dir: &std::path::Path,
+    dest: &std::path::Path,
+    passphrase: zeroize::Zeroizing<String>,
+) -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export.molt.enc".to_string());
+    let part = dest.with_file_name(format!("{name}.part"));
+    // any failure past this point removes the partial file — a failed
+    // export leaves nothing behind under any name
+    let write = || -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
+        let file = std::fs::File::create(&part)?;
+        let mut out = std::io::BufWriter::new(file);
+        let key = molt_storage::export::ExportKey::Passphrase(passphrase);
+        let outcome = molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?;
+        use std::io::Write as _;
+        out.flush()?;
+        let file = out
+            .into_inner()
+            .map_err(|e| molt_storage::StorageError::Io(e.into_error()))?;
+        file.sync_all()?;
+        std::fs::rename(&part, dest)?;
+        // fsync the containing directory, or a power loss can undo the
+        // rename even though the data blocks are on disk (same rule as
+        // molt-storage's write_atomic)
+        if let Some(parent) = dest.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(outcome)
+    };
+    let res = write();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    res
 }
 
 /// Value validation shared by save and reload: nothing invalid reaches the

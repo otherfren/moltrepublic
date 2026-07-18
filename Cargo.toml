@@ -91,6 +91,8 @@ base64             = "0.22"   # smp:// fingerprint is base64url(sha256(CA DER))
 x25519-dalek       = { version = "2", features = ["static_secrets"] }  # queue DH keys
 crypto_box         = "0.9"    # NaCl crypto_box for SMP message-body encryption
 crc32c             = "0.6"    # torn-write/bitrot detection over the ciphertext
+argon2             = "0.5"    # passphrase KDF of the export blob (RustCrypto, pure Rust)
+unicode-normalization = "0.1" # NFC of export passphrases before the KDF
 getrandom          = "0.2"    # OS CSPRNG: seeds, nonces, device key
 hex                = "0.4"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)

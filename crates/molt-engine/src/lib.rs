@@ -886,6 +886,13 @@ impl State {
             Command::SetWorkspaceBackup { id, enabled } => {
                 self.cmd_set_workspace_backup(id, enabled)
             }
+            Command::ExportWorkspace { id, dest, passphrase } => {
+                self.cmd_export_workspace(id, dest, passphrase)
+            }
+            Command::NetExportDone { id, dest, bytes, skipped } => {
+                self.cmd_net_export_done(id, dest, bytes, skipped)
+            }
+            Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
 
             // lifecycles.rs
             Command::RestoreStart { way, target } => self.cmd_restore_start(way, target),
@@ -1333,6 +1340,132 @@ mod tests {
             assert!(molt_storage::find_workspace_dir(&root, &id).is_none());
             assert!(root.join(".trash").read_dir().expect("trash").count() > 0);
         });
+    }
+
+    /// Story 9: the manual export drives a REAL `molt-export-v1` blob onto
+    /// disk (decryptable at the storage layer), enforces the passphrase
+    /// policy synchronously, and reports an unwritable path as an honest
+    /// error — never a fake success.
+    #[test]
+    fn manual_export_writes_a_real_blob_and_fails_honestly() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let session = SessionView {
+                workspaces: Vec::new(),
+                settings: SessionSettings {
+                    workspace_dir: tmp.path().join("workspaces").display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
+            w.execute(Command::CreateStart {
+                name: "Blob Republic".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+            })
+            .await
+            .expect("create start");
+            await_founding(&w).await;
+            w.execute(Command::CreateFinish).await.expect("finish");
+            let id = read_session(&w).await.active_workspace.clone();
+            w.execute(Command::Chat {
+                body: "history to back up".to_string(),
+                quote: None,
+                channel: molt_core::ChannelRef::default(),
+            })
+            .await
+            .expect("chat");
+
+            let pass = "correct horse battery".to_string();
+            // passphrase policy: engine-enforced, synchronous, honest
+            let err = w
+                .execute(Command::ExportWorkspace {
+                    id: id.clone(),
+                    dest: tmp.path().join("x.molt.enc").display().to_string(),
+                    passphrase: "neunchars".to_string(),
+                })
+                .await
+                .expect_err("9 chars must be refused");
+            assert!(err.to_string().contains("at least 10"), "{err}");
+            // unknown workspace is refused before anything runs
+            assert!(w
+                .execute(Command::ExportWorkspace {
+                    id: "77".repeat(32),
+                    dest: tmp.path().join("x.molt.enc").display().to_string(),
+                    passphrase: pass.clone(),
+                })
+                .await
+                .is_err());
+
+            // the real export, into a directory that does not exist yet
+            let dest = tmp.path().join("backups").join("blob.molt.enc");
+            w.execute(Command::ExportWorkspace {
+                id: id.clone(),
+                dest: dest.display().to_string(),
+                passphrase: pass.clone(),
+            })
+            .await
+            .expect("export kickoff");
+            let sv = read_session(&w).await;
+            assert_eq!(sv.export.workspace, id);
+            let outcome = await_export(&w).await;
+            assert_eq!(outcome.result, "ok", "export must succeed: {outcome:?}");
+            assert!(outcome.bytes > 0);
+            let blob = std::fs::read(&dest).expect("blob on disk");
+            assert_eq!(outcome.bytes, u64::try_from(blob.len()).expect("len"));
+            // the blob decrypts and verifies at the storage layer
+            let a = molt_storage::export::read_export(
+                &mut blob.as_slice(),
+                &molt_storage::export::ExportSecret::passphrase(pass.clone()),
+            )
+            .expect("blob decrypts");
+            assert_eq!(a.header.workspace_id, id);
+            assert!(a.entries.iter().any(|e| e.path == "manifest.toml"));
+            assert!(a.entries.iter().any(|e| e.path == "log/000001.mlog"));
+            assert!(
+                a.entries.iter().all(|e| e.path != "transport.state"),
+                "live transport state must never be exported"
+            );
+            // no stray .part file remains
+            assert!(std::fs::read_dir(dest.parent().expect("parent"))
+                .expect("dir")
+                .all(|e| !e
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".part")));
+
+            // honest failure: the destination's parent is a FILE — the task
+            // must report the real error, not a fake success
+            let blocker = tmp.path().join("blocker");
+            std::fs::write(&blocker, b"in the way").expect("blocker");
+            w.execute(Command::ExportWorkspace {
+                id: id.clone(),
+                dest: blocker.join("nope.molt.enc").display().to_string(),
+                passphrase: pass,
+            })
+            .await
+            .expect("kickoff acks; the failure arrives async");
+            let outcome = await_export(&w).await;
+            assert!(
+                outcome.result.starts_with("error: "),
+                "unwritable path must fail honestly, got: {outcome:?}"
+            );
+        });
+    }
+
+    /// Poll the session until the in-flight export settles (~Argon2-bounded).
+    async fn await_export(w: &WalletHandle) -> molt_core::ExportState {
+        for _ in 0..600 {
+            let sv = read_session(w).await;
+            if !sv.export.running && !sv.export.result.is_empty() {
+                return sv.export;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("export did not settle in time");
     }
 
     #[test]

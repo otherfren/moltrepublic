@@ -891,6 +891,25 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "export_workspace",
+            command: "export_workspace",
+            description: "Export a workspace as ONE encrypted blob file (*.molt.enc, format molt-export-v1): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo — and, when stored on this device, the recovery seed. CAUTION: with the seed inside, blob + passphrase replaces the recovery phrase (full seat capability) — guard both like the phrase. Live MLS/transport state is NEVER exported: the blob restores knowledge; rejoining the live republic goes through the recovery ritual. Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff — the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the workspace id from read_session" },
+                    "dest": { "type": "string", "description": "target file path (~ is expanded, parents are created, an existing file is atomically replaced)" },
+                    "passphrase": { "type": "string", "description": "export passphrase, minimum 10 characters" }
+                },
+                "required": ["id", "dest", "passphrase"]
+            }),
+            build: |args| Ok(Command::ExportWorkspace {
+                id: str_arg(args, "id")?,
+                dest: str_arg(args, "dest")?,
+                passphrase: str_arg(args, "passphrase")?,
+            }),
+        },
+        ToolDef {
             name: "restore_start",
             command: "restore_start",
             description: "Begin the (mock) restore from a backup. The engine ticks progress and a live log by itself; read_session shows both. Implausible targets fail (~45%). Rejoining via another member is not a restore way — that is the recovery ritual (recover_start).",
@@ -1104,10 +1123,15 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 34] = [
+        // net_export_done / net_export_failed are the off-actor export task
+        // reporting its real outcome (export_workspace is the tool; an agent
+        // must not be able to forge an export success or failure).
+        const INTERNAL: [&str; 36] = [
             "net_test_s3_result",
             "net_presence_tick",
             "net_list_backups_result",
+            "net_export_done",
+            "net_export_failed",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",

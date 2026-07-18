@@ -515,6 +515,25 @@ pub fn run_app(
             );
         });
     }
+    // the real manual export — same command as the MCP export_workspace
+    // tool; the honest outcome streams back via the session's export state
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_export_workspace(move |id, dest, passphrase| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::ExportWorkspace {
+                    id: id.to_string(),
+                    dest: dest.to_string(),
+                    passphrase: passphrase.to_string(),
+                },
+            );
+        });
+    }
     // Sort the Open list by a header column (view-local: only the mirrored
     // model is reordered; push_session re-applies the sort on every refresh).
     {
@@ -2046,6 +2065,34 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // the create wizard's folder preview roots at the configured
     // workspace dir (shown raw, as configured — `~` and all)
     ui.set_cw_dir(sv.settings.workspace_dir.clone().into());
+
+    // the manual-export status (Open-detail note): honest mirror of the
+    // engine's export state — running / real success / real failure
+    {
+        let s = ui.global::<Strings>();
+        let ex = &sv.export;
+        let (note, failed) = if ex.running {
+            (format!("{} {}", s.get_ow_export_running(), ex.dest), false)
+        } else if ex.result == "ok" {
+            let mut note =
+                format!("{} {} ({})", s.get_ow_export_note(), ex.dest, file_size_label(ex.bytes));
+            if !ex.skipped.is_empty() {
+                note.push_str(&format!(
+                    " — {} {}",
+                    s.get_ow_export_skipped(),
+                    ex.skipped.join(", ")
+                ));
+            }
+            (note, false)
+        } else if let Some(err) = ex.result.strip_prefix("error: ") {
+            (format!("{} {}", s.get_ow_export_failed(), err), true)
+        } else {
+            (String::new(), false)
+        };
+        ui.set_export_note(note.into());
+        ui.set_export_failed(failed);
+        ui.set_export_ws(ex.workspace.as_str().into());
+    }
 
     apply_runs(ui, sv);
     ui.global::<Theme>().set_theme_index(theme_index(&sv.theme));
@@ -4744,7 +4791,10 @@ lexicon! {
     ow_members: "Members", "Mitglieder";
     ow_backup_cfg: "Settings", "Settings";
     ow_export: "Manual backup", "Manuelles Backup";
-    ow_export_note: "Exported (mock):", "Exportiert (Mock):";
+    ow_export_note: "Exported:", "Exportiert:";
+    ow_export_running: "Exporting…", "Exportiere…";
+    ow_export_failed: "Export failed:", "Export fehlgeschlagen:";
+    ow_export_skipped: "not included:", "nicht enthalten:";
     ow_seed_show: "Reveal seed", "Seed zeigen";
     ow_seed_hide: "Hide seed", "Seed verbergen";
     ow_seed_note: "Every secret key of this workspace is derived deterministically from this seed. Never share it.", "Alle geheimen Schlüssel dieses Workspace werden deterministisch aus diesem Seed abgeleitet. Niemals weitergeben.";
@@ -4755,8 +4805,9 @@ lexicon! {
     del_ws_body: "This removes the republic from this device. Type its name to confirm. (Mock — nothing on disk is touched.)", "Dies entfernt die Republik von diesem Gerät. Tippe zur Bestätigung ihren Namen aus. (Mock — auf der Platte wird nichts angefasst.)";
     del_ws_confirm: "Delete permanently", "Endgültig löschen";
     bk_title: "Manual backup", "Manuelles Backup";
-    bk_body: "The whole workspace is written to this location as one encrypted blob. (Mock — nothing is written.)", "Der gesamte Workspace wird als ein verschlüsselter Blob an diesen Ort geschrieben. (Mock — es wird nichts geschrieben.)";
+    bk_body: "The whole workspace is written to this location as one encrypted file — history, chain, and (when stored here) the recovery seed. Live group/transport state is never included: restoring reads everything, rejoining runs the recovery ritual. Caution: this backup + its passphrase can restore your seat like the recovery phrase — guard both.", "Der gesamte Workspace wird als eine verschlüsselte Datei an diesen Ort geschrieben — Historie, Chain und (wenn hier gespeichert) der Recovery-Seed. Live-Gruppen-/Transport-Zustand ist nie enthalten: Wiederherstellen macht alles lesbar, der Wiederbeitritt läuft über das Recovery-Ritual. Achtung: dieses Backup + seine Passphrase kann deinen Sitz wiederherstellen wie die Recovery-Phrase — beides gut verwahren.";
     bk_path: "Target file", "Zieldatei";
+    bk_pass: "Export passphrase (min. 10 characters)", "Export-Passphrase (mind. 10 Zeichen)";
     bk_confirm: "Save backup", "Backup speichern";
     field_s3_backup: "Automatic S3 backup", "Automatisches S3-Backup";
     field_s3_endpoint: "S3 endpoint", "S3-Endpunkt";

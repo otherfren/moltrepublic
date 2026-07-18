@@ -898,6 +898,7 @@ export component AppWindow inherits Window {
     in-out property <bool> ws-sort-desc: false;
     callback sort-workspaces(string, bool);
     property <int> open-selected: -1;
+    property <string> open-id;
     property <string> open-name;
     property <string> open-detail;
     property <string> open-status;
@@ -913,7 +914,13 @@ export component AppWindow inherits Window {
         && root.ws-list[root.open-selected].encrypted;
     property <[MemberSync]> open-members;
     property <bool> seed-shown: false;
-    property <string> export-note;
+    // Manual-export status — Rust-driven from the session's honest export
+    // state (never set locally): the note text, whether it is a failure,
+    // and WHICH workspace it belongs to (shown only on that one's panel).
+    in-out property <string> export-note;
+    in-out property <bool> export-failed: false;
+    in-out property <string> export-ws;
+    callback export-workspace(string /* id */, string /* path */, string /* passphrase */);
 
     // ---- toast: short feedback bubble (e.g. after copy-to-clipboard).
     // The timer's `running` is BOUND to toast-open (declarative) — an
@@ -936,9 +943,11 @@ export component AppWindow inherits Window {
             root.hide-toast();
         }
     }
-    // modal: manual backup — choose where the encrypted blob would be written
+    // modal: manual backup — target path + export passphrase for the real
+    // encrypted blob (the passphrase property is cleared on close, always)
     property <bool> backup-modal-open: false;
     property <string> backup-path;
+    property <string> backup-pass;
     // modal: confirm deleting a workspace (type its name to arm the button;
     // the id is what the delete verb actually addresses)
     property <bool> confirm-delete-open: false;
@@ -947,9 +956,12 @@ export component AppWindow inherits Window {
     property <string> delete-typed;
 
     // Select a row on the Open screen: fill the details panel and drop any
-    // revealed seed / export note from the previous selection.
+    // revealed seed from the previous selection. (The export note is
+    // session state, gated per workspace via export-ws — never cleared
+    // locally, or a repaint would resurrect it.)
     function select-workspace(i: int, w: WorkspaceItem) {
         root.open-selected = i;
+        root.open-id = w.id;
         root.open-name = w.name;
         root.open-detail = w.detail;
         root.open-status = w.status;
@@ -959,14 +971,13 @@ export component AppWindow inherits Window {
         root.open-seed = w.seed;
         root.open-members = w.members;
         root.seed-shown = false;
-        root.export-note = "";
     }
 
     // Deselect the current row: the details panel folds back to its hint.
     function deselect-workspace() {
         root.open-selected = -1;
+        root.open-id = "";
         root.seed-shown = false;
-        root.export-note = "";
     }
 
     // Forget the opened workspace entirely (close-workspace): without this a
@@ -1026,6 +1037,8 @@ export component AppWindow inherits Window {
             root.confirm-delmsg-open = false;
         } else if (root.backup-modal-open) {
             root.backup-modal-open = false;
+            // every way out of the modal drops the typed export passphrase
+            root.backup-pass = "";
         } else if (root.restore-file-modal-open) {
             root.restore-file-modal-open = false;
         } else if (root.ws-dir-modal-open) {
@@ -2474,13 +2487,17 @@ export component AppWindow inherits Window {
                                     label: Strings.ow-export;
                                     clicked => {
                                         root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
+                                        // never inherit a passphrase from a
+                                        // previous (possibly other-workspace)
+                                        // modal session
+                                        root.backup-pass = "";
                                         root.backup-modal-open = true;
                                     }
                                 }
                             }
-                            if root.export-note != "": Text {
+                            if root.export-note != "" && root.export-ws == root.open-id: Text {
                                 text: root.export-note;
-                                color: Theme.good;
+                                color: root.export-failed ? Theme.bad : Theme.good;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
                             }
@@ -5970,20 +5987,24 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Modal: manual backup — pick where the workspace is written as one
-    // encrypted blob (mock: confirming records the note, writes nothing).
+    // Modal: manual backup — target path + export passphrase; confirming
+    // drives the real export command (the engine streams the honest
+    // outcome back into the panel note). The passphrase is cleared on
+    // every way out of the modal.
     if root.backup-modal-open: bk-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.bk-title;
         body: Strings.bk-body;
         confirm-label: Strings.bk-confirm;
-        confirm-enabled: root.backup-path != "";
+        confirm-enabled: root.backup-path != "" && root.backup-pass.character-count >= 10;
         dismissed => {
             root.backup-modal-open = false;
+            root.backup-pass = "";
         }
         confirmed => {
             root.backup-modal-open = false;
-            root.export-note = Strings.ow-export-note + " " + root.backup-path;
+            root.export-workspace(root.open-id, root.backup-path, root.backup-pass);
+            root.backup-pass = "";
         }
         Text {
             text: Strings.bk-path;
@@ -5993,6 +6014,20 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.backup-path;
             placeholder: "~/Backups/republic.molt.enc";
+            accepted => {
+                if (bk-dlg.confirm-enabled) {
+                    bk-dlg.confirmed();
+                }
+            }
+        }
+        Text {
+            text: Strings.bk-pass;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+        }
+        AppField {
+            text <=> root.backup-pass;
+            secret: true;
             accepted => {
                 if (bk-dlg.confirm-enabled) {
                     bk-dlg.confirmed();
