@@ -772,9 +772,14 @@ export component AppWindow inherits Window {
     // chrome controls and the WM close (read from Rust)
     out property <bool> run-active: root.restore-running || root.cw-running || root.jw-running;
     property <bool> restore-file-modal-open: false;
-    // mock folder picker for the settings workspace tab
+    // folder picker for the settings workspace tab
     property <bool> ws-dir-modal-open: false;
-    property <string> ws-dir-draft;
+    // in-out: the native picker (Rust, ws-dir-pick) writes the chosen path;
+    // the field stays editable as a manual fallback
+    in-out property <string> ws-dir-draft;
+    // browse for the workspace folder via the real (rfd) dialog — fills
+    // ws-dir-draft
+    callback ws-dir-pick();
     property <string> rw-file-draft;
     // Organization → Status edit drafts (image path + charter). Confirming
     // creates a REAL gated proposal on the Organization surface (org-propose)
@@ -5050,8 +5055,8 @@ export component AppWindow inherits Window {
                             alignment: start;
                             FieldLabel {
                                 label: Strings.field-workspace-dir;
-                                // read-only: the folder is only changed via
-                                // the (mock) picker modal, never by free-typing
+                                // read-only here: the folder is only changed
+                                // in the picker modal (browse or type there)
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Rectangle {
@@ -6161,8 +6166,9 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
-    // Mock folder picker for the settings workspace tab: edits a draft,
-    // Select commits it into the workspace-dir config field.
+    // Folder picker for the settings workspace tab: browse via the real
+    // (rfd) dialog or edit the path by hand; Select commits the draft
+    // into the workspace-dir config field.
     // =================================================================
     if root.ws-dir-modal-open: wsd-dlg := ConfirmModal {
         dialog-width: 440px;
@@ -6177,12 +6183,26 @@ export component AppWindow inherits Window {
             root.ws-dir-modal-open = false;
             root.cfg-workspace-dir = root.ws-dir-draft;
         }
-        AppField {
-            text <=> root.ws-dir-draft;
-            placeholder: "~/.moltrepublic/workspaces";
-            accepted => {
-                if (wsd-dlg.confirm-enabled) {
-                    wsd-dlg.confirmed();
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.ws-dir-draft;
+                placeholder: "~/.moltrepublic/workspaces";
+                horizontal-stretch: 1;
+                accepted => {
+                    if (wsd-dlg.confirm-enabled) {
+                        wsd-dlg.confirmed();
+                    }
+                }
+            }
+            AppButton {
+                height: 38px;
+                pad: 10px;
+                icon: @image-url("assets/folder.svg");
+                icon-set: true;
+                label: Strings.set-ws-dir-browse;
+                clicked => {
+                    root.ws-dir-pick();
                 }
             }
         }

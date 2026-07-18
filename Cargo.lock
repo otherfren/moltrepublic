@@ -4634,11 +4634,13 @@ dependencies = [
  "molt-config",
  "molt-core",
  "molt-engine",
+ "molt-storage",
  "molt-ui-window",
  "paste",
  "rfd",
  "serde_json",
  "slint",
+ "tempfile",
  "tokio",
  "tracing",
 ]

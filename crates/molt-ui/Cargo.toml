@@ -20,6 +20,9 @@ live-preview = ["molt-ui-window/live-preview"]
 molt-ui-window.workspace = true
 molt-core.workspace = true
 molt-config.workspace = true
+# canonical `~` expansion (expand_tilde) — the browse dialog must resolve
+# the workspace-dir draft exactly like the engine does
+molt-storage.workspace = true
 molt-engine.workspace = true
 tokio.workspace = true
 slint.workspace = true
@@ -32,3 +35,6 @@ base64.workspace = true
 image.workspace = true
 chrono.workspace = true
 paste.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
