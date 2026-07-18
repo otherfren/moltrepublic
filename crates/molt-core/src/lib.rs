@@ -279,6 +279,20 @@ fn default_sound() -> String {
     "none".to_string()
 }
 
+/// The display label for an anonymity-network setting — what
+/// [`WorkspaceInfo::net`] / [`CreateState::net`] and the create screen's
+/// read-only "Network" line show. The SINGLE normalization every surface
+/// shares (engine, GUI, startup scan): only `"tor"` reads as `"tor"`;
+/// `"none"`, the legacy `"nym"`, and any unknown value read as `"none"` —
+/// they never dial (an unknown network fails the dialer resolution closed),
+/// so the honest reading is "no anonymity network configured".
+pub fn effective_net_label(anonymity: &str) -> &'static str {
+    match anonymity {
+        "tor" => "tor",
+        _ => "none",
+    }
+}
+
 impl Default for SessionSettings {
     fn default() -> Self {
         SessionSettings {
@@ -3366,6 +3380,19 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The single source of truth for the "which network am I on" display
+    /// label: only a configured "tor" reads as tor; "none", the legacy
+    /// "nym", and any unknown value read as "none" (they never dial — an
+    /// unknown network fails the dialer resolution closed).
+    #[test]
+    fn effective_net_label_maps_only_tor_to_tor() {
+        assert_eq!(effective_net_label("tor"), "tor");
+        assert_eq!(effective_net_label("none"), "none");
+        assert_eq!(effective_net_label("nym"), "none");
+        assert_eq!(effective_net_label("garbage"), "none");
+        assert_eq!(effective_net_label(""), "none");
+    }
 
     /// Every Reply variant must serialize (the MCP surface renders replies
     /// as JSON text): the internally-tagged repr cannot hold a bare

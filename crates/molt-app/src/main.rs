@@ -105,6 +105,11 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|e| {
             let mut w = e.info();
+            // the manifest has no network label; every entry runs over the
+            // one global anonymity setting, so stamp its effective label
+            w.net =
+                molt_core::effective_net_label(config.transport.anonymity.network.as_str())
+                    .to_string();
             if let Some(phrase) = molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id) {
                 w.seed = phrase;
             }

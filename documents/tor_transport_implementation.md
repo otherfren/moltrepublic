@@ -183,12 +183,14 @@ mock_todo §2 cleanup the surfaces say so. `CreateStart` no longer carries a
 dropdown/tor-mode/port inputs were replaced by a read-only display of the
 effective global network plus a "change it under Settings → Network" hint.
 `CreateState.net` / `WorkspaceInfo.net` remain as pure display labels, now
-derived engine-side from the live global settings at founding/join/recovery
-time (`State::effective_net_label`: `"tor"` or `"none"`, anything unknown
-reads as `"none"` because `Dialer::resolve` fails it closed) — never from a
-client-supplied string. The join/recovery/restore paths' hardcoded `"tor"`
-labels are gone with it, which also retires the `none`/`clearnet` vocabulary
-drift for real entries (demo seed data may still carry legacy values). If
+derived from the live global settings at founding/join/recovery time and at
+the startup scan (one shared normalizer, `molt_core::effective_net_label`:
+`"tor"` or `"none"`, anything unknown reads as `"none"` because
+`Dialer::resolve` fails it closed) — never from a client-supplied string.
+The hardcoded `"tor"` labels on the join/recovery/restore paths and in
+`ScanEntry::info` are gone with it, which also retires the `none`/`clearnet`
+vocabulary drift for real entries (demo seed data may still carry legacy
+values). If
 per-workspace enforcement is ever wanted it is a separate design.
 
 ### P9 — DNS never resolves locally when Tor is on

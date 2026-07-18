@@ -1990,6 +1990,13 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     ui.set_net_health_tone(net_tone);
     ui.set_net_health_reason(net_reason.into());
 
+    // the create screen's read-only "Network" line: the EFFECTIVE global
+    // anonymity network. NOT a draft field (the user never types it), so it
+    // is pushed on every update — inside the settings_changed guard a GUI
+    // save would leave it stale (the draft-protection `editing` flag
+    // suppresses the mirror exactly then)
+    ui.set_cw_net(molt_core::effective_net_label(&sv.settings.anonymity).into());
+
     if !settings_changed {
         apply_strings(ui, lang);
         return;
@@ -2018,11 +2025,6 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
     ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
     ui.set_cfg_network_index(net_index(&s.anonymity));
-    // the create screen's read-only "Network" display: the EFFECTIVE global
-    // anonymity network — the same normalization as the engine's
-    // `effective_net_label` (anything not "tor" reads as "none": an unknown
-    // value fails `Dialer::resolve` closed, so no anonymity network runs)
-    ui.set_cw_net(if s.anonymity == "tor" { "tor" } else { "none" }.into());
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
     ui.set_cfg_smp_custom(s.smp_server == "custom");
