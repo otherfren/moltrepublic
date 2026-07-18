@@ -5055,8 +5055,8 @@ export component AppWindow inherits Window {
                             alignment: start;
                             FieldLabel {
                                 label: Strings.field-workspace-dir;
-                                // read-only: the folder is only changed via
-                                // the picker modal, never by free-typing
+                                // read-only here: the folder is only changed
+                                // in the picker modal (browse or type there)
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Rectangle {

@@ -1160,10 +1160,18 @@ pub fn run_app(
         let weak = ui.as_weak();
         ui.on_ws_dir_pick(move || {
             let weak = weak.clone();
-            let start_dir = weak
+            // only the property read happens on the UI thread; the stat in
+            // browse_start_dir moves to a blocking task (a draft pointing at
+            // a hung mount must not freeze the event loop)
+            let draft = weak
                 .upgrade()
-                .and_then(|ui| browse_start_dir(ui.get_ws_dir_draft().as_str()));
+                .map(|ui| ui.get_ws_dir_draft().to_string())
+                .unwrap_or_default();
             rt.spawn(async move {
+                let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
+                    .await
+                    .ok()
+                    .flatten();
                 let mut picker = rfd::AsyncFileDialog::new();
                 if let Some(dir) = start_dir {
                     picker = picker.set_directory(dir);
@@ -1433,21 +1441,22 @@ fn sync_strings(
     );
 }
 
+/// The directory the workspace-folder browse dialog should start in, given
+/// the modal's hand-editable draft: the draft — its leading `~` expanded the
+/// same way the engine resolves the setting (`molt_storage::expand_tilde`,
+/// so the config default "~/…" starts at the real folder) — when it names an
+/// existing directory, otherwise `None`: an empty draft or a typo must not
+/// derail the dialog (rfd then opens at its platform default). Runs a stat —
+/// call it off the UI thread (the draft may point at a slow mount).
+fn browse_start_dir(draft: &str) -> Option<std::path::PathBuf> {
+    let path = molt_storage::expand_tilde(draft);
+    path.is_dir().then_some(path)
+}
+
 /// Decode a pending `set_image` proposal's payload (base64 of the raw image
 /// file) into a renderable [`slint::Image`]. The bytes rode the proposal
 /// gossip (sign-what-you-see), so this runs locally on every member's
 /// device — no transfer, no proposer needed. `None` on any decode failure.
-/// The directory the workspace-folder browse dialog should start in, given
-/// the modal's hand-editable draft: the draft itself when it names an
-/// existing directory, otherwise `None` — an empty draft, an unexpanded
-/// "~/…" or a typo must not derail the dialog (rfd then opens at its
-/// platform default).
-fn browse_start_dir(draft: &str) -> Option<String> {
-    std::path::Path::new(draft)
-        .is_dir()
-        .then(|| draft.to_string())
-}
-
 fn proposal_image_from_b64(img_b64: &str) -> Option<slint::Image> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -6040,28 +6049,33 @@ mod tests {
     }
 
     /// The workspace-folder browse dialog starts where the hand-editable
-    /// draft points ONLY when that is a real directory — anything else
-    /// (empty draft, unexpanded "~/…", typo, a file) must yield no start
-    /// dir so the dialog opens at its platform default instead of failing.
+    /// draft points ONLY when that (after the engine's own `~` expansion —
+    /// the config default is "~/…") is a real directory; anything else
+    /// (empty draft, typo, a file) must yield no start dir so the dialog
+    /// opens at its platform default instead of failing.
     #[test]
     fn ws_dir_browse_starts_at_the_draft_only_when_it_is_a_real_directory() {
         let dir = tempfile::tempdir().expect("create a temp directory");
         let dir_path = dir.path().display().to_string();
         assert_eq!(
             browse_start_dir(&dir_path),
-            Some(dir_path.clone()),
+            Some(dir.path().to_path_buf()),
             "an existing directory is a usable start dir"
+        );
+        // a "~" draft expands against $HOME exactly like the engine resolves
+        // the setting — pinning the config default's "~/…" form to a REAL
+        // start dir, not a literal "~" path that never exists
+        let home = std::env::var_os("HOME").expect("HOME is set in the test env");
+        assert_eq!(
+            browse_start_dir("~"),
+            Some(std::path::PathBuf::from(home)),
+            "a tilde draft starts at the expanded home directory"
         );
         // a FILE is not a directory to start browsing in
         let file_path = dir.path().join("config.toml");
         std::fs::write(&file_path, b"x").expect("write a probe file");
         assert_eq!(browse_start_dir(&file_path.display().to_string()), None);
         assert_eq!(browse_start_dir(""), None, "empty draft → dialog default");
-        assert_eq!(
-            browse_start_dir("~/.moltrepublic/workspaces"),
-            None,
-            "an unexpanded ~ path never names a real directory"
-        );
         assert_eq!(
             browse_start_dir(&format!("{dir_path}/definitely-missing")),
             None,
