@@ -3150,12 +3150,27 @@ pub struct GroupConfig {
 }
 
 impl GroupConfig {
-    /// A demo 2-of-3 group used by the scaffold when nothing else is supplied.
+    /// A demo 2-of-3 group — **test fixture only**. The product boots with
+    /// [`GroupConfig::solo`]; a real group's roster comes from its founded
+    /// workspace, never from this constructor.
     pub fn demo() -> Self {
         GroupConfig {
             member: "me".to_string(),
             members: vec!["me".to_string(), "peer-1".to_string(), "peer-2".to_string()],
             threshold: 2,
+            self_cosign: true,
+        }
+    }
+
+    /// The honest boot group of a node with no workspace open: just this
+    /// operator, no peers. Nothing in this context can pretend other
+    /// members exist — an open workspace replaces it with the real roster
+    /// from its genesis.
+    pub fn solo() -> Self {
+        GroupConfig {
+            member: "me".to_string(),
+            members: vec!["me".to_string()],
+            threshold: 1,
             self_cosign: true,
         }
     }
@@ -3509,6 +3524,16 @@ mod tests {
         let raw: RawEnvelope = serde_json::from_str(newer).expect("raw fallback");
         assert_eq!(raw.seq, 8);
         assert_eq!(raw.body["type"], serde_json::json!("hologram"));
+    }
+
+    /// The boot group of a production node is honest: one member, no
+    /// invented peers — nothing outside an open workspace may suggest
+    /// other members exist.
+    #[test]
+    fn the_solo_boot_group_names_no_peers() {
+        let solo = GroupConfig::solo();
+        assert_eq!(solo.members, vec![solo.member.clone()]);
+        assert_eq!(solo.threshold, 1);
     }
 
     #[test]

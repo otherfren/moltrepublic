@@ -172,14 +172,16 @@ fn main() -> anyhow::Result<()> {
         // active workspace, restore lifecycle, demo backup orphans
         ..molt_core::SessionView::default()
     };
-    // Group is workspace-specific; the node currently runs the simulated
-    // 2-of-3 group. The engine is bound to the config file: settings changes
-    // persist to it (format-preserving, atomic) and external edits of it are
-    // watched, validated and mirrored into the shared session.
+    // Group is workspace-specific: outside an open workspace the node runs
+    // the honest solo boot group (just this operator — no simulated peers;
+    // opening a workspace swaps in its real genesis roster). The engine is
+    // bound to the config file: settings changes persist to it
+    // (format-preserving, atomic) and external edits of it are watched,
+    // validated and mirrored into the shared session.
     let (wallet, config_store) = {
         let path = config_path.clone();
         rt.block_on(async move {
-            molt_engine::spawn_with_config(molt_core::GroupConfig::demo(), session, path)
+            molt_engine::spawn_with_config(molt_core::GroupConfig::solo(), session, path)
         })
         .with_context(|| format!("binding the engine to {}", config_path.display()))?
     };

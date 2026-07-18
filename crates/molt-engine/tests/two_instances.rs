@@ -158,6 +158,13 @@ async fn founding_ritual_completes_across_two_instances() {
     // --- A's genesis anchors B's real key with a verifying attestation
     a.execute(Command::CloseWorkspace).await.expect("close");
     let dir = molt_storage::find_workspace_dir(&root_a, &id).expect("dir");
+    // a REAL founding must not mark its workspace as simulated — the flag
+    // is the sim seam's marker, and a republic of real members carrying it
+    // would (on the demo-mesh seam) grow fake peers over a real log
+    assert!(
+        !molt_storage::read_prefs(&dir).simulated_members,
+        "a real founding persisted simulated_members = true"
+    );
     let (ws, _loaded) = molt_storage::open_workspace(&dir).expect("open");
     let log = ws.read_log_from(1).expect("genesis");
     let WorkspaceEvent::Founded {

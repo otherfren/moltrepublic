@@ -16,14 +16,17 @@
 //!   traffic that happens anyway; `NetSendFailed` marks transport trouble.
 //!   No beacons, ever.
 //!
-//! **The demo mesh.** On a session-only context (no persisted workspace
-//! open) the roster's other members run as real loopback peers: each has
-//! its own engine instance and transport endpoint, plus a small "brain"
-//! that answers the local member's chat with a canned line — through its
-//! own engine and outbox, so a demo reply exercises the same code path a
-//! real member's message will. Persisted workspaces get no demo peers:
-//! their seats are real (and empty until the T2 join flow fills them) —
-//! a fake member recorded in a real log would replay forever.
+//! **The demo mesh — test seam only** ([`crate::State::demo_mesh`],
+//! default OFF; only `__spawn_demo_mesh` sets it). On a session-only
+//! context the roster's other members run as real loopback peers: each
+//! has its own engine instance and transport endpoint, plus a small
+//! "brain" that answers the local member's chat with a canned line —
+//! through its own engine and outbox, so a demo reply exercises the same
+//! code path a real member's message will. **Production spawns no fake
+//! peers, ever**: without the seam a session-only context runs no
+//! transport at all (chat is an honest local-only scratch log), and a
+//! persisted workspace's `prefs.simulated_members` flag is inert — a
+//! fake member recorded in a real log would replay forever.
 
 use molt_core::{
     fnv1a64, mockrand, Command, EventEnvelope, GroupConfig, MemberId, MessageId, MoltError,
@@ -520,11 +523,12 @@ impl State {
         }
     }
 
-    /// Make sure the demo mesh matches the current context. It runs for a
-    /// session-only context (boot demo group) AND for a persisted
-    /// workspace whose members are simulations (founded before the real
-    /// network exists — `prefs.simulated_members`). A persisted workspace
-    /// with real members gets no fakes.
+    /// Make sure the demo mesh matches the current context. **No-op in
+    /// production** (the [`crate::State::demo_mesh`] seam is off — nothing
+    /// to stand up, nothing to tear down). On the seam it runs for a
+    /// session-only context AND for a persisted workspace whose members
+    /// are simulations (`prefs.simulated_members`). A persisted workspace
+    /// with real members gets no fakes even on the seam.
     pub(crate) fn ensure_demo_net(&mut self) {
         // a real (T2) mesh is managed by the founding/join/open paths, not here —
         // never tear it down to stand up (or clear) the demo mesh
@@ -552,14 +556,18 @@ impl State {
         }
     }
 
-    /// Whether this context should run simulated peer members: nothing
-    /// open (boot demo), or an open workspace explicitly flagged as
-    /// simulated in its prefs.
+    /// Whether this context should run simulated peer members: only on
+    /// the [`crate::State::demo_mesh`] test seam, and there only for a
+    /// session-only context or an open workspace explicitly flagged as
+    /// simulated in its prefs. With the seam off — every production
+    /// engine — the answer is always no: `prefs.simulated_members` stays
+    /// parsed but inert.
     fn wants_demo_mesh(&self) -> bool {
-        match &self.active {
-            None => true,
-            Some(a) => a.prefs.simulated_members,
-        }
+        self.demo_mesh
+            && match &self.active {
+                None => true,
+                Some(a) => a.prefs.simulated_members,
+            }
     }
 
     /// The demo peers: for a persisted simulated workspace, the replayed
@@ -1662,6 +1670,9 @@ fn spawn_demo_peer(
         false,
         false,
         None,
+        // a peer node lives on the demo seam by definition: its own
+        // `ensure_demo_net` must keep (not tear down) the injected mesh
+        true,
     );
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown
@@ -1730,6 +1741,27 @@ mod tests {
     use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
     use molt_core::{ChatMessage, EventEnvelope, MessageId, WorkspaceEvent};
 
+    /// The demo mesh is a **default-off test seam**: a freshly built state
+    /// (what every production spawner creates) wants no fake peers in the
+    /// session-only boot context; only the seam flag re-enables them.
+    #[test]
+    fn the_demo_mesh_seam_is_default_off() {
+        let mut st = crate::tests::plain_state();
+        assert!(
+            !st.demo_mesh,
+            "production default: the demo-mesh seam starts OFF"
+        );
+        assert!(
+            !st.wants_demo_mesh(),
+            "the boot context must not want fake peers without the seam"
+        );
+        st.demo_mesh = true;
+        assert!(
+            st.wants_demo_mesh(),
+            "the test seam re-enables the session-only demo mesh"
+        );
+    }
+
     /// The provisioning task's failure report lands as the calm
     /// `recovery-link-failed:` session notice (the same channel the minted
     /// link rides), and the dead mint's ticket is unregistered — nothing of
@@ -1796,8 +1828,8 @@ mod tests {
     /// enforcement, same posture as the channel-claim coercion above).
     #[test]
     fn a_wire_chat_into_a_closed_discussion_still_lands() {
-        // a runtime context: the send path stands the demo mesh up and the
-        // delivery publishes to the transport feed (spawned tasks)
+        // a runtime context: the delivery path may publish to a transport
+        // feed / bump watch channels (spawned tasks)
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
