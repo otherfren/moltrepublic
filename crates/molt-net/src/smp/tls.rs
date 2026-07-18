@@ -208,16 +208,23 @@ fn verify_signed_by(
     }
 }
 
-/// Build a rustls client config that pins `server`'s CA fingerprint and
-/// offers ALPN `smp/1`.
-fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
-    // Restrict key exchange to X25519 — what every SMP server negotiates.
-    // Offering the alpha provider's full group set makes strict servers
-    // (smp8) abort the handshake (a group triggering HelloRetryRequest the
-    // provider mishandles); pinning X25519 avoids the retry entirely.
+/// The rustcrypto provider with key exchange restricted to X25519 — the
+/// shared base of every TLS client in this crate (SMP and S3). Offering the
+/// alpha provider's full group set makes strict servers abort the handshake
+/// (a group triggering HelloRetryRequest the provider mishandles); pinning
+/// X25519 avoids the retry entirely, and every SMP server (and current S3
+/// endpoint) negotiates it.
+pub(crate) fn x25519_provider() -> rustls::crypto::CryptoProvider {
     let mut base = rustls_rustcrypto::provider();
     base.kx_groups
         .retain(|g| g.name() == rustls::NamedGroup::X25519);
+    base
+}
+
+/// Build a rustls client config that pins `server`'s CA fingerprint and
+/// offers ALPN `smp/1`.
+fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
+    let mut base = x25519_provider();
     // add Ed448 so the client advertises it in signature_algorithms AND
     // can verify the server's Ed448 CertificateVerify (official servers)
     base.signature_verification_algorithms = sig_algs_with_ed448();
@@ -444,6 +451,15 @@ impl Dialer {
     /// uniformly.
     pub async fn dial(&self, server: &SmpServer) -> Result<DialStream, NetError> {
         let (host, port) = server.dial_target(self.tor_on());
+        self.dial_host(host, port).await
+    }
+
+    /// Open the raw byte stream to an arbitrary `host:port` per this dialer —
+    /// the transport core `dial` shares, also used by non-SMP clients (the S3
+    /// backup probe). All fail-closed properties hold here: an `.onion` host
+    /// under `Direct` is refused (never a clearnet dial/DNS leak), SOCKS
+    /// circuits are per-host isolated, and the connect deadline is Tor-sized.
+    pub async fn dial_host(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
         match self {
             Dialer::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail

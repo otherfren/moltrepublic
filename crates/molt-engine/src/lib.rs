@@ -918,6 +918,13 @@ impl State {
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
             Command::NetTestServer { url } => self.cmd_net_test_server(url),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
+            Command::NetTestS3 {
+                endpoint,
+                access_key,
+                secret_key,
+                bucket,
+            } => self.cmd_net_test_s3(endpoint, access_key, secret_key, bucket),
+            Command::NetTestS3Result { result } => self.cmd_net_test_s3_result(result),
             Command::NetRitualLinkReady {
                 seat,
                 link,

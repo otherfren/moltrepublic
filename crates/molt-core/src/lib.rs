@@ -1974,6 +1974,11 @@ pub struct SessionView {
     /// flight does not look like an unsaved settings edit.
     #[serde(default)]
     pub smp_test: String,
+    /// Transient result of the backup panel's "Test connection" against the
+    /// S3 endpoint, same vocabulary and rationale as [`Self::smp_test`]:
+    /// `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
+    #[serde(default)]
+    pub s3_test: String,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -2013,6 +2018,7 @@ impl Default for SessionView {
             theme: "classic".to_string(),
             notice: String::new(),
             smp_test: String::new(),
+            s3_test: String::new(),
             restart_required: Vec::new(),
             settings: SessionSettings::default(),
             workspaces: WorkspaceInfo::demo_set(),
@@ -2451,6 +2457,33 @@ pub enum Command {
     /// from the off-actor probe task (engine-internal, never an MCP tool).
     NetTestResult {
         /// `"ok"` or `"error: …"`; written verbatim into `settings.smp_test`.
+        result: String,
+    },
+    /// Test the S3 backup target (the backup settings panel's Test button):
+    /// a real SigV4-signed `HEAD /bucket` probe over the configured dialer
+    /// (Tor when enabled — fail-closed, like every dial), run off the actor;
+    /// the result lands in `session.s3_test`. Safe to expose — it only reads
+    /// whether the bucket answers, with the configured credentials.
+    NetTestS3 {
+        /// Endpoint URL to test (`https://…` / `http://…`; MinIO and onion
+        /// endpoints supported, path-style). Empty tests the saved
+        /// `settings.s3_endpoint`.
+        #[serde(default)]
+        endpoint: String,
+        /// Access key id; empty falls back to the saved settings.
+        #[serde(default)]
+        access_key: String,
+        /// Secret key; empty falls back to the saved settings.
+        #[serde(default)]
+        secret_key: String,
+        /// Bucket to probe; empty falls back to the saved settings.
+        #[serde(default)]
+        bucket: String,
+    },
+    /// The outcome of a [`Command::NetTestS3`] probe, reported back from the
+    /// off-actor probe task (engine-internal, never an MCP tool).
+    NetTestS3Result {
+        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`.
         result: String,
     },
     /// A founding seat's real, joinable invite link became available once its

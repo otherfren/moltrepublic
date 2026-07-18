@@ -781,6 +781,29 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "net_test_s3",
+            command: "net_test_s3",
+            description: "Test the S3 backup target (the backup settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). The result lands in session.s3_test (\"ok\" or \"error: …\" with the honest failure class — connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "endpoint": { "type": "string", "description": "https://… or http://… endpoint (MinIO/onion supported, path-style); omit to test settings.s3_endpoint" },
+                    "access_key": { "type": "string", "description": "access key id; omit to use the saved one" },
+                    "secret_key": { "type": "string", "description": "secret key; omit to use the saved one" },
+                    "bucket": { "type": "string", "description": "bucket to probe; omit to use the saved one" }
+                }
+            }),
+            build: |args| {
+                let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                Ok(Command::NetTestS3 {
+                    endpoint: s("endpoint"),
+                    access_key: s("access_key"),
+                    secret_key: s("secret_key"),
+                    bucket: s("bucket"),
+                })
+            },
+        },
+        ToolDef {
             name: "open_workspace",
             command: "open_workspace",
             description: "Open a locally known workspace by its id (see read_session → workspaces[].id): its state loads from disk, it becomes active, and the node moves to the main screen.",
@@ -1051,6 +1074,8 @@ mod tests {
         // transport/ritual tasks speaking (exposing them would let an agent
         // forge network peers or ritual members); net_test_result is the
         // node's own SMP probe reporting back (net_test_server is the tool);
+        // net_test_s3_result is the node's own S3 probe reporting back
+        // (net_test_s3 is the tool);
         // net_ritual_link_ready / net_ritual_failed are the off-actor
         // provisioning task reporting a seat's real link or a provisioning
         // failure; net_recover_link_failed is the recovery-mint provisioning
@@ -1070,7 +1095,8 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 31] = [
+        const INTERNAL: [&str; 32] = [
+            "net_test_s3_result",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",

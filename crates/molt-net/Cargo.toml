@@ -55,6 +55,10 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-rustcrypto.workspace = true
 rustls-pki-types.workspace = true
+# S3 backup probe (mock_todo §5): https endpoints verify against the public
+# WebPKI — webpki-roots is Mozilla's root store compiled in as pure-Rust data
+# (no C, no system cert store dependency).
+webpki-roots.workspace = true
 x509-parser.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true

@@ -290,6 +290,31 @@ pub fn run_app(
         });
     }
     {
+        // Probe the S3 backup target in the draft (not the saved settings),
+        // so the user can validate endpoint + credentials before saving.
+        // The engine runs a real SigV4-signed HEAD over the configured
+        // dialer; the verdict streams back into `cfg-s3-test`.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_test_s3(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            issue(
+                &rt,
+                &w,
+                &ui.as_weak(),
+                Command::NetTestS3 {
+                    endpoint: ui.get_cfg_s3_endpoint().to_string(),
+                    access_key: ui.get_cfg_s3_access().to_string(),
+                    secret_key: ui.get_cfg_s3_secret().to_string(),
+                    bucket: ui.get_cfg_s3_bucket().to_string(),
+                },
+            );
+        });
+    }
+    {
         // Leaving settings is guarded: a clean draft navigates straight back;
         // a dirty one raises the unsaved-changes modal (save / discard / stay).
         let rt = rt.clone();
@@ -2030,6 +2055,7 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // settings draft, so push it on every update — even while the user has
     // an unsaved URL open and `settings_changed` is suppressed
     ui.set_cfg_smp_test(sv.smp_test.clone().into());
+    ui.set_cfg_s3_test(sv.s3_test.clone().into());
 
     // transport health for the header "chat" pill: tone (green/amber/red) plus
     // the engine's reason string as the hover tooltip (P6). Pushed on every
@@ -4742,7 +4768,8 @@ lexicon! {
     set_s3_unit_min: "min", "Minuten";
     set_s3_keep: "save up to", "behalte bis zu";
     set_s3_unit_copies: "copies", "Kopien";
-    toast_s3_ok: "S3 backup isn't wired up yet — nothing was tested.", "S3-Backup ist noch nicht angebunden — es wurde nichts getestet.";
+    s3_test_tip: "Sends a signed probe to the bucket over the configured transport — Tor when it is enabled.", "Sendet eine signierte Testanfrage an den Bucket über den konfigurierten Transport — via Tor, wenn aktiviert.";
+    s3_ok: "bucket reachable — credentials accepted ✓", "Bucket erreichbar — Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";
     bk_col_remote: "Backup in bucket", "Backup im Bucket";
     bk_col_auto: "Auto", "Auto";
