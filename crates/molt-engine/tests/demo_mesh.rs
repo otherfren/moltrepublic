@@ -208,7 +208,6 @@ async fn simulated_members_flag_spawns_no_fake_peers() {
         member: "petra".to_string(),
         threshold: 2,
         members: 3,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
