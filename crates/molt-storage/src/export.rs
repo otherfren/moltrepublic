@@ -348,8 +348,9 @@ pub(crate) fn export_dir_chunked(
 }
 
 /// Enforce the passphrase policy (design §3.4): at least
-/// [`EXPORT_PASSPHRASE_MIN_CHARS`] characters of the NFC form.
-fn check_passphrase_policy(pass: &str) -> Result<(), StorageError> {
+/// [`EXPORT_PASSPHRASE_MIN_CHARS`] characters of the NFC form. Public so the
+/// engine enforces the same rule synchronously before spawning the task.
+pub fn check_passphrase_policy(pass: &str) -> Result<(), StorageError> {
     if pass.nfc().count() < EXPORT_PASSPHRASE_MIN_CHARS {
         return Err(StorageError::BadFile(format!(
             "the export passphrase needs at least {EXPORT_PASSPHRASE_MIN_CHARS} characters"

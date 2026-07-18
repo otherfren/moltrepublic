@@ -2052,6 +2052,33 @@ pub struct RestoreState {
     pub target: String,
 }
 
+/// The manual-export lifecycle (story 9, `backup_restore_design.md` §3):
+/// one export at a time; the result is set ONLY by the off-actor task's
+/// real outcome — an "ok" here means the blob is on disk, fsynced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportState {
+    /// An export task is in flight.
+    #[serde(default)]
+    pub running: bool,
+    /// The workspace the last/current export addresses (empty = none yet).
+    #[serde(default)]
+    pub workspace: WorkspaceId,
+    /// The resolved destination path.
+    #[serde(default)]
+    pub dest: String,
+    /// `""` while idle/running; `"ok"` after the blob was written and
+    /// synced; `"error: …"` with the real reason otherwise.
+    #[serde(default)]
+    pub result: String,
+    /// Total bytes written (only meaningful when `result == "ok"`).
+    #[serde(default)]
+    pub bytes: u64,
+    /// Unknown files in the workspace dir the blob does NOT contain —
+    /// named so the user sees what was left out.
+    #[serde(default)]
+    pub skipped: Vec<String>,
+}
+
 /// Transport-health state surfaced on the header "chat" pill (transport
 /// concept §4, T4 §P6). The engine sets it from the last dial/resolve
 /// outcome; the UI reads `tone` for the pill colour and `reason` for the
@@ -2133,6 +2160,9 @@ pub struct SessionView {
     pub active_workspace: WorkspaceId,
     /// The (mock) restore lifecycle.
     pub restore: RestoreState,
+    /// The manual-export lifecycle (real; additive).
+    #[serde(default)]
+    pub export: ExportState,
     /// The founding lifecycle (real over SMP).
     pub create: CreateState,
     /// The join-via-invite lifecycle (real over SMP).
@@ -2161,6 +2191,7 @@ impl Default for SessionView {
             backup_orphans: Vec::new(),
             active_workspace: String::new(),
             restore: RestoreState::default(),
+            export: ExportState::default(),
             create: CreateState::default(),
             join: JoinState::default(),
             net_health: NetHealth::default(),
@@ -2442,6 +2473,44 @@ pub enum Command {
         id: WorkspaceId,
         /// The workspace's recovery phrase.
         phrase: String,
+    },
+    /// Export a workspace as ONE encrypted `.molt.enc` blob file
+    /// (`molt-export-v1`): manifest, encrypted history, the threshold-signed
+    /// chain, the newest snapshot, the logo — and, when stored, the recovery
+    /// seed (blob + passphrase then carries full seat capability, like the
+    /// phrase itself). Live MLS/transport state is NEVER exported: the blob
+    /// restores knowledge, the recovery ritual restores membership. Runs off
+    /// the actor; the honest outcome lands in [`SessionView::export`].
+    ExportWorkspace {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+        /// Target file path (`~` is expanded; parents are created; an
+        /// existing file is atomically replaced).
+        dest: String,
+        /// The export passphrase (Argon2id-stretched; minimum 10
+        /// characters, engine-enforced).
+        passphrase: String,
+    },
+    /// The export task confirmed the blob on disk (engine-internal, from
+    /// the off-actor export task — an MCP agent must not be able to forge
+    /// an export success).
+    NetExportDone {
+        /// The exported workspace.
+        id: WorkspaceId,
+        /// The written file.
+        dest: String,
+        /// Total bytes written.
+        bytes: u64,
+        /// Unknown files the blob does not contain (honesty).
+        skipped: Vec<String>,
+    },
+    /// The export task failed (engine-internal); the real reason is
+    /// surfaced verbatim — never a fake success.
+    NetExportFailed {
+        /// The workspace whose export failed.
+        id: WorkspaceId,
+        /// The failure, honestly.
+        error: String,
     },
     /// Begin the (mock) restore: moves its lifecycle to the run view; the
     /// engine ticks the progress and the live log by itself.
