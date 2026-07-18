@@ -179,10 +179,16 @@ component SmpServerGroup inherits DetailGroup {
     // the wide pane seats this panel beside the network one
     min-width: 340px;
     // mode picker — the same selection control the anonymity panel uses;
-    // choosing "custom" reveals the URL field below. One-way index binding
-    // (the language dropdown's pattern): the settings screen is re-created
-    // on each open, so the draft value re-seeds the display
-    AppDropdown {
+    // choosing "custom" reveals the URL field below. The bool stays the
+    // single source of truth: clicking a row breaks the dropdown's own
+    // declarative current-index binding (AppDropdown assigns it), so this
+    // change-callback re-imposes the bool on the display when the draft is
+    // re-seeded externally (config reload / MCP save with a clean draft —
+    // the buttons this replaces re-rendered from the bool too)
+    changed smp-custom => {
+        mode-dd.current-index = root.smp-custom ? 1 : 0;
+    }
+    mode-dd := AppDropdown {
         width: 200px;
         model: [Strings.smp-public, Strings.smp-custom];
         current-index: root.smp-custom ? 1 : 0;
@@ -5424,8 +5430,9 @@ export component AppWindow inherits Window {
                                 // no alignment:start — the two panels SHARE
                                 // the pane width (Backup-tab posture) instead
                                 // of floating at preferred size in the empty
-                                // pane; SMP keeps its 340px min-width, the
-                                // anonymity panel takes the rest
+                                // pane; surplus splits evenly, except near
+                                // the 620px threshold where SMP's 340px
+                                // min-width pins it and anon takes the rest
                                 AnonNetworkGroup {
                                     horizontal-stretch: 1;
                                     network-index <=> root.cfg-network-index;
