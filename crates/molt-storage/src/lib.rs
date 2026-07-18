@@ -1429,7 +1429,10 @@ impl ScanEntry {
             size_kib: u32::try_from(self.size_kib).unwrap_or(u32::MAX),
             last_backup_min,
             seed: String::new(),
-            net: "tor".to_string(),
+            // the manifest carries no network label — the caller stamps the
+            // effective global setting (`molt_core::effective_net_label`);
+            // claiming one here would mislabel every entry after a restart
+            net: String::new(),
             encrypted: false,
             members: Vec::new(),
             // the charter is in the encrypted genesis — filled in on open
@@ -2453,6 +2456,10 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].manifest.workspace.name, "Chess Club");
         assert!(entries[0].size_kib > 0);
+        // the manifest does not persist a network label, so a scanned entry
+        // must not claim one — the app stamps the effective global setting
+        // (a hardcoded "tor" here mislabeled every workspace after a restart)
+        assert_eq!(entries[0].info().net, "");
         let id = entries[0].manifest.workspace.id.clone();
         assert_eq!(find_workspace_dir(&root, &id), Some(dir.clone()));
 

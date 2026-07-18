@@ -645,7 +645,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_create_start(move |name, member, threshold, members, net| {
+        ui.on_create_start(move |name, member, threshold, members| {
             issue(
                 &rt,
                 &w,
@@ -655,7 +655,6 @@ pub fn run_app(
                     member: member.to_string(),
                     threshold: u8::try_from(threshold).unwrap_or(0),
                     members: u8::try_from(members).unwrap_or(0),
-                    net: net.to_string(),
                 },
             );
         });
@@ -2038,6 +2037,13 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     let (net_tone, net_reason) = net_health_pill(&sv.net_health);
     ui.set_net_health_tone(net_tone);
     ui.set_net_health_reason(net_reason.into());
+
+    // the create screen's read-only "Network" line: the EFFECTIVE global
+    // anonymity network. NOT a draft field (the user never types it), so it
+    // is pushed on every update — inside the settings_changed guard a GUI
+    // save would leave it stale (the draft-protection `editing` flag
+    // suppresses the mirror exactly then)
+    ui.set_cw_net(molt_core::effective_net_label(&sv.settings.anonymity).into());
 
     if !settings_changed {
         apply_strings(ui, lang);
@@ -4532,9 +4538,11 @@ lexicon! {
     cw_rule_b: "of", "von";
     cw_rule_c: "approvals.", "Stimmen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
-    cw_transport_hint: "How this node reaches the other members.", "Wie dieser Node die anderen Mitglieder erreicht.";
+    cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";
+    cw_net_label: "Network", "Netzwerk";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
+    cw_net_hint_settings: "Global setting — change it under Settings → Network.", "Globale Einstellung — ändern unter Einstellungen → Netzwerk.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
     cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";

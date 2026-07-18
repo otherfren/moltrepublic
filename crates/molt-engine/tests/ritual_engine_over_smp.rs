@@ -129,7 +129,6 @@ async fn engine_founds_over_smp_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -301,7 +300,6 @@ async fn engine_join_lifecycle_over_smp_enters_the_republic() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

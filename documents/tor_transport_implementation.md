@@ -175,13 +175,23 @@ Fix: `test_connection` takes the resolved `Dialer` (and `dial_target`), so the
 probe uses the same routing the app will. For an onion-only target with
 `network=none`, report "requires Tor", don't dial.
 
-### P8 — `CreateStart.net` stays cosmetic (unchanged)
+### P8 — the per-workspace `net` choice is GONE (cleaned up 2026-07-18)
 
-`CreateStart.net` → `CreateState.net` → `WorkspaceInfo.net` is a display label
-(`lib.rs:2086`, `lifecycles.rs:622`); routing comes from the **global** settings,
-not per-workspace. This pass does **not** make `net` authoritative (no genesis
-binding). Note the vocabulary drift (`none` vs `clearnet`) but do not fix it
-here. If per-workspace enforcement is ever wanted it is a separate design.
+Routing comes from the **global** settings, not per-workspace — and since the
+mock_todo §2 cleanup the surfaces say so. `CreateStart` no longer carries a
+`net` field (command + MCP tool param removed); the create screen's cosmetic
+dropdown/tor-mode/port inputs were replaced by a read-only display of the
+effective global network plus a "change it under Settings → Network" hint.
+`CreateState.net` / `WorkspaceInfo.net` remain as pure display labels, now
+derived from the live global settings at founding/join/recovery time and at
+the startup scan (one shared normalizer, `molt_core::effective_net_label`:
+`"tor"` or `"none"`, anything unknown reads as `"none"` because
+`Dialer::resolve` fails it closed) — never from a client-supplied string.
+The hardcoded `"tor"` labels on the join/recovery/restore paths and in
+`ScanEntry::info` are gone with it, which also retires the `none`/`clearnet`
+vocabulary drift for real entries (demo seed data may still carry legacy
+values). If
+per-workspace enforcement is ever wanted it is a separate design.
 
 ### P9 — DNS never resolves locally when Tor is on
 
@@ -417,8 +427,9 @@ test files + CI wiring only.
   inbound; ensure it binds loopback-only under `network=tor` (or always). Its
   own concept is `mcp-security.md`.
 - **nym** — greyed; a separate transport.
-- **Per-workspace `net` enforcement** (P8) and the `none`/`clearnet` vocabulary
-  drift.
+- **Per-workspace `net` enforcement** (P8) — the cosmetic per-workspace choice
+  was removed 2026-07-18 (see §P8); only a real per-workspace transport design
+  remains open, if ever wanted.
 - **arti circuit tuning** (guard/bridge config, pluggable transports).
 
 ## 8. Risks & watch items

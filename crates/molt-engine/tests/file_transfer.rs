@@ -121,7 +121,6 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

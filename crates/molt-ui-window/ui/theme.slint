@@ -145,7 +145,7 @@ export struct WorkspaceItem {
     backup: string, // human "last backup" label, e.g. "30 min ago" / "never"
     encrypted: bool, // at-rest encrypted (mock): inactive until decrypted
     seed: string, // recovery seed all secret keys derive from (mock)
-    net: string, // transport: "tor" | "nym" | "clearnet"
+    net: string, // effective global anonymity network at founding/join ("tor" | "none"; demo entries may carry legacy values)
     members: [MemberSync], // who is in the DAO + when they last synced
 }
 
@@ -402,8 +402,10 @@ export global Strings {
     in property <string> cw-rule-c;
     in property <string> cw-grp-transport;
     in property <string> cw-transport-hint;
+    in property <string> cw-net-label;
     in property <string> cw-net-ok-tor;
     in property <string> cw-net-warn;
+    in property <string> cw-net-hint-settings;
     in property <string> cw-found;
     in property <string> cw-invites;
     in property <string> cw-invites-hint;

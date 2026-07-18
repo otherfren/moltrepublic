@@ -279,6 +279,20 @@ fn default_sound() -> String {
     "none".to_string()
 }
 
+/// The display label for an anonymity-network setting — what
+/// [`WorkspaceInfo::net`] / [`CreateState::net`] and the create screen's
+/// read-only "Network" line show. The SINGLE normalization every surface
+/// shares (engine, GUI, startup scan): only `"tor"` reads as `"tor"`;
+/// `"none"`, the legacy `"nym"`, and any unknown value read as `"none"` —
+/// they never dial (an unknown network fails the dialer resolution closed),
+/// so the honest reading is "no anonymity network configured".
+pub fn effective_net_label(anonymity: &str) -> &'static str {
+    match anonymity {
+        "tor" => "tor",
+        _ => "none",
+    }
+}
+
 impl Default for SessionSettings {
     fn default() -> Self {
         SessionSettings {
@@ -397,7 +411,9 @@ pub struct WorkspaceInfo {
     pub last_backup_min: u32,
     /// The (mock) recovery seed all of its secret keys derive from.
     pub seed: String,
-    /// Transport: `"tor" | "nym" | "clearnet"`.
+    /// The effective global anonymity network (`"tor" | "none"`) when this
+    /// entry was founded/joined — a display label (routing always follows
+    /// the LIVE global settings); demo entries may carry legacy values.
     pub net: String,
     /// Encrypted at rest (mock): an encrypted workspace is inactive —
     /// opening requires a decrypt with the recovery phrase.
@@ -1839,7 +1855,8 @@ pub struct CreateState {
     pub threshold: u8,
     /// The member count (n).
     pub members: u8,
-    /// Transport: `"tor" | "nym" | "none"`.
+    /// The EFFECTIVE global anonymity network (`"tor" | "none"`) captured
+    /// when the ritual opened — a read-only display value, never a choice.
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
     pub seed: String,
@@ -2300,7 +2317,9 @@ pub enum Command {
     /// invite links and opens their invite queues. The workspace is
     /// created only when every member activated their link AND signed the
     /// final roster (transport concept §3.3) — until then nothing exists
-    /// on disk, and closing the wizard voids the links.
+    /// on disk, and closing the wizard voids the links. The transport is
+    /// NOT a parameter: the ritual always routes through the global
+    /// anonymity settings (`SessionSettings.anonymity`, Settings → Network).
     CreateStart {
         /// The new republic's name.
         name: String,
@@ -2310,8 +2329,6 @@ pub enum Command {
         threshold: u8,
         /// The member count (n), `2..=13`.
         members: u8,
-        /// Transport: `"tor" | "nym" | "none"`.
-        net: String,
     },
     /// Propose the deliberated charter — the final DAO name and a free-text
     /// agenda — once every seat has joined (`create.can_propose`). This seals
@@ -3363,6 +3380,19 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The single source of truth for the "which network am I on" display
+    /// label: only a configured "tor" reads as tor; "none", the legacy
+    /// "nym", and any unknown value read as "none" (they never dial — an
+    /// unknown network fails the dialer resolution closed).
+    #[test]
+    fn effective_net_label_maps_only_tor_to_tor() {
+        assert_eq!(effective_net_label("tor"), "tor");
+        assert_eq!(effective_net_label("none"), "none");
+        assert_eq!(effective_net_label("nym"), "none");
+        assert_eq!(effective_net_label("garbage"), "none");
+        assert_eq!(effective_net_label(""), "none");
+    }
 
     /// Every Reply variant must serialize (the MCP surface renders replies
     /// as JSON text): the internally-tagged repr cannot hold a bare

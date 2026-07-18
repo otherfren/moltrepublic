@@ -490,8 +490,10 @@ export component AppWindow inherits Window {
     callback restore-cancel();
     callback restore-finish();
     // founding verbs (engine-backed; the engine ticks progress + log and
-    // derives the seed + invites): name, handle, threshold, members, net
-    callback create-start(string, string, int, int, string);
+    // derives the seed + invites): name, handle, threshold, members — the
+    // transport is NOT a parameter: it always follows the global anonymity
+    // settings (Settings → Network)
+    callback create-start(string, string, int, int);
     callback create-cancel();
     callback create-finish();
     // deliberation step: the founder proposes the final name + charter (agenda)
@@ -661,9 +663,9 @@ export component AppWindow inherits Window {
 
     // create: the local configuration draft (like the settings draft, local
     // until create-start hands it to the engine) …
-    property <int> cw-net-index: 0;
-    property <int> cw-tor-mode-index: 0;
-    property <int> cw-tor-port: 9050;
+    // the EFFECTIVE global anonymity network ("tor" | "none") — read-only
+    // display on the create screen, fed from the saved settings
+    in property <string> cw-net: "none";
     property <string> cw-name;
     // the founder's editable charter draft, proposed once every seat is filled
     property <string> cw-agenda;
@@ -1061,9 +1063,6 @@ export component AppWindow inherits Window {
         root.cw-member = "";
         root.cw-threshold = 2;
         root.cw-members = 3;
-        root.cw-net-index = 0;
-        root.cw-tor-mode-index = 0;
-        root.cw-tor-port = 9050;
     }
 
     init => {
@@ -1686,49 +1685,39 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // how the republic's traffic travels
+                    // how the republic's traffic travels: a READ-ONLY view of
+                    // the global anonymity setting — the ritual transport
+                    // always comes from Settings → Network, never from a
+                    // per-republic choice (tor doc §P8)
                     RestoreWay {
                         title: Strings.cw-grp-transport;
                         hint: Strings.cw-transport-hint;
                         icon: @image-url("assets/globe.svg");
-                        HorizontalLayout {
-                            spacing: 8px;
-                            AppDropdown {
-                                width: 110px;
-                                model: ["tor", "none"];
-                                current-index <=> root.cw-net-index;
-                            }
-                            if root.cw-net-index == 0: AppDropdown {
-                                width: 130px;
-                                model: ["local", "embedded", "whonix"];
-                                current-index <=> root.cw-tor-mode-index;
-                            }
-                            // only a LOCAL tor daemon has an explicit SOCKS
-                            // port; embedded and whonix configure themselves
-                            if root.cw-net-index == 0 && root.cw-tor-mode-index == 0: AppStepper {
-                                width: 120px;
-                                value <=> root.cw-tor-port;
-                                minimum: 1;
-                                maximum: 65535;
-                            }
+                        VerticalLayout {
+                            spacing: 5px;
                             HorizontalLayout {
                                 spacing: 8px;
-                                horizontal-stretch: 1;
-                                alignment: end;
                                 Rectangle {
                                     width: 9px;
                                     height: 9px;
                                     border-radius: 4.5px;
                                     y: (parent.height - self.height) / 2;
-                                    background: root.cw-net-index == 1 ? Theme.warn : Theme.good;
+                                    background: root.cw-net == "tor" ? Theme.good : Theme.warn;
                                 }
                                 Text {
-                                    text: root.cw-net-index == 0 ? Strings.cw-net-ok-tor : Strings.cw-net-warn;
-                                    color: root.cw-net-index == 1 ? Theme.warn : Theme.good;
+                                    text: "\{Strings.cw-net-label}: \{root.cw-net} — \{root.cw-net == "tor" ? Strings.cw-net-ok-tor : Strings.cw-net-warn}";
+                                    color: root.cw-net == "tor" ? Theme.good : Theme.warn;
                                     font-size: Theme.fs-cap;
                                     vertical-alignment: center;
+                                    horizontal-stretch: 1;
                                     overflow: elide;
                                 }
+                            }
+                            Text {
+                                text: Strings.cw-net-hint-settings;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
                     }
@@ -1746,8 +1735,7 @@ export component AppWindow inherits Window {
                             label: Strings.cw-found;
                             enabled: root.cw-name != "" && root.cw-member != "";
                             clicked => {
-                                root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members,
-                                    root.cw-net-index == 0 ? "tor" : "none");
+                                root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members);
                             }
                         }
                     }

@@ -894,15 +894,14 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
-            description: "Begin founding a new republic over the configured transport (SMP). The engine derives the founder's identity, mints one-time invite links per member, and runs the real ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose.",
+            description: "Begin founding a new republic over the configured transport (SMP). The transport routing (tor/none) always follows the GLOBAL anonymity settings (save_settings / Settings → Network) — it is not a per-republic choice. The engine derives the founder's identity, mints one-time invite links per member, and runs the real ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "the new republic's name (must be unique locally)" },
                     "member": { "type": "string", "description": "the founder's handle" },
                     "threshold": { "type": "integer", "description": "approvals required (m), 1..=members" },
-                    "members": { "type": "integer", "description": "member count (n), 2..=13" },
-                    "net": { "type": "string", "enum": ["tor", "nym", "none"] }
+                    "members": { "type": "integer", "description": "member count (n), 2..=13" }
                 },
                 "required": ["name", "member", "threshold", "members"]
             }),
@@ -911,11 +910,6 @@ pub fn tools() -> Vec<ToolDef> {
                 member: str_arg(args, "member")?,
                 threshold: u8_arg(args, "threshold")?,
                 members: u8_arg(args, "members")?,
-                net: args
-                    .get("net")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tor")
-                    .to_string(),
             }),
         },
         ToolDef {

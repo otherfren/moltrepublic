@@ -258,6 +258,15 @@ impl State {
         molt_net::smp::tls::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
     }
 
+    /// The display label for the EFFECTIVE global anonymity network — what
+    /// `WorkspaceInfo.net` / `CreateState.net` show. Derived from the same
+    /// settings [`Self::dialer_for`] resolves, never from a client-supplied
+    /// string (tor_transport_implementation.md §P8). The normalization is
+    /// the shared [`molt_core::effective_net_label`].
+    pub(crate) fn effective_net_label(&self) -> String {
+        molt_core::effective_net_label(&self.session.settings.anonymity).to_string()
+    }
+
     /// Resolve the dialer for a flow about to open SMP connections, updating
     /// the transport-health pill (T4 §P6): success clears it to `Ok`, a
     /// fail-closed error sets it `Down` with the reason and returns that reason

@@ -19,7 +19,7 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 | Nr. | Titel | Komplexität |
 |----:|-------|:-----------:|
 | 1 | Workspace-Ordner-Auswahl ohne echten Dateidialog | S |
-| 2 | Create-Screen: „Netzwerk“-Auswahl ist kosmetisch (dokumentiert, P8) | S |
+| 2 | ✅ ERLEDIGT — Create-Screen: „Netzwerk“-Auswahl ist kosmetisch (dokumentiert, P8) | S |
 | 3 | Statische Statusfelder der Workspace-Liste (Größe, Sync, Queue) | S |
 | 4 | Demo-Boot-Gruppe + Demo-Mesh mit Antwort-„Brains“ | S |
 | 5 | S3 „Verbindung testen“ zeigt immer Erfolg (reiner UI-Toast) | M |
@@ -54,6 +54,15 @@ molt-ui + ein Callback.
 **Komplexität: S** — dasselbe Muster existiert zweimal im selben File.
 
 ## 2. Create-Screen: „Netzwerk“-Auswahl ist kosmetisch (dokumentiert, P8) — **S**
+
+> **✅ ERLEDIGT (2026-07-18): Variante (a) umgesetzt.** `CreateStart` hat kein
+> `net`-Feld mehr (Command + MCP-Tool-Param entfernt); der Create-Screen zeigt
+> die effektive globale Einstellung read-only (mit Hinweis auf Einstellungen →
+> Netzwerk); `WorkspaceInfo.net`/`CreateState.net` werden engine-seitig aus den
+> globalen Settings abgeleitet (`molt_core::effective_net_label` — auch beim
+> Join/Recovery/Restore und beim Startup-Scan, die vorher „tor“ hartkodierten).
+> Details: `tor_transport_implementation.md` §P8. Die Fundort-Zeilennummern
+> unten sind historisch.
 
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:1570–1624` (Dropdown tor/none, Tor-Modus, Port; `:1624` übergibt nur den String `"tor"`/`"none"`)

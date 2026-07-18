@@ -87,7 +87,6 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

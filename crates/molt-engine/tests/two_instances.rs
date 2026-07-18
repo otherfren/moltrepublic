@@ -65,7 +65,6 @@ async fn founding_ritual_completes_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -230,7 +229,6 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -362,7 +360,6 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -460,7 +457,6 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -580,7 +576,6 @@ async fn founding_bootstraps_a_direct_mesh_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -734,7 +729,6 @@ async fn founding_chats_over_the_direct_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -875,7 +869,6 @@ async fn reactions_and_deletes_converge_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -1223,7 +1216,6 @@ async fn founding_governs_over_the_direct_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -1427,7 +1419,6 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -1663,7 +1654,6 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -1948,7 +1938,6 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -2137,7 +2126,6 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         member: "founder-a".to_string(),
         threshold: 1,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -2409,7 +2397,6 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         member: "founder-a".to_string(),
         threshold: 1,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -2663,7 +2650,6 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
         member: "founder-a".to_string(),
         threshold: 1,
         members: 3,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -2909,7 +2895,6 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -3726,7 +3711,6 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
         member: "founder-a".to_string(),
         threshold: 1,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -3893,7 +3877,6 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 3,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
@@ -4391,7 +4374,6 @@ async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring()
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
