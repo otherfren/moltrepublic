@@ -12,8 +12,42 @@ mod common;
 
 use std::time::Duration;
 
-use common::read_chat;
+use common::{await_founding, read_chat};
 use molt_core::{Command, Event, GroupConfig, Reply, SessionView};
+use molt_engine::WalletHandle;
+
+/// Post `n` chats as `own` and require SILENCE: no chat event from anyone
+/// else within a window comfortably past the old brains' max reply delay
+/// (1.5–6.5 s), and a log holding exactly the own messages afterwards.
+async fn expect_no_peer_reply(w: &WalletHandle, own: &str, n: usize) {
+    let mut ev = w.subscribe();
+    for i in 0..n {
+        w.execute(Command::Chat {
+            body: format!("anyone there {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("chat");
+    }
+    let reply = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Ok(Event::Chat { from, .. }) = ev.recv().await {
+                if from != own {
+                    return from;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        reply.is_err(),
+        "no fake peer may answer in production, got a reply from {reply:?}"
+    );
+    let chat = read_chat(w).await;
+    assert_eq!(chat.len(), n, "the log holds exactly the operator's own messages");
+    assert!(chat.iter().all(|m| m["from"] == serde_json::json!(own)));
+}
 
 /// Post a few messages and wait for a loopback peer to answer through the
 /// real transport path.
@@ -150,36 +184,7 @@ async fn demo_workspace_mesh_updates_presence_on_reply() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_spawn_runs_no_demo_mesh() {
     let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
-    let mut ev = w.subscribe();
-    for i in 0..6 {
-        w.execute(Command::Chat {
-            body: format!("nobody home {i}"),
-            quote: None,
-            channel: molt_core::ChannelRef::default(),
-        })
-        .await
-        .expect("chat");
-    }
-    // the old brains answered 1.5–6.5 s after a message; watch well past
-    // that window and require silence
-    let silence = tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if let Ok(Event::Chat { from, .. }) = ev.recv().await {
-                if from != "me" {
-                    return from;
-                }
-            }
-        }
-    })
-    .await;
-    assert!(
-        silence.is_err(),
-        "no fake peer may answer in production, got a reply from {:?}",
-        silence
-    );
-    let chat = read_chat(&w).await;
-    assert_eq!(chat.len(), 6, "the scratch log holds exactly my own messages");
-    assert!(chat.iter().all(|m| m["from"] == serde_json::json!("me")));
+    expect_no_peer_reply(&w, "me", 6).await;
 }
 
 /// `prefs.simulated_members` is INERT for the mesh: a persisted workspace
@@ -207,49 +212,9 @@ async fn simulated_members_flag_spawns_no_fake_peers() {
     })
     .await
     .expect("create start");
-    // the sim ritual seals asynchronously — poll the session
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        match w.execute(Command::ReadSession).await.expect("session") {
-            Reply::Session(s) => match s.create.run.outcome {
-                1 => break,
-                2 => panic!("founding failed: {:?}", s.create.run.log),
-                _ => {}
-            },
-            other => panic!("unexpected: {other:?}"),
-        }
-        assert!(tokio::time::Instant::now() < deadline, "founding did not seal");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    await_founding(&w).await;
     w.execute(Command::CreateFinish).await.expect("finish");
-
-    let mut ev = w.subscribe();
-    for i in 0..6 {
-        w.execute(Command::Chat {
-            body: format!("anyone there {i}"),
-            quote: None,
-            channel: molt_core::ChannelRef::default(),
-        })
-        .await
-        .expect("chat");
-    }
-    let silence = tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if let Ok(Event::Chat { from, .. }) = ev.recv().await {
-                if from != "petra" {
-                    return from;
-                }
-            }
-        }
-    })
-    .await;
-    assert!(
-        silence.is_err(),
-        "the simulated_members flag must not spawn fake peers, got {:?}",
-        silence
-    );
-    let chat = read_chat(&w).await;
-    assert_eq!(chat.len(), 6, "only the operator's own messages");
+    expect_no_peer_reply(&w, "petra", 6).await;
 }
 
 /// The streaming `Proposed` event names its proposer: a frontend must be

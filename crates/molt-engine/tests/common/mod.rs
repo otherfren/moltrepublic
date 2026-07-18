@@ -65,6 +65,28 @@ pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
     }
 }
 
+/// Poll the session until a running founding seals (`create.run.outcome
+/// == 1`; panic on failure or after 20 s) — the sim ritual runs its
+/// members asynchronously.
+pub async fn await_founding(w: &WalletHandle) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match w.execute(Command::ReadSession).await.expect("read session") {
+            Reply::Session(s) => match s.create.run.outcome {
+                1 => return,
+                2 => panic!("founding failed: {:?}", s.create.run.log),
+                _ => {}
+            },
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "founding did not seal in time"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Poll until the chat log holds at least `want` messages (or panic after
 /// `secs`).
 pub async fn await_chat_len(w: &WalletHandle, want: usize, secs: u64) -> Vec<serde_json::Value> {

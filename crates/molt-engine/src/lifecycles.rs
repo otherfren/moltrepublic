@@ -602,7 +602,11 @@ impl State {
                 None, // …rooted, never pruned at birth
                 MoltError::Create,
             )?;
-            self.persist_simulated_members(&id, true);
+            // truthful marker: only a sim-seam founding has simulated
+            // members. A REAL founding must never carry the flag — marked
+            // simulated, the demo-mesh seam would grow fake peers over a
+            // real republic's log.
+            self.persist_simulated_members(&id, self.ritual_sim);
             id
         } else {
             demo_workspace_id(&c.name)
