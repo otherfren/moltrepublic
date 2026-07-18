@@ -1214,7 +1214,9 @@ impl State {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
-        tracing::info!(%member, %link, "recovery link ready");
+        // the link itself is single-use secret material — it goes to the
+        // operator surface only, never into the log
+        tracing::info!(%member, "recovery link ready");
         self.session.notice = format!("recovery-link:{link}");
         self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)

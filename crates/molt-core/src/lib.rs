@@ -2927,6 +2927,14 @@ pub struct SurfaceSnapshot {
     /// a filtered read; `Group` is always present). Empty on other surfaces.
     #[serde(default)]
     pub channels: Vec<ChannelInfo>,
+    /// Chat only: the archive half of the retention window currently holds
+    /// at least one visible message. Engine-computed with the same view
+    /// predicate an `"archive"` read filters by, on EVERY chat read (so a
+    /// frontend needs no extra archive read to offer/hide that view).
+    /// Additive with a default, so an older writer's snapshot stays
+    /// deserializable. `false` on other surfaces.
+    #[serde(default)]
+    pub has_archive: bool,
 }
 
 /// One block of the persistent chain as display data — the row a

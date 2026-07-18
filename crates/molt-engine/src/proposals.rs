@@ -702,6 +702,15 @@ impl State {
             } else {
                 Vec::new()
             },
+            // presence, not a materialization: one early-exit probe with the
+            // same predicates an "archive" read of THIS channel filters by,
+            // so a frontend can offer/hide the Archive view without a second
+            // full read — and never offer an archive the filtered pane
+            // would show empty
+            has_archive: surface == Surface::Chat
+                && self
+                    .chat_visible_in(Some("archive"))
+                    .any(|m| channel.as_ref().map_or(true, |c| &m.channel == c)),
         }
     }
 

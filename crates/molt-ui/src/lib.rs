@@ -2100,8 +2100,9 @@ struct SurfacesBundle {
     /// The chat surface is showing the Archive sub-view — its log pages
     /// at 20 rows (an archive can hold a whole retention half-window).
     chat_archive: bool,
-    /// The archive half holds at least one message right now — the sidebar
-    /// only offers the Archive item then (engine-filtered presence read).
+    /// The archive half holds at least one message in the SELECTED channel
+    /// right now — the sidebar only offers the chat Archive item then
+    /// (engine-stamped `has_archive` on the pane's own filtered read).
     archive_exists: bool,
     /// Every committed chain block, newest first (the Chain-History panel).
     chain_rows: Vec<molt_core::ChainBlockView>,
@@ -2540,21 +2541,6 @@ async fn push_surfaces(
         Ok(Reply::State(snap)) => Some(snap),
         _ => None,
     };
-    // whether the archive half actually holds messages right now — the
-    // sidebar only offers the Archive item then. Engine-filtered with the
-    // same ReadState the archive pane reads (co-equality, never a
-    // client-side recount of the retention boundary)
-    let archive_exists = match wallet
-        .execute(Command::ReadState {
-            surface: Surface::Chat,
-            channel: None,
-            view: Some("archive".to_string()),
-        })
-        .await
-    {
-        Ok(Reply::State(snap)) => !snap.applied.is_empty(),
-        _ => false,
-    };
     // the Organization tables ride the same push: the engine's ReadMembers /
     // ReadUploads (the projections the MCP tools of the same name read)
     let members: Vec<MemberRowData> = match wallet.execute(Command::ReadMembers).await {
@@ -2629,6 +2615,14 @@ async fn push_surfaces(
             snaps.push((sf, snap));
         }
     }
+    // the sidebar's Archive gate rides the SAME channel-filtered chat read
+    // the archive pane renders from: the engine stamps `has_archive` on
+    // every chat snapshot (an early-exit presence probe, no extra read),
+    // so the item never promises messages the filtered pane wouldn't show
+    let archive_exists = snaps
+        .iter()
+        .find(|(sf, _)| *sf == Surface::Chat)
+        .is_some_and(|(_, s)| s.has_archive);
     // proposal state across ALL surfaces feeds the patch channels: lazy
     // titles for the sidebar and the system lines (P8)
     let all_pending: Vec<ProposalView> = snaps
@@ -2918,7 +2912,9 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 .map(|sf| {
                     sf.views()
                         .iter()
-                        .filter(|(key, _)| view_visible(key, b.archive_exists, b.chat_archive))
+                        .filter(|(key, _)| {
+                            view_visible(&s.key, key, b.archive_exists, b.chat_archive)
+                        })
                         .map(|(key, label)| ViewItem {
                             key: (*key).into(),
                             name: view_label(b.lang, key, label).into(),
@@ -3459,11 +3455,12 @@ fn expires_label(lang: i32, now: u64, expires_ts: u64, available: bool) -> Strin
         format!("in {} h", left / 3600)
     } else {
         let d = left / 86_400;
-        if de {
-            format!("in {d} Tag{}", if d == 1 { "" } else { "en" })
-        } else {
-            format!("in {d} day{}", if d == 1 { "" } else { "s" })
-        }
+        let unit = strings_pick(
+            de,
+            if d == 1 { "day" } else { "days" },
+            if d == 1 { "Tag" } else { "Tagen" },
+        );
+        format!("in {d} {unit}")
     }
 }
 
@@ -3547,30 +3544,34 @@ fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String, QuoteSrc>
     // Runs AFTER the teaser pass: only rows whose quote actually renders
     // (quote_label set) may indent.
     let mut depth = 0;
-    let mut prev_target: Option<String> = None;
-    for line in log.iter_mut() {
-        let target = if line.quote_label.is_empty() {
-            None
-        } else if line.quote_id.is_empty() {
-            // legacy/cross-channel: the teaser is the only stable handle
-            Some(format!("label:{}", line.quote_label))
-        } else {
-            Some(line.quote_id.clone())
-        };
-        match target {
-            Some(t) => {
-                if prev_target.as_deref() != Some(t.as_str()) {
-                    depth = if depth == 1 { 2 } else { 1 };
-                }
-                line.quote_indent = depth;
-                prev_target = Some(t);
-            }
-            None => {
-                depth = 0;
-                prev_target = None;
-            }
+    for i in 0..log.len() {
+        if log[i].quote_label.is_empty() {
+            depth = 0;
+            continue;
         }
+        if i == 0 || !same_quote_target(&log[i - 1], &log[i]) {
+            depth = if depth == 1 { 2 } else { 1 };
+        }
+        log[i].quote_indent = depth;
     }
+}
+
+/// Whether two displayed rows quote the SAME target — the grouping relation
+/// behind the alternating reply indent. Precedence: the resolved target row
+/// (set for both id and legacy quotes whose target is in view — so the two
+/// addressing styles agree on a shared target), then the stable id, then the
+/// teaser text as the last resort for unresolvable cross-channel quotes.
+fn same_quote_target(a: &LogLineData, b: &LogLineData) -> bool {
+    if a.quote_label.is_empty() || b.quote_label.is_empty() {
+        return false;
+    }
+    if a.quote >= 0 && b.quote >= 0 {
+        return a.quote == b.quote;
+    }
+    if !a.quote_id.is_empty() || !b.quote_id.is_empty() {
+        return a.quote_id == b.quote_id;
+    }
+    a.quote_label == b.quote_label
 }
 
 // ---------------------------------------------------------------------------
@@ -4073,12 +4074,14 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
     .to_string()
 }
 
-/// Sidebar sub-view visibility: the chat Archive item earns its place only
+/// Sidebar sub-view visibility: the CHAT Archive item earns its place only
 /// while the archive half actually holds messages — or while the user is
 /// standing in it (never hide the ground under the active selection; it
-/// vanishes once they leave). Every other sub-view is always offered.
-fn view_visible(key: &str, archive_has_rows: bool, viewing_archive: bool) -> bool {
-    key != "archive" || archive_has_rows || viewing_archive
+/// vanishes once they leave). Every other sub-view is always offered —
+/// including the "archive" views of OTHER surfaces (Memory, Quests), whose
+/// state has nothing to do with the chat retention window.
+fn view_visible(surface: &str, key: &str, archive_has_rows: bool, viewing_archive: bool) -> bool {
+    surface != "chat" || key != "archive" || archive_has_rows || viewing_archive
 }
 
 /// The default transition op the GUI uses when proposing on a surface.
@@ -5060,6 +5063,7 @@ mod tests {
             denied: 0,
             declined: Vec::new(),
             channels: Vec::new(),
+            has_archive: false,
         };
         let data = surface_data(0, Surface::Memory, &snap, "petra", None);
         assert_eq!(data.log.len(), 2);
@@ -5523,13 +5527,17 @@ mod tests {
 
     #[test]
     fn archive_item_only_shows_while_the_archive_holds_messages() {
-        assert!(!view_visible("archive", false, false), "empty archive: hidden");
-        assert!(view_visible("archive", true, false), "archived messages exist: offered");
+        assert!(!view_visible("chat", "archive", false, false), "empty archive: hidden");
+        assert!(view_visible("chat", "archive", true, false), "archived messages exist: offered");
         assert!(
-            view_visible("archive", false, true),
+            view_visible("chat", "archive", false, true),
             "the view the user stands in never vanishes under them"
         );
-        assert!(view_visible("today", false, false), "other sub-views are always offered");
+        assert!(view_visible("chat", "today", false, false), "other sub-views are always offered");
+        assert!(
+            view_visible("memory", "archive", false, false),
+            "another surface's archive view has nothing to do with the chat retention window"
+        );
     }
 
     #[test]

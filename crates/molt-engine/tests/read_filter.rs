@@ -101,6 +101,13 @@ async fn view_filter_rides_read_state() {
         read(None, "archive").await.channels,
         read_chat_snapshot(&w, None).await.channels
     );
+    // the archive-presence stamp rides every chat read (view-independent):
+    // a fresh log has nothing in the older retention half
+    assert!(
+        !read(None, "today").await.has_archive,
+        "a just-sent message must not flag an archive presence"
+    );
+    assert!(!read_chat_snapshot(&w, None).await.has_archive);
     // an unknown view key errors (shared `Surface::views` vocabulary)
     let err = w
         .execute(Command::ReadState {

@@ -74,53 +74,48 @@ component LanguageAppearanceGroup inherits DetailGroup {
     }
 }
 
+// one alert-sound picker row: dropdown plus the conditional preview
+// button — the sound model and the index→name mapping live here exactly
+// once, shared by the message and vote rows
+component SoundPickerRow inherits FieldLabel {
+    in-out property <int> index;
+    callback test(string);
+    HorizontalLayout {
+        spacing: 8px;
+        AppDropdown {
+            width: 200px;
+            model: [Strings.sound-off, "Bell", "Chime", "Pop"];
+            current-index <=> root.index;
+        }
+        if root.index > 0: AppButton {
+            width: 32px;
+            height: 32px;
+            pad: 0px;
+            label: "🔊";
+            clicked => {
+                root.test(root.index == 1 ? "bell" : (root.index == 2 ? "chime" : "pop"));
+            }
+        }
+    }
+}
+
 component SoundAlertsGroup inherits DetailGroup {
     in-out property <int> message-index;
     in-out property <int> vote-index;
     callback test-sound(string);
     title: Strings.set-panel-sounds;
-    FieldLabel {
+    SoundPickerRow {
         label: Strings.field-sound-message;
-        HorizontalLayout {
-            spacing: 8px;
-            AppDropdown {
-                width: 200px;
-                model: [Strings.sound-off, "Bell", "Chime", "Pop"];
-                current-index <=> root.message-index;
-            }
-            if root.message-index > 0: AppButton {
-                width: 32px;
-                height: 32px;
-                pad: 0px;
-                label: "🔊";
-                clicked => {
-                    root.test-sound(
-                        root.message-index == 1 ? "bell"
-                        : (root.message-index == 2 ? "chime" : "pop"));
-                }
-            }
+        index <=> root.message-index;
+        test(s) => {
+            root.test-sound(s);
         }
     }
-    FieldLabel {
+    SoundPickerRow {
         label: Strings.field-sound-vote;
-        HorizontalLayout {
-            spacing: 8px;
-            AppDropdown {
-                width: 200px;
-                model: [Strings.sound-off, "Bell", "Chime", "Pop"];
-                current-index <=> root.vote-index;
-            }
-            if root.vote-index > 0: AppButton {
-                width: 32px;
-                height: 32px;
-                pad: 0px;
-                label: "🔊";
-                clicked => {
-                    root.test-sound(
-                        root.vote-index == 1 ? "bell"
-                        : (root.vote-index == 2 ? "chime" : "pop"));
-                }
-            }
+        index <=> root.vote-index;
+        test(s) => {
+            root.test-sound(s);
         }
     }
 }
@@ -4885,6 +4880,10 @@ export component AppWindow inherits Window {
                     }
                 }
                 set-pane := Rectangle {
+                    // Settings → General: from this pane width the two form
+                    // groups sit side by side; below it they stack. ONE
+                    // predicate, so the two arrangements stay complementary.
+                    property <bool> side-groups: self.width >= 560px;
                     vertical-stretch: 1;
                     background: Theme.panel;
                     border-radius: Theme.radius;
@@ -4896,9 +4895,7 @@ export component AppWindow inherits Window {
                         if root.set-tab == 0: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            // the two groups sit side by side when the pane
-                            // offers the room, stacked on a narrow window
-                            if set-pane.width >= 560px: HorizontalLayout {
+                            if set-pane.side-groups: HorizontalLayout {
                                 spacing: 14px;
                                 alignment: start;
                                 LanguageAppearanceGroup {
@@ -4915,17 +4912,20 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            if set-pane.width < 560px: LanguageAppearanceGroup {
-                                lang-index: root.lang-index;
-                                set-language(i) => {
-                                    root.set-language(i);
+                            if !set-pane.side-groups: VerticalLayout {
+                                spacing: 14px;
+                                LanguageAppearanceGroup {
+                                    lang-index: root.lang-index;
+                                    set-language(i) => {
+                                        root.set-language(i);
+                                    }
                                 }
-                            }
-                            if set-pane.width < 560px: SoundAlertsGroup {
-                                message-index <=> root.cfg-sound-message-index;
-                                vote-index <=> root.cfg-sound-vote-index;
-                                test-sound(s) => {
-                                    root.test-sound(s);
+                                SoundAlertsGroup {
+                                    message-index <=> root.cfg-sound-message-index;
+                                    vote-index <=> root.cfg-sound-vote-index;
+                                    test-sound(s) => {
+                                        root.test-sound(s);
+                                    }
                                 }
                             }
                         }
