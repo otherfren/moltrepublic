@@ -838,39 +838,125 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Encrypt a workspace at rest (mock flag flip — real at-rest crypto is
-    /// the storage encryption story). The ACTIVE workspace refuses: it would
-    /// be encrypted from under its own open storage/mesh.
-    pub(crate) fn cmd_encrypt_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
+    /// Seal a workspace at rest under its recovery phrase (S6 — real,
+    /// durable): `molt_storage::seal_at_rest` verifies the phrase against
+    /// the encrypted genesis FIRST (proof the caller holds the credential),
+    /// then removes the device-sealed key material and marks the manifest —
+    /// the state is derived from the directory and survives restarts. The
+    /// ACTIVE workspace refuses: it would be sealed from under its own open
+    /// storage/mesh. Synchronous on the actor by design decision (§7.4):
+    /// the phrase has 256-bit entropy, so verification is one HKDF + one
+    /// AEAD open — no memory-hard KDF, no I/O worth a task.
+    pub(crate) fn cmd_encrypt_workspace(
+        &mut self,
+        id: WorkspaceId,
+        phrase: String,
+    ) -> Result<Reply, MoltError> {
         if self.session.active_workspace == id {
             return Err(MoltError::WorkspaceBusy(
                 "close the workspace before encrypting it".to_string(),
             ));
         }
-        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) else {
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
-        };
-        ws.encrypted = true;
+        }
+        if phrase.trim().is_empty() {
+            return Err(MoltError::BadPayload(
+                "the recovery phrase is required to encrypt — it is verified \
+                 before the device-sealed keys are removed"
+                    .to_string(),
+            ));
+        }
+        // a storage-less node has no at-rest bytes and nothing to verify a
+        // phrase against — claiming to seal would be exactly the fake
+        // behavior this command used to be; refuse honestly instead
+        if !self.persist {
+            return Err(MoltError::Storage(
+                "this node runs without workspace storage — there is nothing \
+                 on disk to encrypt"
+                    .to_string(),
+            ));
+        }
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        molt_storage::seal_at_rest(&dir, &phrase)
+            .map_err(molt_storage::StorageError::into_molt)?;
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            ws.encrypted = true;
+            // sealed = no key material: the details panel must not keep
+            // showing the phrase or the genesis roster from session memory
+            ws.seed = String::new();
+            ws.members = Vec::new();
+            ws.agenda = String::new();
+        }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// Decrypt an at-rest-encrypted workspace. Mock: the phrase is required
-    /// but not yet verified against the workspace key.
+    /// Decrypt an at-rest-sealed workspace: `molt_storage::unseal_at_rest`
+    /// REALLY verifies the phrase (BIP-39 checksum, then the genesis
+    /// frame's Poly1305 tag under the derived key) — a wrong phrase is a
+    /// hard error that changes nothing on disk. On success the key
+    /// material is re-sealed under the local device key and the list entry
+    /// gets its hidden details (phrase, roster, charter) back.
     pub(crate) fn cmd_decrypt_workspace(
         &mut self,
         id: WorkspaceId,
         phrase: String,
     ) -> Result<Reply, MoltError> {
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
+            return Err(MoltError::UnknownWorkspace(id));
+        }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "a recovery phrase is required to decrypt".to_string(),
             ));
         }
-        let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) else {
-            return Err(MoltError::UnknownWorkspace(id));
-        };
-        ws.encrypted = false;
+        // mirror of the encrypt honesty rule: nothing on disk, nothing to
+        // verify the phrase against — refuse instead of pretending
+        if !self.persist {
+            return Err(MoltError::Storage(
+                "this node runs without workspace storage — there is nothing \
+                 on disk to decrypt"
+                    .to_string(),
+            ));
+        }
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        molt_storage::unseal_at_rest(&root, &dir, &phrase)
+            .map_err(molt_storage::StorageError::into_molt)?;
+        // the key material is back — refill the details-panel facts the
+        // sealed state hid (same sources the boot scan uses)
+        let seed = molt_storage::read_sealed_seed(&root, &dir, &id).unwrap_or_default();
+        let mut members = Vec::new();
+        let mut agenda = String::new();
+        if let Some(genesis) = molt_storage::peek_genesis(&root, &dir, &id) {
+            if let WorkspaceEvent::Founded {
+                roster, agenda: a, ..
+            } = genesis.body
+            {
+                // a closed workspace has no presence knowledge — every
+                // member is honestly never-seen (same as the boot scan)
+                members = roster_members(&roster, 0, |_| molt_core::MemberInfo::NEVER);
+                agenda = a;
+            }
+        }
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            ws.encrypted = false;
+            ws.seed = seed;
+            ws.members = members;
+            ws.agenda = agenda;
+        }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

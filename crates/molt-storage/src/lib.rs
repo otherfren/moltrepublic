@@ -36,10 +36,15 @@
 //! so day-to-day opens never touch the seed. The seed entropy itself is also
 //! stored device-sealed (`keys/seed.sealed`, own AAD domain — decision
 //! 2026-07-15) so the Open screen can show the phrase of an
-//! at-rest-unencrypted workspace; S6 passphrase sealing removes that file.
-//! Honest threat-model note: all of this protects the synced / backed-up
-//! workspace dir, not a fully compromised home directory (passphrase sealing
-//! is the opt-in v2, milestone S6).
+//! at-rest-unencrypted workspace. The opt-in S6 phrase sealing ([`sealing`])
+//! removes BOTH key files: the recovery phrase becomes the only credential
+//! (derive-and-verify — no phrase-sealed copy is stored).
+//! Honest threat-model note: the device-sealed default protects the synced /
+//! backed-up workspace dir, not a fully compromised home directory — that is
+//! what the opt-in phrase sealing is for.
+
+pub mod sealing;
+pub use sealing::{is_sealed, seal_at_rest, unseal_at_rest};
 
 pub mod export;
 
@@ -124,6 +129,12 @@ pub enum StorageError {
     /// The workspace was written by a newer node version.
     #[error("workspace version {0} is newer than this build supports")]
     NewerVersion(u32),
+    /// The workspace (carried by id) is phrase-sealed at rest (S6): no key
+    /// material on disk — opening is impossible by design, not an I/O
+    /// accident. Mapped to [`molt_core::MoltError::WorkspaceEncrypted`] so
+    /// every frontend routes it to the decrypt flow.
+    #[error("workspace is sealed at rest — decrypt it with its recovery phrase first")]
+    Sealed(String),
     /// The recovery phrase did not parse / carry valid entropy.
     #[error("seed: {0}")]
     BadSeed(String),
@@ -140,6 +151,7 @@ impl StorageError {
     pub fn into_molt(self) -> molt_core::MoltError {
         match self {
             StorageError::Busy(pid) => molt_core::MoltError::WorkspaceBusy(pid),
+            StorageError::Sealed(id) => molt_core::MoltError::WorkspaceEncrypted(id),
             other => molt_core::MoltError::Storage(other.to_string()),
         }
     }
@@ -1234,20 +1246,52 @@ pub fn create_workspace(
     })
 }
 
+/// The manifest-level preconditions of opening: version within this
+/// build's ceiling, and not phrase-sealed (S6 — a sealed dir has NO key
+/// material on disk; opening it is impossible by design, not an I/O
+/// accident, and the typed [`StorageError::Sealed`] routes every frontend
+/// to the decrypt flow).
+fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
+    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
+        return Err(StorageError::NewerVersion(manifest.version));
+    }
+    if sealing::is_sealed(manifest) {
+        return Err(StorageError::Sealed(manifest.workspace.id.clone()));
+    }
+    Ok(())
+}
+
 /// Open an existing workspace directory: check the manifest version, take
 /// the LOCK, unseal the key, load the newest valid snapshot, replay the log
 /// tail (recovering a torn last segment), and position the writer.
 pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), StorageError> {
-    let manifest = read_manifest(ws_dir)?;
-    if manifest.version > molt_core::STORAGE_VERSION_PRUNED {
-        return Err(StorageError::NewerVersion(manifest.version));
-    }
+    // cheap pre-check on the un-locked manifest: never create a LOCK file
+    // in a directory that is not an openable workspace
+    openable_gate(&read_manifest(ws_dir)?)?;
     let lock = acquire_lock(ws_dir)?;
+    // re-read under the flock: a seal_at_rest may have raced the pre-check
+    // (its marker + key deletion land under the flock we now hold) — the
+    // stale copy would misreport a healthy sealed dir as corruption
+    let manifest = read_manifest(ws_dir)?;
+    openable_gate(&manifest)?;
 
     let root = ws_dir.parent().unwrap_or(ws_dir);
     let device_key = load_or_create_device_key(&device_key_path(root))?;
     let id = id_bytes(&manifest.workspace.id)?;
-    let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file))?;
+    let sealed = match fs::read(ws_dir.join(&manifest.crypto.key_file)) {
+        Ok(b) => b,
+        // marker and key files disagree (crashed seal?): honest corruption,
+        // never a guess — decrypting with the recovery phrase repairs it
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StorageError::BadFile(format!(
+                "{} says device-sealed but the key material is missing \
+                 (interrupted encrypt?) — decrypt with the recovery phrase \
+                 to repair",
+                ws_dir.display()
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
     let key = unseal_workspace_key(&device_key, &id, &sealed)?;
     let prefs = read_prefs(ws_dir);
 
@@ -1452,7 +1496,9 @@ impl ScanEntry {
             // effective global setting (`molt_core::effective_net_label`);
             // claiming one here would mislabel every entry after a restart
             net: String::new(),
-            encrypted: false,
+            // derived from the directory (S6 marker), so the sealed state
+            // survives restarts instead of living in session memory
+            encrypted: sealing::is_sealed(&self.manifest),
             members: Vec::new(),
             // the charter is in the encrypted genesis — filled in on open
             // (refresh_active_entry), like the roster
@@ -2148,7 +2194,9 @@ mod tests {
         let on_disk = read_manifest(&dir).expect("manifest reads");
         assert_eq!(on_disk.version, molt_core::STORAGE_VERSION_PRUNED);
         let mut m = read_manifest(&dir).expect("manifest");
-        m.version = molt_core::STORAGE_VERSION_PRUNED + 1;
+        // one past everything this build understands (S6 raised the ceiling
+        // to STORAGE_VERSION_SEALED)
+        m.version = molt_core::STORAGE_VERSION_SEALED + 1;
         {
             let text = toml::to_string_pretty(&m).expect("render");
             fs::write(dir.join("manifest.toml"), text).expect("write");

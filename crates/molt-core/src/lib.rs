@@ -1135,6 +1135,26 @@ pub const STORAGE_VERSION: u32 = 1;
 /// [`STORAGE_VERSION`], so old binaries read them unchanged.
 pub const STORAGE_VERSION_PRUNED: u32 = 2;
 
+/// The manifest version a workspace is RAISED to when it is sealed at rest
+/// under its recovery phrase (S6, `documents/backup_restore_design.md` §5.4):
+/// an older binary — which would trip over the keyless directory with a raw
+/// I/O error — refuses the whole workspace politely at the manifest gate
+/// instead. Unsealing recomputes the floor (pruned chain present →
+/// [`STORAGE_VERSION_PRUNED`], else [`STORAGE_VERSION`]), so a decrypted
+/// workspace stays openable by older binaries when nothing else requires
+/// newness.
+pub const STORAGE_VERSION_SEALED: u32 = 3;
+
+/// [`CryptoParams::sealed`] marker of the default at-rest state: key material
+/// device-sealed under `~/.moltrepublic/device.key` (`keys/workspace.key` +
+/// `keys/seed.sealed` present). Shared vocabulary with the export blob's
+/// `at_rest` meta field (S4).
+pub const SEALED_DEVICE: &str = "device";
+/// [`CryptoParams::sealed`] marker of the phrase-sealed at-rest state (S6):
+/// NO key material on disk — the workspace key is re-derived from the
+/// recovery phrase + the manifest id on decrypt (derive-and-verify).
+pub const SEALED_PHRASE: &str = "phrase";
+
 /// `manifest.toml` — the plaintext identity card of a workspace directory.
 /// Deliberately *minimal*: what the Open screen needs before the user
 /// authorizes decryption, and nothing that leaks content (no roster, no
@@ -1188,6 +1208,13 @@ pub struct CryptoParams {
     /// Path of the sealed workspace key, relative to the workspace dir.
     #[serde(default = "default_key_file")]
     pub key_file: String,
+    /// The at-rest state: [`SEALED_DEVICE`] (default — key material sealed to
+    /// the device key) or [`SEALED_PHRASE`] (S6 — no key material on disk;
+    /// the recovery phrase is the credential). Additive: manifests written
+    /// before this field default to `"device"`, which is exactly what they
+    /// are — zero migration.
+    #[serde(default = "default_sealed")]
+    pub sealed: String,
 }
 
 impl Default for CryptoParams {
@@ -1196,6 +1223,7 @@ impl Default for CryptoParams {
             kdf: default_kdf(),
             cipher: default_cipher(),
             key_file: default_key_file(),
+            sealed: default_sealed(),
         }
     }
 }
@@ -1208,6 +1236,9 @@ fn default_cipher() -> String {
 }
 fn default_key_file() -> String {
     "keys/workspace.key".to_string()
+}
+fn default_sealed() -> String {
+    SEALED_DEVICE.to_string()
 }
 
 /// `prefs.toml` — per-workspace settings that are *this node's business*,
@@ -2458,16 +2489,26 @@ pub enum Command {
         /// New auto-backup state.
         enabled: bool,
     },
-    /// Encrypt a workspace at rest (mock): it becomes inactive — opening
-    /// requires [`Command::DecryptWorkspace`] first. The ACTIVE workspace
-    /// cannot be encrypted from under itself.
+    /// Seal a workspace at rest under its recovery phrase (S6): the phrase
+    /// is verified against the encrypted genesis first (proof the caller
+    /// holds the credential), then the device-sealed key material is
+    /// removed from disk — the phrase becomes the only way back in. The
+    /// workspace becomes inactive; opening requires
+    /// [`Command::DecryptWorkspace`] first. The ACTIVE workspace cannot be
+    /// encrypted from under itself. Durable: the state is derived from the
+    /// directory and survives restarts.
     EncryptWorkspace {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
+        /// The workspace's recovery phrase (verified before any deletion).
+        #[serde(default)]
+        phrase: String,
     },
-    /// Decrypt an at-rest-encrypted workspace so it can be opened again.
-    /// Mock: the phrase is required but not yet verified (real crypto
-    /// comes with the storage encryption story).
+    /// Decrypt an at-rest-sealed workspace so it can be opened again. The
+    /// phrase is REALLY verified (BIP-39 checksum, then an authenticated
+    /// decrypt of the genesis frame with the derived key); a wrong phrase
+    /// is a hard error and changes nothing on disk. On success the key
+    /// material is re-sealed under the local device key.
     DecryptWorkspace {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
