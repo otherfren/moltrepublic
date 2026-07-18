@@ -1262,7 +1262,13 @@ export component AppWindow inherits Window {
                                     // row it replaces
                                     label: s.key == "chat" && v.key == "today" ? Strings.ch-group : v.name;
                                     icon: v.icon;
-                                    selected: v.key == root.selected-view;
+                                    // exactly ONE active sub-item per surface:
+                                    // while a discussion (patch/topic channel)
+                                    // is the chat filter, ITS row below is the
+                                    // active one — the Gruppe row only lights
+                                    // up when the group channel is showing
+                                    selected: v.key == root.selected-view
+                                        && (s.key != "chat" || v.key != "today" || root.selected-channel == "group");
                                     pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
                                         : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
@@ -1301,7 +1307,11 @@ export component AppWindow inherits Window {
                             for c in root.chat-channels: ViewRow {
                                 label: c.label;
                                 icon: c.icon;
-                                selected: c.key == root.selected-channel;
+                                // …and a discussion row only while the log
+                                // view shows it (Archive selected = only the
+                                // Archive row is active)
+                                selected: c.key == root.selected-channel
+                                    && root.selected-view == "today";
                                 pending: c.unread;
                                 chosen => {
                                     // channel switches keep the compose
