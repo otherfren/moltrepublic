@@ -245,23 +245,28 @@ export global Palettes {
         accent-warn: #d99400,
         accent-bad: #cf4433,
     };
-    // Dark — near-black with a teal undertone; the accent is tuned to the
-    // brand teal (matching the light-teal "republic" the logo uses on dark),
-    // so the moltrepublic.ai lockup and the UI share one teal.
+    // Dark — neutral graphite surfaces with the brand teal as the only hue
+    // (reworked 2026-07-18: the old teal-on-teal near-black scheme blurred).
+    // Built on proven dark-mode practice (Material dark / GitHub Primer):
+    // no pure black, a clear four-step elevation ladder, off-white (not
+    // white) primary text, and a 13:1 / 7:1 / 4.7:1 WCAG-checked text
+    // ladder on bg-surface. Semantic green/amber/red are Primer-dark
+    // values — desaturated enough for dark, distinct from the teal accent.
+    // The lockup's light teal (#6fc7d0 in app.slint) stays the brand mark.
     out property <Palette> dark: {
-        bg-base: #05100f,
-        bg-surface: #0a1c1b,
-        bg-elevated: #0f2a28,
-        raised: #143432,
-        text-primary: #d8e8e2,
-        text-secondary: #82b2b5,
-        text-faint: #466f6b,
-        border-subtle: #17403c,
-        accent-primary: #45c8d0,
-        accent-foreground: #04211f,
-        accent-good: #2fd0a6,
-        accent-warn: #f2c94c,
-        accent-bad: #ff5d70,
+        bg-base: #16181d,
+        bg-surface: #1e2126,
+        bg-elevated: #262a31,
+        raised: #323843,
+        text-primary: #e8eaed,
+        text-secondary: #a9b1b8,
+        text-faint: #838b94,
+        border-subtle: #3a4047,
+        accent-primary: #53c6d0,
+        accent-foreground: #0c2226,
+        accent-good: #3fb950,
+        accent-warn: #d29922,
+        accent-bad: #f85149,
     };
     // Brutalism — an earnest, slightly-clumsy homemade theme ("gewollt aber nicht
     // gekonnt"): a light warm-concrete desktop, off-white beveled chrome, and a
@@ -286,7 +291,7 @@ export global Palettes {
 }
 
 export global Theme {
-    // 0 = Light (Office), 1 = Dark (cypherpunk), 2 = Win95 (brutalist).
+    // 0 = Light (Office), 1 = Dark (neutral graphite), 2 = Win95 (brutalist).
     in-out property <int> theme-index: 0;
     // Fired when the in-app ThemeSwitch picks a theme; Rust binds this to a
     // SetTheme command so the change round-trips through the engine (co-equal).
