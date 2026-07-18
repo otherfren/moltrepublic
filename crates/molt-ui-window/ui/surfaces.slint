@@ -1,0 +1,1542 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// DESIGN MOCKS for the four staged surfaces: Memory (shared brain), Quests
+// (quest board), Vault (sealed secrets) and Wallet (Monero multisig).
+//
+// These panes are badged UX drafts to iterate on look & feel — every dataset
+// below is .slint-side sample data, never engine state, and every action that
+// would change shared state renders DISABLED (with the "not yet" tooltip, the
+// same idiom as the greyed network options). The REAL threshold governance
+// for these surfaces (pending proposals / applied log / propose) stays in
+// app.slint and routes to the "proposals" (resp. wallet "status") sub-views.
+//
+// Each pane is one component taking only the selected sub-view key, so the
+// panes stay independently editable under scripts/dev-ui.sh hot-reload.
+
+import { Theme, Strings } from "theme.slint";
+import { AppButton, AppField, AppArea, ScrollHint, HoverTip } from "components.slint";
+
+// ---------------------------------------------------------------------------
+// shared chrome
+// ---------------------------------------------------------------------------
+
+// The small-but-unmissable badge every mock pane carries: warn-coloured like
+// the founding ritual's SIMULATION badge, with an honesty tooltip.
+export component MockBadge inherits Rectangle {
+    background: Theme.warn;
+    border-radius: Theme.win95 ? 0px : 4px;
+    width: bt.preferred-width + 12px;
+    height: bt.preferred-height + 5px;
+    bt := Text {
+        x: 6px;
+        y: 2.5px;
+        text: Strings.mock-badge;
+        color: #1a1200;
+        font-size: Theme.fs-cap;
+        font-weight: 700;
+    }
+    ta := TouchArea { }
+    HoverTip {
+        label: Strings.mock-tip;
+        shown: ta.has-hover;
+        x: 0;
+        y: parent.height + 6px;
+    }
+}
+
+// One pane/view header: Twemoji glyph + title + the mock badge, and an
+// optional one-line hint underneath (the honest "what this will be" line).
+component PaneHeader inherits VerticalLayout {
+    in property <string> glyph;
+    in property <string> title;
+    in property <string> hint: "";
+    spacing: 5px;
+    HorizontalLayout {
+        spacing: 10px;
+        // fixed clip box, like the nav rows: an oversized emoji glyph must
+        // never bleed into the neighbours
+        Rectangle {
+            width: 22px;
+            height: 24px;
+            clip: true;
+            Text {
+                text: root.glyph;
+                font-family: "Twemoji Mozilla";
+                font-size: 16px;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.fs-h2;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            MockBadge { }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    if root.hint != "": Text {
+        text: root.hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+    }
+}
+
+// The standard content panel every pane's body sits on (chat's message list
+// idiom): a themed surface with a Flickable + scroll hint.
+component PanePanel inherits Rectangle {
+    vertical-stretch: 1;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    out property <length> inner-width: fl.width;
+    fl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: self.width;
+        viewport-height: body.preferred-height + 24px;
+        body := VerticalLayout {
+            padding: 12px;
+            spacing: 10px;
+            alignment: start;
+            @children
+        }
+    }
+    ScrollHint {
+        x: parent.width - 7px;
+        view-h: fl.height;
+        content-h: fl.viewport-height;
+        scroll-y: fl.viewport-y;
+    }
+}
+
+// A tiny accent-tinted tag chip ("governance", "runbook", …).
+component TagChip inherits Rectangle {
+    in property <string> label;
+    background: Theme.accent-soft;
+    border-radius: Theme.win95 ? 0px : 4px;
+    width: tt.preferred-width + 12px;
+    height: tt.preferred-height + 4px;
+    tt := Text {
+        x: 6px;
+        y: 2px;
+        text: root.label;
+        color: Theme.win95 ? Theme.text : Theme.accent;
+        font-size: 11px;
+        font-weight: 600;
+    }
+}
+
+// A quiet "glyph + text" caption row (authors, dates, rewards …).
+component GlyphCaption inherits HorizontalLayout {
+    in property <string> glyph;
+    in property <string> label;
+    in property <color> tone: Theme.faint;
+    spacing: 5px;
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        clip: true;
+        y: (parent.height - self.height) / 2;
+        Text {
+            text: root.glyph;
+            font-family: "Twemoji Mozilla";
+            font-size: 11px;
+            width: 100%;
+            height: 100%;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        text: root.label;
+        color: root.tone;
+        font-size: Theme.fs-cap;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory — the shared brain
+// ---------------------------------------------------------------------------
+
+struct MockNote {
+    title: string,
+    excerpt: string,
+    tags: [string],
+    author: string,
+    ver: string,
+    when: string,
+    links: int,
+    pinned: bool,
+}
+
+component NoteCard inherits Rectangle {
+    in property <MockNote> n;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    // pinned notes carry the accent rim the selected nav row uses
+    if root.n.pinned: Rectangle {
+        x: 0;
+        y: 0;
+        width: 3px;
+        height: parent.height;
+        background: Theme.accent;
+    }
+    VerticalLayout {
+        padding: 12px;
+        spacing: 7px;
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.n.title;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            if root.n.pinned: Rectangle {
+                width: 16px;
+                height: 18px;
+                clip: true;
+                Text {
+                    text: "📌";
+                    font-family: "Twemoji Mozilla";
+                    font-size: 12px;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        // the excerpt takes what is left of the fixed card height
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Text {
+                x: 0;
+                y: 0;
+                width: 100%;
+                text: root.n.excerpt;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            spacing: 5px;
+            for t in root.n.tags: TagChip {
+                label: t;
+                y: (parent.height - self.height) / 2;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            // the signature of the shared brain: how connected a note is
+            GlyphCaption {
+                glyph: "🔗";
+                label: "\{root.n.links} \{Strings.mem-links-word}";
+            }
+        }
+        Text {
+            text: "\{root.n.author} · \{root.n.ver} · \{root.n.when}";
+            color: Theme.faint;
+            font-size: 11px;
+            overflow: elide;
+        }
+    }
+}
+
+export component MemoryPane inherits VerticalLayout {
+    in property <string> view;
+    spacing: 8px;
+
+    // sample data — design mock only, never engine state
+    property <[MockNote]> notes: [
+        { title: "Founding decisions", excerpt: "Why we chose 3-of-4, the SMP relay we pay for, and the recovery drill every member runs quarterly.", tags: ["governance", "canon"], author: "petra", ver: "v12", when: "3 d", links: 7, pinned: true },
+        { title: "Node recovery runbook", excerpt: "Restore from seed, re-adopt the queue credentials, verify the chain before the first send.", tags: ["ops", "runbook"], author: "walter", ver: "v6", when: "1 w", links: 4, pinned: false },
+        { title: "Treasury policy", excerpt: "Transfers above 5 XMR need a written purpose in the proposal text.", tags: ["treasury", "policy"], author: "mara", ver: "v3", when: "2 w", links: 5, pinned: true },
+        { title: "Reading list: MLS & SMP", excerpt: "Annotated links for new members — start with the messaging layer, the ritual paper last.", tags: ["onboarding"], author: "petra", ver: "v9", when: "5 d", links: 2, pinned: false },
+        { title: "Meeting notes 2026-07-02", excerpt: "Quest rewards, the vault release drill, and the still-open logo vote.", tags: ["minutes"], author: "jonas", ver: "v1", when: "2 w", links: 3, pinned: false },
+        { title: "Glossary", excerpt: "Ritual, seal, threshold, patch channel — the words we keep using, pinned down once.", tags: ["onboarding", "canon"], author: "mara", ver: "v17", when: "1 d", links: 11, pinned: false },
+    ];
+    property <[MockNote]> archived: [
+        { title: "Old relay migration plan", excerpt: "", tags: [], author: "walter", ver: "v4", when: "Mar 2026", links: 0, pinned: false },
+        { title: "Logo drafts, round 1", excerpt: "", tags: [], author: "mara", ver: "v2", when: "Feb 2026", links: 0, pinned: false },
+        { title: "Bootstrapping diary", excerpt: "", tags: [], author: "petra", ver: "v8", when: "Jan 2026", links: 0, pinned: false },
+    ];
+
+    if root.view == "brain": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🧠";
+            title: Strings.mem-title-brain;
+            hint: Strings.mem-hint-brain;
+        }
+        HorizontalLayout {
+            alignment: start;
+            AppButton {
+                emoji: "✨";
+                label: Strings.mem-new-note;
+                primary: true;
+                enabled: false;
+                tooltip: Strings.not-implemented-yet;
+                tooltip-below: true;
+            }
+        }
+        // note cards in as many 300px-minimum columns as fit (the presence
+        // strip's index-computed grid — Slint has no flow layout)
+        pp := PanePanel {
+            Rectangle {
+                property <length> card-h: 158px;
+                property <length> gap: 10px;
+                property <int> cols: max(1, Math.floor((pp.inner-width - 24px) / (300px + self.gap)));
+                property <length> card-w: ((pp.inner-width - 24px) - (self.cols - 1) * self.gap) / self.cols;
+                property <int> rows: Math.ceil(root.notes.length / self.cols);
+                height: self.rows * self.card-h + max(0, self.rows - 1) * self.gap;
+                for n[i] in root.notes: NoteCard {
+                    x: Math.mod(i, parent.cols) * (parent.card-w + parent.gap);
+                    y: Math.floor(i / parent.cols) * (parent.card-h + parent.gap);
+                    width: parent.card-w;
+                    height: parent.card-h;
+                    n: n;
+                }
+            }
+        }
+    }
+
+    if root.view == "archive": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🗄️";
+            title: Strings.mem-title-archive;
+            hint: Strings.mem-hint-archive;
+        }
+        PanePanel {
+            for n in root.archived: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                height: 44px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    Text {
+                        text: n.title;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: "\{n.author} · \{n.ver} · \{n.when}";
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quests — the quest board
+// ---------------------------------------------------------------------------
+
+struct MockQuest {
+    title: string,
+    detail: string,
+    reward: string, // "5 XMR" ("" = none)
+    who: string, // open: put forward by; claimed/done: the claimant
+    when: string,
+    done: bool,
+}
+
+component QuestCard inherits Rectangle {
+    in property <MockQuest> q;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    opacity: root.q.done ? 0.62 : 1.0;
+    VerticalLayout {
+        padding: 11px;
+        spacing: 7px;
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.q.title;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            if root.q.done: Rectangle {
+                width: 18px;
+                height: 20px;
+                clip: true;
+                Text {
+                    text: "✅";
+                    font-family: "Twemoji Mozilla";
+                    font-size: 13px;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if root.q.detail != "": Text {
+            text: root.q.detail;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.q.reward != "": Rectangle {
+                background: Theme.accent-soft;
+                border-radius: Theme.win95 ? 0px : 4px;
+                width: rw.preferred-width + 12px;
+                height: rw.preferred-height + 4px;
+                y: (parent.height - self.height) / 2;
+                rw := HorizontalLayout {
+                    x: 6px;
+                    y: 2px;
+                    spacing: 4px;
+                    Text {
+                        text: "🪙";
+                        font-family: "Twemoji Mozilla";
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.q.reward;
+                        color: Theme.win95 ? Theme.text : Theme.accent;
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            GlyphCaption {
+                glyph: "👤";
+                label: "\{root.q.who} · \{root.q.when}";
+            }
+        }
+    }
+}
+
+component QuestColumn inherits Rectangle {
+    in property <string> title;
+    in property <color> tone;
+    in property <[MockQuest]> quests;
+    horizontal-stretch: 1;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 7px;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                y: (parent.height - self.height) / 2;
+                background: root.tone;
+            }
+            Text {
+                text: root.title;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "\{root.quests.length}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            cfl := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: clist.preferred-height;
+                clist := VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    for q in root.quests: QuestCard {
+                        q: q;
+                    }
+                }
+            }
+            ScrollHint {
+                x: parent.width - 5px;
+                view-h: cfl.height;
+                content-h: cfl.viewport-height;
+                scroll-y: cfl.viewport-y;
+            }
+        }
+    }
+}
+
+export component QuestsPane inherits VerticalLayout {
+    in property <string> view;
+    spacing: 8px;
+
+    // sample data — design mock only, never engine state
+    property <[MockQuest]> open-quests: [
+        { title: "Write the onboarding guide", detail: "Turn the reading list into a step-by-step guide for the next member.", reward: "3 XMR", who: "petra", when: "4 d", done: false },
+        { title: "Set up a second SMP relay", detail: "A fallback relay on separate infrastructure, cert pinned.", reward: "8 XMR", who: "walter", when: "1 w", done: false },
+        { title: "Design a republic emblem", detail: "Vector, monochrome-friendly, at home next to the wordmark.", reward: "2 XMR", who: "mara", when: "2 w", done: false },
+    ];
+    property <[MockQuest]> claimed-quests: [
+        { title: "Quarterly recovery drill", detail: "Run the full restore on a clean machine, note every rough edge.", reward: "5 XMR", who: "jonas", when: "12 d left", done: false },
+        { title: "Audit chat retention", detail: "Check the archive halves really drop on the configured rhythm.", reward: "1.5 XMR", who: "mara", when: "3 d left", done: false },
+    ];
+    property <[MockQuest]> done-quests: [
+        { title: "Treasury multisig setup", detail: "", reward: "4 XMR", who: "walter", when: "1 m", done: true },
+        { title: "Found the republic", detail: "", reward: "", who: "petra", when: "4 m", done: true },
+    ];
+
+    if root.view == "board": VerticalLayout {
+        spacing: 8px;
+        vertical-stretch: 1;
+        PaneHeader {
+            glyph: "📋";
+            title: Strings.qb-title-board;
+            hint: Strings.qb-hint-board;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            vertical-stretch: 1;
+            QuestColumn {
+                title: Strings.qb-col-open;
+                tone: Theme.accent;
+                quests: root.open-quests;
+            }
+            QuestColumn {
+                title: Strings.qb-col-claimed;
+                tone: Theme.warn;
+                quests: root.claimed-quests;
+            }
+            QuestColumn {
+                title: Strings.qb-col-done;
+                tone: Theme.good;
+                quests: root.done-quests;
+            }
+        }
+    }
+
+    if root.view == "create": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "✨";
+            title: Strings.qb-title-create;
+            hint: Strings.qb-hint-create;
+        }
+        PanePanel {
+            AppField {
+                placeholder: Strings.qb-ph-title;
+            }
+            AppArea {
+                height: 140px;
+                placeholder: Strings.qb-ph-desc;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Strings.qb-reward;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                    }
+                    AppField {
+                        placeholder: "0.0";
+                    }
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Strings.qb-deadline;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                    }
+                    AppField {
+                        placeholder: "2026-08-01";
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: start;
+                AppButton {
+                    emoji: "📋";
+                    label: Strings.qb-propose;
+                    primary: true;
+                    enabled: false;
+                    tooltip: Strings.not-implemented-yet;
+                    tooltip-below: true;
+                }
+            }
+        }
+    }
+
+    if root.view == "my-quests": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🎯";
+            title: Strings.qb-title-mine;
+            hint: Strings.qb-hint-mine;
+        }
+        PanePanel {
+            for q in root.claimed-quests: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 11px;
+                    spacing: 7px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            spacing: 4px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: q.title;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: q.detail;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            GlyphCaption {
+                                glyph: "⏳";
+                                label: "\{q.when} · 🪙 \{q.reward}";
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            AppButton {
+                                label: Strings.qb-mark-done;
+                                enabled: false;
+                                tooltip: Strings.not-implemented-yet;
+                                tooltip-left: true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.view == "archive": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🗄️";
+            title: Strings.qb-title-archive;
+            hint: Strings.qb-hint-archive;
+        }
+        PanePanel {
+            for q in root.done-quests: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                height: 44px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 18px;
+                        height: 100%;
+                        clip: true;
+                        Text {
+                            text: "✅";
+                            font-family: "Twemoji Mozilla";
+                            font-size: 13px;
+                            width: 100%;
+                            height: 100%;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: q.title;
+                        color: Theme.dim;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: q.reward == "" ? "\{q.who} · \{q.when}" : "\{q.reward} → \{q.who} · \{q.when}";
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vault — sealed secrets
+// ---------------------------------------------------------------------------
+
+struct MockSecret {
+    name: string,
+    glyph: string, // 🔑 credential · 📄 document
+    by: string,
+    when: string,
+    need: int, // released at `need` of `total` signatures
+    total: int,
+}
+
+struct MockSigner {
+    name: string,
+    signed: bool,
+}
+
+struct MockRelease {
+    secret: string,
+    by: string,
+    reason: string,
+    signers: [MockSigner],
+    need: int,
+}
+
+struct MockExposed {
+    name: string,
+    content: string,
+    by: string,
+    when: string,
+}
+
+component SecretCard inherits Rectangle {
+    in property <MockSecret> s;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 12px;
+        // the seal medallion — the vault's signature element
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.win95 ? 0px : 22px;
+            background: Theme.accent-soft;
+            border-width: Theme.border-w;
+            border-color: Theme.accent;
+            clip: true;
+            Text {
+                text: root.s.glyph;
+                font-family: "Twemoji Mozilla";
+                font-size: 17px;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                x: parent.width - 16px;
+                y: parent.height - 16px;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background: Theme.panel;
+                Text {
+                    text: "🔒";
+                    font-family: "Twemoji Mozilla";
+                    font-size: 9px;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 5px;
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: root.s.name;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: "\{Strings.vt-sealed-by} \{root.s.by} · \{root.s.when}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                overflow: elide;
+            }
+            // the release threshold as share dots: `need` filled of `total`
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                for i in root.s.total: Rectangle {
+                    width: 9px;
+                    height: 9px;
+                    border-radius: 4.5px;
+                    y: (parent.height - self.height) / 2;
+                    background: i < root.s.need ? Theme.accent : transparent;
+                    border-width: 1px;
+                    border-color: i < root.s.need ? Theme.accent : Theme.faint;
+                }
+                Text {
+                    text: "  \{Strings.vt-opens-at} \{root.s.need} \{Strings.cw-rule-b} \{root.s.total}";
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component VaultPane inherits VerticalLayout {
+    in property <string> view;
+    spacing: 8px;
+
+    // sample data — design mock only, never engine state
+    property <[MockSecret]> secrets: [
+        { name: "Treasury seed phrase", glyph: "🔑", by: "petra", when: "at the founding", need: 4, total: 4 },
+        { name: "S3 backup credentials", glyph: "🔑", by: "walter", when: "2 w", need: 3, total: 4 },
+        { name: "Emergency contact list", glyph: "📄", by: "mara", when: "1 m", need: 3, total: 4 },
+        { name: "Domain registrar login", glyph: "🔑", by: "petra", when: "3 w", need: 3, total: 4 },
+    ];
+    property <[MockRelease]> releases: [
+        { secret: "S3 backup credentials", by: "walter", reason: "Rotating the bucket keys after the provider notice.", need: 3, signers: [
+            { name: "walter", signed: true }, { name: "petra", signed: true }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
+        { secret: "Emergency contact list", by: "mara", reason: "Yearly check that the numbers still work.", need: 3, signers: [
+            { name: "mara", signed: true }, { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "jonas", signed: false }] },
+    ];
+    property <[MockExposed]> exposed: [
+        { name: "Old relay admin password", content: "relay-2025 · root · \"circular-otter-42\"", by: "walter", when: "2 m" },
+        { name: "Budget sheet key (2025)", content: "age1q…8vte — decrypts budget-2025.age in the uploads", by: "petra", when: "5 m" },
+    ];
+
+    // one release request's collected signatures, counted .slint-side
+    pure function sig-count(r: MockRelease) -> int {
+        // sample data keeps signers sorted signed-first, so counting is a
+        // prefix scan — good enough for a design mock
+        return r.signers[0].signed ? (r.signers[1].signed ? (r.signers[2].signed ? (r.signers[3].signed ? 4 : 3) : 2) : 1) : 0;
+    }
+
+    if root.view == "secrets": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🔐";
+            title: Strings.vt-title-secrets;
+            hint: Strings.vt-hint-secrets;
+        }
+        HorizontalLayout {
+            alignment: start;
+            AppButton {
+                emoji: "🔏";
+                label: Strings.vt-seal-new;
+                primary: true;
+                enabled: false;
+                tooltip: Strings.not-implemented-yet;
+                tooltip-below: true;
+            }
+        }
+        PanePanel {
+            for s in root.secrets: SecretCard {
+                s: s;
+            }
+        }
+    }
+
+    if root.view == "disclose": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "📤";
+            title: Strings.vt-title-disclose;
+            hint: Strings.vt-hint-disclose;
+        }
+        HorizontalLayout {
+            alignment: start;
+            AppButton {
+                emoji: "🗳️";
+                label: Strings.vt-request;
+                primary: true;
+                enabled: false;
+                tooltip: Strings.not-implemented-yet;
+                tooltip-below: true;
+            }
+        }
+        PanePanel {
+            for r in root.releases: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 10px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: r.secret;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 700;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "\{Strings.vt-requested-by} \{r.by}";
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: r.reason;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        wrap: word-wrap;
+                    }
+                    // signature progress: the pending-proposal meter idiom
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.win95 ? 0px : 3px;
+                            background: Theme.line;
+                            horizontal-stretch: 1;
+                            Rectangle {
+                                x: 0;
+                                height: parent.height;
+                                border-radius: parent.border-radius;
+                                width: parent.width * min(1.0, root.sig-count(r) * 1.0 / max(r.need, 1));
+                                background: Theme.accent;
+                            }
+                        }
+                        Text {
+                            text: "\{root.sig-count(r)}/\{r.need} \{Strings.vt-signed-word}";
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for m in r.signers: Rectangle {
+                            background: m.signed ? Theme.accent-soft : transparent;
+                            border-radius: Theme.win95 ? 0px : 4px;
+                            border-width: m.signed ? 0px : 1px;
+                            border-color: Theme.line;
+                            width: mrow.preferred-width + 12px;
+                            height: mrow.preferred-height + 6px;
+                            mrow := HorizontalLayout {
+                                x: 6px;
+                                y: 3px;
+                                spacing: 4px;
+                                if m.signed: Text {
+                                    text: "✍️";
+                                    font-family: "Twemoji Mozilla";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: m.name;
+                                    color: m.signed ? (Theme.win95 ? Theme.text : Theme.accent) : Theme.faint;
+                                    font-size: 11px;
+                                    font-weight: m.signed ? 700 : 400;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.view == "exposed": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "🔓";
+            title: Strings.vt-title-exposed;
+            hint: Strings.vt-hint-exposed;
+        }
+        PanePanel {
+            for e in root.exposed: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 10px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: e.name;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 700;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "\{Strings.vt-released-word} · \{Strings.vt-requested-by} \{e.by} · \{e.when}";
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    // the revealed content on an inset well
+                    Rectangle {
+                        background: Theme.bg;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        height: ct.preferred-height + 16px;
+                        ct := Text {
+                            x: 10px;
+                            y: 8px;
+                            width: parent.width - 20px;
+                            text: e.content;
+                            color: Theme.text;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wallet — Monero multisig
+// ---------------------------------------------------------------------------
+
+struct MockTransfer {
+    incoming: bool,
+    amount: string, // "12.0000"
+    label: string,
+    when: string,
+    conf: int, // confirmations, capped at 10
+    txid: string,
+}
+
+struct MockPendingTx {
+    label: string,
+    amount: string,
+    signed: int,
+    need: int,
+    signers: string, // "petra ✓ · walter …"
+}
+
+component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    height: 44px;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        Text {
+            text: root.label;
+            color: Theme.dim;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component WalletPane inherits VerticalLayout {
+    in property <string> view;
+    spacing: 8px;
+
+    // sample data — design mock only, never engine state
+    property <[MockTransfer]> transfers: [
+        { incoming: true, amount: "0.5028", label: "Donation (anonymous)", when: "5 h", conf: 3, txid: "b41c…9e" },
+        { incoming: true, amount: "12.0000", label: "Member top-up — mara", when: "2 d", conf: 10, txid: "9f3c…a1" },
+        { incoming: false, amount: "4.0000", label: "Quest reward — multisig setup", when: "1 w", conf: 10, txid: "77ab…04" },
+        { incoming: true, amount: "25.0000", label: "Member top-up — petra", when: "2 w", conf: 10, txid: "c2d8…5f" },
+        { incoming: false, amount: "2.4000", label: "Relay hosting Q2", when: "1 m", conf: 10, txid: "e901…bc" },
+        { incoming: false, amount: "0.8000", label: "Domain renewal", when: "1 m", conf: 10, txid: "12fe…77" },
+        { incoming: true, amount: "100.0000", label: "Founding treasury", when: "4 m", conf: 10, txid: "a0b1…c2" },
+    ];
+    property <[MockPendingTx]> pending-tx: [
+        { label: "Quest reward — recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: "petra ✍ · walter — · mara — · jonas —" },
+        { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: "petra — · walter — · mara — · jonas —" },
+    ];
+    // send form: pure pane state for design iteration (priority chip row)
+    property <int> prio: 1;
+
+    // the receive card's decorative pseudo-QR: a deterministic 17×17
+    // module pattern with the three finder squares — design chrome only,
+    // NOT an encoding of the (equally fictional) address below it
+    pure function qr-cell(row: int, col: int) -> bool {
+        if (row <= 6 && col <= 6) {
+            return row == 0 || row == 6 || col == 0 || col == 6 || (row >= 2 && row <= 4 && col >= 2 && col <= 4);
+        }
+        if (row <= 6 && col >= 10) {
+            return row == 0 || row == 6 || col == 10 || col == 16 || (row >= 2 && row <= 4 && col >= 12 && col <= 14);
+        }
+        if (row >= 10 && col <= 6) {
+            return row == 10 || row == 16 || col == 0 || col == 6 || (row >= 12 && row <= 14 && col >= 2 && col <= 4);
+        }
+        return Math.mod(row * 17 + col * 31 + row * col * 7, 11) < 5;
+    }
+
+    if root.view == "balance": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "💰";
+            title: Strings.wl-title-balance;
+            hint: Strings.wl-hint-balance;
+        }
+        // the balance figure — the wallet's signature moment
+        Rectangle {
+            background: Theme.panel;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            height: bal.preferred-height + 36px;
+            bal := VerticalLayout {
+                x: 18px;
+                y: 18px;
+                width: parent.width - 36px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "128.4062";
+                        color: Theme.text;
+                        font-size: 34px;
+                        font-weight: 800;
+                    }
+                    Text {
+                        text: "XMR";
+                        color: Theme.faint;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                        vertical-alignment: bottom;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            background: Theme.accent-soft;
+                            border-radius: Theme.win95 ? 0px : 4px;
+                            width: msc.preferred-width + 12px;
+                            height: msc.preferred-height + 6px;
+                            msc := Text {
+                                x: 6px;
+                                y: 3px;
+                                text: "3 \{Strings.cw-rule-b} 4 \{Strings.wl-multisig-word}";
+                                color: Theme.win95 ? Theme.text : Theme.accent;
+                                font-size: Theme.fs-cap;
+                                font-weight: 700;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 18px;
+                    alignment: start;
+                    GlyphCaption {
+                        glyph: "🔓";
+                        label: "121.9034 XMR \{Strings.wl-unlocked}";
+                        tone: Theme.dim;
+                    }
+                    GlyphCaption {
+                        glyph: "⏳";
+                        label: "6.5028 XMR \{Strings.wl-locked}";
+                        tone: Theme.dim;
+                    }
+                }
+            }
+        }
+        // transfers awaiting the threshold's signatures
+        Text {
+            text: Strings.wl-pending-sigs;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 600;
+        }
+        PanePanel {
+            for t in root.pending-tx: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 11px;
+                    spacing: 7px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: t.label;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 600;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "− \{t.amount} XMR";
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.win95 ? 0px : 3px;
+                            background: Theme.line;
+                            horizontal-stretch: 1;
+                            Rectangle {
+                                x: 0;
+                                height: parent.height;
+                                border-radius: parent.border-radius;
+                                width: parent.width * min(1.0, t.signed * 1.0 / max(t.need, 1));
+                                background: Theme.accent;
+                            }
+                        }
+                        Text {
+                            text: "\{t.signed}/\{t.need} \{Strings.vt-signed-word}";
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: t.signers;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.view == "history": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "📜";
+            title: Strings.wl-title-history;
+            hint: Strings.wl-hint-history;
+        }
+        PanePanel {
+            for t in root.transfers: Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                height: 52px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 20px;
+                        height: 100%;
+                        clip: true;
+                        Text {
+                            text: t.incoming ? "📥" : "📤";
+                            font-family: "Twemoji Mozilla";
+                            font-size: 14px;
+                            width: 100%;
+                            height: 100%;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: t.label;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "\{t.when} · \{t.txid}";
+                            color: Theme.faint;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                    Text {
+                        text: t.conf >= 10 ? "10/10 ✓" : "\{t.conf}/10";
+                        color: t.conf >= 10 ? Theme.good : Theme.warn;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: t.incoming ? "+ \{t.amount}" : "− \{t.amount}";
+                        color: t.incoming ? Theme.good : Theme.text;
+                        font-size: Theme.fs-body;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        width: 90px;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.view == "send": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "📤";
+            title: Strings.wl-title-send;
+            hint: Strings.wl-hint-send;
+        }
+        PanePanel {
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: Strings.wl-to-address;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                }
+                AppField {
+                    placeholder: "4…";
+                }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: Strings.wl-amount;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                }
+                AppField {
+                    placeholder: "0.0000";
+                }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: Strings.wl-priority;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    AppButton {
+                        label: Strings.wl-prio-low;
+                        primary: root.prio == 0;
+                        clicked => {
+                            root.prio = 0;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.wl-prio-normal;
+                        primary: root.prio == 1;
+                        clicked => {
+                            root.prio = 1;
+                        }
+                    }
+                    AppButton {
+                        label: Strings.wl-prio-high;
+                        primary: root.prio == 2;
+                        clicked => {
+                            root.prio = 2;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                AppButton {
+                    emoji: "🗳️";
+                    label: Strings.wl-propose-transfer;
+                    primary: true;
+                    enabled: false;
+                    tooltip: Strings.not-implemented-yet;
+                    tooltip-below: true;
+                }
+                Text {
+                    text: "\{Strings.wl-fee} ≈ 0.000021 XMR";
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+
+    if root.view == "receive": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "📥";
+            title: Strings.wl-title-receive;
+            hint: Strings.wl-hint-receive;
+        }
+        PanePanel {
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: start;
+                // decorative pseudo-QR on a light well (QR needs light
+                // ground on every theme)
+                Rectangle {
+                    width: 17 * 6px + 24px;
+                    height: 17 * 6px + 24px;
+                    background: #ffffff;
+                    border-radius: Theme.win95 ? 0px : 8px;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    for i in 289: Rectangle {
+                        x: 12px + Math.mod(i, 17) * 6px;
+                        y: 12px + Math.floor(i / 17) * 6px;
+                        width: 6px;
+                        height: 6px;
+                        background: root.qr-cell(Math.floor(i / 17), Math.mod(i, 17)) ? #1a1d21 : transparent;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Strings.wl-subaddress;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                    }
+                    Rectangle {
+                        background: Theme.bg;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        height: addr.preferred-height + 16px;
+                        addr := Text {
+                            x: 10px;
+                            y: 8px;
+                            width: parent.width - 20px;
+                            text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTvUuMbNkXaWpEjHfRgCiA5oq31TzKeYw6vNhSdJrLmPxQbUcFgAt2iE9oRk4";
+                            color: Theme.text;
+                            font-size: Theme.fs-cap;
+                            wrap: char-wrap;
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        AppButton {
+                            label: Strings.ow-copy;
+                            enabled: false;
+                            tooltip: Strings.not-implemented-yet;
+                            tooltip-below: true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.view == "settings": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "⚙️";
+            title: Strings.wl-title-settings;
+            hint: Strings.wl-hint-settings;
+        }
+        PanePanel {
+            SettingRow {
+                label: Strings.wl-node;
+                value: "node.example.org:18081 · Tor";
+            }
+            SettingRow {
+                label: Strings.wl-sync;
+                value: "3 214 502 ✓";
+            }
+            SettingRow {
+                label: Strings.wl-signer-set;
+                value: "3 \{Strings.cw-rule-b} 4 — petra, walter, mara, jonas";
+            }
+        }
+    }
+}
