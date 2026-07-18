@@ -1037,6 +1037,8 @@ export component AppWindow inherits Window {
             root.confirm-delmsg-open = false;
         } else if (root.backup-modal-open) {
             root.backup-modal-open = false;
+            // every way out of the modal drops the typed export passphrase
+            root.backup-pass = "";
         } else if (root.restore-file-modal-open) {
             root.restore-file-modal-open = false;
         } else if (root.ws-dir-modal-open) {
@@ -2485,6 +2487,10 @@ export component AppWindow inherits Window {
                                     label: Strings.ow-export;
                                     clicked => {
                                         root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
+                                        // never inherit a passphrase from a
+                                        // previous (possibly other-workspace)
+                                        // modal session
+                                        root.backup-pass = "";
                                         root.backup-modal-open = true;
                                     }
                                 }

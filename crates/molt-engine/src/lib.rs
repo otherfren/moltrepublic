@@ -1418,7 +1418,7 @@ mod tests {
             // the blob decrypts and verifies at the storage layer
             let a = molt_storage::export::read_export(
                 &mut blob.as_slice(),
-                &molt_storage::export::ExportSecret::Passphrase(pass.clone()),
+                &molt_storage::export::ExportSecret::passphrase(pass.clone()),
             )
             .expect("blob decrypts");
             assert_eq!(a.header.workspace_id, id);

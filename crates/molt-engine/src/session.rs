@@ -888,10 +888,10 @@ impl State {
         dest: String,
         passphrase: String,
     ) -> Result<Reply, MoltError> {
-        if !self.session.workspaces.iter().any(|w| w.id == id) {
+        let Some(entry) = self.session.workspaces.iter().find(|w| w.id == id) else {
             return Err(MoltError::UnknownWorkspace(id));
-        }
-        if self.session.workspaces.iter().any(|w| w.id == id && w.encrypted) {
+        };
+        if entry.encrypted {
             return Err(MoltError::WorkspaceEncrypted(id));
         }
         if dest.trim().is_empty() {
@@ -916,22 +916,22 @@ impl State {
             )));
         };
         let dest_path = molt_storage::expand_tilde(dest.trim());
+        let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("engine is shutting down".to_string()));
         };
         self.session.export = molt_core::ExportState {
             running: true,
             workspace: id.clone(),
-            dest: dest_path.display().to_string(),
+            dest: dest_str.clone(),
             result: String::new(),
             bytes: 0,
             skipped: Vec::new(),
         };
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
-            let dest_str = dest_path.display().to_string();
             let res = tokio::task::spawn_blocking(move || {
-                export_to_file(&root, &dir, &dest_path, passphrase)
+                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
             })
             .await;
             let cmd = match res {
@@ -1119,7 +1119,7 @@ fn export_to_file(
     root: &std::path::Path,
     ws_dir: &std::path::Path,
     dest: &std::path::Path,
-    passphrase: String,
+    passphrase: zeroize::Zeroizing<String>,
 ) -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1129,20 +1129,35 @@ fn export_to_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "export.molt.enc".to_string());
     let part = dest.with_file_name(format!("{name}.part"));
-    let mut f = std::fs::File::create(&part)?;
-    let key = molt_storage::export::ExportKey::Passphrase(passphrase);
-    let outcome = match molt_storage::export::export_dir(root, ws_dir, &key, &mut f) {
-        Ok(o) => o,
-        Err(e) => {
-            drop(f);
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
+    // any failure past this point removes the partial file — a failed
+    // export leaves nothing behind under any name
+    let write = || -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
+        let file = std::fs::File::create(&part)?;
+        let mut out = std::io::BufWriter::new(file);
+        let key = molt_storage::export::ExportKey::Passphrase(passphrase);
+        let outcome = molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?;
+        use std::io::Write as _;
+        out.flush()?;
+        let file = out
+            .into_inner()
+            .map_err(|e| molt_storage::StorageError::Io(e.into_error()))?;
+        file.sync_all()?;
+        std::fs::rename(&part, dest)?;
+        // fsync the containing directory, or a power loss can undo the
+        // rename even though the data blocks are on disk (same rule as
+        // molt-storage's write_atomic)
+        if let Some(parent) = dest.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
         }
+        Ok(outcome)
     };
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&part, dest)?;
-    Ok(outcome)
+    let res = write();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    res
 }
 
 /// Value validation shared by save and reload: nothing invalid reaches the

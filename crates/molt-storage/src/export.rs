@@ -78,8 +78,19 @@ const EXPORT_BACKUP_TAG: &str = "molt-export-backup-v1";
 /// The HKDF domain binding the header into the stream key.
 const EXPORT_STREAM_TAG: &str = "molt-export-stream-v1";
 
-/// Included files as `(relative path, absolute path)` + the skipped names.
-type CollectedEntries = (Vec<(String, PathBuf)>, Vec<String>);
+/// Where an entry's bytes come from: most files are read lazily at write
+/// time; a snapshot is captured EAGERLY at collect time because the live
+/// writer prunes old snapshots — a path picked now could be gone by the
+/// time the writer reaches it (spurious failure on a healthy workspace).
+enum ExportSource {
+    /// Read from disk when the entry is written.
+    File(PathBuf),
+    /// Bytes captured at collect time.
+    Bytes(Vec<u8>),
+}
+
+/// Included entries as `(relative path, source)` + the skipped names.
+type CollectedEntries = (Vec<(String, ExportSource)>, Vec<String>);
 
 /// Lossless `u32 → usize` (every supported target has ≥32-bit pointers).
 fn usize_of(v: u32) -> usize {
@@ -89,20 +100,34 @@ fn usize_of(v: u32) -> usize {
 /// How the export blob's protection key is derived (design §3.4).
 pub enum ExportKey {
     /// Manual export (story 9): a user-chosen passphrase, Argon2id-stretched.
-    /// Minimum [`EXPORT_PASSPHRASE_MIN_CHARS`] characters (NFC form).
-    Passphrase(String),
+    /// Minimum [`EXPORT_PASSPHRASE_MIN_CHARS`] characters.
+    Passphrase(Zeroizing<String>),
     /// Automatic backup (story 12): the key derives from the workspace's own
     /// key — restorable from recovery phrase + workspace id, promptless.
     Workspace,
+}
+
+impl ExportKey {
+    /// Passphrase mode, wrapping the secret so it is wiped on drop.
+    pub fn passphrase(s: impl Into<String>) -> Self {
+        ExportKey::Passphrase(Zeroizing::new(s.into()))
+    }
 }
 
 /// The secret the reading side supplies (story 13 maps a typed recovery
 /// phrase to [`ExportSecret::WorkspaceKey`] via the id in the header).
 pub enum ExportSecret {
     /// For `key_mode = "passphrase"` blobs.
-    Passphrase(String),
+    Passphrase(Zeroizing<String>),
     /// For `key_mode = "workspace"` blobs: the re-derived workspace key.
     WorkspaceKey([u8; 32]),
+}
+
+impl ExportSecret {
+    /// Passphrase mode, wrapping the secret so it is wiped on drop.
+    pub fn passphrase(s: impl Into<String>) -> Self {
+        ExportSecret::Passphrase(Zeroizing::new(s.into()))
+    }
 }
 
 /// What an export produced — the caller reports these honestly.
@@ -310,7 +335,7 @@ pub(crate) fn export_dir_chunked(
         .map_err(|_| StorageError::Corrupt("export header too large".to_string()))?;
     out.write_all(&header_len.to_le_bytes())?;
     out.write_all(&header_bytes)?;
-    written += 15 + 4 + u64::try_from(header_bytes.len()).unwrap_or(0);
+    written += 15 + 4 + u64::from(header_len);
 
     // encrypted payload stream
     let created = crate::now_secs();
@@ -333,14 +358,21 @@ pub(crate) fn export_dir_chunked(
         .map_err(|_| StorageError::Corrupt("export meta too large".to_string()))?;
     w.write(&meta_len.to_le_bytes())?;
     w.write(&meta_bytes)?;
-    for (rel, path) in &files {
-        let data = fs::read(path)?;
+    for (rel, src) in &files {
+        let owned;
+        let data: &[u8] = match src {
+            ExportSource::File(path) => {
+                owned = fs::read(path)?;
+                &owned
+            }
+            ExportSource::Bytes(bytes) => bytes,
+        };
         let path_len = u16::try_from(rel.len())
             .map_err(|_| StorageError::Corrupt(format!("entry path too long: {rel}")))?;
         w.write(&path_len.to_le_bytes())?;
         w.write(rel.as_bytes())?;
         w.write(&u64::try_from(data.len()).unwrap_or(0).to_le_bytes())?;
-        w.write(&data)?;
+        w.write(data)?;
     }
     written += w.finish()?;
 
@@ -348,10 +380,13 @@ pub(crate) fn export_dir_chunked(
 }
 
 /// Enforce the passphrase policy (design §3.4): at least
-/// [`EXPORT_PASSPHRASE_MIN_CHARS`] characters of the NFC form. Public so the
-/// engine enforces the same rule synchronously before spawning the task.
+/// [`EXPORT_PASSPHRASE_MIN_CHARS`] characters **as typed** (length only, no
+/// composition rules; NFC is applied to the KDF *input*, not to the count —
+/// counting post-NFC could reject a passphrase the UI's character gate
+/// accepted). Public so the engine enforces the same rule synchronously
+/// before spawning the task.
 pub fn check_passphrase_policy(pass: &str) -> Result<(), StorageError> {
-    if pass.nfc().count() < EXPORT_PASSPHRASE_MIN_CHARS {
+    if pass.chars().count() < EXPORT_PASSPHRASE_MIN_CHARS {
         return Err(StorageError::BadFile(format!(
             "the export passphrase needs at least {EXPORT_PASSPHRASE_MIN_CHARS} characters"
         )));
@@ -373,18 +408,9 @@ fn read_seed_entropy(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    if blob.len() <= crate::NONCE_LEN {
-        return Err(StorageError::BadFile("sealed seed is too short".to_string()));
-    }
-    let (nonce, ct) = blob.split_at(crate::NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(device_key.into());
-    let entropy = cipher
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload { msg: ct, aad: &crate::seed_seal_aad(id) },
-        )
-        .map_err(|_| StorageError::Crypto("unsealing the stored seed failed".to_string()))?;
-    Ok(Some(Zeroizing::new(entropy)))
+    Ok(Some(Zeroizing::new(crate::unseal_seed_entropy(
+        device_key, id, &blob,
+    )?)))
 }
 
 /// Walk the workspace dir into the design-§3.2 include table. Returns the
@@ -395,7 +421,7 @@ fn read_seed_entropy(
 fn collect_entries(
     ws_dir: &Path,
 ) -> Result<CollectedEntries, StorageError> {
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut files: Vec<(String, ExportSource)> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for entry in fs::read_dir(ws_dir)? {
         let entry = entry?;
@@ -407,7 +433,7 @@ fn collect_entries(
         let is_dir = entry.file_type()?.is_dir();
         match name.as_str() {
             "manifest.toml" | "prefs.toml" | "chain.state" if !is_dir => {
-                files.push((name, path));
+                files.push((name, ExportSource::File(path)));
             }
             // §3.3 hard exclusion + runtime scratch
             "transport.state" | "LOCK" => {}
@@ -417,7 +443,7 @@ fn collect_entries(
                     let seg = seg?;
                     let seg_name = seg.file_name().to_string_lossy().into_owned();
                     if seg_name.ends_with(".mlog") && seg.file_type()?.is_file() {
-                        files.push((format!("log/{seg_name}"), seg.path()));
+                        files.push((format!("log/{seg_name}"), ExportSource::File(seg.path())));
                     } else if !seg_name.starts_with('.') {
                         skipped.push(format!("log/{seg_name}"));
                     }
@@ -425,13 +451,27 @@ fn collect_entries(
             }
             "snapshots" if is_dir => {
                 // newest snapshot only — snapshots are droppable
-                // optimizations, one keeps the blob small (§3.2)
-                if let Some((_, newest)) = crate::list_sorted(&path, ".msnap").pop() {
-                    let rel = format!(
-                        "snapshots/{}",
-                        newest.file_name().unwrap_or_default().to_string_lossy()
-                    );
-                    files.push((rel, newest));
+                // optimizations, one keeps the blob small (§3.2). Its bytes
+                // are captured NOW: the open workspace's writer prunes old
+                // snapshots concurrently, so the picked file may vanish —
+                // re-pick a bounded number of times, and a workspace whose
+                // snapshots all vanished simply exports without one.
+                for _ in 0..3 {
+                    let Some((_, newest)) = crate::list_sorted(&path, ".msnap").pop() else {
+                        break;
+                    };
+                    match fs::read(&newest) {
+                        Ok(bytes) => {
+                            let rel = format!(
+                                "snapshots/{}",
+                                newest.file_name().unwrap_or_default().to_string_lossy()
+                            );
+                            files.push((rel, ExportSource::Bytes(bytes)));
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 for snap in fs::read_dir(&path)? {
                     let snap = snap?;
@@ -442,7 +482,7 @@ fn collect_entries(
                 }
             }
             _ if !is_dir && name.starts_with("logo.") => {
-                files.push((name, path));
+                files.push((name, ExportSource::File(path)));
             }
             _ => {
                 // unknown — named honestly so the user sees what the blob
@@ -558,7 +598,10 @@ impl<'a> ChunkWriter<'a> {
 /// deliberately indistinguishable — the AEAD cannot tell and we do not
 /// guess), truncation, reorder, a short non-final chunk, malformed entry
 /// paths, or a payload whose seed does not derive its workspace key.
-/// Blocking (Argon2) — call off-actor only.
+/// Blocking (Argon2) — call off-actor only. v1 buffers the whole blob and
+/// its decrypted payload in memory (bounded by the blob the caller chose to
+/// open); story 13's import should stream chunks into its staging dir
+/// instead of holding large archives resident.
 pub fn read_export(
     input: &mut dyn Read,
     secret: &ExportSecret,
@@ -752,6 +795,7 @@ fn parse_payload(pt: &[u8]) -> Result<(ExportMeta, Vec<ExportEntry>), StorageErr
             || path.starts_with('/')
             || path.contains('\\')
             || path.contains('\0')
+            || path.contains(':') // Windows drive-letter escape (C:/…)
             || path.split('/').any(|c| c.is_empty() || c == "." || c == "..")
         {
             return Err(StorageError::Corrupt(format!("illegal entry path `{path}`")));
@@ -847,12 +891,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let (root, dir, seed) = make_ws(tmp.path());
         let mut blob = Vec::new();
-        let outcome = export_dir(&root, &dir, &ExportKey::Passphrase(PASS.into()), &mut blob)
+        let outcome = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob)
             .expect("export");
         assert_eq!(outcome.bytes, u64::try_from(blob.len()).expect("len"), "honest byte count");
         assert_eq!(outcome.skipped, vec!["notes.txt".to_string()], "unknown file named");
 
-        let a = read_export(&mut blob.as_slice(), &ExportSecret::Passphrase(PASS.into()))
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
             .expect("decrypt");
         // include table
         for p in ["manifest.toml", "prefs.toml", "chain.state", "logo.png", "log/000001.mlog"] {
@@ -895,10 +939,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let (root, dir, _) = make_ws(tmp.path());
         let mut blob = Vec::new();
-        export_dir(&root, &dir, &ExportKey::Passphrase(PASS.into()), &mut blob).expect("export");
+        export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
         let err = read_export(
             &mut blob.as_slice(),
-            &ExportSecret::Passphrase("not the passphrase".into()),
+            &ExportSecret::passphrase("not the passphrase"),
         )
         .expect_err("wrong passphrase must fail");
         assert!(
@@ -914,7 +958,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let (root, dir, _) = make_ws(tmp.path());
         let mut blob = Vec::new();
-        let err = export_dir(&root, &dir, &ExportKey::Passphrase("neunchars".into()), &mut blob)
+        let err = export_dir(&root, &dir, &ExportKey::passphrase("neunchars"), &mut blob)
             .expect_err("9 chars must be refused");
         assert!(err.to_string().contains("at least 10 characters"), "{err}");
         assert!(blob.is_empty(), "nothing may be written on refusal");
@@ -942,7 +986,7 @@ mod tests {
         assert!(a.header.kdf.is_none(), "workspace mode needs no kdf table");
         assert!(entry(&a, "manifest.toml").is_some());
         // supplying the wrong secret KIND is refused with a clear message
-        let err = read_export(&mut blob.as_slice(), &ExportSecret::Passphrase(PASS.into()))
+        let err = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
             .expect_err("secret kind mismatch");
         assert!(err.to_string().contains("key mode"), "{err}");
     }
@@ -1042,7 +1086,7 @@ mod tests {
             b.extend_from_slice(&[0u8; 64]); // never reached
             b
         };
-        let secret = ExportSecret::Passphrase(PASS.into());
+        let secret = ExportSecret::passphrase(PASS);
         // bad magic
         let mut bad = forge(&serde_json::json!({}));
         bad[0] ^= 0xff;
@@ -1098,7 +1142,7 @@ mod tests {
         let sealed = crate::seal_seed_entropy(&dk, &id, &other).expect("seal");
         fs::write(dir.join("keys").join("seed.sealed"), sealed).expect("write");
         let mut blob = Vec::new();
-        let err = export_dir(&root, &dir, &ExportKey::Passphrase(PASS.into()), &mut blob)
+        let err = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob)
             .expect_err("inconsistent hierarchy must refuse");
         assert!(err.to_string().contains("does not derive"), "{err}");
     }
@@ -1161,7 +1205,7 @@ mod tests {
             "created": 1, "exporter": "test", "at_rest": "device",
             "workspace_key": "22".repeat(32), "files": 1
         });
-        for evil in ["../x", "/etc/passwd", "a//b", "log/../../x", "."] {
+        for evil in ["../x", "/etc/passwd", "a//b", "log/../../x", ".", "C:/evil", "C:evil"] {
             let err = read_export(
                 &mut forge(&plain_meta, &[(evil, b"x")]).as_slice(),
                 &ExportSecret::WorkspaceKey(key),
