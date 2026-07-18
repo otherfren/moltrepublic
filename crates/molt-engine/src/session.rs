@@ -857,6 +857,9 @@ impl State {
                 "close the workspace before encrypting it".to_string(),
             ));
         }
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
+            return Err(MoltError::UnknownWorkspace(id));
+        }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "the recovery phrase is required to encrypt — it is verified \
@@ -864,20 +867,25 @@ impl State {
                     .to_string(),
             ));
         }
-        if !self.session.workspaces.iter().any(|w| w.id == id) {
-            return Err(MoltError::UnknownWorkspace(id));
+        // a storage-less node has no at-rest bytes and nothing to verify a
+        // phrase against — claiming to seal would be exactly the fake
+        // behavior this command used to be; refuse honestly instead
+        if !self.persist {
+            return Err(MoltError::Storage(
+                "this node runs without workspace storage — there is nothing \
+                 on disk to encrypt"
+                    .to_string(),
+            ));
         }
-        if self.persist {
-            let root = self.workspace_root();
-            let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
-                MoltError::Storage(format!(
-                    "workspace {id} has no directory under {}",
-                    root.display()
-                ))
-            })?;
-            molt_storage::seal_at_rest(&dir, &phrase)
-                .map_err(molt_storage::StorageError::into_molt)?;
-        }
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        molt_storage::seal_at_rest(&dir, &phrase)
+            .map_err(molt_storage::StorageError::into_molt)?;
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.encrypted = true;
             // sealed = no key material: the details panel must not keep
@@ -901,48 +909,51 @@ impl State {
         id: WorkspaceId,
         phrase: String,
     ) -> Result<Reply, MoltError> {
+        if !self.session.workspaces.iter().any(|w| w.id == id) {
+            return Err(MoltError::UnknownWorkspace(id));
+        }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "a recovery phrase is required to decrypt".to_string(),
             ));
         }
-        if !self.session.workspaces.iter().any(|w| w.id == id) {
-            return Err(MoltError::UnknownWorkspace(id));
+        // mirror of the encrypt honesty rule: nothing on disk, nothing to
+        // verify the phrase against — refuse instead of pretending
+        if !self.persist {
+            return Err(MoltError::Storage(
+                "this node runs without workspace storage — there is nothing \
+                 on disk to decrypt"
+                    .to_string(),
+            ));
         }
-        let mut details: Option<(String, Vec<molt_core::MemberInfo>, String)> = None;
-        if self.persist {
-            let root = self.workspace_root();
-            let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
-                MoltError::Storage(format!(
-                    "workspace {id} has no directory under {}",
-                    root.display()
-                ))
-            })?;
-            molt_storage::unseal_at_rest(&root, &dir, &phrase)
-                .map_err(molt_storage::StorageError::into_molt)?;
-            // the key material is back — refill the details-panel facts the
-            // sealed state hid (same sources the boot scan uses)
-            let seed = molt_storage::read_sealed_seed(&root, &dir, &id).unwrap_or_default();
-            let mut members = Vec::new();
-            let mut agenda = String::new();
-            if let Some(genesis) = molt_storage::peek_genesis(&root, &dir, &id) {
-                if let WorkspaceEvent::Founded {
-                    roster, agenda: a, ..
-                } = genesis.body
-                {
-                    members = roster_members(&roster, |_| false, "");
-                    agenda = a;
-                }
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        molt_storage::unseal_at_rest(&root, &dir, &phrase)
+            .map_err(molt_storage::StorageError::into_molt)?;
+        // the key material is back — refill the details-panel facts the
+        // sealed state hid (same sources the boot scan uses)
+        let seed = molt_storage::read_sealed_seed(&root, &dir, &id).unwrap_or_default();
+        let mut members = Vec::new();
+        let mut agenda = String::new();
+        if let Some(genesis) = molt_storage::peek_genesis(&root, &dir, &id) {
+            if let WorkspaceEvent::Founded {
+                roster, agenda: a, ..
+            } = genesis.body
+            {
+                members = roster_members(&roster, |_| false, "");
+                agenda = a;
             }
-            details = Some((seed, members, agenda));
         }
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.encrypted = false;
-            if let Some((seed, members, agenda)) = details {
-                ws.seed = seed;
-                ws.members = members;
-                ws.agenda = agenda;
-            }
+            ws.seed = seed;
+            ws.members = members;
+            ws.agenda = agenda;
         }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

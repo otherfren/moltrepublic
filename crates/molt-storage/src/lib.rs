@@ -129,6 +129,12 @@ pub enum StorageError {
     /// The workspace was written by a newer node version.
     #[error("workspace version {0} is newer than this build supports")]
     NewerVersion(u32),
+    /// The workspace (carried by id) is phrase-sealed at rest (S6): no key
+    /// material on disk — opening is impossible by design, not an I/O
+    /// accident. Mapped to [`molt_core::MoltError::WorkspaceEncrypted`] so
+    /// every frontend routes it to the decrypt flow.
+    #[error("workspace is sealed at rest — decrypt it with its recovery phrase first")]
+    Sealed(String),
     /// The recovery phrase did not parse / carry valid entropy.
     #[error("seed: {0}")]
     BadSeed(String),
@@ -145,6 +151,7 @@ impl StorageError {
     pub fn into_molt(self) -> molt_core::MoltError {
         match self {
             StorageError::Busy(pid) => molt_core::MoltError::WorkspaceBusy(pid),
+            StorageError::Sealed(id) => molt_core::MoltError::WorkspaceEncrypted(id),
             other => molt_core::MoltError::Storage(other.to_string()),
         }
     }
@@ -1239,22 +1246,34 @@ pub fn create_workspace(
     })
 }
 
+/// The manifest-level preconditions of opening: version within this
+/// build's ceiling, and not phrase-sealed (S6 — a sealed dir has NO key
+/// material on disk; opening it is impossible by design, not an I/O
+/// accident, and the typed [`StorageError::Sealed`] routes every frontend
+/// to the decrypt flow).
+fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
+    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
+        return Err(StorageError::NewerVersion(manifest.version));
+    }
+    if sealing::is_sealed(manifest) {
+        return Err(StorageError::Sealed(manifest.workspace.id.clone()));
+    }
+    Ok(())
+}
+
 /// Open an existing workspace directory: check the manifest version, take
 /// the LOCK, unseal the key, load the newest valid snapshot, replay the log
 /// tail (recovering a torn last segment), and position the writer.
 pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), StorageError> {
-    let manifest = read_manifest(ws_dir)?;
-    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
-        return Err(StorageError::NewerVersion(manifest.version));
-    }
-    // a phrase-sealed dir has NO key material on disk (S6) — opening it
-    // is impossible by design, not an I/O accident; say so
-    if sealing::is_sealed(&manifest) {
-        return Err(StorageError::Crypto(
-            "workspace is sealed at rest — decrypt it with its recovery phrase first".to_string(),
-        ));
-    }
+    // cheap pre-check on the un-locked manifest: never create a LOCK file
+    // in a directory that is not an openable workspace
+    openable_gate(&read_manifest(ws_dir)?)?;
     let lock = acquire_lock(ws_dir)?;
+    // re-read under the flock: a seal_at_rest may have raced the pre-check
+    // (its marker + key deletion land under the flock we now hold) — the
+    // stale copy would misreport a healthy sealed dir as corruption
+    let manifest = read_manifest(ws_dir)?;
+    openable_gate(&manifest)?;
 
     let root = ws_dir.parent().unwrap_or(ws_dir);
     let device_key = load_or_create_device_key(&device_key_path(root))?;

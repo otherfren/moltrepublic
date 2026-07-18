@@ -60,15 +60,20 @@ pub fn is_sealed(manifest: &WorkspaceManifest) -> bool {
 /// from a synchronous handler that accepts the few file operations; the
 /// crypto itself is one HKDF + one AEAD open (no Argon2, see module doc).
 pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
+    // cheap pre-checks before the LOCK is even created: is this a
+    // workspace at all, and does the phrase pass its BIP-39 checksum
+    // (typos fail here, before any file is touched)
+    crate::read_manifest(ws_dir)?;
+    let seed = Zeroizing::new(crate::seed_entropy(phrase)?);
+    // hold the flock: an OPEN workspace must never lose its keys mid-run
+    let _lock = crate::acquire_lock(ws_dir)?;
+    // (re)read the manifest UNDER the lock — a copy taken before it could
+    // be stale (a concurrently-closing engine's rename or version bump)
+    // and writing it back below would silently revert those updates
     let mut manifest = crate::read_manifest(ws_dir)?;
     if manifest.version > STORAGE_VERSION_SEALED {
         return Err(StorageError::NewerVersion(manifest.version));
     }
-    // BIP-39 checksum catches typos before any file is touched (not even
-    // the LOCK is taken yet)
-    let seed = Zeroizing::new(crate::seed_entropy(phrase)?);
-    // hold the flock: an OPEN workspace must never lose its keys mid-run
-    let _lock = crate::acquire_lock(ws_dir)?;
     let id = crate::id_bytes(&manifest.workspace.id)?;
     let key = Zeroizing::new(crate::derive_workspace_key(&seed, &manifest.workspace.id));
     // proof-of-credential: the caller must hold the phrase BEFORE we delete
@@ -80,6 +85,13 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // honest corruption and `unseal_at_rest` repairs (it rewrites both).
     secure_remove(&ws_dir.join(&manifest.crypto.key_file))?;
     secure_remove(&ws_dir.join("keys").join("seed.sealed"))?;
+    // the materialized logo is republic CONTENT in plaintext (an applied
+    // org image, mirrored out of the encrypted log for display) — it must
+    // not stay readable in a sealed dir. Deleting it is safe: the log
+    // replays it and `sync_logo_file` rebuilds the file at the next open
+    // after a decrypt. The manifest (name, m/n) deliberately stays — the
+    // Open screen lists sealed workspaces by their identity card.
+    remove_logo_files(ws_dir)?;
     manifest.crypto.sealed = SEALED_PHRASE.to_string();
     manifest.version = manifest.version.max(STORAGE_VERSION_SEALED);
     crate::write_manifest(ws_dir, &manifest)
@@ -96,12 +108,16 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
 /// Also the repair path for a crash window that left the marker and the
 /// key files disagreeing — it rewrites both from the verified phrase.
 pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
+    // cheap pre-checks before the LOCK is created (see seal_at_rest)
+    crate::read_manifest(ws_dir)?;
+    let seed = Zeroizing::new(crate::seed_entropy(phrase)?);
+    let _lock = crate::acquire_lock(ws_dir)?;
+    // (re)read under the lock — the pre-lock copy could be stale and its
+    // write-back below would revert concurrent manifest updates
     let mut manifest = crate::read_manifest(ws_dir)?;
     if manifest.version > STORAGE_VERSION_SEALED {
         return Err(StorageError::NewerVersion(manifest.version));
     }
-    let seed = Zeroizing::new(crate::seed_entropy(phrase)?);
-    let _lock = crate::acquire_lock(ws_dir)?;
     let id = crate::id_bytes(&manifest.workspace.id)?;
     let key = Zeroizing::new(crate::derive_workspace_key(&seed, &manifest.workspace.id));
     // the Poly1305 tag of the genesis frame IS the real phrase verification
@@ -114,11 +130,7 @@ pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), St
     crate::write_atomic(ws_dir, "keys/workspace.key", &sealed_key, true)?;
     let sealed_seed = crate::seal_seed_entropy(&device_key, &id, &seed)?;
     crate::write_atomic(ws_dir, "keys/seed.sealed", &sealed_seed, true)?;
-    manifest.version = if chain_is_pruned(ws_dir, &key, &id) {
-        STORAGE_VERSION_PRUNED
-    } else {
-        STORAGE_VERSION
-    };
+    manifest.version = chain_version_floor(ws_dir, &key, &id);
     manifest.crypto.sealed = SEALED_DEVICE.to_string();
     crate::write_manifest(ws_dir, &manifest)
 }
@@ -131,25 +143,37 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
     let first = frames
         .first()
         .ok_or_else(|| StorageError::Corrupt("workspace has no genesis frame".to_string()))?;
-    crate::decrypt_frame(key, id, 1, 1, first.nonce, first.ciphertext).map_err(|_| {
-        StorageError::Crypto("the recovery phrase does not match this workspace".to_string())
-    })?;
+    crate::decrypt_frame(key, id, 1, 1, first.nonce, first.ciphertext)
+        .map(Zeroizing::new) // wipe the decrypted genesis on drop
+        .map_err(|_| {
+            StorageError::Crypto("the recovery phrase does not match this workspace".to_string())
+        })?;
     Ok(())
 }
 
-/// Whether `chain.state` holds a PRUNED chain — decides the version floor
-/// a decrypted workspace returns to. Absent/damaged files read as "not
-/// pruned" (the same lenient posture as `read_chain`; the reopen path
-/// re-raises the version when it meets a pruned blob).
-fn chain_is_pruned(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> bool {
-    let Ok(data) = fs::read(ws_dir.join("chain.state")) else {
-        return false;
+/// The manifest version floor a decrypted workspace returns to, decided by
+/// `chain.state`:
+///
+/// * absent → [`STORAGE_VERSION`] (pre-chain / freshly founded);
+/// * readable FULL chain → [`STORAGE_VERSION`] (old binaries read it fine);
+/// * readable PRUNED chain → [`STORAGE_VERSION_PRUNED`] (the WP4b gate);
+/// * **present but unreadable** (torn, tampered, newer layout) →
+///   [`STORAGE_VERSION_PRUNED`], the CONSERVATIVE answer: the file might be
+///   a pruned chain, and dropping the floor would let a pre-pruning binary
+///   run a pruned republic chainless — the state fork the version gate
+///   exists to hard-stop. Over-describing only costs an old binary a
+///   polite refusal.
+fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
+    let data = match fs::read(ws_dir.join("chain.state")) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return STORAGE_VERSION,
+        Err(_) => return STORAGE_VERSION_PRUNED,
     };
     let (frames, torn) = crate::split_frames(&data);
     if frames.len() != 1 || torn.is_some() {
-        return false;
+        return STORAGE_VERSION_PRUNED;
     }
-    let chain_key = crate::hkdf32(key, "molt-chain-state", id);
+    let chain_key = Zeroizing::new(crate::hkdf32(key, "molt-chain-state", id));
     let Ok(plaintext) = crate::decrypt_frame(
         &chain_key,
         id,
@@ -157,13 +181,30 @@ fn chain_is_pruned(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> bool {
         0,
         frames[0].nonce,
         frames[0].ciphertext,
-    ) else {
-        return false;
-    };
-    matches!(
-        serde_json::from_slice::<crate::ChainStateFile>(&plaintext),
-        Ok(crate::ChainStateFile::Pruned { .. })
     )
+    .map(Zeroizing::new) else {
+        return STORAGE_VERSION_PRUNED;
+    };
+    match serde_json::from_slice::<crate::ChainStateFile>(&plaintext) {
+        Ok(crate::ChainStateFile::Pruned { .. }) | Err(_) => STORAGE_VERSION_PRUNED,
+        Ok(crate::ChainStateFile::Full(_)) => STORAGE_VERSION,
+    }
+}
+
+/// Remove every materialized `logo.*` file (plaintext republic content
+/// mirrored out of the encrypted log; rebuilt by `sync_logo_file` at the
+/// next open after a decrypt).
+fn remove_logo_files(ws_dir: &Path) -> Result<(), StorageError> {
+    let Ok(rd) = fs::read_dir(ws_dir) else {
+        return Ok(());
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("logo.") {
+            secure_remove(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort overwrite-then-unlink (design §5.1). Honest limits: on
@@ -182,6 +223,16 @@ fn secure_remove(path: &Path) -> Result<(), StorageError> {
                 let _ = f.sync_all();
             }
             fs::remove_file(path)?;
+            // make the unlink itself durable BEFORE the manifest is marked
+            // sealed: without the parent-dir fsync a power loss could keep
+            // the durably-sealed marker while resurrecting the key file —
+            // key material riding along in every "sealed" backup, and no
+            // path that ever notices (same rule as write_atomic's rename)
+            if let Some(parent) = path.parent() {
+                if let Ok(d) = fs::File::open(parent) {
+                    let _ = d.sync_all();
+                }
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -271,13 +322,45 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].info().encrypted, "scan derives encrypted from the dir");
 
-        // …and open refuses with an honest reason
+        // …and open refuses with the TYPED sealed error (mapped to
+        // MoltError::WorkspaceEncrypted, so every frontend routes it to
+        // the decrypt flow even when its session flag is stale)
         match open_workspace(&dir) {
-            Err(StorageError::Crypto(msg)) => {
-                assert!(msg.contains("sealed"), "honest reason, got: {msg}")
-            }
-            other => panic!("expected Crypto(sealed), got {:?}", other.map(|_| ())),
+            Err(StorageError::Sealed(sealed_id)) => assert_eq!(sealed_id, id),
+            other => panic!("expected Sealed, got {:?}", other.map(|_| ())),
         }
+    }
+
+    /// The materialized plaintext logo is republic content — it must not
+    /// stay readable in a sealed dir (it is rebuilt from the log at the
+    /// next open after a decrypt).
+    #[test]
+    fn sealing_removes_the_plaintext_logo() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        fs::write(dir.join("logo.png"), b"the republic's face").expect("logo");
+        seal_at_rest(&dir, &phrase).expect("seal");
+        assert!(!dir.join("logo.png").exists(), "content removed while sealed");
+    }
+
+    /// A damaged (present-but-unreadable) chain.state must keep the PRUNED
+    /// floor on unseal: the file might be a pruned chain, and dropping to
+    /// the base version would let a pre-pruning binary run the republic
+    /// chainless — over-describing only costs an old binary a refusal.
+    #[test]
+    fn a_damaged_chain_state_keeps_the_conservative_pruned_floor() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        seal_at_rest(&dir, &phrase).expect("seal");
+        fs::write(dir.join("chain.state"), b"torn garbage").expect("damage");
+        unseal_at_rest(&root, &dir, &phrase).expect("unseal");
+        assert_eq!(
+            read_manifest(&dir).expect("m").version,
+            STORAGE_VERSION_PRUNED,
+            "unreadable chain.state must not drop the version floor"
+        );
     }
 
     #[test]

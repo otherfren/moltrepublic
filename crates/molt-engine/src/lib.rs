@@ -2347,20 +2347,21 @@ mod tests {
         });
     }
 
-    /// The at-rest toggle on a SESSION-ONLY node (no storage — unit tests,
-    /// ephemeral demo): there are no on-disk bytes to seal, so the flag is
-    /// a session marker and the phrase cannot be verified against anything;
-    /// the real, phrase-verified path is pinned by
-    /// [`at_rest_sealing_is_real_verified_and_survives_a_restart`]. What
-    /// this test pins: an encrypted entry cannot be opened until a decrypt
-    /// flips it back, and both commands demand a phrase — the Open screen's
-    /// buttons and the MCP encrypt_/decrypt_workspace tools drive the same
-    /// commands.
+    /// At-rest sealing on a SESSION-ONLY node (no storage — unit tests,
+    /// ephemeral nodes): there are no on-disk bytes to seal and no genesis
+    /// to verify a phrase against, so BOTH commands refuse honestly instead
+    /// of faking a flag flip (the pre-story-10 mock accepted any phrase
+    /// here while the tool texts promised real verification). The real,
+    /// phrase-verified path is pinned by
+    /// [`at_rest_sealing_is_real_verified_and_survives_a_restart`]; the
+    /// session's `encrypted` flag still gates open (it is scan-derived on
+    /// storage nodes), pinned there too.
     #[test]
-    fn encrypted_workspaces_refuse_to_open_until_decrypted() {
+    fn a_storageless_node_refuses_to_fake_at_rest_sealing() {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             let id = demo_workspace_id("Family Office");
+            // an empty phrase is rejected before anything else
             assert!(
                 w.execute(Command::EncryptWorkspace {
                     id: id.clone(),
@@ -2370,12 +2371,16 @@ mod tests {
                 .is_err(),
                 "encrypting needs a phrase"
             );
-            w.execute(Command::EncryptWorkspace {
-                id: id.clone(),
-                phrase: "word1 word2 word3".into(),
-            })
-            .await
-            .expect("encrypt");
+            // …and WITH a phrase the storage-less node still refuses: it
+            // cannot verify or seal anything, and must not pretend to
+            assert!(matches!(
+                w.execute(Command::EncryptWorkspace {
+                    id: id.clone(),
+                    phrase: "word1 word2 word3".into(),
+                })
+                .await,
+                Err(MoltError::Storage(_))
+            ));
             let entry = |s: &SessionView| {
                 s.workspaces
                     .iter()
@@ -2383,41 +2388,24 @@ mod tests {
                     .map(|ws| ws.encrypted)
                     .expect("entry")
             };
-            assert!(entry(&*read_session(&w).await), "flag set in the session");
-            assert!(
-                matches!(
-                    w.execute(Command::OpenWorkspace { id: id.clone() }).await,
-                    Err(MoltError::WorkspaceEncrypted(_))
-                ),
-                "an encrypted workspace refuses to open"
-            );
-            assert!(
+            assert!(!entry(&*read_session(&w).await), "nothing was faked");
+            assert!(matches!(
                 w.execute(Command::DecryptWorkspace {
                     id: id.clone(),
-                    phrase: String::new(),
-                })
-                .await
-                .is_err(),
-                "decrypting needs a phrase"
-            );
-            w.execute(Command::DecryptWorkspace {
-                id: id.clone(),
-                phrase: "word1 word2 word3".into(),
-            })
-            .await
-            .expect("decrypt");
-            assert!(!entry(&*read_session(&w).await));
-            w.execute(Command::OpenWorkspace { id: id.clone() })
-                .await
-                .expect("open decrypted");
-            // the ACTIVE workspace cannot be encrypted from under itself
-            assert!(w
-                .execute(Command::EncryptWorkspace {
-                    id,
                     phrase: "word1 word2 word3".into(),
                 })
-                .await
-                .is_err());
+                .await,
+                Err(MoltError::Storage(_))
+            ));
+            // an unknown id reports UnknownWorkspace, not a phrase error
+            assert!(matches!(
+                w.execute(Command::EncryptWorkspace {
+                    id: "no-such".into(),
+                    phrase: String::new(),
+                })
+                .await,
+                Err(MoltError::UnknownWorkspace(_))
+            ));
         });
     }
 
