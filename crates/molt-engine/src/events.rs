@@ -239,12 +239,12 @@ impl State {
                 self.next_id = self.next_id.max(id.0 + 1);
             }
             WorkspaceEvent::Approved { id, .. } => {
-                // Deliberately no per-member dedup yet: the threshold
-                // machine is a simulation (one local operator stands in for
-                // the whole group, engine doc header) — a repeated Approve
-                // *is* the next member's co-signature. Real dedup arrives
-                // with real member identities (FROST/MLS, molt-identity);
-                // the envelope's `by` already records what it will need.
+                // Replay projection, deliberately a plain count: live
+                // approvals are already deduplicated at their source
+                // (`cmd_approve` refuses a second local approval; the chain
+                // collects distinct signatures and ignores this counter), so
+                // this arm only reconstructs what a log recorded — including
+                // legacy pre-chain logs whose counter once simulated peers.
                 if let Some(p) = self.proposals.get_mut(&id.0) {
                     if p.state == ProposalState::Proposed {
                         p.approvals += 1;

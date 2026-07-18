@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The gated surfaces: propose → threshold approvals → apply. A faithful
-//! but *simulated* stand-in for the real FROST threshold machine.
+//! The gated surfaces: propose → threshold approvals → apply.
+//!
+//! Two honest paths, no simulation: a **chain-governed** republic (every
+//! ritual-founded workspace) runs real signed m-of-n threshold governance
+//! over the mesh (`chain.rs`); every other context (the solo boot group,
+//! legacy pre-chain workspaces, session-only tests) runs the
+//! **single-operator** path — this node records at most its OWN approval,
+//! and a proposal applies only when that one real vote meets the
+//! threshold (the honest 1-of-1 case). Counting repeated local approvals
+//! as invented peers — the pre-chain simulation — is gone: a repeat is
+//! refused with [`MoltError::AlreadyApproved`].
 
 use std::collections::HashMap;
 
@@ -210,8 +219,9 @@ impl State {
             }
         } else {
             if self.config.self_cosign {
-                // legacy counted simulation — the proposer's own approval is an
-                // event too, so replay must not depend on the config flag
+                // single-operator path: the proposer's own co-signature is
+                // this node's one real approval — recorded as an event, so
+                // replay never depends on the config flag
                 let env = self.make_env(
                     me.clone(),
                     WorkspaceEvent::Approved {
@@ -223,14 +233,28 @@ impl State {
                 );
                 self.record(env);
             }
-            // A self-cosign may already satisfy a threshold of 1.
+            // the one real vote may already satisfy a threshold of 1 —
+            // honest 1-of-1 governance (the solo boot group)
             self.try_apply(id);
         }
         Ok(Reply::Proposed { id })
     }
 
+    /// The single-operator invariant, stated ONCE: without chain governance
+    /// the only approval this node can record is the local operator's own —
+    /// [`State::cmd_approve`] refuses repeats, and the wire delivery drops
+    /// governance frames for non-chain workspaces — and the pre-chain
+    /// simulation's legacy logs share the shape (their every `Approved`
+    /// frame was minted locally, the first always the operator's). So "any
+    /// approval recorded" means "the operator already voted"; the approve
+    /// guard, `approved_by_me`, the votes row and [`State::waits_on`] must
+    /// all read it from here so they can never drift apart.
+    fn operator_approved(p: &ProposalRecord) -> bool {
+        p.approvals > 0
+    }
+
     pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
-        {
+        let operator_already_voted = {
             let p = self
                 .proposals
                 .get(&proposal.0)
@@ -238,7 +262,8 @@ impl State {
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
-        }
+            Self::operator_approved(p)
+        };
         if self.is_chain_governed() {
             // real threshold: sign + gossip; a block seals once m distinct
             // members have signed (here or over the mesh)
@@ -250,6 +275,14 @@ impl State {
                 need: self.threshold(),
             });
         } else {
+            // single-operator path: this node contributes exactly ONE real
+            // approval — its own. A repeat must not count as the next
+            // member's co-signature (that was the pre-chain simulation);
+            // the missing votes can only come from the members themselves,
+            // which takes a chain-governed republic.
+            if operator_already_voted {
+                return Err(MoltError::AlreadyApproved(proposal));
+            }
             let me = self.member();
             let env = self.make_env(
                 me.clone(),
@@ -322,11 +355,20 @@ impl State {
     /// frame and its `Applied` frame must not leave a proposal stuck at
     /// `have >= need` forever. Called once per open, after the tail applied.
     ///
-    /// Legacy path only: a chain-governed workspace never applies by counting —
-    /// the replayed `Approved` frames are real signatures the chain already
-    /// consumed (or not), so re-counting them here would double-apply.
+    /// Single-operator path only: a chain-governed workspace never applies by
+    /// counting — the replayed `Approved` frames are real signatures the chain
+    /// already consumed (or not), so re-counting them here would double-apply.
     pub(crate) fn recover_pending_applies(&mut self) {
         if self.is_chain_governed() {
+            return;
+        }
+        // The honest re-decision is bounded by what the single-operator path
+        // can legitimately produce: ONE real vote. A counted threshold above
+        // that can only have been "met" by the removed pre-chain simulation
+        // (a legacy log's invented peer approvals) — minting a fresh
+        // `Applied` from such a count would fake a threshold decision no
+        // member made, so those proposals stay pending (decline is the exit).
+        if self.threshold() > 1 {
             return;
         }
         let ready: Vec<u64> = self
@@ -342,30 +384,31 @@ impl State {
 
     pub(crate) fn view(&self, id: u64, p: &ProposalRecord) -> ProposalView {
         // a chain-governed proposal's real progress is the count of distinct
-        // collected signatures, not the legacy counter
+        // collected signatures; the single-operator path counts the recorded
+        // approval events (live: at most this node's own — a legacy log
+        // replays what it recorded)
         let approvals = if self.is_chain_governed() {
             self.chain_approval_count(id)
         } else {
             p.approvals
         };
-        // reader-relative: chain governance knows exactly who signed; the
-        // legacy counted simulation has one local operator standing in for
-        // the whole group, where the FIRST approval is by definition ours
-        // (self-cosign or the explicit approve) and repeats simulate peers
+        // reader-relative: chain governance knows exactly who signed; on the
+        // single-operator path the ONLY approval this node can ever record
+        // is its own (self-cosign or the one explicit approve)
         let approved_by_me = if self.is_chain_governed() {
             let me = self.member();
             self.pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == me))
         } else {
-            p.approvals > 0
+            Self::operator_approved(p)
         };
         let (current, proposed) = change_summary(&self.org_effective(), p);
         // the voting row: one stance per roster member, roster order. Chain
-        // governance knows exactly who signed; the legacy counted simulation
-        // attributes its anonymous counter deterministically (the local
-        // member first — matching `approved_by_me` — then roster order), so
-        // the row always agrees with the `approvals` count.
+        // governance knows exactly who signed; the single-operator path
+        // claims only what it knows — this node's own vote. (A legacy log
+        // whose counter simulated peers cannot attribute them to anyone, so
+        // its extra count stays anonymous rather than pinned on a member.)
         let me = self.member();
         let mut votes: Vec<MemberVote> = if self.is_chain_governed() {
             let signed: Vec<String> = self
@@ -385,23 +428,15 @@ impl State {
                 })
                 .collect()
         } else {
-            let mut others_left = approvals.saturating_sub(1);
             self.roster()
                 .into_iter()
-                .map(|member| {
-                    let vote = if member == me {
-                        if approvals > 0 {
-                            VoteState::Approved
-                        } else {
-                            VoteState::Open
-                        }
-                    } else if others_left > 0 {
-                        others_left -= 1;
+                .map(|member| MemberVote {
+                    vote: if member == me && Self::operator_approved(p) {
                         VoteState::Approved
                     } else {
                         VoteState::Open
-                    };
-                    MemberVote { member, vote }
+                    },
+                    member,
                 })
                 .collect()
         };
@@ -487,7 +522,7 @@ impl State {
         eff
     }
 
-    /// The applied Organization entries, BORROWED (legacy counted projection
+    /// The applied Organization entries, BORROWED (single-operator projection
     /// then the chain projection — one is always empty for a workspace). No
     /// clone: callers only read `op`/`value`/`bytes_b64` fields.
     pub(crate) fn applied_org_entries(&self) -> impl Iterator<Item = &Value> {
@@ -604,8 +639,8 @@ impl State {
                 .map(|m| (None, serde_json::to_value(m).unwrap_or_default()))
                 .collect()
         } else {
-            // the surface's applied log is the legacy (counted-simulation)
-            // projection plus the chain (real threshold) projection — one of the
+            // the surface's applied log is the single-operator projection
+            // plus the chain (real threshold) projection — one of the
             // two is always empty for a given workspace, so this is a concat
             let mut v = self.applied.get(&surface).cloned().unwrap_or_default();
             if let Some(chain) = self.chain_applied.get(&surface) {
@@ -715,10 +750,10 @@ impl State {
     }
 
     /// Whether a pending proposal still awaits `member`'s approval. Chain
-    /// governance knows exactly who signed; the legacy counted simulation
-    /// (one operator stands in for the group) treats the first approval as
-    /// the local member's and cannot know about the simulated peers — for
-    /// them every pending proposal counts as open (mock).
+    /// governance knows exactly who signed; on the single-operator path
+    /// the only recordable approval is the local member's own, so a peer's
+    /// approval is honestly always still outstanding — nothing can ever
+    /// deliver it in a context without chain governance.
     fn waits_on(&self, id: u64, p: &ProposalRecord, member: &str) -> bool {
         if p.state != ProposalState::Proposed {
             return false;
@@ -729,7 +764,7 @@ impl State {
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == member))
         } else if member == self.member() {
-            p.approvals == 0
+            !Self::operator_approved(p)
         } else {
             true
         }
