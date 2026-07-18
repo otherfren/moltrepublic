@@ -60,7 +60,6 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
         member: "petra".to_string(),
         threshold: 2,
         members: 4,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

@@ -397,7 +397,9 @@ pub struct WorkspaceInfo {
     pub last_backup_min: u32,
     /// The (mock) recovery seed all of its secret keys derive from.
     pub seed: String,
-    /// Transport: `"tor" | "nym" | "clearnet"`.
+    /// The effective global anonymity network (`"tor" | "none"`) when this
+    /// entry was founded/joined — a display label (routing always follows
+    /// the LIVE global settings); demo entries may carry legacy values.
     pub net: String,
     /// Encrypted at rest (mock): an encrypted workspace is inactive —
     /// opening requires a decrypt with the recovery phrase.
@@ -1839,7 +1841,8 @@ pub struct CreateState {
     pub threshold: u8,
     /// The member count (n).
     pub members: u8,
-    /// Transport: `"tor" | "nym" | "none"`.
+    /// The EFFECTIVE global anonymity network (`"tor" | "none"`) captured
+    /// when the ritual opened — a read-only display value, never a choice.
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
     pub seed: String,
@@ -2300,7 +2303,9 @@ pub enum Command {
     /// invite links and opens their invite queues. The workspace is
     /// created only when every member activated their link AND signed the
     /// final roster (transport concept §3.3) — until then nothing exists
-    /// on disk, and closing the wizard voids the links.
+    /// on disk, and closing the wizard voids the links. The transport is
+    /// NOT a parameter: the ritual always routes through the global
+    /// anonymity settings (`SessionSettings.anonymity`, Settings → Network).
     CreateStart {
         /// The new republic's name.
         name: String,
@@ -2310,8 +2315,6 @@ pub enum Command {
         threshold: u8,
         /// The member count (n), `2..=13`.
         members: u8,
-        /// Transport: `"tor" | "nym" | "none"`.
-        net: String,
     },
     /// Propose the deliberated charter — the final DAO name and a free-text
     /// agenda — once every seat has joined (`create.can_propose`). This seals

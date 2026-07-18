@@ -57,7 +57,6 @@ async fn a_2_of_3_republic_founds_and_applies_a_rename_at_threshold() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 3,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

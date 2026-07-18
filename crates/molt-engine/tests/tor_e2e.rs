@@ -148,7 +148,6 @@ async fn engine_founds_over_tor_across_two_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");

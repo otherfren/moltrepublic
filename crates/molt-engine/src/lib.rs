@@ -815,8 +815,7 @@ impl State {
                 member,
                 threshold,
                 members,
-                net,
-            } => self.cmd_create_start(name, member, threshold, members, net),
+            } => self.cmd_create_start(name, member, threshold, members),
             Command::CreatePropose { name, agenda } => self.cmd_create_propose(name, agenda),
             Command::CreateCancel => self.cmd_create_cancel(),
             Command::CreateFinish => self.cmd_create_finish(),
@@ -1086,7 +1085,6 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
-                net: "tor".to_string(),
             })
             .await
             .expect("create start");
@@ -2801,7 +2799,6 @@ mod tests {
                     member: "me".to_string(),
                     threshold: 4,
                     members: 3,
-                    net: "tor".to_string(),
                 })
                 .await,
                 Err(MoltError::Create(_))
@@ -2813,7 +2810,6 @@ mod tests {
                         member: "me".to_string(),
                         threshold: 1,
                         members: bad_n,
-                        net: "tor".to_string(),
                     })
                     .await,
                     Err(MoltError::Create(_))
@@ -2827,7 +2823,6 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
-                net: "tor".to_string(),
             })
             .await
             .expect("start");
@@ -2873,6 +2868,57 @@ mod tests {
                 }
                 other => panic!("unexpected: {other:?}"),
             }
+        });
+    }
+
+    /// The persisted `WorkspaceInfo.net` label mirrors the EFFECTIVE global
+    /// anonymity setting — the ritual transport always comes from the global
+    /// settings (`resolve_dialer`), so the label must reflect those and never
+    /// a client-supplied string (tor_transport_implementation.md §P8).
+    #[test]
+    fn workspace_net_label_mirrors_the_global_anonymity_setting() {
+        rt().block_on(async {
+            // default settings (anonymity = "none") → the label says "none"
+            let w = __spawn_sim_founding(GroupConfig::demo(), SessionView::default(), false);
+            w.execute(Command::CreateStart {
+                name: "Plain".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+            })
+            .await
+            .expect("start");
+            // the run header shows the effective network while the ritual runs
+            assert_eq!(read_session(&w).await.create.net, "none");
+            await_founding(&w).await;
+            w.execute(Command::CreateFinish).await.expect("finish");
+            let s = read_session(&w).await;
+            let ws = s.workspaces.iter().find(|x| x.name == "Plain").expect("entry");
+            assert_eq!(ws.net, "none", "label = the effective global setting");
+
+            // tor configured globally → the label says "tor"
+            let session = SessionView {
+                settings: SessionSettings {
+                    anonymity: "tor".to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, false);
+            w.execute(Command::CreateStart {
+                name: "Onioned".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+            })
+            .await
+            .expect("start tor");
+            assert_eq!(read_session(&w).await.create.net, "tor");
+            await_founding(&w).await;
+            w.execute(Command::CreateFinish).await.expect("finish tor");
+            let s = read_session(&w).await;
+            let ws = s.workspaces.iter().find(|x| x.name == "Onioned").expect("entry");
+            assert_eq!(ws.net, "tor", "label = the effective global setting");
         });
     }
 
@@ -3036,7 +3082,11 @@ mod tests {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Main, "entered the republic");
                     assert_eq!(s.join, molt_core::JoinState::default(), "join reset");
-                    assert!(s.workspaces.iter().any(|ws| ws.name == "R"), "workspace added");
+                    let ws =
+                        s.workspaces.iter().find(|ws| ws.name == "R").expect("workspace added");
+                    // the net label mirrors the joiner's own global anonymity
+                    // setting ("none" by default) — never a hardcoded "tor"
+                    assert_eq!(ws.net, "none", "label = the effective global setting");
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -3279,7 +3329,6 @@ mod tests {
                 member: "founder".to_string(),
                 threshold: 2,
                 members: 2,
-                net: "tor".to_string(),
             })
             .await
             .expect("start");

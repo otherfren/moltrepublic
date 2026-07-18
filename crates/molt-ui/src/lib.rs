@@ -645,7 +645,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_create_start(move |name, member, threshold, members, net| {
+        ui.on_create_start(move |name, member, threshold, members| {
             issue(
                 &rt,
                 &w,
@@ -655,7 +655,6 @@ pub fn run_app(
                     member: member.to_string(),
                     threshold: u8::try_from(threshold).unwrap_or(0),
                     members: u8::try_from(members).unwrap_or(0),
-                    net: net.to_string(),
                 },
             );
         });
@@ -2019,6 +2018,11 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
     ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
     ui.set_cfg_network_index(net_index(&s.anonymity));
+    // the create screen's read-only "Network" display: the EFFECTIVE global
+    // anonymity network — the same normalization as the engine's
+    // `effective_net_label` (anything not "tor" reads as "none": an unknown
+    // value fails `Dialer::resolve` closed, so no anonymity network runs)
+    ui.set_cw_net(if s.anonymity == "tor" { "tor" } else { "none" }.into());
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
     ui.set_cfg_smp_custom(s.smp_server == "custom");
@@ -4484,9 +4488,11 @@ lexicon! {
     cw_rule_b: "of", "von";
     cw_rule_c: "approvals.", "Stimmen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
-    cw_transport_hint: "How this node reaches the other members.", "Wie dieser Node die anderen Mitglieder erreicht.";
+    cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";
+    cw_net_label: "Network", "Netzwerk";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
+    cw_net_hint_settings: "Global setting — change it under Settings → Network.", "Globale Einstellung — ändern unter Einstellungen → Netzwerk.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
     cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";

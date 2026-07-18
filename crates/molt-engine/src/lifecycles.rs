@@ -296,7 +296,7 @@ impl State {
             roster.len(),
             members,
             entry_seed,
-            "tor".to_string(),
+            self.effective_net_label(),
             false,
             String::new(), // restore rebuilds the charter at S4/S5
         );
@@ -375,7 +375,6 @@ impl State {
         member: String,
         threshold: u8,
         members: u8,
-        net: String,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.create.run, MoltError::Create)?;
         let name = name.trim().to_string();
@@ -426,7 +425,7 @@ impl State {
             member: member.clone(),
             threshold,
             members,
-            net,
+            net: self.effective_net_label(),
             seed,
             seats,
             simulated,
@@ -903,7 +902,7 @@ impl State {
             sealed.roster.len(),
             members,
             j.seed.clone(),
-            "tor".to_string(),
+            self.effective_net_label(),
             self.session.settings.s3_backup,
             sealed.agenda.clone(),
         );
@@ -1164,7 +1163,7 @@ impl State {
             sealed.roster.len(),
             members,
             phrase.clone(),
-            "tor".to_string(),
+            self.effective_net_label(),
             self.session.settings.s3_backup,
             sealed.agenda.clone(),
         );
