@@ -1250,30 +1250,13 @@ pub fn run_app(
                     // from the last APPLIED settings, so an unsaved draft
                     // never changes behavior
                     Ok(Event::Chat { from, .. }) => {
-                        let sound = last_settings
-                            .lock()
-                            .ok()
-                            .and_then(|s| s.as_ref().map(|s| s.sound_message.clone()))
-                            .unwrap_or_default();
-                        let weak2 = weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            let Some(ui) = weak2.upgrade() else { return };
-                            if ui.get_node_member() != from.as_str() {
-                                play_alert(&sound);
-                            }
-                        });
+                        alert_unless_own(&last_settings, |s| s.sound_message.clone(), &weak, from);
                         push_surfaces(&w, &weak, &chat_ui).await;
                     }
-                    Ok(Event::Proposed { .. }) => {
-                        // the engine emits Proposed for our own proposals
-                        // too — a beep on one's own act is acceptable
-                        // feedback (and the event carries no author)
-                        let sound = last_settings
-                            .lock()
-                            .ok()
-                            .and_then(|s| s.as_ref().map(|s| s.sound_vote.clone()))
-                            .unwrap_or_default();
-                        play_alert(&sound);
+                    // only a vote somebody ELSE initiated rings — the
+                    // proposer already knows what they just did
+                    Ok(Event::Proposed { by, .. }) => {
+                        alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by);
                         push_surfaces(&w, &weak, &chat_ui).await;
                     }
                     // WP4b: checkpoint lifecycle closure for the operator —
@@ -4164,6 +4147,31 @@ fn sound_name(i: i32) -> String {
 /// The last time an alert actually played — a debounce so a reconnect
 /// catch-up of hundreds of queued messages cannot spawn a player storm.
 static LAST_ALERT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The shared own-echo gate of the chat and vote alerts: play the configured
+/// sound unless the acting member IS the local one. The comparison runs on
+/// the Slint thread because `node_member` is a UI property; the sound name is
+/// read from the last APPLIED settings, so an unsaved draft never changes
+/// behavior.
+fn alert_unless_own(
+    last_settings: &Arc<Mutex<Option<SessionSettings>>>,
+    pick: impl Fn(&SessionSettings) -> String,
+    weak: &slint::Weak<AppWindow>,
+    by: molt_core::MemberId,
+) {
+    let sound = last_settings
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().map(pick))
+        .unwrap_or_default();
+    let weak2 = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak2.upgrade() else { return };
+        if ui.get_node_member() != by.as_str() {
+            play_alert(&sound);
+        }
+    });
+}
 
 /// Play a short alert sound, fire-and-forget. The sample is synthesized in
 /// pure Rust (a tiny WAV, cached in the temp dir) and handed to the system

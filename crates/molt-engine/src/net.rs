@@ -901,8 +901,11 @@ impl State {
                     tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes within the cap");
                     return Ok(Reply::Ack);
                 }
-                self.receive_proposed(id.0, surface, payload);
-                self.emit(molt_core::Event::Proposed { id, surface });
+                // announce only a genuinely NEW proposal: a WP2 re-serve or
+                // an id-collision refusal must not (re-)ring frontends
+                if self.receive_proposed(id.0, surface, payload) {
+                    self.emit(molt_core::Event::Proposed { id, surface, by: from });
+                }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
                 self.receive_approval(id.0, &by, height, &sig);

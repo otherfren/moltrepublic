@@ -24,7 +24,7 @@ mod common;
 use std::time::Duration;
 
 use molt_core::{
-    ChatMessage, Command, EventEnvelope, MemberId, ProposalId, Reply, SessionSettings,
+    ChatMessage, Command, Event, EventEnvelope, MemberId, ProposalId, Reply, SessionSettings,
     SessionView, Surface, WorkspaceEvent,
 };
 use molt_engine::WalletHandle;
@@ -1799,6 +1799,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     // pending read with the identical bytes (what the GUI preview decodes) ---
     let member_bytes: Vec<u8> = big_bmp(7);
     let member_b64 = base64::engine::general_purpose::STANDARD.encode(&member_bytes);
+    let mut a_ev = a.subscribe();
     member_feed.push(EventEnvelope {
         seq: 2,
         ts: 1_751_000_300,
@@ -1815,6 +1816,20 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         },
     });
     let _ = member_wake.send(2);
+    // the streaming event names the WIRE proposer — the GUI's alert-sound
+    // gate (only somebody else's vote rings)
+    let ev_by = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(Event::Proposed { id, by, .. }) = a_ev.recv().await {
+                if id == ProposalId(7) {
+                    return by;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the founder streams the member's proposal");
+    assert_eq!(ev_by, "member-b", "a wire proposal is attributed to its sender");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let pending = match a
@@ -1848,6 +1863,56 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
+    // --- a re-served DUPLICATE must not re-announce: WP2 catch-up re-wraps
+    // open proposals under the SERVING peer's name, so a second Proposed
+    // for a known id would re-ring every GUI's vote alert after each
+    // rejoin. Only a genuinely new insert may emit; the next streamed
+    // Proposed must therefore be the fresh id 8, never id 7 again. ---
+    member_feed.push(EventEnvelope {
+        seq: 3,
+        ts: 1_751_000_400,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Proposed {
+            id: ProposalId(7),
+            surface: Surface::Organization,
+            payload: serde_json::json!({
+                "op": "set_image",
+                "title": "Set image to seal.png",
+                "value": "seal.png",
+                "bytes_b64": member_b64,
+            }),
+        },
+    });
+    member_feed.push(EventEnvelope {
+        seq: 4,
+        ts: 1_751_000_500,
+        by: "member-b".to_string(),
+        body: WorkspaceEvent::Proposed {
+            id: ProposalId(8),
+            surface: Surface::Organization,
+            payload: serde_json::json!({
+                "op": "set_name",
+                "title": "Namen ändern",
+                "value": "Nach dem Duplikat",
+            }),
+        },
+    });
+    let _ = member_wake.send(3);
+    let next = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(Event::Proposed { id, .. }) = a_ev.recv().await {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the fresh proposal streams");
+    assert_eq!(
+        next,
+        ProposalId(8),
+        "a deduplicated re-serve must not re-emit Proposed"
+    );
 }
 
 /// **Recovery link-mint + request, end to end over the minted queue.** The

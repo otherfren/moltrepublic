@@ -1435,7 +1435,16 @@ impl State {
 
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
     /// shows up and can be approved here.
-    pub(crate) fn receive_proposed(&mut self, id: u64, surface: Surface, payload: serde_json::Value) {
+    /// Returns `true` only when the proposal was genuinely NEW here — a
+    /// refused id collision or a deduplicated re-serve (WP2 catch-up
+    /// re-wraps open proposals under the serving peer's name) returns
+    /// `false`, and the caller must not announce it on the event stream.
+    pub(crate) fn receive_proposed(
+        &mut self,
+        id: u64,
+        surface: Surface,
+        payload: serde_json::Value,
+    ) -> bool {
         self.next_id = self.next_id.max(id.saturating_add(1));
         // SECURITY (symmetric to receive_membership_proposal): an id already
         // registered in `proposal_changes` (a membership/checkpoint change)
@@ -1444,18 +1453,21 @@ impl State {
         // "surface proposal" would sign that change's bytes.
         if self.proposal_changes.contains_key(&id) {
             tracing::warn!(%id, "refusing a surface proposal whose id names a chain change");
-            return;
+            return false;
         }
-        self.proposals
-            .entry(id)
-            .or_insert_with(|| molt_core::ProposalRecord {
+        let mut inserted = false;
+        self.proposals.entry(id).or_insert_with(|| {
+            inserted = true;
+            molt_core::ProposalRecord {
                 surface,
                 payload,
                 approvals: 0,
                 state: ProposalState::Proposed,
                 declined_at: 0,
                 declined_by: String::new(),
-            });
+            }
+        });
+        inserted
     }
 
     /// Inbound: a peer's signed approval (gossip). Collect + try to seal.

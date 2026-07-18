@@ -201,7 +201,7 @@ impl State {
             },
         );
         self.record(env);
-        self.emit(Event::Proposed { id, surface });
+        self.emit(Event::Proposed { id, surface, by: me.clone() });
         if self.is_chain_governed() {
             // real threshold: the proposer co-signs their own proposal; the
             // other members' signatures arrive over the mesh

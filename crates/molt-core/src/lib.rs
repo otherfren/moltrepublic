@@ -3233,6 +3233,12 @@ pub enum Event {
         id: ProposalId,
         /// The surface.
         surface: Surface,
+        /// Who this node first learned the proposal from: the local member
+        /// on an own proposal, the authenticated wire sender on a peer's
+        /// (normally the proposer; on a WP2 catch-up re-serve, the serving
+        /// peer). Lets a frontend keep its alert sound for votes somebody
+        /// ELSE initiated; duplicates never re-emit.
+        by: MemberId,
     },
     /// A proposal gained an approval.
     Approved {

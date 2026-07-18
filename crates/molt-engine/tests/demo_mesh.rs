@@ -139,3 +139,32 @@ async fn demo_workspace_mesh_updates_presence_on_reply() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+/// The streaming `Proposed` event names its proposer: a frontend must be
+/// able to tell an own proposal (quiet feedback) from a peer's (alert
+/// sound) — the GUI only rings for votes somebody ELSE initiated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposed_event_carries_the_proposer() {
+    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let mut ev = w.subscribe();
+    w.execute(Command::Propose {
+        surface: molt_core::Surface::Organization,
+        payload: serde_json::json!({
+            "op": "set_name",
+            "title": "Namen ändern",
+            "value": "Umbenannt",
+        }),
+    })
+    .await
+    .expect("propose");
+    let by = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(Event::Proposed { by, .. }) = ev.recv().await {
+                return by;
+            }
+        }
+    })
+    .await
+    .expect("the Proposed event arrives");
+    assert_eq!(by, "me", "a local proposal is attributed to the local member");
+}
