@@ -130,7 +130,8 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
         "set_chat_retention" => format!("{} days", eff.retention_days),
         // the image ops show what they change: the current image reference
         "set_image" | "remove_image" => eff.image.clone(),
-        // no plugin state exists yet (mock) — nothing to show
+        // an op this build doesn't know (ops are free-form wire strings, so
+        // an older log may carry one) — tolerated, nothing to show
         _ => String::new(),
     };
     (current, proposed)

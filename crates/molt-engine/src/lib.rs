@@ -1905,6 +1905,16 @@ mod tests {
             ),
             ("7 days".to_string(), "14 days".to_string())
         );
+        // ops are free-form wire strings, so an older log may carry one this
+        // build doesn't know (e.g. the retired plugin vocabulary): tolerated,
+        // the Ist-Stand simply stays empty — never a rejection
+        assert_eq!(
+            proposals::change_summary(
+                &eff(""),
+                &rec(Surface::Organization, "enable_plugin", "calendar")
+            ),
+            (String::new(), "calendar".to_string())
+        );
     }
 
     /// The republic's effective display identity is a fold of the applied
@@ -2509,7 +2519,7 @@ mod tests {
     }
 
     /// Organization is a gated surface like the others: charter / name /
-    /// logo / plugin changes go through propose → threshold → applied — and
+    /// logo / retention changes go through propose → threshold → applied — and
     /// because the MCP `propose` tool derives its surface list from
     /// `is_gated`, the GUI edit modals and an MCP agent drive the SAME path.
     #[test]
@@ -2540,6 +2550,15 @@ mod tests {
             assert!(snap.gated, "organization is threshold-gated");
             assert_eq!(snap.applied.len(), 1, "applied at threshold");
             assert!(snap.pending.is_empty());
+            // an op this build doesn't know still proposes: ops are free-form
+            // wire strings (an MCP agent or an older/newer build may mint
+            // one), so the validator only vets the ops it understands
+            w.execute(Command::Propose {
+                surface: Surface::Organization,
+                payload: json!({"op":"enable_plugin","title":"t","value":"calendar"}),
+            })
+            .await
+            .expect("an unknown org op is tolerated, not rejected");
         });
     }
 

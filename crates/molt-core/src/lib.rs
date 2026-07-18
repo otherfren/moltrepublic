@@ -45,8 +45,8 @@ pub type WorkspaceId = String;
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
     /// Who this republic is: status (with the ratified charter) and roster.
-    /// Changing it (charter, name, image, plugins) is gated like any other
-    /// state change.
+    /// Changing it (charter, name, image, chat retention) is gated like any
+    /// other state change.
     Organization,
     /// Free conversation. Ungated: a message changes no shared state.
     Chat,
@@ -105,7 +105,7 @@ impl Surface {
                 // every file shared into the chat (the uploads table)
                 ("uploads", "Uploads"),
                 // in-voting organization changes (charter / name / image /
-                // plugins); the GUI shows this entry only while non-empty
+                // retention); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
                 // the applied organization changes (the surface's applied
                 // log) — every accepted vote's row, with the 💬 back-link
