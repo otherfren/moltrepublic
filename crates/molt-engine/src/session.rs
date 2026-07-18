@@ -20,6 +20,16 @@ use molt_core::{
 
 use crate::{ActiveStorage, State};
 
+/// A workspace directory's real on-disk size, clamped into the list
+/// entry's `u32` KiB field. One recursive walk of a single directory —
+/// called only at the quiescent entry choke points (materialize, open,
+/// clean close), never per message and never on the org-apply path: a
+/// wire-driven block apply must not stat-walk on the actor, and the
+/// async writer may not have flushed the change yet anyway.
+pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
+    u32::try_from(molt_storage::workspace_size_kib(dir)).unwrap_or(u32::MAX)
+}
+
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
         // leaving an in-flight founding abandons it (the session is in-memory):
@@ -445,6 +455,16 @@ impl State {
             self.request_catchup(height + 1);
         }
         self.refresh_active_entry();
+        // the size is stamped outside refresh_active_entry on purpose: at
+        // open the directory is quiescent (nothing queued on the writer yet)
+        // so the walk is exact; the org-apply refresh path skips it
+        if let Some((id, dir)) = self
+            .active
+            .as_ref()
+            .map(|a| (a.id.clone(), a.dir.clone()))
+        {
+            self.set_entry_size(&id, &dir);
+        }
         // rebuild the logo file from the replayed log if it went missing
         // (crash, restore) — deterministic, the bytes live in the payload
         self.sync_logo_file();
@@ -561,10 +581,24 @@ impl State {
 
     /// Flush + closing snapshot + LOCK release for the open workspace (if
     /// any), then drop its in-memory state. No-op on a session-only open.
+    /// Stamp the real on-disk size into the list entry for `id` (no-op on
+    /// an unknown id). Callers pick the quiescent moments — open and clean
+    /// close — where the directory matches what the writer has flushed.
+    fn set_entry_size(&mut self, id: &str, dir: &std::path::Path) {
+        let size = entry_size_kib(dir);
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            ws.size_kib = size;
+        }
+    }
+
     pub(crate) fn close_active_storage(&mut self) {
         if let Some(active) = self.active.take() {
             let snap = self.snapshot_now();
+            // close is synchronous (acked by the writer thread), so the
+            // flushed log + closing snapshot are on disk — the moment the
+            // list entry's size is exact
             active.handle.close(Some(snap));
+            self.set_entry_size(&active.id, &active.dir);
             self.reset_workspace_state();
         }
     }

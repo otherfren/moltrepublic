@@ -1461,7 +1461,7 @@ pub fn scan_workspaces(root: &Path) -> Vec<ScanEntry> {
         match read_manifest(&dir) {
             Ok(manifest) => {
                 let prefs = read_prefs(&dir);
-                let size_kib = dir_size(&dir).div_ceil(1024);
+                let size_kib = workspace_size_kib(&dir);
                 out.push(ScanEntry {
                     dir,
                     manifest,
@@ -1502,17 +1502,36 @@ pub fn find_workspace_dir(root: &Path, id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The real on-disk footprint of a workspace directory in KiB, rounded
+/// **up** (a directory holding any file bytes never reports 0). One
+/// recursive walk, tolerant of concurrent writers: entries that vanish
+/// mid-walk (or a directory that does not exist at all) simply contribute
+/// nothing — never an error, never a panic. Symlinks are **not** followed:
+/// a link cycle must not recurse and a link must not pull foreign bytes
+/// into the footprint. Both the boot scan and the engine's list-entry
+/// refreshes report through this one helper so the two can never disagree
+/// on what "size" means.
+pub fn workspace_size_kib(dir: &Path) -> u64 {
+    dir_size(dir).div_ceil(1024)
+}
+
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let Ok(rd) = fs::read_dir(dir) else {
         return total;
     };
     for entry in rd.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            total += dir_size(&path);
-        } else if let Ok(md) = entry.metadata() {
-            total += md.len();
+        // the readdir entry's own type (one syscall at most, and symlinks
+        // are NOT followed — no cycle recursion, no foreign bytes)
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_dir() {
+            total += dir_size(&entry.path());
+        } else if ft.is_file() {
+            if let Ok(md) = entry.metadata() {
+                total += md.len();
+            }
         }
     }
     total
@@ -2444,6 +2463,37 @@ mod tests {
         match open_workspace(&dir) {
             Err(StorageError::Crypto(msg)) => assert!(msg.contains("device key")),
             other => panic!("expected Crypto, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn workspace_size_kib_sums_recursively_and_rounds_up() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("ws");
+        fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        fs::write(dir.join("a.bin"), vec![0u8; 1500]).expect("write a");
+        fs::write(dir.join("sub").join("b.bin"), vec![0u8; 600]).expect("write b");
+        // 2100 bytes round UP to 3 KiB — a non-empty dir is never under-reported
+        assert_eq!(workspace_size_kib(&dir), 3);
+        // exactly on a KiB boundary there is nothing to round
+        fs::write(dir.join("a.bin"), vec![0u8; 1448]).expect("rewrite a");
+        assert_eq!(workspace_size_kib(&dir), 2, "1448 + 600 = 2048 = 2 KiB");
+        // a dir that vanished (or never existed) reports 0 instead of failing
+        assert_eq!(workspace_size_kib(&tmp.path().join("gone")), 0);
+        // an empty dir occupies no KiB
+        let empty = tmp.path().join("empty");
+        fs::create_dir_all(&empty).expect("mkdir empty");
+        assert_eq!(workspace_size_kib(&empty), 0);
+        // symlinks are never followed: a link to a large outside dir must not
+        // inflate the footprint, and a self-link must not recurse forever
+        #[cfg(unix)]
+        {
+            let outside = tmp.path().join("outside");
+            fs::create_dir_all(&outside).expect("mkdir outside");
+            fs::write(outside.join("big.bin"), vec![0u8; 8192]).expect("write big");
+            std::os::unix::fs::symlink(&outside, dir.join("link-out")).expect("link out");
+            std::os::unix::fs::symlink(&dir, dir.join("link-self")).expect("link self");
+            assert_eq!(workspace_size_kib(&dir), 2, "links contribute nothing");
         }
     }
 
