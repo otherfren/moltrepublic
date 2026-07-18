@@ -2914,9 +2914,10 @@ pub struct ProposalView {
     pub proposed: String,
     /// Per-member stance, one entry per roster member in roster order (the
     /// pending cards' voting pills). Chain governance reports the collected
-    /// signatures; the legacy counted simulation attributes its anonymous
-    /// counter deterministically (the local member first, then roster
-    /// order), so the pills always agree with `approvals`.
+    /// signatures; the single-operator path claims only what it knows —
+    /// the local member's own vote, every peer honestly open. (A legacy
+    /// log whose counter once simulated peers keeps its `approvals` count,
+    /// but the anonymous extras are attributed to nobody.)
     #[serde(default)]
     pub votes: Vec<MemberVote>,
     /// When the proposal was declined (unix seconds; 0 = not declined) —
