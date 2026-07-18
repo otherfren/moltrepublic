@@ -844,6 +844,10 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-access;
     in-out property <string> cfg-s3-secret;
     in-out property <string> cfg-s3-bucket;
+    // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
+    in property <string> cfg-s3-test;
+    // run a live signed probe against the S3 target in the draft
+    callback test-s3();
     in-out property <int> cfg-s3-interval: 60;
     // the Chain-History panel's rows + pager (built Rust-side, paged at 20)
     in property <[ChainRow]> chain-rows;
@@ -5201,12 +5205,31 @@ export component AppWindow inherits Window {
                                         icon: @image-url("assets/cloud.svg");
                                         icon-set: true;
                                         label: Strings.set-s3-test;
+                                        // honest copy: the probe is a real
+                                        // signed HEAD over the configured
+                                        // transport (Tor when enabled)
+                                        tooltip: Strings.s3-test-tip;
+                                        tooltip-below: true;
                                         enabled: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
                                         clicked => {
-                                            root.show-toast(Strings.toast-s3-ok);
+                                            root.test-s3();
                                         }
                                     }
                                 }
+                            }
+                            // the streamed probe verdict (hidden until a
+                            // test ran); errors carry their honest class
+                            if root.cfg-s3-test != "": Text {
+                                vertical-stretch: 0;
+                                text: root.cfg-s3-test == "testing" ? Strings.smp-testing
+                                    : root.cfg-s3-test == "ok" ? Strings.s3-ok
+                                    : root.cfg-s3-test;
+                                color: root.cfg-s3-test == "ok" ? Theme.good
+                                    : root.cfg-s3-test == "testing" ? Theme.faint
+                                    : Theme.bad;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                                preferred-width: 0px;
                             }
                             HorizontalLayout {
                                 vertical-stretch: 0;
