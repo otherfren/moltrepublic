@@ -447,18 +447,21 @@ pub fn run_app(
             );
         });
     }
-    // the (mock) at-rest encryption toggle — same commands as the MCP
-    // encrypt_/decrypt_workspace tools
+    // real at-rest sealing (S6) — same commands as the MCP
+    // encrypt_/decrypt_workspace tools; the engine verifies the phrase
     {
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_encrypt_workspace(move |id| {
+        ui.on_encrypt_workspace(move |id, phrase| {
             issue(
                 &rt,
                 &w,
                 &weak,
-                Command::EncryptWorkspace { id: id.to_string() },
+                Command::EncryptWorkspace {
+                    id: id.to_string(),
+                    phrase: phrase.to_string(),
+                },
             );
         });
     }
@@ -4779,7 +4782,9 @@ lexicon! {
     ow_encrypt: "Encrypt", "Verschlüsseln";
     ow_decrypt: "Decrypt", "Entschlüsseln";
     dw_title: "Decrypt workspace", "Workspace entschlüsseln";
-    dw_body: "Enter the recovery phrase to decrypt this workspace on disk; it can then be opened again. (Mock — the phrase is not verified yet.)", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu entschlüsseln; danach lässt er sich wieder öffnen. (Mock — die Phrase wird noch nicht geprüft.)";
+    dw_body: "Enter the recovery phrase to decrypt this workspace on disk: it is verified against the workspace, the keys are restored, and the workspace can be opened again. A wrong phrase changes nothing.", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu entschlüsseln: sie wird gegen den Workspace geprüft, die Schlüssel werden wiederhergestellt, und der Workspace lässt sich wieder öffnen. Eine falsche Phrase ändert nichts.";
+    ew_title: "Encrypt workspace", "Workspace verschlüsseln";
+    ew_body: "Enter the recovery phrase to seal this workspace on disk: it is verified first, then the device-stored keys are removed — afterwards only the phrase opens this workspace again.", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu versiegeln: sie wird zuerst geprüft, dann werden die gerätegespeicherten Schlüssel entfernt — danach öffnet nur noch die Phrase diesen Workspace.";
     ow_open: "Open", "Öffnen";
     ow_delete: "Delete", "Löschen";
     ow_select_hint: "Select a republic to see its status.", "Wähle eine Republik, um ihren Status zu sehen.";

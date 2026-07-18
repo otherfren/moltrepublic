@@ -479,12 +479,16 @@ export component AppWindow inherits Window {
     callback jump-to-vote();
     // workspace verbs (engine-backed, co-equal with MCP)
     callback open-workspace(string);
-    // (mock) at-rest encryption: flag flips in the engine session — the
+    // real at-rest sealing (S6): encrypt verifies the phrase and removes
+    // the device-sealed keys, decrypt verifies and restores them — the
     // same commands the MCP encrypt_/decrypt_workspace tools drive
-    callback encrypt-workspace(string);
+    callback encrypt-workspace(string, string);
     callback decrypt-workspace(string, string);
-    // the decrypt dialog (seed-phrase entry) for one encrypted workspace
+    // the phrase dialog for one workspace: decrypt-seal picks the
+    // direction (true = sealing/encrypt, false = unsealing/decrypt) —
+    // both directions verify the typed recovery phrase in the engine
     property <bool> decrypt-modal-open: false;
+    property <bool> decrypt-seal: false;
     property <string> decrypt-id;
     property <string> decrypt-name;
     property <string> decrypt-phrase;
@@ -2336,8 +2340,9 @@ export component AppWindow inherits Window {
                                             overflow: elide;
                                         }
                                     }
-                                    // at-rest state (mock): encrypted = the
-                                    // workspace is inactive until decrypted
+                                    // at-rest state (derived from the dir's
+                                    // manifest): encrypted = keys removed,
+                                    // inactive until decrypted
                                     Text {
                                         width: 100px;
                                         text: w.encrypted ? Strings.ow-enc : Strings.ow-unenc;
@@ -2365,14 +2370,14 @@ export component AppWindow inherits Window {
                                         y: (parent.height - self.height) / 2;
                                         label: w.encrypted ? Strings.ow-decrypt : Strings.ow-encrypt;
                                         clicked => {
-                                            if (w.encrypted) {
-                                                root.decrypt-id = w.id;
-                                                root.decrypt-name = w.name;
-                                                root.decrypt-phrase = "";
-                                                root.decrypt-modal-open = true;
-                                            } else {
-                                                root.encrypt-workspace(w.id);
-                                            }
+                                            // both directions prompt for the
+                                            // recovery phrase — sealing needs
+                                            // proof before keys are removed
+                                            root.decrypt-id = w.id;
+                                            root.decrypt-name = w.name;
+                                            root.decrypt-phrase = "";
+                                            root.decrypt-seal = !w.encrypted;
+                                            root.decrypt-modal-open = true;
                                         }
                                     }
                                     AppButton {
@@ -6179,21 +6184,28 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
-    // Modal: decrypt an at-rest-encrypted workspace (Open screen). The
-    // phrase is required; verifying it is the real-crypto story (mock).
+    // Modal: seal / unseal a workspace at rest (Open screen). Both
+    // directions take the recovery phrase; the engine verifies it for
+    // real (sealing proves the credential BEFORE removing the keys).
     // =================================================================
     if root.decrypt-modal-open: dec-dlg := ConfirmModal {
         dialog-width: 480px;
-        title: "\{Strings.dw-title} — \{root.decrypt-name}";
-        body: Strings.dw-body;
-        confirm-label: Strings.ow-decrypt;
+        title: root.decrypt-seal
+            ? "\{Strings.ew-title} — \{root.decrypt-name}"
+            : "\{Strings.dw-title} — \{root.decrypt-name}";
+        body: root.decrypt-seal ? Strings.ew-body : Strings.dw-body;
+        confirm-label: root.decrypt-seal ? Strings.ow-encrypt : Strings.ow-decrypt;
         confirm-enabled: root.decrypt-phrase != "";
         dismissed => {
             root.decrypt-modal-open = false;
         }
         confirmed => {
             root.decrypt-modal-open = false;
-            root.decrypt-workspace(root.decrypt-id, root.decrypt-phrase);
+            if (root.decrypt-seal) {
+                root.encrypt-workspace(root.decrypt-id, root.decrypt-phrase);
+            } else {
+                root.decrypt-workspace(root.decrypt-id, root.decrypt-phrase);
+            }
         }
         HorizontalLayout {
             spacing: 8px;
