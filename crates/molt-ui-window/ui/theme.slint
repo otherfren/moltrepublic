@@ -153,7 +153,7 @@ export struct WorkspaceItem {
 // the S3 bucket, or both. Built Rust-side from the session's workspaces +
 // the bucket-only orphans; prose cells (size/last) are rendered there too.
 export struct BackupRow {
-    id: string, // local workspace id ("" = bucket-only orphan)
+    id: string, // workspace id: the local id, or a bucket-only row's id pseudonym ("" = foreign key)
     local: string, // local workspace name ("" = bucket-only)
     remote: string, // backup name in the bucket ("" = not backed up)
     has-local: bool, // false = orphan row, auto-backup not toggleable

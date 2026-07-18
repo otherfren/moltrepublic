@@ -1618,11 +1618,11 @@ fn orphan_remote_label(o: &molt_core::BackupOrphan) -> String {
     if !o.name.is_empty() {
         return o.name.clone();
     }
-    if o.id.chars().count() > 12 {
-        let short: String = o.id.chars().take(12).collect();
-        format!("{short}…")
-    } else {
-        o.id.clone()
+    // a real orphan id is 64 ASCII hex chars (parse_backup_key pins it), so
+    // byte slicing is safe — same idiom as the checksum cell
+    match o.id.get(..12) {
+        Some(short) if o.id.len() > 12 => format!("{short}…"),
+        _ => o.id.clone(),
     }
 }
 
@@ -1655,7 +1655,9 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         })
         .collect();
     rows.extend(sv.backup_orphans.iter().map(|o| BackupRow {
-        id: "".into(),
+        // the FULL workspace-id pseudonym rides along (the label below is
+        // shortened): restore-from-S3 starts from exactly this id
+        id: o.id.as_str().into(),
         local: "".into(),
         remote: orphan_remote_label(o).into(),
         has_local: false,
@@ -4809,7 +4811,7 @@ lexicon! {
     bk_refresh: "Refresh bucket", "Bucket aktualisieren";
     bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport — Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport — via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
     bk_listing: "listing the bucket…", "Bucket wird gelesen…";
-    bk_list_ok: "bucket listed — the table shows its real contents ✓", "Bucket gelesen — die Tabelle zeigt den echten Inhalt ✓";
+    bk_list_ok: "bucket listed ✓", "Bucket gelesen ✓";
     set_save: "Save", "Speichern";
     set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";
     set_close: "Close", "Schließen";
@@ -5804,22 +5806,23 @@ mod tests {
     /// them: one true orphan (id only, no name) and one foreign key. The
     /// production DEFAULT has none — molt-core pins that.
     fn sv_with_orphans() -> SessionView {
-        let mut sv = SessionView::default();
-        sv.backup_orphans = vec![
-            molt_core::BackupOrphan {
-                id: "ab".repeat(32),
-                name: String::new(),
-                size_kib: 480,
-                last_backup_min: 129_600,
-            },
-            molt_core::BackupOrphan {
-                id: String::new(),
-                name: "molt/leftover.bin".to_string(),
-                size_kib: 75,
-                last_backup_min: 43_200,
-            },
-        ];
-        sv
+        SessionView {
+            backup_orphans: vec![
+                molt_core::BackupOrphan {
+                    id: "ab".repeat(32),
+                    name: String::new(),
+                    size_kib: 480,
+                    last_backup_min: 129_600,
+                },
+                molt_core::BackupOrphan {
+                    id: String::new(),
+                    name: "molt/leftover.bin".to_string(),
+                    size_kib: 75,
+                    last_backup_min: 43_200,
+                },
+            ],
+            ..SessionView::default()
+        }
     }
 
     #[test]
@@ -5864,7 +5867,10 @@ mod tests {
             assert!(!row.auto);
         }
         assert_eq!(orphans[0].remote.as_str(), "abababababab…");
+        // the row keeps the FULL pseudonym (restore starts from it)
+        assert_eq!(orphans[0].id.as_str(), "ab".repeat(32));
         assert_eq!(orphans[1].remote.as_str(), "molt/leftover.bin");
+        assert_eq!(orphans[1].id.as_str(), "", "a foreign key has no workspace id");
     }
 
     /// The production default renders a table with ONLY the local rows —

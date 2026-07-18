@@ -147,8 +147,10 @@ async fn list_maps_403_to_the_credentials_class() {
 
 #[tokio::test]
 async fn a_body_that_is_not_a_listing_is_a_protocol_error() {
+    // a captive portal / proxy answering 200 with HTML must never read as
+    // a valid empty listing
     let (endpoint, _seen) =
-        stub_server(vec![(200, "<html>captive portal</html><Contents>".to_string())]).await;
+        stub_server(vec![(200, "<html>captive portal</html>".to_string())]).await;
     let err = client_for(&endpoint)
         .list_objects("molt/")
         .await

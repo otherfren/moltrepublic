@@ -711,18 +711,25 @@ pub struct BackupObject {
     pub modified: u64,
 }
 
+/// The bucket prefix every backup object lives under
+/// (`backup_restore_design.md` §6.2) — the single authority for the scheme,
+/// shared by the listing (engine) and [`parse_backup_key`]; story 12's
+/// writer must build its keys from it too.
+pub const BACKUP_OBJECT_PREFIX: &str = "molt/";
+
 /// Parse a bucket key against the backup naming scheme
 /// `molt/<workspace_id>/<unix_ts>.molt.enc` (`backup_restore_design.md`
-/// §6.2): the id is 64 lowercase hex chars, the stem numeric. Returns
-/// `(workspace_id, ts)`, or `None` for any foreign key.
+/// §6.2): the id is 64 lowercase hex chars, the stem decimal digits.
+/// Returns `(workspace_id, ts)`, or `None` for any foreign key.
 pub fn parse_backup_key(key: &str) -> Option<(WorkspaceId, u64)> {
-    let rest = key.strip_prefix("molt/")?;
+    let rest = key.strip_prefix(BACKUP_OBJECT_PREFIX)?;
     let (id, file) = rest.split_once('/')?;
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return None;
     }
     let stem = file.strip_suffix(".molt.enc")?;
-    if stem.is_empty() || stem.contains('/') {
+    // digits only — u64::parse alone would also accept a leading '+'
+    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let ts: u64 = stem.parse().ok()?;
@@ -2595,6 +2602,12 @@ pub enum Command {
         /// against the locally known workspaces at arrival time.
         #[serde(default)]
         objects: Vec<BackupObject>,
+        /// Which listing request this answers (the engine's listing
+        /// generation). A stale result — an older request resolving after a
+        /// newer one, possibly against previously saved settings — is
+        /// dropped instead of overwriting the newer table.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// A founding seat's real, joinable invite link became available once its
     /// queue was provisioned on the SMP server (engine-internal, from the
@@ -3717,6 +3730,7 @@ mod tests {
             "molt/backup.tar".to_string(),                     // no id level
             format!("molt/{id}/notes.txt"),                    // wrong suffix
             format!("molt/{id}/xx.molt.enc"),                  // non-numeric ts
+            format!("molt/{id}/+123.molt.enc"),                // sign is not a digit
             format!("molt/{}/001.molt.enc", "zz".repeat(32)),  // not hex
             format!("molt/{}/001.molt.enc", "ab".repeat(16)),  // wrong id length
             format!("other/{id}/001.molt.enc"),                // outside molt/

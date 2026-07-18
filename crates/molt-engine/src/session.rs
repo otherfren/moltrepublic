@@ -91,6 +91,7 @@ impl State {
         settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
         validate_settings(&settings)?;
+        self.invalidate_backup_listing_on_target_change(&settings);
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
@@ -123,6 +124,7 @@ impl State {
         {
             return Ok(Reply::Ack); // no visible change, no notice churn
         }
+        self.invalidate_backup_listing_on_target_change(&settings);
         self.session.settings = settings;
         self.session.language = language;
         self.session.theme = theme;
@@ -130,6 +132,26 @@ impl State {
         self.session.notice = "config-reloaded".to_string();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
+    }
+
+    /// A changed backup target (endpoint/credentials/bucket) invalidates
+    /// the backup table's bucket side: the orphan rows and the listing
+    /// verdict described the OLD bucket, and an in-flight listing against
+    /// it must not land either (the generation bump drops it). Shared by
+    /// save and reload — the honest reset happens however the settings
+    /// change.
+    fn invalidate_backup_listing_on_target_change(&mut self, new: &SessionSettings) {
+        let old = &self.session.settings;
+        let changed = old.s3_endpoint != new.s3_endpoint
+            || old.s3_access_key != new.s3_access_key
+            || old.s3_secret_key != new.s3_secret_key
+            || old.s3_bucket != new.s3_bucket;
+        if changed && !(self.session.s3_list.is_empty() && self.session.backup_orphans.is_empty())
+        {
+            self.s3_list_gen += 1;
+            self.session.s3_list = String::new();
+            self.session.backup_orphans.clear();
+        }
     }
 
     /// Surface a config-persistence outcome (sent by the ConfigStore task).
@@ -284,57 +306,68 @@ impl State {
     /// The outcome returns as [`molt_core::Command::NetListBackupsResult`].
     pub(crate) fn cmd_net_list_backups(&mut self) -> Result<Reply, MoltError> {
         let s = &self.session.settings;
-        let config = match molt_net::s3::S3Config::from_settings(
+        let target = molt_net::s3::S3Config::from_settings(
             &s.s3_endpoint,
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
-        ) {
-            Ok(c) => c,
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|config| {
+            let dialer = self.dialer_for().map_err(|e| e.to_string())?;
+            Ok((config, dialer))
+        });
+        let (config, dialer) = match target {
+            Ok(pair) => pair,
             Err(e) => {
+                // honest empty state: an unusable target lists nothing
+                self.s3_list_gen += 1; // a stale in-flight result must not resurrect rows
                 self.session.s3_list = format!("error: {e}");
                 self.session.backup_orphans.clear();
                 self.emit_session(SessionScope::Full);
                 return Ok(Reply::Ack);
             }
         };
-        let dialer = match self.dialer_for() {
-            Ok(dialer) => dialer,
-            Err(e) => {
-                self.session.s3_list = format!("error: {e}");
-                self.session.backup_orphans.clear();
-                self.emit_session(SessionScope::Full);
-                return Ok(Reply::Ack);
-            }
+        // "listing" is only shown once the task really runs — a failed
+        // upgrade (actor shutting down) must not wedge the state
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Ok(Reply::Ack);
         };
+        self.s3_list_gen += 1;
+        let generation = self.s3_list_gen;
         self.session.s3_list = "listing".to_string();
         self.emit_session(SessionScope::Full);
-        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
-            tokio::spawn(async move {
-                let client = molt_net::s3::S3Client::new(config, dialer);
-                let (result, objects) = match client.list_objects("molt/").await {
-                    Ok(listed) => (
-                        "ok".to_string(),
-                        listed
-                            .into_iter()
-                            .map(|o| molt_core::BackupObject {
-                                key: o.key,
-                                size: o.size,
-                                modified: o.modified,
-                            })
-                            .collect(),
-                    ),
-                    Err(e) => (format!("error: {e}"), Vec::new()),
-                };
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx
-                    .send(crate::Envelope {
-                        cmd: molt_core::Command::NetListBackupsResult { result, objects },
-                        reply,
-                    })
-                    .await;
-            });
-        }
+        tokio::spawn(async move {
+            let client = molt_net::s3::S3Client::new(config, dialer);
+            let (result, objects) = match client
+                .list_objects(molt_core::BACKUP_OBJECT_PREFIX)
+                .await
+            {
+                Ok(listed) => (
+                    "ok".to_string(),
+                    listed
+                        .into_iter()
+                        .map(|o| molt_core::BackupObject {
+                            key: o.key,
+                            size: o.size,
+                            modified: o.modified,
+                        })
+                        .collect(),
+                ),
+                Err(e) => (format!("error: {e}"), Vec::new()),
+            };
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(crate::Envelope {
+                    cmd: molt_core::Command::NetListBackupsResult {
+                        result,
+                        objects,
+                        generation: Some(generation),
+                    },
+                    reply,
+                })
+                .await;
+        });
         Ok(Reply::Ack)
     }
 
@@ -343,12 +376,17 @@ impl State {
     /// known workspaces — entries with no local counterpart become the REAL
     /// `backup_orphans` (foreign keys survive as unknown entries); on
     /// failure the table shows no bucket rows at all rather than stale or
-    /// invented ones.
+    /// invented ones. A stale generation (an older request resolving after
+    /// a newer one, or after the backup target changed) is dropped.
     pub(crate) fn cmd_net_list_backups_result(
         &mut self,
         result: String,
         objects: Vec<molt_core::BackupObject>,
+        generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
+        if generation != Some(self.s3_list_gen) {
+            return Ok(Reply::Ack);
+        }
         if result == "ok" {
             let local_ids: Vec<String> = self
                 .session

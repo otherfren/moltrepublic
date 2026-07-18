@@ -51,7 +51,7 @@ impl S3Client {
     /// like the probe (403 credentials, 404 missing bucket), and
     /// [`S3Error::Protocol`] for anything that does not parse as a listing.
     pub async fn list_objects(&self, prefix: &str) -> Result<Vec<S3Object>, S3Error> {
-        let path = format!("{}/{}", self.config.endpoint.base_path, self.config.bucket);
+        let path = self.bucket_path();
         let mut out: Vec<S3Object> = Vec::new();
         let mut token: Option<String> = None;
         for _ in 0..MAX_PAGES {
@@ -70,9 +70,7 @@ impl S3Client {
                 .map_err(|_| S3Error::Protocol("listing response is not UTF-8".to_string()))?;
             let page = parse_list_page(body)?;
             if out.len() + page.objects.len() > MAX_OBJECTS {
-                return Err(S3Error::Protocol(format!(
-                    "listing exceeds {MAX_OBJECTS} objects"
-                )));
+                return Err(too_many_objects());
             }
             out.extend(page.objects);
             match page.next {
@@ -87,16 +85,44 @@ impl S3Client {
 }
 
 /// Parse one ListObjectsV2 response body.
+///
+/// Deliberately strict: a 200 whose body is not recognizably a
+/// `ListBucketResult` (captive portal, error page, a 204-style empty body,
+/// a namespaced/attributed dialect this minimal parser cannot read) is a
+/// hard error — an *invented empty listing* would tell the user their
+/// backups are gone.
 pub(crate) fn parse_list_page(body: &str) -> Result<ListPage, S3Error> {
     let bad = |what: &str| S3Error::Protocol(format!("listing response: {what}"));
+    // the root element may carry attributes (xmlns), so match the open
+    // bracket + name only
+    if !body.contains("<ListBucketResult") {
+        return Err(bad("not a ListObjectsV2 result"));
+    }
     let mut objects = Vec::new();
+    // `outside` collects the body text NOT inside <Contents> blocks: the
+    // page-level fields (IsTruncated, NextContinuationToken) are searched
+    // only there, so escaped-and-decoded or hostile KEY content can never
+    // impersonate them
+    let mut outside = String::new();
     let mut rest = body;
-    while let Some((contents, after)) = element(rest, "Contents") {
-        rest = after;
+    while let Some(start) = rest.find("<Contents>") {
+        outside.push_str(&rest[..start]);
+        let after_open = &rest[start + "<Contents>".len()..];
+        let Some(end) = after_open.find("</Contents>") else {
+            // a dangling open tag means the body was cut or malformed —
+            // rejecting beats silently dropping the tail
+            return Err(bad("unterminated <Contents>"));
+        };
+        let contents = &after_open[..end];
+        rest = &after_open[end + "</Contents>".len()..];
         let key = element(contents, "Key")
             .map(|(inner, _)| inner)
             .ok_or_else(|| bad("<Contents> without <Key>"))?;
         let key = unescape_xml(key)?;
+        if key.is_empty() {
+            // an empty key would render as a ghost row with no label
+            return Err(bad("empty <Key>"));
+        }
         let size: u64 = element(contents, "Size")
             .map(|(inner, _)| inner.trim())
             .ok_or_else(|| bad("<Contents> without <Size>"))?
@@ -112,32 +138,35 @@ pub(crate) fn parse_list_page(body: &str) -> Result<ListPage, S3Error> {
             modified,
         });
         if objects.len() > MAX_OBJECTS {
-            return Err(S3Error::Protocol(format!(
-                "listing exceeds {MAX_OBJECTS} objects"
-            )));
+            return Err(too_many_objects());
         }
     }
-    // the loop above stops when no complete <Contents>…</Contents> is left;
-    // a dangling open tag means the body was cut or malformed — rejecting
-    // beats silently dropping the tail
-    if rest.contains("<Contents>") {
-        return Err(bad("unterminated <Contents>"));
+    outside.push_str(rest);
+    // any <Contents…> spelling the exact-tag loop above could not consume
+    // (attributes, namespace prefix, self-closing) would otherwise vanish
+    // silently — reject the whole page instead of under-reporting backups
+    if outside.contains("<Contents") {
+        return Err(bad("unsupported <Contents> element form"));
     }
-    let truncated = element(body, "IsTruncated")
+    let truncated = element(&outside, "IsTruncated")
         .map(|(inner, _)| inner.trim() == "true")
         .unwrap_or(false);
-    let next = match element(body, "NextContinuationToken") {
-        Some((inner, _)) => Some(unescape_xml(inner)?),
-        None => None,
+    // the token only means something on a truncated page (a missing one
+    // there would silently fake a complete listing)
+    let next = if truncated {
+        let (inner, _) = element(&outside, "NextContinuationToken")
+            .ok_or_else(|| bad("truncated without a continuation token"))?;
+        Some(unescape_xml(inner)?)
+    } else {
+        None
     };
-    if truncated && next.is_none() {
-        // accepting the partial page would fake a complete listing
-        return Err(bad("truncated without a continuation token"));
-    }
-    Ok(ListPage {
-        objects,
-        next: if truncated { next } else { None },
-    })
+    Ok(ListPage { objects, next })
+}
+
+/// The shared over-cap error (one wording for the per-page and the
+/// cumulative check).
+fn too_many_objects() -> S3Error {
+    S3Error::Protocol(format!("listing exceeds {MAX_OBJECTS} objects"))
 }
 
 /// Find the first `<name>…</name>` element; returns `(inner, rest after the
@@ -178,7 +207,17 @@ fn unescape_xml(s: &str) -> Result<String, S3Error> {
                     Some(hex) => u32::from_str_radix(hex, 16).map_err(|_| bad())?,
                     None => digits.parse::<u32>().map_err(|_| bad())?,
                 };
-                out.push(char::from_u32(code).ok_or_else(bad)?);
+                let c = char::from_u32(code).ok_or_else(bad)?;
+                // only XML-1.0-legal characters: NUL/C0 controls smuggled in
+                // via numeric refs would flow into UI labels and JSON
+                let legal = matches!(c, '\u{9}' | '\u{A}' | '\u{D}')
+                    || ('\u{20}'..='\u{D7FF}').contains(&c)
+                    || ('\u{E000}'..='\u{FFFD}').contains(&c)
+                    || c >= '\u{10000}';
+                if !legal {
+                    return Err(bad());
+                }
+                out.push(c);
             }
         }
         rest = &entity_rest[end + 1..];
@@ -197,7 +236,24 @@ fn parse_iso8601(s: &str) -> Option<u64> {
     let year: i64 = d.next()?.parse().ok()?;
     let month: u32 = d.next()?.parse().ok()?;
     let day: i64 = d.next()?.parse().ok()?;
-    if d.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if d.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+    // day validated against the actual month length (a "Feb 31" must be a
+    // hard reject, not a silent roll-over into March)
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = match month {
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=month_days).contains(&day) {
         return None;
     }
     let time = time.strip_suffix('Z')?;
@@ -313,32 +369,87 @@ mod tests {
 
     #[test]
     fn hostile_or_truncated_xml_is_an_error_never_a_panic_or_guess() {
+        let lbr = |inner: &str| format!("<ListBucketResult>{inner}</ListBucketResult>");
         for body in [
             // Contents cut off mid-element
-            "<ListBucketResult><Contents><Key>a</Key>",
+            "<ListBucketResult><Contents><Key>a</Key>".to_string(),
             // missing required fields
-            "<x><Contents><Key>a</Key></Contents></x>",
-            "<x><Contents><Size>1</Size><LastModified>1970-01-01T00:00:00Z</LastModified></Contents></x>",
+            lbr("<Contents><Key>a</Key></Contents>"),
+            lbr("<Contents><Size>1</Size><LastModified>1970-01-01T00:00:00Z</LastModified></Contents>"),
             // unparseable size / date / hostile numbers
-            "<x><Contents><Key>a</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>huge</Size></Contents></x>",
-            "<x><Contents><Key>a</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>-1</Size></Contents></x>",
-            "<x><Contents><Key>a</Key><LastModified>not a date</LastModified><Size>1</Size></Contents></x>",
+            lbr("<Contents><Key>a</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>huge</Size></Contents>"),
+            lbr("<Contents><Key>a</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>-1</Size></Contents>"),
+            lbr("<Contents><Key>a</Key><LastModified>not a date</LastModified><Size>1</Size></Contents>"),
             // malformed entities must not decode to something else
-            "<x><Contents><Key>a&bogus;</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents></x>",
-            "<x><Contents><Key>a&#xzz;</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents></x>",
-            "<x><Contents><Key>a&amp</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents></x>",
+            lbr("<Contents><Key>a&bogus;</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>"),
+            lbr("<Contents><Key>a&#xzz;</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>"),
+            lbr("<Contents><Key>a&amp</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>"),
+            // an empty key would become an unlabeled ghost row
+            lbr("<Contents><Key></Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>"),
         ] {
             assert!(
-                matches!(parse_list_page(body), Err(S3Error::Protocol(_))),
+                matches!(parse_list_page(&body), Err(S3Error::Protocol(_))),
                 "hostile body must be a protocol error: {body}"
             );
         }
     }
 
+    /// A 200 whose body is not a listing (captive portal, HTML error page,
+    /// empty 204-style body) must be a hard error — parsing it as a VALID
+    /// EMPTY listing would tell the user their backups are gone.
+    #[test]
+    fn a_non_listing_body_is_never_a_valid_empty_listing() {
+        for body in [
+            "",
+            "<html>captive portal login</html>",
+            "<?xml version=\"1.0\"?><Error><Code>SlowDown</Code></Error>",
+        ] {
+            assert!(
+                matches!(parse_list_page(body), Err(S3Error::Protocol(_))),
+                "non-listing body must be rejected: {body:?}"
+            );
+        }
+    }
+
+    /// Element spellings the exact-tag scan cannot consume (attributes,
+    /// namespace prefixes, self-closing) must fail loudly instead of
+    /// under-reporting: silently dropping <Contents> blocks would show the
+    /// user an empty/partial bucket as truth.
+    #[test]
+    fn unsupported_contents_forms_are_rejected_not_silently_dropped() {
+        for body in [
+            "<ListBucketResult><Contents xmlns=\"x\"><Key>a</Key></Contents></ListBucketResult>",
+            "<s3:ListBucketResult><s3:Contents><s3:Key>a</s3:Key></s3:Contents></s3:ListBucketResult>",
+            "<ListBucketResult><Contents/></ListBucketResult>",
+        ] {
+            assert!(
+                matches!(parse_list_page(body), Err(S3Error::Protocol(_))),
+                "unsupported form must be rejected: {body}"
+            );
+        }
+    }
+
+    /// Page-level fields are read only OUTSIDE the <Contents> blocks: a key
+    /// whose decoded content spells an <IsTruncated> tag must not be able
+    /// to fake a complete (or truncated) listing.
+    #[test]
+    fn page_fields_inside_key_content_are_ignored() {
+        let body = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                    <NextContinuationToken>t</NextContinuationToken>\
+                    <Contents><Key>a&lt;IsTruncated&gt;false&lt;/IsTruncated&gt;</Key>\
+                    <LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>\
+                    </ListBucketResult>";
+        let page = parse_list_page(body).expect("parses");
+        assert_eq!(page.next.as_deref(), Some("t"), "the real trailer wins");
+    }
+
     #[test]
     fn an_absurd_object_count_is_capped_like_the_byte_caps_in_http() {
         let one = "<Contents><Key>k</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>";
-        let body = format!("<x>{}</x>", one.repeat(MAX_OBJECTS + 1));
+        let body = format!(
+            "<ListBucketResult>{}</ListBucketResult>",
+            one.repeat(MAX_OBJECTS + 1)
+        );
         assert!(matches!(
             parse_list_page(&body),
             Err(S3Error::Protocol(_))
@@ -359,6 +470,8 @@ mod tests {
             "2024-00-10T00:00:00Z", "2024-01-32T00:00:00Z", "2024-01-01T24:00:00Z",
             "2024-01-01T00:61:00Z", "9999999999999-01-01T00:00:00Z",
             "2024-01-01T00:00:00.abcZ", "2024-01-01T00:00:00+02:00",
+            // impossible calendar dates must reject, not roll over
+            "2024-02-30T00:00:00Z", "2023-02-29T00:00:00Z", "2024-04-31T00:00:00Z",
         ] {
             assert_eq!(parse_iso8601(bad), None, "must reject {bad:?}");
         }
@@ -374,5 +487,10 @@ mod tests {
         assert_eq!(unescape_xml("&#65;&#x42;").expect("ok"), "AB");
         assert!(unescape_xml("&#x110000;").is_err(), "beyond char range");
         assert!(unescape_xml("dangling &").is_err());
+        // XML-illegal characters (NUL, C0 controls) must not be smuggled
+        // into UI labels via numeric refs
+        for illegal in ["&#0;", "&#x1F;", "&#8;", "&#xFFFF;"] {
+            assert!(unescape_xml(illegal).is_err(), "must reject {illegal}");
+        }
     }
 }

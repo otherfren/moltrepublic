@@ -269,12 +269,18 @@ impl S3Client {
     /// endpoint is reachable, TLS verified, the credentials were accepted
     /// and the bucket exists; every failure carries its honest class.
     pub async fn probe_bucket(&self) -> Result<(), S3Error> {
-        let path = format!("{}/{}", self.config.endpoint.base_path, self.config.bucket);
+        let path = self.bucket_path();
         let resp = self.request("HEAD", &path, &[], &[]).await?;
         match resp.status {
             200..=299 => Ok(()),
             s => Err(self.status_error(s)),
         }
+    }
+
+    /// The path-style bucket path (`[base]/bucket`) — the one place the
+    /// addressing scheme lives, shared by every bucket-level operation.
+    pub(crate) fn bucket_path(&self) -> String {
+        format!("{}/{}", self.config.endpoint.base_path, self.config.bucket)
     }
 
     /// The honest interpretation of a non-success HTTP status against the

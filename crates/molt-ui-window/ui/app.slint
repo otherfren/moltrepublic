@@ -5108,9 +5108,12 @@ export component AppWindow inherits Window {
                             vertical-stretch: 1;
                             // opening the tab refreshes the bucket side of
                             // the table from a real listing (a no-op note
-                            // when no backup target is configured)
+                            // when no backup target is configured); never
+                            // stack a second request on one in flight
                             init => {
-                                root.list-backups();
+                                if root.cfg-bk-list != "listing" {
+                                    root.list-backups();
+                                }
                             }
                             // both name columns get the SAME fixed share of
                             // the width — a stretch would distribute by each
