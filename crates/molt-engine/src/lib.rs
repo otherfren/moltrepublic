@@ -1834,6 +1834,85 @@ mod tests {
         });
     }
 
+    /// The open-time crash recovery must not resurrect the simulation: a
+    /// legacy log whose counter reached a threshold > 1 did so on invented
+    /// peer approvals, and minting a fresh `Applied` from that count would
+    /// fake a threshold decision no member made. Such proposals stay
+    /// pending (decline is the only exit).
+    #[test]
+    fn recovery_never_applies_from_simulated_counts() {
+        let mut st = plain_state(); // 2-of-3 demo config
+        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            seq,
+            ts: 100 + seq,
+            by: by.to_string(),
+            body,
+        };
+        st.apply(&e(
+            1,
+            "me",
+            molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({"op":"add_note","title":"t"}),
+            },
+        ));
+        // a legacy pre-chain log: two counted approvals (the second was the
+        // simulation), crash before the Applied frame
+        for seq in [2, 3] {
+            st.apply(&e(
+                seq,
+                "me",
+                molt_core::WorkspaceEvent::Approved {
+                    id: molt_core::ProposalId(1),
+                    by: "me".to_string(),
+                    height: 0,
+                    sig: String::new(),
+                },
+            ));
+        }
+        st.recover_pending_applies();
+        let snap = st.snapshot(Surface::Memory, None, None);
+        assert!(snap.applied.is_empty(), "no apply on invented peer counts");
+        assert_eq!(snap.pending.len(), 1, "the legacy proposal stays pending");
+    }
+
+    /// The honest twin: at threshold 1 the one recorded vote is the local
+    /// operator's real decision, so a crash between the `Approved` frame
+    /// and its `Applied` frame recovers into the applied state at open.
+    #[test]
+    fn recovery_completes_a_real_single_operator_decision() {
+        let mut st = plain_state();
+        st.config.threshold = 1;
+        let e = |seq: u64, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            seq,
+            ts: 100 + seq,
+            by: "me".to_string(),
+            body,
+        };
+        st.apply(&e(
+            1,
+            molt_core::WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({"op":"add_note","title":"t"}),
+            },
+        ));
+        st.apply(&e(
+            2,
+            molt_core::WorkspaceEvent::Approved {
+                id: molt_core::ProposalId(1),
+                by: "me".to_string(),
+                height: 0,
+                sig: String::new(),
+            },
+        ));
+        st.recover_pending_applies();
+        let snap = st.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.applied.len(), 1, "my one real vote recovers to applied");
+        assert!(snap.pending.is_empty());
+    }
+
     /// The solo boot group (1-of-1) is REAL governance, not a simulation:
     /// the only member's own self-cosigned approval meets the threshold,
     /// so a proposal applies through the same honest single-operator path.

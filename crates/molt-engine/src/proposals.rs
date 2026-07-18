@@ -240,8 +240,21 @@ impl State {
         Ok(Reply::Proposed { id })
     }
 
+    /// The single-operator invariant, stated ONCE: without chain governance
+    /// the only approval this node can record is the local operator's own —
+    /// [`State::cmd_approve`] refuses repeats, and the wire delivery drops
+    /// governance frames for non-chain workspaces — and the pre-chain
+    /// simulation's legacy logs share the shape (their every `Approved`
+    /// frame was minted locally, the first always the operator's). So "any
+    /// approval recorded" means "the operator already voted"; the approve
+    /// guard, `approved_by_me`, the votes row and [`State::waits_on`] must
+    /// all read it from here so they can never drift apart.
+    fn operator_approved(p: &ProposalRecord) -> bool {
+        p.approvals > 0
+    }
+
     pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
-        {
+        let operator_already_voted = {
             let p = self
                 .proposals
                 .get(&proposal.0)
@@ -249,7 +262,8 @@ impl State {
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
-        }
+            Self::operator_approved(p)
+        };
         if self.is_chain_governed() {
             // real threshold: sign + gossip; a block seals once m distinct
             // members have signed (here or over the mesh)
@@ -266,7 +280,7 @@ impl State {
             // member's co-signature (that was the pre-chain simulation);
             // the missing votes can only come from the members themselves,
             // which takes a chain-governed republic.
-            if self.proposals.get(&proposal.0).is_some_and(|p| p.approvals > 0) {
+            if operator_already_voted {
                 return Err(MoltError::AlreadyApproved(proposal));
             }
             let me = self.member();
@@ -348,6 +362,15 @@ impl State {
         if self.is_chain_governed() {
             return;
         }
+        // The honest re-decision is bounded by what the single-operator path
+        // can legitimately produce: ONE real vote. A counted threshold above
+        // that can only have been "met" by the removed pre-chain simulation
+        // (a legacy log's invented peer approvals) — minting a fresh
+        // `Applied` from such a count would fake a threshold decision no
+        // member made, so those proposals stay pending (decline is the exit).
+        if self.threshold() > 1 {
+            return;
+        }
         let ready: Vec<u64> = self
             .proposals
             .iter()
@@ -378,7 +401,7 @@ impl State {
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == me))
         } else {
-            p.approvals > 0
+            Self::operator_approved(p)
         };
         let (current, proposed) = change_summary(&self.org_effective(), p);
         // the voting row: one stance per roster member, roster order. Chain
@@ -408,7 +431,7 @@ impl State {
             self.roster()
                 .into_iter()
                 .map(|member| MemberVote {
-                    vote: if member == me && p.approvals > 0 {
+                    vote: if member == me && Self::operator_approved(p) {
                         VoteState::Approved
                     } else {
                         VoteState::Open
@@ -741,7 +764,7 @@ impl State {
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == member))
         } else if member == self.member() {
-            p.approvals == 0
+            !Self::operator_approved(p)
         } else {
             true
         }
