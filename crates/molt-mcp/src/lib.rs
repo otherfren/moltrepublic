@@ -863,20 +863,24 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "encrypt_workspace",
             command: "encrypt_workspace",
-            description: "Encrypt a workspace at rest (mock flag today — real at-rest crypto comes with the storage encryption story): it becomes inactive and open_workspace refuses until decrypt_workspace. The active workspace cannot be encrypted.",
+            description: "Seal a closed workspace at rest under its recovery phrase: the phrase is verified against the workspace first, then the device-sealed key material is removed from disk — the phrase becomes the only way back in. The workspace becomes inactive and open_workspace refuses until decrypt_workspace; the state survives restarts. The active workspace cannot be encrypted.",
             schema: || json!({
                 "type": "object",
-                "properties": { "id": { "type": "string" } },
-                "required": ["id"]
+                "properties": {
+                    "id": { "type": "string" },
+                    "phrase": { "type": "string", "description": "the workspace's recovery phrase (verified before any key is removed)" }
+                },
+                "required": ["id", "phrase"]
             }),
             build: |args| Ok(Command::EncryptWorkspace {
                 id: str_arg(args, "id")?,
+                phrase: str_arg(args, "phrase")?,
             }),
         },
         ToolDef {
             name: "decrypt_workspace",
             command: "decrypt_workspace",
-            description: "Decrypt an at-rest-encrypted workspace so it can be opened again. Mock: the recovery phrase is required but not yet verified.",
+            description: "Decrypt an at-rest-sealed workspace so it can be opened again. The recovery phrase is really verified (an authenticated decrypt of the workspace's genesis with the derived key); a wrong phrase is a hard error and changes nothing on disk.",
             schema: || json!({
                 "type": "object",
                 "properties": {

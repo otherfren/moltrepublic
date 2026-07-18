@@ -881,7 +881,7 @@ impl State {
             Command::OpenWorkspace { id } => self.cmd_open_workspace(id),
             Command::CloseWorkspace => self.cmd_close_workspace(),
             Command::DeleteWorkspace { id } => self.cmd_delete_workspace(id),
-            Command::EncryptWorkspace { id } => self.cmd_encrypt_workspace(id),
+            Command::EncryptWorkspace { id, phrase } => self.cmd_encrypt_workspace(id, phrase),
             Command::DecryptWorkspace { id, phrase } => self.cmd_decrypt_workspace(id, phrase),
             Command::SetWorkspaceBackup { id, enabled } => {
                 self.cmd_set_workspace_backup(id, enabled)
@@ -1456,16 +1456,154 @@ mod tests {
         });
     }
 
-    /// Poll the session until the in-flight export settles (~Argon2-bounded).
-    async fn await_export(w: &WalletHandle) -> molt_core::ExportState {
-        for _ in 0..600 {
-            let sv = read_session(w).await;
-            if !sv.export.running && !sv.export.result.is_empty() {
-                return sv.export;
+    /// **The story-10 keystone:** at-rest sealing is real, phrase-verified
+    /// and derived from the directory (design §8.2, engine level). Found a
+    /// republic on a storage engine, close it, seal it with the real phrase
+    /// — the key material is gone from disk, a fresh scan (≈ restart)
+    /// reports the sealed state, open refuses honestly, a wrong phrase
+    /// changes nothing, and the right phrase brings everything back.
+    #[test]
+    fn at_rest_sealing_is_real_verified_and_survives_a_restart() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let root = tmp.path().join("workspaces");
+            let session = SessionView {
+                workspaces: Vec::new(),
+                settings: SessionSettings {
+                    workspace_dir: root.display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
+            w.execute(Command::CreateStart {
+                name: "Vaulted".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+            })
+            .await
+            .expect("create start");
+            await_founding(&w).await;
+            w.execute(Command::CreateFinish).await.expect("finish");
+            let s = read_session(&w).await;
+            let id = s.active_workspace.clone();
+            let phrase = s.workspaces.iter().find(|x| x.id == id).expect("entry").seed.clone();
+            assert_eq!(phrase.split(' ').count(), 24, "the real phrase");
+            let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+
+            // the ACTIVE workspace cannot be sealed from under itself
+            assert!(matches!(
+                w.execute(Command::EncryptWorkspace {
+                    id: id.clone(),
+                    phrase: phrase.clone(),
+                })
+                .await,
+                Err(MoltError::WorkspaceBusy(_))
+            ));
+            w.execute(Command::CloseWorkspace).await.expect("close");
+
+            // encrypt requires phrase PROOF: a foreign (valid) phrase and an
+            // empty one are refused, and nothing is deleted
+            let foreign = molt_storage::generate_seed_phrase().expect("gen");
+            assert!(w
+                .execute(Command::EncryptWorkspace {
+                    id: id.clone(),
+                    phrase: foreign.clone(),
+                })
+                .await
+                .is_err());
+            assert!(w
+                .execute(Command::EncryptWorkspace {
+                    id: id.clone(),
+                    phrase: String::new(),
+                })
+                .await
+                .is_err());
+            assert!(dir.join("keys/workspace.key").exists(), "nothing deleted");
+            assert!(dir.join("keys/seed.sealed").exists());
+
+            // the real phrase seals: key material gone, session honest
+            w.execute(Command::EncryptWorkspace {
+                id: id.clone(),
+                phrase: phrase.clone(),
+            })
+            .await
+            .expect("encrypt");
+            assert!(!dir.join("keys/workspace.key").exists(), "key removed");
+            assert!(!dir.join("keys/seed.sealed").exists(), "seed removed");
+            {
+                let s = read_session(&w).await;
+                let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
+                assert!(ws.encrypted);
+                assert!(ws.seed.is_empty(), "no phrase to show while sealed");
+                assert!(ws.members.is_empty(), "no roster to show while sealed");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        panic!("export did not settle in time");
+            assert!(matches!(
+                w.execute(Command::OpenWorkspace { id: id.clone() }).await,
+                Err(MoltError::WorkspaceEncrypted(_))
+            ));
+
+            // restart persistence: a FRESH scan of the directory (what boot
+            // does) derives the sealed state — no session memory involved
+            let entries = molt_storage::scan_workspaces(&root);
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].info().encrypted, "a restart still sees it sealed");
+            // …and a second engine booted from that scan refuses the open
+            let session2 = SessionView {
+                workspaces: entries.iter().map(|e| e.info()).collect(),
+                settings: SessionSettings {
+                    workspace_dir: root.display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w2 = spawn_with_storage(GroupConfig::demo(), session2);
+            assert!(matches!(
+                w2.execute(Command::OpenWorkspace { id: id.clone() }).await,
+                Err(MoltError::WorkspaceEncrypted(_))
+            ));
+
+            // wrong phrase on decrypt: hard error, still sealed on disk
+            assert!(w
+                .execute(Command::DecryptWorkspace {
+                    id: id.clone(),
+                    phrase: foreign,
+                })
+                .await
+                .is_err());
+            assert!(!dir.join("keys/workspace.key").exists(), "still sealed");
+            assert!(
+                molt_storage::scan_workspaces(&root)[0].info().encrypted,
+                "still sealed after the failed attempt"
+            );
+
+            // the right phrase unseals; the entry gets its details back and
+            // the workspace opens and replays
+            w.execute(Command::DecryptWorkspace {
+                id: id.clone(),
+                phrase: phrase.clone(),
+            })
+            .await
+            .expect("decrypt");
+            {
+                let s = read_session(&w).await;
+                let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
+                assert!(!ws.encrypted);
+                assert_eq!(ws.seed, phrase, "the stored phrase is shown again");
+                assert!(!ws.members.is_empty(), "the roster is back");
+            }
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("open after decrypt");
+            match w.execute(Command::Status).await.expect("status") {
+                Reply::Status(st) => {
+                    assert_eq!(st.member, "petra");
+                    assert_eq!(st.members.len(), 3, "the history replayed");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
     }
 
     #[test]
@@ -2209,18 +2347,35 @@ mod tests {
         });
     }
 
-    /// The (mock) at-rest encryption toggle: an encrypted workspace cannot
-    /// be opened until a decrypt (with a phrase) flips it back — the Open
-    /// screen's buttons and the MCP encrypt_/decrypt_workspace tools drive
-    /// the same commands. Mock: the phrase is required, not yet verified.
+    /// The at-rest toggle on a SESSION-ONLY node (no storage — unit tests,
+    /// ephemeral demo): there are no on-disk bytes to seal, so the flag is
+    /// a session marker and the phrase cannot be verified against anything;
+    /// the real, phrase-verified path is pinned by
+    /// [`at_rest_sealing_is_real_verified_and_survives_a_restart`]. What
+    /// this test pins: an encrypted entry cannot be opened until a decrypt
+    /// flips it back, and both commands demand a phrase — the Open screen's
+    /// buttons and the MCP encrypt_/decrypt_workspace tools drive the same
+    /// commands.
     #[test]
     fn encrypted_workspaces_refuse_to_open_until_decrypted() {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             let id = demo_workspace_id("Family Office");
-            w.execute(Command::EncryptWorkspace { id: id.clone() })
+            assert!(
+                w.execute(Command::EncryptWorkspace {
+                    id: id.clone(),
+                    phrase: String::new(),
+                })
                 .await
-                .expect("encrypt");
+                .is_err(),
+                "encrypting needs a phrase"
+            );
+            w.execute(Command::EncryptWorkspace {
+                id: id.clone(),
+                phrase: "word1 word2 word3".into(),
+            })
+            .await
+            .expect("encrypt");
             let entry = |s: &SessionView| {
                 s.workspaces
                     .iter()
@@ -2256,7 +2411,13 @@ mod tests {
                 .await
                 .expect("open decrypted");
             // the ACTIVE workspace cannot be encrypted from under itself
-            assert!(w.execute(Command::EncryptWorkspace { id }).await.is_err());
+            assert!(w
+                .execute(Command::EncryptWorkspace {
+                    id,
+                    phrase: "word1 word2 word3".into(),
+                })
+                .await
+                .is_err());
         });
     }
 
