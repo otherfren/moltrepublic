@@ -26,9 +26,9 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 | 6 | ✅ ERLEDIGT — Präsenz ohne echte Zeitstempel: keine Alterung, Mock-Aktivitäts-Trio | M |
 | 7 | ✅ ERLEDIGT (entfernt) — Legacy-Zähl-Simulation der Governance | M |
 | 8 | ✅ ERLEDIGT — Backup-Orphans: statische Demo-Daten in der Backup-Tabelle | M |
-| 9 | Manueller Workspace-Export („Backup als Blob“) ist ein UI-No-op | L |
-| 10 | At-rest-Verschlüsselung: Flag-Flip, Phrase ungeprüft, nicht persistent (S6) | L |
-| 11 | Plugin-Governance ohne Plugin-Zustand | L |
+| 9 | ✅ ERLEDIGT — Manueller Workspace-Export („Backup als Blob“) ist ein UI-No-op | L |
+| 10 | ✅ ERLEDIGT — At-rest-Verschlüsselung: Flag-Flip, Phrase ungeprüft, nicht persistent (S6) | L |
+| 11 | ✅ ERLEDIGT (Vokabel entfernt) — Plugin-Governance ohne Plugin-Zustand | L |
 | 12 | Auto-Backup nach S3: Einstellungen komplett, Backend fehlt (S5) | XL |
 | 13 | Restore aus S3/Datei: vollständig simulierter Lauf mit Fake-Log (S4/S5) | XL |
 | 14 | Vier Surfaces ohne Implementierung: Memory, Quests, Vault, Wallet | XL |
@@ -260,6 +260,12 @@ hängt am S3-Client.
 
 ## 9. Manueller Workspace-Export („Backup als Blob“) ist ein UI-No-op — **L**
 
+> **✅ ERLEDIGT (2026-07-18).** Echter S4-Export: `molt-export-v1`-Blob
+> (Argon2id 64 MiB/t=3/p=1, XChaCha20-Poly1305 in 4-MiB-Chunks, Header über
+> Key-Bindung authentifiziert), atomarer Write mit fsync; MLS-Ratchets und
+> SMP-Queue-Creds werden NIE exportiert; `Command::ExportWorkspace` + MCP-Tool;
+> Design: `documents/backup_restore_design.md`. Import ist Nr. 13.
+
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:5766–5795`: das Backup-Modal setzt bei „Bestätigen“ nur `root.export-note = "Exportiert (Mock): <Pfad>"` — kein Command, kein Write
 - `crates/molt-ui/src/lib.rs:4548` (`bk_body`: „Mock — es wird nichts geschrieben“), `:4537` (`ow_export_note`)
@@ -280,6 +286,13 @@ molt-engine, molt-ui, molt-mcp.
 Finding 13.
 
 ## 10. At-rest-Verschlüsselung: Flag-Flip, Phrase ungeprüft, nicht persistent — **L**
+
+> **✅ ERLEDIGT (2026-07-18).** S6 derive-and-verify: Versiegeln entfernt
+> Schlüsselmaterial von der Platte (Genesis-Frame-Tag = Phrase-Prüfung; falsche
+> Phrase = harter Fehler, Platte unangetastet), Zustand kommt aus dem
+> Verzeichnis-Marker (überlebt Neustart), `STORAGE_VERSION_SEALED`-Gate,
+> Alt-Verzeichnisse ohne Migration; versiegelte Verzeichnisse verweigern
+> Export/Open typisiert. Storage-lose Knoten verweigern ehrlich.
 
 **Fundorte:**
 - `crates/molt-engine/src/session.rs:576–611`: `cmd_encrypt_workspace` setzt nur `ws.encrypted = true` (Session-Feld); `cmd_decrypt_workspace` verlangt eine nicht-leere Phrase, prüft sie aber nicht
@@ -302,6 +315,11 @@ Schichten: molt-storage (Kern), molt-engine, molt-ui/mcp (nur Texte).
 für Bestands-Workspaces, Design-Doc-Pflicht laut CLAUDE.md.
 
 ## 11. Plugin-Governance ohne Plugin-Zustand — **L**
+
+> **✅ ERLEDIGT (2026-07-18): Vokabel entfernt** (Produktentscheidung). Die
+> fünf Plugin-Erwähnungen waren reine Prosa; kein persistierter/wire-sichtbarer
+> Typ trug je eine Plugin-Variante. Die Replay-Toleranz für unbekannte Org-Ops
+> (tragend für Additiv-Only) ist jetzt per Test gepinnt.
 
 **Fundorte:**
 - `crates/molt-engine/src/proposals.rs:133` („no plugin state exists yet (mock) — nothing to show“)
