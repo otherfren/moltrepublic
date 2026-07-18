@@ -761,11 +761,7 @@ impl State {
                     .and_then(|e| e.members.iter().find(|m| m.name == member))
                     .map(|m| m.last_seen)
                     .unwrap_or(molt_core::MemberInfo::NEVER);
-                let presence = if self.net_unreachable.contains(&member) {
-                    2
-                } else {
-                    molt_core::presence_state(now, last_seen)
-                };
+                let presence = self.presence_of(&member, last_seen, now);
                 MemberView {
                     open_proposals: self
                         .proposals
@@ -803,17 +799,15 @@ impl State {
             .workspaces
             .iter()
             .find(|w| w.id == self.session.active_workspace);
-        // "sharer online?" from the REAL stamps, aged at read time (a
-        // send-failure pin wins) — a never-seen sharer is honestly offline
+        // "sharer online?" from the REAL stamps, aged at read time (self is
+        // always online, a send-failure pin wins) — a never-seen sharer is
+        // honestly offline
         let presence = |member: &str| {
-            if self.net_unreachable.contains(member) {
-                return 2;
-            }
             let last_seen = entry
                 .and_then(|e| e.members.iter().find(|mi| mi.name == member))
                 .map(|mi| mi.last_seen)
                 .unwrap_or(molt_core::MemberInfo::NEVER);
-            molt_core::presence_state(now, last_seen)
+            self.presence_of(member, last_seen, now)
         };
         self.chat_visible()
             .filter_map(|m| {

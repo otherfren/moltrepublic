@@ -1589,8 +1589,12 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Record a real sighting on the active workspace entry's pill;
-    /// emits only when something actually changed.
+    /// Record a real sighting on the active workspace entry's pill. The
+    /// stamp is always advanced (aging + the activity trio read it), but a
+    /// full session push fires ONLY when the pill STATE changes — a peer
+    /// already online re-stamping every second must not re-broadcast the
+    /// whole session for a label that renders identically (the 30 s ticker
+    /// and the next state-change push carry the refreshed stamp).
     fn stamp_member_pill(&mut self, member: &MemberId, now: u64) {
         let active = self.session.active_workspace.clone();
         let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
@@ -1600,18 +1604,20 @@ impl State {
             return;
         };
         let state = molt_core::presence_state(now, now);
-        if m.state == state && m.last_seen == now {
-            return;
-        }
+        let state_changed = m.state != state;
         m.state = state;
         m.last_seen = now;
-        self.emit_session(SessionScope::Full);
+        if state_changed {
+            self.emit_session(SessionScope::Full);
+        }
     }
 
     /// Re-derive every pill state of the active entry from its stamp
-    /// (send-failure pins win); emits only when a state actually changed.
+    /// (self always online, send-failure pins win); emits only when a
+    /// state actually changed.
     fn refresh_member_pills(&mut self) {
         let now = self.presence_now();
+        let me = self.member();
         let active = self.session.active_workspace.clone();
         let unreachable = &self.net_unreachable;
         let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
@@ -1619,7 +1625,9 @@ impl State {
         };
         let mut changed = false;
         for m in &mut entry.members {
-            let state = if unreachable.contains(&m.name) {
+            let state = if m.name == me {
+                0
+            } else if unreachable.contains(&m.name) {
                 2
             } else {
                 molt_core::presence_state(now, m.last_seen)
@@ -2012,6 +2020,42 @@ mod tests {
         st.clock_override = Some(T + 8 * 86_400);
         let s = st.status();
         assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 1, 1));
+    }
+
+    /// This node never hears itself on the wire, so its own stamp would
+    /// age out — but it is the one running the app: self stays online
+    /// through every aging pass and read, and always counts in the trio.
+    #[test]
+    fn the_local_member_stays_online_through_aging() {
+        let mut st = presence_fixture(); // ada is the local member
+        // long after every threshold, with no traffic at all
+        st.clock_override = Some(T + 30 * 86_400);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "ada").state, 0, "self never ages offline");
+        let ada = st
+            .members_view()
+            .into_iter()
+            .find(|m| m.member == "ada")
+            .expect("ada row");
+        assert_eq!(ada.presence, 0, "the Members table shows self online");
+        let s = st.status();
+        assert_eq!(s.active_1h, 1, "self always counts active");
+    }
+
+    /// A send-failure pin is scoped to the workspace: closing/resetting the
+    /// workspace drops it, so a same-named member in the next workspace is
+    /// not falsely shown unreachable.
+    #[test]
+    fn a_send_failure_pin_does_not_leak_past_a_workspace_reset() {
+        let mut st = presence_fixture();
+        st.cmd_net_send_failed("bob".to_string(), "gone".to_string(), None)
+            .expect("ack");
+        assert!(st.net_unreachable.contains("bob"));
+        st.reset_workspace_state();
+        assert!(
+            st.net_unreachable.is_empty(),
+            "the close/switch boundary clears the pins"
+        );
     }
 
     /// The presence ticker ages a silent member's pill: online → stale

@@ -468,7 +468,8 @@ pub(crate) struct State {
     /// Members whose sends keep failing (outbox backoff): their pill is
     /// pinned unreachable (state 2) regardless of how fresh the last-seen
     /// stamp is, until the next real sighting clears the pin. Runtime-only,
-    /// active workspace scope (cleared with the mesh).
+    /// active-workspace scope — [`State::reset_workspace_state`] clears it
+    /// at the close/switch boundary so a pin never leaks into the next.
     pub(crate) net_unreachable: std::collections::HashSet<MemberId>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
@@ -679,6 +680,21 @@ impl State {
     /// THIS accessor so tests can age pills deterministically.
     pub(crate) fn presence_now(&self) -> u64 {
         self.clock_override.unwrap_or_else(now_secs)
+    }
+
+    /// The 0/1/2 presence pill for one member, the single derivation every
+    /// surface shares: THIS node is always online (it is the one running —
+    /// it never hears itself on the wire, so its stamp would otherwise age
+    /// out); a send-failure pin forces offline; everyone else ages from
+    /// their real last-seen stamp.
+    pub(crate) fn presence_of(&self, member: &str, last_seen: u64, now: u64) -> u8 {
+        if member == self.member() {
+            0
+        } else if self.net_unreachable.contains(member) {
+            2
+        } else {
+            molt_core::presence_state(now, last_seen)
+        }
     }
 
     /// The member roster: the open workspace's, else the boot group's.
