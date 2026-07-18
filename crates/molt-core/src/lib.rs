@@ -340,39 +340,73 @@ fn default_s3_keep_copies() -> u16 {
     5
 }
 
-/// One member of a workspace with its (mock) last-sync info.
+/// One member of a workspace with its REAL last-seen info. Prose ("2 min
+/// ago") is presentation and is rendered client-side from the stamp — the
+/// `last_sync_min` pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
     /// Display handle.
     pub name: String,
-    /// Human "last synced" label, e.g. `"2 min ago"`.
-    pub last: String,
-    /// 0 = synced, 1 = syncing, 2 = offline.
+    /// Unix seconds this member was last actually observed on the wire
+    /// (authenticated inbound traffic, or completing a ritual with us);
+    /// [`MemberInfo::NEVER`] = never seen by this install. Additive with
+    /// a default: older data honestly reads back as never-seen.
+    #[serde(default)]
+    pub last_seen: u64,
+    /// 0 = online, 1 = stale, 2 = offline/unreachable — aged from
+    /// `last_seen` by [`presence_state`] (the engine's presence ticker
+    /// keeps the pushed pills current; a send-failure pins 2 until the
+    /// next sighting).
     pub state: u8,
 }
 
-/// Project a member roster into the session's [`MemberInfo`] shape: members
-/// for whom `synced` holds are "just now"/online, everyone else gets
-/// `absent_label` and shows offline. The one projection every flow uses —
-/// presence is the transport's runtime state, so until that exists these
-/// labels are the honest defaults.
+impl MemberInfo {
+    /// The `last_seen` sentinel for "never seen by this install" (unix 0
+    /// predates every republic, and `#[serde(default)]` makes it what
+    /// stamp-less legacy data reads back as).
+    pub const NEVER: u64 = 0;
+    /// Seen within this many seconds → online (state 0). 5 minutes: the
+    /// mesh has no beacons, so presence is only as fresh as real traffic.
+    pub const ONLINE_SECS: u64 = 300;
+    /// Seen within this many seconds → stale (state 1); older (or never)
+    /// → offline (state 2). 30 minutes.
+    pub const STALE_SECS: u64 = 1800;
+}
+
+/// Age a member's REAL last-seen stamp into the 0/1/2 pill state — the one
+/// classification every surface uses (thresholds on [`MemberInfo`]). Pure:
+/// core owns no clock, callers pass `now`.
+pub fn presence_state(now: u64, last_seen: u64) -> u8 {
+    if last_seen == MemberInfo::NEVER {
+        return 2;
+    }
+    let age = now.saturating_sub(last_seen);
+    if age <= MemberInfo::ONLINE_SECS {
+        0
+    } else if age <= MemberInfo::STALE_SECS {
+        1
+    } else {
+        2
+    }
+}
+
+/// Project a member roster into the session's [`MemberInfo`] shape from
+/// each member's REAL last-seen stamp ([`MemberInfo::NEVER`] = never
+/// seen). The one projection every flow uses; `now` comes from the caller
+/// (core owns no clock).
 pub fn roster_members(
     roster: &[MemberId],
-    synced: impl Fn(&str) -> bool,
-    absent_label: &str,
+    now: u64,
+    last_seen_of: impl Fn(&str) -> u64,
 ) -> Vec<MemberInfo> {
     roster
         .iter()
         .map(|m| {
-            let is_synced = synced(m);
+            let last_seen = last_seen_of(m);
             MemberInfo {
                 name: m.clone(),
-                last: if is_synced {
-                    "just now".to_string()
-                } else {
-                    absent_label.to_string()
-                },
-                state: if is_synced { 0 } else { 2 },
+                last_seen,
+                state: presence_state(now, last_seen),
             }
         })
         .collect()
@@ -505,10 +539,13 @@ impl WorkspaceInfo {
 
     /// The demo set of local republics the scaffold ships with.
     pub fn demo_set() -> Vec<WorkspaceInfo> {
-        fn m(name: &str, last: &str, state: u8) -> MemberInfo {
+        // Demo entries are closed workspaces: no presence knowledge exists
+        // for them, so every member is honestly never-seen (the state keeps
+        // the demo pill color only).
+        fn m(name: &str, _last: &str, state: u8) -> MemberInfo {
             MemberInfo {
                 name: name.to_string(),
-                last: last.to_string(),
+                last_seen: MemberInfo::NEVER,
                 state,
             }
         }
@@ -2082,6 +2119,10 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// Periodic presence aging (engine-internal ticker): re-derive the
+    /// member pills' 0/1/2 state from their real last-seen stamps so a
+    /// silent member ages online → stale → offline without any traffic.
+    NetPresenceTick,
     /// Sending to a member's queue keeps failing; the outbox is backing
     /// off and retrying (engine-internal transport health).
     NetSendFailed {
@@ -3041,9 +3082,13 @@ pub struct MemberView {
     /// The anchored Ed25519 identity public key, lowercase hex
     /// ("" when unanchored).
     pub identity_pk: String,
-    /// Human "last seen" label (mock), e.g. `"just now"`.
-    pub last_seen: String,
-    /// 0 = synced, 1 = syncing, 2 = offline (mock presence).
+    /// Unix seconds this member was last actually observed on the wire
+    /// ([`MemberInfo::NEVER`] = never seen by this install); prose is
+    /// rendered client-side.
+    #[serde(default)]
+    pub last_seen: u64,
+    /// 0 = online, 1 = stale, 2 = offline/unreachable — aged live from
+    /// `last_seen` ([`presence_state`]; a send-failure pins 2).
     pub presence: u8,
     /// Pending proposals still awaiting THIS member's approval.
     pub open_proposals: usize,
@@ -3122,14 +3167,15 @@ pub struct StatusView {
     /// (real on replayed workspaces; 0 on pre-ritual/demo groups).
     #[serde(default)]
     pub founded_ts: u64,
-    /// Members active within the last hour. Mock presence projection until
-    /// real presence lands: synced members count as hour-active.
+    /// Members actually seen on the wire within the last hour (real
+    /// last-seen stamps; the local member always counts — it is reading
+    /// this). Never-seen members count in no window.
     #[serde(default)]
     pub active_1h: usize,
-    /// Members active within the last 24 h (mock: synced + syncing).
+    /// Members seen within the last 24 h (real stamps).
     #[serde(default)]
     pub active_24h: usize,
-    /// Members active within the last 7 days (mock: the whole roster).
+    /// Members seen within the last 7 days (real stamps).
     #[serde(default)]
     pub active_7d: usize,
     /// The republic's current image: the file reference of the last applied
@@ -3567,6 +3613,55 @@ mod tests {
         let solo = GroupConfig::solo();
         assert_eq!(solo.members, vec![solo.member.clone()]);
         assert_eq!(solo.threshold, 1);
+    }
+
+    // --- real presence: numeric last-seen stamps ---------------------------
+
+    /// The presence classification is a pure function of (now, stamp):
+    /// never-seen is offline, a fresh sighting is online, silence ages the
+    /// state through stale to offline at the documented thresholds.
+    #[test]
+    fn presence_ages_by_real_time_and_never_seen_is_offline() {
+        let t = 1_000_000u64;
+        assert_eq!(presence_state(t, MemberInfo::NEVER), 2);
+        assert_eq!(presence_state(t, t), 0);
+        assert_eq!(presence_state(t + MemberInfo::ONLINE_SECS, t), 0);
+        assert_eq!(presence_state(t + MemberInfo::ONLINE_SECS + 1, t), 1);
+        assert_eq!(presence_state(t + MemberInfo::STALE_SECS, t), 1);
+        assert_eq!(presence_state(t + MemberInfo::STALE_SECS + 1, t), 2);
+        // a stamp slightly ahead of our clock (peer clock skew) is online
+        assert_eq!(presence_state(t, t + 50), 0);
+    }
+
+    /// The one roster projection carries the REAL stamp per member and
+    /// derives the pill state from it — a member without a stamp starts
+    /// honestly as never-seen/offline, no placeholder presence.
+    #[test]
+    fn roster_members_projects_real_stamps() {
+        let roster = vec!["ada".to_string(), "bob".to_string()];
+        let now = 2_000_000u64;
+        let members = roster_members(&roster, now, |m| {
+            if m == "ada" {
+                now - 10
+            } else {
+                MemberInfo::NEVER
+            }
+        });
+        assert_eq!(
+            members,
+            vec![
+                MemberInfo {
+                    name: "ada".to_string(),
+                    last_seen: now - 10,
+                    state: 0,
+                },
+                MemberInfo {
+                    name: "bob".to_string(),
+                    last_seen: MemberInfo::NEVER,
+                    state: 2,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -115,9 +115,11 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(genesis) = molt_storage::peek_genesis(&workspace_dir, &e.dir, &w.id) {
                 if let molt_core::WorkspaceEvent::Founded { roster, agenda, .. } = genesis.body {
-                    // a closed workspace has no presence knowledge — an empty
-                    // "last" renders the chip as a bare name, no status dot
-                    w.members = molt_core::roster_members(&roster, |_| false, "");
+                    // a closed workspace has no presence knowledge — every
+                    // member is honestly never-seen until traffic stamps it
+                    w.members = molt_core::roster_members(&roster, 0, |_| {
+                        molt_core::MemberInfo::NEVER
+                    });
                     w.agenda = agenda;
                 }
             }

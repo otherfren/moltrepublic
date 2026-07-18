@@ -469,6 +469,9 @@ impl State {
         self.recovery_tickets.clear();
         self.recovery_mesh_window.clear();
         self.mesh_extension_at.clear();
+        // send-failure presence pins belong to the OLD workspace's mesh —
+        // dropping them stops a same-named member showing offline in the next
+        self.net_unreachable.clear();
         self.replica = None;
         self.identity_sk = None;
         self.chain.clear();

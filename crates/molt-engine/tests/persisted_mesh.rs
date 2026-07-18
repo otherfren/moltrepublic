@@ -142,7 +142,11 @@ async fn persisted_outbox_feeds_a_real_engine_and_survives_restart() {
         Reply::Session(s) => {
             let ws = s.workspaces.iter().find(|w| w.id == id_b).expect("entry");
             let ada = ws.members.iter().find(|m| m.name == "ada").expect("ada pill");
-            assert_eq!((ada.state, ada.last.as_str()), (0, "just now"));
+            assert_eq!(ada.state, 0, "ada's pill is live");
+            assert!(
+                ada.last_seen > 0,
+                "the sighting carries a real unix stamp"
+            );
         }
         other => panic!("unexpected: {other:?}"),
     }

@@ -737,8 +737,10 @@ impl State {
 
     /// The Organization → Members table: one row per roster member. The
     /// identity anchor comes from the genesis (real on ritual-founded
-    /// workspaces); presence is the session entry's mock label.
+    /// workspaces); presence is the REAL last-seen stamp, aged live at
+    /// read time (a send-failure pin wins) — prose is rendered UI-side.
     pub(crate) fn members_view(&self) -> Vec<MemberView> {
+        let now = self.presence_now();
         let entry = self
             .session
             .workspaces
@@ -755,10 +757,11 @@ impl State {
                     .unwrap_or_default();
                 // a human-scale fingerprint: the key's leading 16 hex chars
                 let id = identity_pk.get(..16).unwrap_or_default().to_string();
-                let (last_seen, presence) = entry
+                let last_seen = entry
                     .and_then(|e| e.members.iter().find(|m| m.name == member))
-                    .map(|m| (m.last.clone(), m.state))
-                    .unwrap_or_default();
+                    .map(|m| m.last_seen)
+                    .unwrap_or(molt_core::MemberInfo::NEVER);
+                let presence = self.presence_of(&member, last_seen, now);
                 MemberView {
                     open_proposals: self
                         .proposals
@@ -790,16 +793,21 @@ impl State {
     pub(crate) fn uploads_view(&self) -> Vec<UploadView> {
         let retention_secs = self.org_effective().retention_days * 86_400;
         let me = self.member();
+        let now = self.presence_now();
         let entry = self
             .session
             .workspaces
             .iter()
             .find(|w| w.id == self.session.active_workspace);
+        // "sharer online?" from the REAL stamps, aged at read time (self is
+        // always online, a send-failure pin wins) — a never-seen sharer is
+        // honestly offline
         let presence = |member: &str| {
-            entry
+            let last_seen = entry
                 .and_then(|e| e.members.iter().find(|mi| mi.name == member))
-                .map(|mi| mi.state)
-                .unwrap_or(0)
+                .map(|mi| mi.last_seen)
+                .unwrap_or(molt_core::MemberInfo::NEVER);
+            self.presence_of(member, last_seen, now)
         };
         self.chat_visible()
             .filter_map(|m| {
@@ -823,24 +831,31 @@ impl State {
     }
 
     pub(crate) fn status(&self) -> StatusView {
-        // the activity trio is a mock presence projection (real presence is
-        // transport work): synced = hour-active, syncing = day-active, the
-        // whole roster = week-active
+        // the activity trio counts REAL last-seen stamps per window; the
+        // local member always counts (it is the one asking), a never-seen
+        // member counts nowhere
+        let now = self.presence_now();
+        let me = self.member();
         let entry = self
             .session
             .workspaces
             .iter()
             .find(|w| w.id == self.session.active_workspace);
-        let presence = |member: &str| {
-            entry
+        let active_within = |member: &str, window_secs: u64| {
+            if member == me {
+                return true;
+            }
+            let last_seen = entry
                 .and_then(|e| e.members.iter().find(|mi| mi.name == member))
-                .map(|mi| mi.state)
-                .unwrap_or(0)
+                .map(|mi| mi.last_seen)
+                .unwrap_or(molt_core::MemberInfo::NEVER);
+            last_seen != molt_core::MemberInfo::NEVER
+                && now.saturating_sub(last_seen) <= window_secs
         };
         let roster = self.roster();
-        let active_1h = roster.iter().filter(|m| presence(m) == 0).count();
-        let active_24h = roster.iter().filter(|m| presence(m) <= 1).count();
-        let active_7d = roster.len();
+        let active_1h = roster.iter().filter(|m| active_within(m, 3_600)).count();
+        let active_24h = roster.iter().filter(|m| active_within(m, 86_400)).count();
+        let active_7d = roster.iter().filter(|m| active_within(m, 604_800)).count();
         let surfaces = Surface::ALL
             .into_iter()
             .map(|s| {
