@@ -708,34 +708,122 @@ impl WorkspaceInfo {
     }
 }
 
-/// A backup found in the S3 bucket with no matching local workspace
-/// (mock). Shows up in the settings backup table with an empty "local"
-/// column.
+/// A backup found in the S3 bucket with no matching local workspace,
+/// aggregated from a real bucket listing ([`Command::NetListBackups`]).
+/// Shows up in the settings backup table with an empty "local" column.
+///
+/// Backups are named by the workspace-id *pseudonym*, never by display name
+/// (`backup_restore_design.md` §6.2), so an orphan carries only its [`id`]
+/// — [`name`] stays empty. A bucket key that does not follow the backup
+/// naming scheme at all is still listed honestly: as an unknown entry with
+/// an empty [`id`] and the raw object key as [`name`].
+///
+/// [`id`]: BackupOrphan::id
+/// [`name`]: BackupOrphan::name
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupOrphan {
-    /// Workspace name recorded in the backup.
+    /// The workspace-id pseudonym from the object key (empty for a foreign
+    /// key that does not follow the backup naming scheme). Restore-from-S3
+    /// starts from this id.
+    #[serde(default)]
+    pub id: WorkspaceId,
+    /// Display label when one exists: empty for a real orphan (the bucket
+    /// carries no workspace names), the raw object key for a foreign entry.
     pub name: String,
-    /// Backup size in KiB.
+    /// Total size of the entry's objects in KiB (rounded up).
     pub size_kib: u32,
-    /// Minutes since this backup was written.
+    /// Minutes since the entry's newest object was written.
     pub last_backup_min: u32,
 }
 
-impl BackupOrphan {
-    /// The demo bucket contents that have no local counterpart.
-    pub fn demo_set() -> Vec<BackupOrphan> {
-        fn o(name: &str, size_kib: u32, last_backup_min: u32) -> BackupOrphan {
-            BackupOrphan {
-                name: name.to_string(),
-                size_kib,
-                last_backup_min,
-            }
-        }
-        vec![
-            o("Chess Club", 480, 129_600), // 90 days
-            o("Book Money", 75, 43_200),   // 30 days
-        ]
+/// One object from a real bucket listing, as reported by the off-actor
+/// listing task ([`Command::NetListBackupsResult`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupObject {
+    /// The full object key, e.g. `molt/<workspace_id>/<ts>.molt.enc`.
+    pub key: String,
+    /// Object size in bytes.
+    pub size: u64,
+    /// Last-modified time, unix seconds.
+    pub modified: u64,
+}
+
+/// The bucket prefix every backup object lives under
+/// (`backup_restore_design.md` §6.2) — the single authority for the scheme,
+/// shared by the listing (engine) and [`parse_backup_key`]; story 12's
+/// writer must build its keys from it too.
+pub const BACKUP_OBJECT_PREFIX: &str = "molt/";
+
+/// Parse a bucket key against the backup naming scheme
+/// `molt/<workspace_id>/<unix_ts>.molt.enc` (`backup_restore_design.md`
+/// §6.2): the id is 64 lowercase hex chars, the stem decimal digits.
+/// Returns `(workspace_id, ts)`, or `None` for any foreign key.
+pub fn parse_backup_key(key: &str) -> Option<(WorkspaceId, u64)> {
+    let rest = key.strip_prefix(BACKUP_OBJECT_PREFIX)?;
+    let (id, file) = rest.split_once('/')?;
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return None;
     }
+    let stem = file.strip_suffix(".molt.enc")?;
+    // digits only — u64::parse alone would also accept a leading '+'
+    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let ts: u64 = stem.parse().ok()?;
+    Some((id.to_string(), ts))
+}
+
+/// Classify a real bucket listing into the session's orphan entries
+/// (mock_todo story 8): objects whose workspace id is in `local_ids` belong
+/// to a locally known workspace (their table row exists already) and are
+/// skipped; parseable prefixes without a local workspace aggregate into one
+/// [`BackupOrphan`] each (sizes summed, dated by the newest object);
+/// foreign keys become per-key unknown entries — never silently dropped.
+/// Pure and deterministic (orphans sorted by id, then unknowns by key);
+/// `now` is unix seconds.
+pub fn backup_orphans_from_listing(
+    objects: &[BackupObject],
+    local_ids: &[WorkspaceId],
+    now: u64,
+) -> Vec<BackupOrphan> {
+    let minutes_since = |modified: u64| -> u32 {
+        u32::try_from(now.saturating_sub(modified) / 60).unwrap_or(u32::MAX)
+    };
+    let kib = |bytes: u64| -> u32 { u32::try_from(bytes.div_ceil(1024)).unwrap_or(u32::MAX) };
+    // id → (total bytes, newest modified)
+    let mut per_id: std::collections::BTreeMap<String, (u64, u64)> =
+        std::collections::BTreeMap::new();
+    let mut unknown: Vec<BackupOrphan> = Vec::new();
+    for o in objects {
+        match parse_backup_key(&o.key) {
+            Some((id, _ts)) => {
+                if local_ids.contains(&id) {
+                    continue;
+                }
+                let e = per_id.entry(id).or_insert((0, 0));
+                e.0 = e.0.saturating_add(o.size);
+                e.1 = e.1.max(o.modified);
+            }
+            None => unknown.push(BackupOrphan {
+                id: String::new(),
+                name: o.key.clone(),
+                size_kib: kib(o.size),
+                last_backup_min: minutes_since(o.modified),
+            }),
+        }
+    }
+    let mut out: Vec<BackupOrphan> = per_id
+        .into_iter()
+        .map(|(id, (bytes, newest))| BackupOrphan {
+            id,
+            name: String::new(),
+            size_kib: kib(bytes),
+            last_backup_min: minutes_since(newest),
+        })
+        .collect();
+    unknown.sort_by(|a, b| a.name.cmp(&b.name));
+    out.extend(unknown);
+    out
 }
 
 /// Metadata of a file shared into the chat. Only metadata travels in the
@@ -2018,6 +2106,12 @@ pub struct SessionView {
     /// `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
     #[serde(default)]
     pub s3_test: String,
+    /// Transient state of the last bucket listing ([`Command::NetListBackups`]),
+    /// same rationale as [`Self::s3_test`]: `""` (never listed), `"listing"`,
+    /// `"ok"`, or `"error: …"` (the honest failure class — including "no
+    /// endpoint configured" when the backup target is not set up).
+    #[serde(default)]
+    pub s3_list: String,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -2029,7 +2123,9 @@ pub struct SessionView {
     pub settings: SessionSettings,
     /// The locally known workspaces (mock list, shared).
     pub workspaces: Vec<WorkspaceInfo>,
-    /// Backups in the S3 bucket without a local workspace (mock, static).
+    /// Backups in the S3 bucket without a local workspace, from the last
+    /// real listing ([`Command::NetListBackups`]). Empty until a listing
+    /// ran — the table never shows invented bucket contents.
     #[serde(default)]
     pub backup_orphans: Vec<BackupOrphan>,
     /// Id of the currently opened workspace (empty = none). The display
@@ -2058,10 +2154,11 @@ impl Default for SessionView {
             notice: String::new(),
             smp_test: String::new(),
             s3_test: String::new(),
+            s3_list: String::new(),
             restart_required: Vec::new(),
             settings: SessionSettings::default(),
             workspaces: WorkspaceInfo::demo_set(),
-            backup_orphans: BackupOrphan::demo_set(),
+            backup_orphans: Vec::new(),
             active_workspace: String::new(),
             restore: RestoreState::default(),
             create: CreateState::default(),
@@ -2528,6 +2625,32 @@ pub enum Command {
     NetTestS3Result {
         /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`.
         result: String,
+    },
+    /// List the configured S3 bucket's backup objects (the settings backup
+    /// table's refresh): a SigV4-signed ListObjectsV2 under the `molt/`
+    /// prefix over the configured dialer (Tor when enabled — fail-closed),
+    /// run off the actor. The outcome classifies into real
+    /// `session.backup_orphans` (objects with no matching local workspace)
+    /// and `session.s3_list`; with no backup target configured it fails
+    /// fast with an honest note and an empty table. Always driven by the
+    /// SAVED settings. Safe to expose — it only reads the bucket.
+    NetListBackups,
+    /// The outcome of a [`Command::NetListBackups`] listing, reported back
+    /// from the off-actor listing task (engine-internal, never an MCP tool
+    /// — an agent must not be able to forge bucket contents).
+    NetListBackupsResult {
+        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_list`.
+        result: String,
+        /// The listed objects (empty on error); the engine classifies them
+        /// against the locally known workspaces at arrival time.
+        #[serde(default)]
+        objects: Vec<BackupObject>,
+        /// Which listing request this answers (the engine's listing
+        /// generation). A stale result — an older request resolving after a
+        /// newer one, possibly against previously saved settings — is
+        /// dropped instead of overwriting the newer table.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// A founding seat's real, joinable invite link became available once its
     /// queue was provisioned on the SMP server (engine-internal, from the
@@ -3684,6 +3807,99 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert_eq!(a, demo_workspace_id("Family Office"));
         assert_ne!(a, demo_workspace_id("Savings-DAO"));
+    }
+
+    // --- backup listing (mock_todo story 8) --------------------------------
+
+    /// The production session must never invent bucket contents: orphans
+    /// appear only from a real listing (`NetListBackups`), so the default is
+    /// EMPTY. This is the regression fence for the removed demo fixture.
+    #[test]
+    fn session_default_has_no_backup_orphans() {
+        assert!(
+            SessionView::default().backup_orphans.is_empty(),
+            "demo orphans must not leak into the production session state"
+        );
+        assert!(SessionView::default().s3_list.is_empty(), "no listing ran yet");
+    }
+
+    /// The bucket object-naming scheme (`backup_restore_design.md` §6.2):
+    /// `molt/<workspace_id>/<ts>.molt.enc` with a 64-hex id and a numeric
+    /// timestamp. Anything else is a foreign key, not a backup.
+    #[test]
+    fn backup_key_parses_the_naming_scheme_and_rejects_foreign_keys() {
+        let id = "ab".repeat(32);
+        let key = format!("molt/{id}/001752800000.molt.enc");
+        assert_eq!(
+            parse_backup_key(&key),
+            Some((id.clone(), 1_752_800_000)),
+            "the canonical scheme parses"
+        );
+        for foreign in [
+            "molt/backup.tar".to_string(),                     // no id level
+            format!("molt/{id}/notes.txt"),                    // wrong suffix
+            format!("molt/{id}/xx.molt.enc"),                  // non-numeric ts
+            format!("molt/{id}/+123.molt.enc"),                // sign is not a digit
+            format!("molt/{}/001.molt.enc", "zz".repeat(32)),  // not hex
+            format!("molt/{}/001.molt.enc", "ab".repeat(16)),  // wrong id length
+            format!("other/{id}/001.molt.enc"),                // outside molt/
+            format!("molt/{id}/deep/001.molt.enc"),            // extra level
+            String::new(),
+        ] {
+            assert_eq!(parse_backup_key(&foreign), None, "foreign: {foreign:?}");
+        }
+    }
+
+    /// Classification of a real listing: objects of a locally known
+    /// workspace are NOT orphans (their row exists locally); parseable
+    /// prefixes without a local workspace aggregate into one orphan entry
+    /// (newest object dates it, sizes sum); unparseable keys survive
+    /// honestly as unknown per-key entries instead of being hidden.
+    #[test]
+    fn backup_listing_classifies_local_orphan_and_foreign() {
+        let local = "11".repeat(32);
+        let orphan = "22".repeat(32);
+        let now = 1_752_800_000u64;
+        let obj = |key: &str, size: u64, modified: u64| BackupObject {
+            key: key.to_string(),
+            size,
+            modified,
+        };
+        let objects = vec![
+            // two generations of a local workspace's backup → no orphan
+            obj(&format!("molt/{local}/001752700000.molt.enc"), 4096, now - 100_000),
+            obj(&format!("molt/{local}/001752790000.molt.enc"), 4096, now - 10_000),
+            // two generations of an unknown workspace → ONE orphan entry
+            obj(&format!("molt/{orphan}/001752600000.molt.enc"), 1024, now - 200_000),
+            obj(&format!("molt/{orphan}/001752796400.molt.enc"), 2048, now - 3_600),
+            // a foreign key → a per-key unknown entry
+            obj("molt/leftover.bin", 512, now - 60),
+        ];
+        let got = backup_orphans_from_listing(&objects, std::slice::from_ref(&local), now);
+        assert_eq!(got.len(), 2, "one orphan + one unknown: {got:?}");
+        let o = &got[0];
+        assert_eq!(o.id, orphan, "the orphan carries the workspace-id pseudonym");
+        assert_eq!(o.name, "", "no display name is known for an orphan");
+        assert_eq!(o.size_kib, 3, "sizes sum, KiB rounded up");
+        assert_eq!(o.last_backup_min, 60, "dated by the NEWEST object");
+        let f = &got[1];
+        assert_eq!(f.id, "", "a foreign key has no workspace id");
+        assert_eq!(f.name, "molt/leftover.bin", "shown by its raw key");
+        assert_eq!(f.size_kib, 1);
+        assert_eq!(f.last_backup_min, 1);
+        // a listing with only local backups yields no orphans at all
+        assert!(
+            backup_orphans_from_listing(&objects[..2], &[local], now).is_empty()
+        );
+        // a future-dated object (clock skew) clamps to "just now", and an
+        // empty listing stays empty
+        let skew = backup_orphans_from_listing(
+            &[obj(&format!("molt/{orphan}/9.molt.enc"), 10, now + 500)],
+            &[],
+            now,
+        );
+        assert_eq!(skew[0].last_backup_min, 0);
+        assert!(backup_orphans_from_listing(&[], &[], now).is_empty());
     }
 
     // --- chat bus Stage A: message identity + channel tags -----------------

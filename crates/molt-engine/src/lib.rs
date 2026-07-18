@@ -479,6 +479,11 @@ pub(crate) struct State {
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
     /// deterministically.
     pub(crate) clock_override: Option<u64>,
+    /// Generation of the newest backup-bucket listing request
+    /// ([`molt_core::Command::NetListBackups`]): bumped per request and on a
+    /// backup-target settings change, so a stale off-actor result can never
+    /// overwrite a newer table (last-REQUEST wins, not last arrival).
+    pub(crate) s3_list_gen: u64,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -642,6 +647,7 @@ impl State {
             mesh_extension_at: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
             clock_override: None,
+            s3_list_gen: 0,
             active: None,
             net,
             net_ritual: None,
@@ -972,6 +978,12 @@ impl State {
                 bucket,
             } => self.cmd_net_test_s3(endpoint, access_key, secret_key, bucket),
             Command::NetTestS3Result { result } => self.cmd_net_test_s3_result(result),
+            Command::NetListBackups => self.cmd_net_list_backups(),
+            Command::NetListBackupsResult {
+                result,
+                objects,
+                generation,
+            } => self.cmd_net_list_backups_result(result, objects, generation),
             Command::NetRitualLinkReady {
                 seat,
                 link,

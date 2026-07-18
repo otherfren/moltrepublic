@@ -804,6 +804,13 @@ pub fn tools() -> Vec<ToolDef> {
             },
         },
         ToolDef {
+            name: "net_list_backups",
+            command: "net_list_backups",
+            description: "List the configured S3 bucket's backup objects (the settings backup table's refresh): a real SigV4-signed ListObjectsV2 under the molt/ prefix over the configured transport (Tor when enabled, fail-closed), driven by the SAVED settings. Objects with no matching local workspace land as real orphans in session.backup_orphans (foreign keys as unknown entries); the honest status lands in session.s3_list (\"ok\" or \"error: …\" — including \"no endpoint configured\" when no backup target is set up). Read-only against the bucket.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::NetListBackups),
+        },
+        ToolDef {
             name: "open_workspace",
             command: "open_workspace",
             description: "Open a locally known workspace by its id (see read_session → workspaces[].id): its state loads from disk, it becomes active, and the node moves to the main screen.",
@@ -1075,7 +1082,9 @@ mod tests {
         // forge network peers or ritual members); net_test_result is the
         // node's own SMP probe reporting back (net_test_server is the tool);
         // net_test_s3_result is the node's own S3 probe reporting back
-        // (net_test_s3 is the tool);
+        // (net_test_s3 is the tool); net_list_backups_result is the node's
+        // own bucket-listing task reporting back (net_list_backups is the
+        // tool — an agent must not be able to forge bucket contents);
         // net_ritual_link_ready / net_ritual_failed are the off-actor
         // provisioning task reporting a seat's real link or a provisioning
         // failure; net_recover_link_failed is the recovery-mint provisioning
@@ -1095,9 +1104,10 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 33] = [
+        const INTERNAL: [&str; 34] = [
             "net_test_s3_result",
             "net_presence_tick",
+            "net_list_backups_result",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",
