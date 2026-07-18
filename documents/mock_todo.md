@@ -18,9 +18,9 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 
 | Nr. | Titel | Komplexität |
 |----:|-------|:-----------:|
-| 1 | Workspace-Ordner-Auswahl ohne echten Dateidialog | S |
+| 1 | ✅ ERLEDIGT — Workspace-Ordner-Auswahl ohne echten Dateidialog | S |
 | 2 | ✅ ERLEDIGT — Create-Screen: „Netzwerk“-Auswahl ist kosmetisch (dokumentiert, P8) | S |
-| 3 | Statische Statusfelder der Workspace-Liste (Größe, Sync, Queue) | S |
+| 3 | ✅ ERLEDIGT (Größe; Sync-Felder → Nr. 6/12) — Statische Statusfelder der Workspace-Liste | S |
 | 4 | Demo-Boot-Gruppe + Demo-Mesh mit Antwort-„Brains“ | S |
 | 5 | S3 „Verbindung testen“ zeigt immer Erfolg (reiner UI-Toast) | M |
 | 6 | Präsenz ohne echte Zeitstempel: keine Alterung, Mock-Aktivitäts-Trio | M |
@@ -36,6 +36,11 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 ---
 
 ## 1. Workspace-Ordner-Auswahl ohne echten Dateidialog — **S**
+
+> **✅ ERLEDIGT (2026-07-18).** „Durchsuchen…“ öffnet jetzt einen echten
+> `rfd::AsyncFileDialog::pick_folder()` (Startverzeichnis = validierter Draft,
+> `~`-Expansion wie im Engine-Pfad); das Textfeld bleibt als manueller Fallback.
+> Mock-Wortlaut entfernt. Die Fundort-Zeilennummern unten sind historisch.
 
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:652` („mock folder picker for the settings workspace tab“), Modal bei `:6116`
@@ -84,6 +89,12 @@ nur der Aufräum-Schritt.
 **Komplexität: S** (für die ehrliche Variante; per-Workspace-Transport wäre L).
 
 ## 3. Statische Statusfelder der Workspace-Liste — **S**
+
+> **✅ ERLEDIGT für die Größe (2026-07-18).** `size_kib` ist echt: rekursiver
+> KiB-Walk in molt-storage (symlink-sicher, race-tolerant), gestempelt bei
+> Boot-Scan, Materialisierung, Open (nach Replay) und Clean-Close; Session-only
+> Demo-Einträge melden ehrlich 0. Die Sync-Felder (`synced`/`state`/
+> `last_sync_min`/`sync_queue`) gehören zu Nr. 6, `last_backup_min` zu Nr. 12.
 
 **Fundorte:**
 - `crates/molt-engine/src/lifecycles.rs:186–196` (`push_workspace_entry`: `synced: true`, `state: 0`, `last_sync_min: 0`, `sync_queue: 0`, `size_kib: 16`, `last_backup_min` = 0/NEVER)
