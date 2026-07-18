@@ -21,8 +21,8 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 | 1 | ✅ ERLEDIGT — Workspace-Ordner-Auswahl ohne echten Dateidialog | S |
 | 2 | ✅ ERLEDIGT — Create-Screen: „Netzwerk“-Auswahl ist kosmetisch (dokumentiert, P8) | S |
 | 3 | ✅ ERLEDIGT (Größe; Sync-Felder → Nr. 6/12) — Statische Statusfelder der Workspace-Liste | S |
-| 4 | Demo-Boot-Gruppe + Demo-Mesh mit Antwort-„Brains“ | S |
-| 5 | S3 „Verbindung testen“ zeigt immer Erfolg (reiner UI-Toast) | M |
+| 4 | ✅ ERLEDIGT (entfernt) — Demo-Boot-Gruppe + Demo-Mesh mit Antwort-„Brains“ | S |
+| 5 | ✅ ERLEDIGT — S3 „Verbindung testen“ zeigt immer Erfolg (reiner UI-Toast) | M |
 | 6 | Präsenz ohne echte Zeitstempel: keine Alterung, Mock-Aktivitäts-Trio | M |
 | 7 | Legacy-Zähl-Simulation der Governance (Demo-/Alt-Workspaces) | M |
 | 8 | Backup-Orphans: statische Demo-Daten in der Backup-Tabelle | M |
@@ -146,6 +146,13 @@ niemand antwortet. Negativ-Tests pinnen beides in `tests/demo_mesh.rs`;
 weiter.
 
 ## 5. S3 „Verbindung testen“ zeigt immer Erfolg — **M**
+
+> **✅ ERLEDIGT (2026-07-18).** Echter `Command::NetTestS3` nach dem Muster des
+> SMP-Tests: purer Rust-S3-Baustein in molt-net (SigV4 gegen offizielle
+> AWS-Testvektoren, minimaler HTTP/1.1, rustls+webpki-roots) über den
+> fail-closed, Tor-fähigen Dialer; ehrliche Fehlerklassen (Endpoint/Connect/
+> TLS/403 Creds/404 Bucket/301 Region); MCP-Tool `net_test_s3`; Fake-Toast
+> entfernt. Live gegen AWS verifiziert. Der Client ist die Basis für Nr. 8/12/13.
 
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:5083–5093`: `clicked => { root.show-toast(Strings.toast-s3-ok); }` — reiner UI-Toast, kein Command
