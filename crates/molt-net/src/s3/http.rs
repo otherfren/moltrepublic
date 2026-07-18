@@ -96,68 +96,115 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))?;
 
-    // --- response: buffer to EOF (Connection: close), then parse ---
+    // --- response: read until provably complete or EOF, then parse ---
+    let head_only = method == "HEAD";
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         let n = match stream.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => n,
-            // servers may RST after their close-notify; whatever arrived
-            // before the error is still parsed below
-            Err(_) if !buf.is_empty() => break,
-            Err(e) => return Err(S3Error::Protocol(format!("http read: {e}"))),
+            Err(e) => {
+                // servers may RST after their last byte instead of closing
+                // cleanly; accept what arrived only when it is provably
+                // complete — or close-delimited, where truncation is
+                // undetectable by design. Anything else is a real error:
+                // a partial framed body must never parse as authoritative.
+                if response_complete(&buf, head_only) || close_delimited(&buf, head_only) {
+                    break;
+                }
+                return Err(S3Error::Protocol(format!("http read: {e}")));
+            }
         };
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > MAX_RESPONSE {
             return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
         }
-        // a HEAD response is complete at the end of its head — some servers
-        // then wait for the client to close first
-        if method == "HEAD" && buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        // stop as soon as the response is provably complete — a keep-alive
+        // server ignoring our `Connection: close` must not stall us until
+        // the timeout (close-delimited bodies still need the EOF above)
+        if response_complete(&buf, head_only) {
             break;
         }
     }
-    parse_response(&buf, method == "HEAD")
+    parse_response(&buf, head_only)
 }
 
-/// Parse a full HTTP/1.1 response held in `raw`.
-fn parse_response(raw: &[u8], head_only: bool) -> Result<HttpResponse, S3Error> {
-    let head_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| S3Error::Protocol("http response head is incomplete".to_string()))?;
-    let head = std::str::from_utf8(&raw[..head_end])
-        .map_err(|_| S3Error::Protocol("http response head is not UTF-8".to_string()))?;
+/// The index just past the head's `\r\n\r\n`, once fully received.
+fn head_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// A parsed response head: status, lowercased headers, body offset.
+type ParsedHead = (u16, Vec<(String, String)>, usize);
+
+/// Parse the (complete) head.
+fn parse_head(raw: &[u8]) -> Option<ParsedHead> {
+    let end = head_end(raw)?;
+    let head = std::str::from_utf8(&raw[..end - 4]).ok()?;
     let mut lines = head.split("\r\n");
-    let status_line = lines
-        .next()
-        .ok_or_else(|| S3Error::Protocol("http response is empty".to_string()))?;
-    // "HTTP/1.1 200 OK"
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| S3Error::Protocol(format!("bad http status line: {status_line}")))?;
+    let status: u16 = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
     let mut headers = Vec::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
-    let rest = &raw[head_end + 4..];
-    let body = if head_only {
-        Vec::new()
-    } else if headers
+    Some((status, headers, end))
+}
+
+fn is_chunked(headers: &[(String, String)]) -> bool {
+    headers
         .iter()
         .any(|(k, v)| k == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked"))
-    {
-        dechunk(rest)?
-    } else if let Some(len) = headers
+}
+
+fn content_length(headers: &[(String, String)]) -> Option<usize> {
+    headers
         .iter()
         .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-    {
+        .and_then(|(_, v)| v.parse().ok())
+}
+
+/// Whether `raw` already holds a provably complete response: a full head,
+/// plus (for non-HEAD) a fully-arrived framed body. A close-delimited body
+/// (neither `Content-Length` nor chunked) is never provably complete — only
+/// the peer's EOF ends it.
+fn response_complete(raw: &[u8], head_only: bool) -> bool {
+    let Some((_, headers, body_start)) = parse_head(raw) else {
+        return false;
+    };
+    if head_only {
+        return true;
+    }
+    let rest = &raw[body_start..];
+    if is_chunked(&headers) {
+        dechunk(rest).is_ok()
+    } else if let Some(len) = content_length(&headers) {
+        rest.len() >= len
+    } else {
+        false
+    }
+}
+
+/// Whether `raw` holds a complete head announcing a close-delimited body.
+fn close_delimited(raw: &[u8], head_only: bool) -> bool {
+    !head_only
+        && parse_head(raw)
+            .is_some_and(|(_, headers, _)| !is_chunked(&headers) && content_length(&headers).is_none())
+}
+
+/// Parse a full HTTP/1.1 response held in `raw`.
+fn parse_response(raw: &[u8], head_only: bool) -> Result<HttpResponse, S3Error> {
+    let (status, headers, body_start) = parse_head(raw).ok_or_else(|| {
+        S3Error::Protocol("http response head is incomplete or malformed".to_string())
+    })?;
+    let rest = &raw[body_start..];
+    let body = if head_only {
+        Vec::new()
+    } else if is_chunked(&headers) {
+        dechunk(rest)?
+    } else if let Some(len) = content_length(&headers) {
         if rest.len() < len {
             return Err(S3Error::Protocol("http body was truncated".to_string()));
         }
@@ -186,6 +233,11 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, S3Error> {
         let size_hex = size_str.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_hex, 16)
             .map_err(|_| S3Error::Protocol(format!("bad chunk size: {size_str}")))?;
+        // reject absurd sizes BEFORE any arithmetic — a hostile
+        // `ffffffffffffffff` must not overflow `size + 2` or slice-panic
+        if size > MAX_RESPONSE {
+            return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
+        }
         rest = &rest[line_end + 2..];
         if size == 0 {
             return Ok(body); // trailers, if any, are ignored
@@ -247,5 +299,38 @@ mod tests {
             parse_response(raw, false),
             Err(S3Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn hostile_chunk_size_is_an_error_not_a_panic() {
+        // a chunk size that would overflow `size + 2` / slice out of range
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    ffffffffffffffff\r\nx\r\n0\r\n\r\n";
+        assert!(matches!(
+            parse_response(raw, false),
+            Err(S3Error::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn completeness_is_provable_only_for_framed_bodies() {
+        // content-length: complete exactly when the body arrived in full
+        let full = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(response_complete(full, false));
+        assert!(!response_complete(&full[..full.len() - 1], false));
+        // chunked: complete only with the terminating 0-chunk
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                        4\r\nWiki\r\n0\r\n\r\n";
+        assert!(response_complete(chunked, false));
+        assert!(!response_complete(&chunked[..chunked.len() - 7], false));
+        // close-delimited: never provably complete, but recognized as such
+        let close = b"HTTP/1.1 200 OK\r\n\r\npartial";
+        assert!(!response_complete(close, false));
+        assert!(close_delimited(close, false));
+        assert!(!close_delimited(full, false));
+        // HEAD: complete at the end of the head, whatever it announces
+        let head = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 243\r\n\r\n";
+        assert!(response_complete(head, true));
+        assert!(!response_complete(&head[..head.len() - 2], true));
     }
 }

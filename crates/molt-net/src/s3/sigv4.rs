@@ -140,20 +140,24 @@ pub fn signing_key(secret_key: &str, datetime: &str, region: &str, service: &str
     hmac(&k, b"aws4_request")
 }
 
-/// The final hex signature over the request.
-pub fn signature(p: &SignParams<'_>) -> String {
-    let (canonical, _) = canonical_request(p);
+/// The full chain once: canonical request → string to sign → signing key →
+/// `(signed_headers, hex signature)` — shared by [`signature`] and
+/// [`authorization_header`] so the two can never drift apart.
+fn signed_parts(p: &SignParams<'_>) -> (String, String) {
+    let (canonical, signed) = canonical_request(p);
     let sts = string_to_sign(p.datetime, p.region, p.service, &canonical);
     let key = signing_key(p.secret_key, p.datetime, p.region, p.service);
-    hex::encode(hmac(&key, sts.as_bytes()))
+    (signed, hex::encode(hmac(&key, sts.as_bytes())))
+}
+
+/// The final hex signature over the request.
+pub fn signature(p: &SignParams<'_>) -> String {
+    signed_parts(p).1
 }
 
 /// The complete `Authorization` header value.
 pub fn authorization_header(p: &SignParams<'_>) -> String {
-    let (canonical, signed) = canonical_request(p);
-    let sts = string_to_sign(p.datetime, p.region, p.service, &canonical);
-    let key = signing_key(p.secret_key, p.datetime, p.region, p.service);
-    let sig = hex::encode(hmac(&key, sts.as_bytes()));
+    let (signed, sig) = signed_parts(p);
     format!(
         "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
         p.access_key,

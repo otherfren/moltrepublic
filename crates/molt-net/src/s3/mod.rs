@@ -22,7 +22,7 @@
 pub mod http;
 pub mod sigv4;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
@@ -150,27 +150,36 @@ impl S3Endpoint {
 
     /// The `Host` header value: the port rides along only when it is not the
     /// scheme default (it is part of the signed headers, so it must match
-    /// the wire exactly).
+    /// the wire exactly), and an IPv6 literal gets its brackets back.
     pub fn host_header(&self) -> String {
         let default = match self.scheme {
             S3Scheme::Https => 443,
             S3Scheme::Http => 80,
         };
-        if self.port == default {
-            self.host.clone()
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == default {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 }
 
 /// Best-effort region from an AWS endpoint hostname
 /// (`s3.eu-central-1.amazonaws.com`, the legacy `s3-eu-west-1` dash form,
-/// dualstack included); everything else — MinIO etc. — signs as the
-/// conventional `us-east-1`, which S3-compatible stores accept.
+/// dualstack and the China `.amazonaws.com.cn` partition included);
+/// everything else — MinIO etc. — signs as the conventional `us-east-1`,
+/// which S3-compatible stores accept.
 pub fn infer_region(host: &str) -> String {
     let default = "us-east-1".to_string();
-    let Some(prefix) = host.strip_suffix(".amazonaws.com") else {
+    let Some(prefix) = host
+        .strip_suffix(".amazonaws.com.cn")
+        .or_else(|| host.strip_suffix(".amazonaws.com"))
+    else {
         return default;
     };
     // strip an optional leading "<bucket>." down to the s3 label
@@ -362,21 +371,23 @@ impl S3Client {
 }
 
 /// A rustls config verifying against the public WebPKI (`webpki-roots`).
-/// Same pure-Rust provider posture as the SMP client, and the same alpha-
-/// provider constraint: TLS 1.3 with X25519 (see `smp/tls.rs::pinned_config`
-/// for why offering more makes strict servers abort).
+/// Shares the SMP client's provider posture ([`crate::smp::tls::x25519_provider`]):
+/// pure-Rust rustcrypto, TLS 1.3, X25519. Built once and cached — the root
+/// store holds every Mozilla trust anchor, and `request` is the shared core
+/// the backup upload/download stories will drive per object.
 fn public_tls_config() -> Result<Arc<ClientConfig>, S3Error> {
-    let mut base = rustls_rustcrypto::provider();
-    base.kx_groups
-        .retain(|g| g.name() == rustls::NamedGroup::X25519);
+    static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(cfg) = CFG.get() {
+        return Ok(cfg.clone());
+    }
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(base))
+    let config = ClientConfig::builder_with_provider(Arc::new(crate::smp::tls::x25519_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| S3Error::Tls(format!("rustls provider: {e}")))?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(Arc::new(config))
+    Ok(CFG.get_or_init(|| Arc::new(config)).clone())
 }
 
 #[cfg(test)]
@@ -411,6 +422,14 @@ mod tests {
         assert_eq!(e.scheme, S3Scheme::Http);
         assert_eq!(e.port, 80);
 
+        // IPv6 literal: brackets stripped for dialing, restored in Host
+        let e = S3Endpoint::parse("http://[fd00::1]:9000").expect("v6");
+        assert_eq!(e.host, "fd00::1");
+        assert_eq!(e.port, 9000);
+        assert_eq!(e.host_header(), "[fd00::1]:9000");
+        let e = S3Endpoint::parse("http://[fd00::1]").expect("v6 default port");
+        assert_eq!(e.host_header(), "[fd00::1]");
+
         assert!(S3Endpoint::parse("").is_err());
         assert!(S3Endpoint::parse("ftp://host").is_err());
         assert!(S3Endpoint::parse("https://host:notaport").is_err());
@@ -424,6 +443,7 @@ mod tests {
         assert_eq!(infer_region("s3.dualstack.ap-south-1.amazonaws.com"), "ap-south-1");
         assert_eq!(infer_region("s3.amazonaws.com"), "us-east-1");
         assert_eq!(infer_region("bucket.s3.us-west-2.amazonaws.com"), "us-west-2");
+        assert_eq!(infer_region("s3.cn-north-1.amazonaws.com.cn"), "cn-north-1");
         assert_eq!(infer_region("minio.local"), "us-east-1");
         assert_eq!(infer_region("storage.example.onion"), "us-east-1");
     }

@@ -175,6 +175,25 @@ async fn unreachable_endpoint_is_the_connect_class() {
     );
 }
 
+/// `#[ignore]` (real network): drives the https/WebPKI path end to end —
+/// real DNS, TCP, TLS 1.3 against AWS's certificate chain verified through
+/// webpki-roots + the rustcrypto provider. Bogus credentials on purpose:
+/// reaching the HTTP error class at all proves transport + TLS + signing
+/// were accepted as well-formed; the loopback tests can't cover this.
+/// `cargo test -p molt-net --test s3_probe -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "dials the real s3.amazonaws.com"]
+async fn live_https_probe_reaches_aws_through_webpki_tls() {
+    let err = client_for("https://s3.amazonaws.com")
+        .probe_bucket()
+        .await
+        .expect_err("bogus creds cannot probe successfully");
+    let S3Error::Http { status, hint } = err else {
+        panic!("expected an HTTP-class outcome (transport+TLS ok), got {err:?}");
+    };
+    println!("OK: live AWS answered http {status}: {hint}");
+}
+
 #[tokio::test]
 async fn onion_endpoint_under_direct_dialer_fails_closed() {
     // no Tor configured + .onion endpoint: refused before any DNS/dial
