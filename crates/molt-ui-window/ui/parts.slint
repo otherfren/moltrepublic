@@ -392,7 +392,10 @@ export component ChatRow inherits Rectangle {
     // between the repeater and the card loses the card's preferred height,
     // the card comes up short and the next one paints over the pills. So
     // the row is a transparent container and indents its card itself.
-    in property <bool> indent: false;
+    // Depth 0 = no quote; 1 and 2 alternate between neighboring quote
+    // groups of different targets (LogLine.quote-indent), so stacked
+    // replies to different questions stop lining up as one thread.
+    in property <int> indent-level: 0;
     // the card's height comes from a real padded layout (not from a
     // manually anchored crow + offset): preferred-height of an anchored,
     // width-bound layout mis-measures wrapped content by a few pixels —
@@ -403,8 +406,8 @@ export component ChatRow inherits Rectangle {
     // block (same member in a row = same tone), in a grey of its own —
     // NOT the panel tone the chat sits on
     card := Rectangle {
-    x: root.indent ? 22px : 0px;
-    width: parent.width - (root.indent ? 22px : 0px);
+    x: root.indent-level * 22px;
+    width: parent.width - root.indent-level * 22px;
     height: parent.height;
     // a system line (UI-synthesized governance note in a patch channel)
     // renders quiet: no card chrome, no author, no actions
@@ -418,29 +421,36 @@ export component ChatRow inherits Rectangle {
         padding-top: 7px;
         padding-bottom: 6px;
         spacing: 0px;
-        // quoted message teaser: grey, clickable — jumps to the original
-        // when it is in view (a cross-channel quote has a teaser but no
-        // in-view row to jump to)
+        // quoted message teaser, messenger-style: an accent bar plus the
+        // teaser at body size on a soft accent field — the reply target is
+        // unmissable. Clickable — jumps to the original when it is in view
+        // (a cross-channel quote has a teaser but no in-view row to jump to)
         if root.line.quote-label != "": HorizontalLayout {
             alignment: start;
             Rectangle {
-                height: 18px;
-                border-radius: Theme.win95 ? 0px : 4px;
-                background: qt-ta.has-hover ? Theme.raised : transparent;
+                border-radius: Theme.win95 ? 0px : 6px;
+                background: qt-ta.has-hover ? Theme.raised : Theme.accent-soft;
+                clip: true;
                 HorizontalLayout {
-                    padding-left: 2px;
-                    padding-right: 6px;
-                    spacing: 5px;
+                    padding-right: 10px;
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    spacing: 7px;
+                    Rectangle {
+                        width: 3px;
+                        background: Theme.accent;
+                    }
                     Text {
                         text: "↳";
-                        color: Theme.faint;
-                        font-size: Theme.fs-cap;
+                        color: Theme.accent;
+                        font-size: Theme.fs-body;
+                        font-weight: 700;
                         vertical-alignment: center;
                     }
                     Text {
                         text: root.line.quote-label;
-                        color: Theme.faint;
-                        font-size: Theme.fs-cap;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
                         vertical-alignment: center;
                         overflow: elide;
                     }
@@ -456,7 +466,7 @@ export component ChatRow inherits Rectangle {
             }
         }
         if root.line.quote-label != "": Rectangle {
-            height: 2px;
+            height: 4px;
         }
         // the author is named once per block (with the grey timestamp) —
         // consecutive messages of the same member just append below it
@@ -1078,8 +1088,11 @@ export component ProposalCard inherits Rectangle {
             }
         }
         if root.p.image-op && root.p.proposed != "": HorizontalLayout {
+            // NO alignment:start here: it would size the card to its
+            // preferred width, which is 0 (the explicitly-positioned
+            // pi-row is excluded from it) — a 0-wide card means an
+            // invisible, unclickable TouchArea. Stretch is load-bearing.
             spacing: 8px;
-            alignment: start;
             Text {
                 text: Strings.pc-proposed;
                 color: Theme.faint;

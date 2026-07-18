@@ -2100,6 +2100,9 @@ struct SurfacesBundle {
     /// The chat surface is showing the Archive sub-view — its log pages
     /// at 20 rows (an archive can hold a whole retention half-window).
     chat_archive: bool,
+    /// The archive half holds at least one message right now — the sidebar
+    /// only offers the Archive item then (engine-filtered presence read).
+    archive_exists: bool,
     /// Every committed chain block, newest first (the Chain-History panel).
     chain_rows: Vec<molt_core::ChainBlockView>,
     member: String,
@@ -2413,6 +2416,10 @@ struct LogLineData {
     /// styling, no author, no actions.
     system: bool,
     quote_label: String,
+    /// Reply-indent depth (0 = no quote; 1/2 alternate between NEIGHBORING
+    /// quote groups of different targets, so stacked replies to different
+    /// questions stop reading as one thread) — annotate_chat_log fills it.
+    quote_indent: i32,
     deleted_by: String,
     first: bool,
     own: bool,
@@ -2533,6 +2540,21 @@ async fn push_surfaces(
         Ok(Reply::State(snap)) => Some(snap),
         _ => None,
     };
+    // whether the archive half actually holds messages right now — the
+    // sidebar only offers the Archive item then. Engine-filtered with the
+    // same ReadState the archive pane reads (co-equality, never a
+    // client-side recount of the retention boundary)
+    let archive_exists = match wallet
+        .execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+            view: Some("archive".to_string()),
+        })
+        .await
+    {
+        Ok(Reply::State(snap)) => !snap.applied.is_empty(),
+        _ => false,
+    };
     // the Organization tables ride the same push: the engine's ReadMembers /
     // ReadUploads (the projections the MCP tools of the same name read)
     let members: Vec<MemberRowData> = match wallet.execute(Command::ReadMembers).await {
@@ -2567,7 +2589,7 @@ async fn push_surfaces(
                     .get(..10)
                     .map(|s| format!("{s}…"))
                     .unwrap_or_default(),
-                expires: expires_label(upload_now, u.expires_ts, u.available),
+                expires: expires_label(lang, upload_now, u.expires_ts, u.available),
                 ts: u.ts,
                 bytes: u.size,
                 expires_ts: u.expires_ts,
@@ -2744,6 +2766,7 @@ async fn push_surfaces(
         lang,
         chain_rows,
         chat_archive: chat_view == "archive",
+        archive_exists,
         member,
         threshold_badge,
         surfaces,
@@ -2839,6 +2862,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         quote: l.quote,
                         system: l.system,
                         quote_label: l.quote_label.clone().into(),
+                        quote_indent: l.quote_indent,
                         deleted_by: l.deleted_by.clone().into(),
                         first: l.first,
                         own: l.own,
@@ -2894,6 +2918,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 .map(|sf| {
                     sf.views()
                         .iter()
+                        .filter(|(key, _)| view_visible(key, b.archive_exists, b.chat_archive))
                         .map(|(key, label)| ViewItem {
                             key: (*key).into(),
                             name: view_label(b.lang, key, label).into(),
@@ -3156,6 +3181,7 @@ fn surface_data(
                 quote_id: String::new(),
                 system: false,
                 quote_label: String::new(),
+                quote_indent: 0,
                 deleted_by: String::new(),
                 first: true,
                 own: false,
@@ -3354,6 +3380,7 @@ fn chat_line(lang: i32, m: &ChatMessage, me: &str) -> LogLineData {
         // UI-synthesized governance rows — one flag, no second style
         system: !m.kind.is_user(),
         quote_label: String::new(), // teaser, filled in by annotate_chat_log
+        quote_indent: 0,            // reply depth, filled in by annotate_chat_log
         deleted_by: m.deleted_by.clone().unwrap_or_default(),
         first: true, // author-block start, filled in by annotate_chat_log
         own: m.from == me,
@@ -3417,12 +3444,13 @@ fn charter_columns(text: &str, max: usize) -> Vec<String> {
 /// so the share ages out of the read contract at `expires_ts` (share time +
 /// the org's chat retention window). 0 = unknown age, no deadline; an
 /// unavailable share has nothing left to expire (both "—").
-fn expires_label(now: u64, expires_ts: u64, available: bool) -> String {
+fn expires_label(lang: i32, now: u64, expires_ts: u64, available: bool) -> String {
+    let de = lang == 1;
     if !available || expires_ts == 0 {
         return "—".to_string();
     }
     if expires_ts <= now {
-        return "expired".to_string();
+        return strings_pick(de, "expired", "abgelaufen");
     }
     let left = expires_ts - now;
     if left < 3600 {
@@ -3431,7 +3459,11 @@ fn expires_label(now: u64, expires_ts: u64, available: bool) -> String {
         format!("in {} h", left / 3600)
     } else {
         let d = left / 86_400;
-        format!("in {d} day{}", if d == 1 { "" } else { "s" })
+        if de {
+            format!("in {d} Tag{}", if d == 1 { "" } else { "en" })
+        } else {
+            format!("in {d} day{}", if d == 1 { "" } else { "s" })
+        }
     }
 }
 
@@ -3505,6 +3537,37 @@ fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String, QuoteSrc>
                 }
                 Some(src) => log[i].quote_label = format!("{}: …", src.lead),
                 None => log[i].quote = -1,
+            }
+        }
+    }
+    // the reply indent: consecutive quote rows of the SAME target share one
+    // depth, a neighbor quoting a DIFFERENT target takes the other — so
+    // stacked replies to different questions stop reading as one thread. A
+    // non-quoting row ends the run (the next group starts at depth 1).
+    // Runs AFTER the teaser pass: only rows whose quote actually renders
+    // (quote_label set) may indent.
+    let mut depth = 0;
+    let mut prev_target: Option<String> = None;
+    for line in log.iter_mut() {
+        let target = if line.quote_label.is_empty() {
+            None
+        } else if line.quote_id.is_empty() {
+            // legacy/cross-channel: the teaser is the only stable handle
+            Some(format!("label:{}", line.quote_label))
+        } else {
+            Some(line.quote_id.clone())
+        };
+        match target {
+            Some(t) => {
+                if prev_target.as_deref() != Some(t.as_str()) {
+                    depth = if depth == 1 { 2 } else { 1 };
+                }
+                line.quote_indent = depth;
+                prev_target = Some(t);
+            }
+            None => {
+                depth = 0;
+                prev_target = None;
             }
         }
     }
@@ -3794,6 +3857,7 @@ fn system_line_data(text: String) -> LogLineData {
         quote_id: String::new(),
         system: true,
         quote_label: String::new(),
+        quote_indent: 0,
         deleted_by: String::new(),
         first: false,
         own: false,
@@ -4007,6 +4071,14 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         _ => en,
     }
     .to_string()
+}
+
+/// Sidebar sub-view visibility: the chat Archive item earns its place only
+/// while the archive half actually holds messages — or while the user is
+/// standing in it (never hide the ground under the active selection; it
+/// vanishes once they leave). Every other sub-view is always offered.
+fn view_visible(key: &str, archive_has_rows: bool, viewing_archive: bool) -> bool {
+    key != "archive" || archive_has_rows || viewing_archive
 }
 
 /// The default transition op the GUI uses when proposing on a surface.
@@ -4322,7 +4394,7 @@ lexicon! {
     field_threshold: "Threshold (m)", "Schwelle (m)";
     field_members: "Members (n)", "Mitglieder (n)";
     field_language: "Language", "Sprache";
-    field_theme: "Theme", "Design";
+    field_theme: "Theme", "Erscheinungsbild";
     field_workspace_dir: "Workspace directory", "Workspace-Verzeichnis";
     field_mcp_port: "MCP port", "MCP-Port";
     field_mcp_allow: "Allowed client IPs", "Erlaubte Client-IPs";
@@ -4484,7 +4556,7 @@ lexicon! {
     om_recover_link: "Recovery link", "Recovery-Link";
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
-    rlk_caution: "Share it off-band, over a private channel. It is single-use and dies with this session — after an app restart, mint a fresh one.", "Teile ihn off-band über einen privaten Kanal. Er ist einmalig nutzbar und stirbt mit dieser Sitzung — nach einem Neustart der App einen neuen erstellen.";
+    rlk_caution: "Caution: share this link only over a secret channel. It is single-use and becomes invalid again when this application restarts.", "Achtung, dieser Link sollte nur über einen geheimen Kanal geteilt werden. Er ist einmalig nutzbar und wird nach Neustart dieser Anwendung wieder ungültig.";
     rlk_pending: "Creating the link…", "Link wird erstellt…";
     rlk_pending_hint: "The returning member does not need to be online — a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein — ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
     rlk_failed_mesh: "The link could not be created: this device is not connected to the republic's mesh right now. Close and reopen the republic to reconnect, then try again. The returning member does not need to be online for this.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist gerade nicht mit dem Mesh der Republik verbunden. Schließe die Republik und öffne sie erneut, dann versuche es noch einmal. Das zurückkehrende Mitglied muss dafür nicht online sein.";
@@ -4554,14 +4626,14 @@ lexicon! {
     set_save: "Save", "Speichern";
     set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";
     set_close: "Close", "Schließen";
-    set_path_label: "Writes to", "Schreibt nach";
+    set_path_label: "Config is written to", "Config wird geschrieben nach";
     set_reloaded_note: "config.toml changed on disk — settings reloaded.", "config.toml wurde auf der Platte geändert — Einstellungen neu geladen.";
     set_conflict_note: "config.toml on disk is invalid — the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig — die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
     set_restart_note: "Takes effect after a restart:", "Wirkt erst nach einem Neustart:";
-    set_panel_appearance: "Language & appearance", "Sprache & Design";
-    set_panel_sounds: "Sound alerts", "Sound-Alerts";
+    set_panel_appearance: "Language & appearance", "Sprache & Erscheinungsbild";
+    set_panel_sounds: "Sound alerts", "Benachrichtigungstöne";
     field_sound_message: "New message", "Neue Nachricht";
-    field_sound_vote: "New vote", "Neues Vote";
+    field_sound_vote: "New vote", "Neue Abstimmung";
     sound_off: "off", "aus";
     set_tor_embedded_missing: "\"embedded\" is greyed out: this build was compiled without the embedded-tor feature (in-process Tor). Rebuild with --features embedded-tor, or use a local Tor daemon.", "\"embedded\" ist ausgegraut: dieses Binary wurde ohne das embedded-tor-Feature (In-Prozess-Tor) gebaut. Mit --features embedded-tor neu bauen oder einen lokalen Tor-Daemon nutzen.";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
@@ -4631,6 +4703,7 @@ mod tests {
             quote_id: String::new(),
             system: false,
             quote_label: String::new(),
+            quote_indent: 0,
             deleted_by: String::new(),
             first: true,
             own: false,
@@ -5399,21 +5472,64 @@ mod tests {
 
     #[test]
     fn expires_labels_render_the_retention_deadline() {
-        assert_eq!(expires_label(100, 100 + 13 * 86_400, true), "in 13 days");
-        assert_eq!(expires_label(100, 100 + 86_400, true), "in 1 day");
-        assert_eq!(expires_label(100, 100 + 7_200, true), "in 2 h");
-        assert_eq!(expires_label(100, 100 + 120, true), "in 2 min");
-        assert_eq!(expires_label(500, 100, true), "expired");
+        assert_eq!(expires_label(0, 100, 100 + 13 * 86_400, true), "in 13 days");
+        assert_eq!(expires_label(0, 100, 100 + 86_400, true), "in 1 day");
+        assert_eq!(expires_label(0, 100, 100 + 7_200, true), "in 2 h");
+        assert_eq!(expires_label(0, 100, 100 + 120, true), "in 2 min");
+        assert_eq!(expires_label(0, 500, 100, true), "expired");
         assert_eq!(
-            expires_label(100, 0, true),
+            expires_label(0, 100, 0, true),
             "—",
             "0 = unknown share age, no deadline (the engine keeps it forever)"
         );
         assert_eq!(
-            expires_label(100, 100 + 86_400, false),
+            expires_label(0, 100, 100 + 86_400, false),
             "—",
             "an unavailable share has nothing left to expire"
         );
+        // the cell renders in the active language, like the tables around it
+        assert_eq!(expires_label(1, 100, 100 + 13 * 86_400, true), "in 13 Tagen");
+        assert_eq!(expires_label(1, 100, 100 + 86_400, true), "in 1 Tag");
+        assert_eq!(expires_label(1, 500, 100, true), "abgelaufen");
+    }
+
+    #[test]
+    fn quote_indent_groups_by_target_and_alternates_between_neighbors() {
+        let mut log = vec![
+            line("a", "question 1"),
+            line("b", "reply 1"),
+            line("c", "reply 2"),
+            line("d", "reply to something else"),
+            line("e", "plain"),
+            line("f", "late reply"),
+        ];
+        log[1].quote_id = hex_id(1);
+        log[2].quote_id = hex_id(1);
+        log[3].quote_id = hex_id(2);
+        log[5].quote_id = hex_id(3);
+        let quotes = HashMap::from([
+            (hex_id(1), qsrc("a", "question 1", false)),
+            (hex_id(2), qsrc("x", "question 2", false)),
+            (hex_id(3), qsrc("y", "question 3", false)),
+        ]);
+        annotate_chat_log(&mut log, &quotes);
+        assert_eq!(log[0].quote_indent, 0, "no quote, no indent");
+        assert_eq!(log[1].quote_indent, 1, "a fresh reply group starts at depth 1");
+        assert_eq!(log[2].quote_indent, 1, "same target keeps the depth");
+        assert_eq!(log[3].quote_indent, 2, "a neighboring different target alternates");
+        assert_eq!(log[4].quote_indent, 0, "plain rows sit flush and end the run");
+        assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
+    }
+
+    #[test]
+    fn archive_item_only_shows_while_the_archive_holds_messages() {
+        assert!(!view_visible("archive", false, false), "empty archive: hidden");
+        assert!(view_visible("archive", true, false), "archived messages exist: offered");
+        assert!(
+            view_visible("archive", false, true),
+            "the view the user stands in never vanishes under them"
+        );
+        assert!(view_visible("today", false, false), "other sub-views are always offered");
     }
 
     #[test]

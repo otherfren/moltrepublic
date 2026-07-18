@@ -43,6 +43,88 @@ component FieldLabel inherits VerticalLayout {
     @children
 }
 
+// Settings → General: the two form groups, factored into components so the
+// wide pane can seat them side by side and a narrow pane can stack the
+// SAME content — one set of bindings, two arrangements.
+component LanguageAppearanceGroup inherits DetailGroup {
+    in property <int> lang-index;
+    callback set-language(int);
+    title: Strings.set-panel-appearance;
+    FieldLabel {
+        label: Strings.field-language;
+        AppDropdown {
+            width: 200px;
+            model: ["English", "Deutsch"];
+            current-index: root.lang-index;
+            changed(i) => {
+                root.set-language(i);
+            }
+        }
+    }
+    FieldLabel {
+        label: Strings.field-theme;
+        AppDropdown {
+            width: 200px;
+            model: ["Classic", "Dark", "Brutalism"];
+            current-index <=> Theme.theme-index;
+            changed(i) => {
+                Theme.picked(i);
+            }
+        }
+    }
+}
+
+component SoundAlertsGroup inherits DetailGroup {
+    in-out property <int> message-index;
+    in-out property <int> vote-index;
+    callback test-sound(string);
+    title: Strings.set-panel-sounds;
+    FieldLabel {
+        label: Strings.field-sound-message;
+        HorizontalLayout {
+            spacing: 8px;
+            AppDropdown {
+                width: 200px;
+                model: [Strings.sound-off, "Bell", "Chime", "Pop"];
+                current-index <=> root.message-index;
+            }
+            if root.message-index > 0: AppButton {
+                width: 32px;
+                height: 32px;
+                pad: 0px;
+                label: "🔊";
+                clicked => {
+                    root.test-sound(
+                        root.message-index == 1 ? "bell"
+                        : (root.message-index == 2 ? "chime" : "pop"));
+                }
+            }
+        }
+    }
+    FieldLabel {
+        label: Strings.field-sound-vote;
+        HorizontalLayout {
+            spacing: 8px;
+            AppDropdown {
+                width: 200px;
+                model: [Strings.sound-off, "Bell", "Chime", "Pop"];
+                current-index <=> root.vote-index;
+            }
+            if root.vote-index > 0: AppButton {
+                width: 32px;
+                height: 32px;
+                pad: 0px;
+                label: "🔊";
+                clicked => {
+                    root.test-sound(
+                        root.vote-index == 1 ? "bell"
+                        : (root.vote-index == 2 ? "chime" : "pop"));
+                }
+            }
+        }
+    }
+}
+
 // The paged lists' footer: ‹ Page x of y › — the caller shows it only when
 // the list exceeds one page (count > 20); the actual paging (slice, clamp
 // on shrink) runs in Rust, this row merely steps and displays the echo.
@@ -3024,10 +3106,11 @@ export component AppWindow inherits Window {
                                         for l[i] in s.log: ChatRow {
                                                 line: l;
                                                 index: i;
-                                                // replies indent behind their quote
-                                                // (a cross-channel quote has a
-                                                // teaser but no in-view row)
-                                                indent: l.quote-label != "";
+                                                // replies indent behind their quote;
+                                                // neighboring reply groups of
+                                                // different targets alternate depth
+                                                // (Rust-side annotate_chat_log)
+                                                indent-level: l.quote-indent;
                                                 scroll-request: root.chat-scroll-to;
                                                 // feedback honesty: rows without a
                                                 // real id (legacy entries, system
@@ -4801,7 +4884,7 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                 }
-                Rectangle {
+                set-pane := Rectangle {
                     vertical-stretch: 1;
                     background: Theme.panel;
                     border-radius: Theme.radius;
@@ -4813,76 +4896,36 @@ export component AppWindow inherits Window {
                         if root.set-tab == 0: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            DetailGroup {
-                                title: Strings.set-panel-appearance;
-                                FieldLabel {
-                                    label: Strings.field-language;
-                                    AppDropdown {
-                                        width: 200px;
-                                        model: ["English", "Deutsch"];
-                                        current-index: root.lang-index;
-                                        changed(i) => {
-                                            root.set-language(i);
-                                        }
+                            // the two groups sit side by side when the pane
+                            // offers the room, stacked on a narrow window
+                            if set-pane.width >= 560px: HorizontalLayout {
+                                spacing: 14px;
+                                alignment: start;
+                                LanguageAppearanceGroup {
+                                    lang-index: root.lang-index;
+                                    set-language(i) => {
+                                        root.set-language(i);
                                     }
                                 }
-                                FieldLabel {
-                                    label: Strings.field-theme;
-                                    AppDropdown {
-                                        width: 200px;
-                                        model: ["Classic", "Dark", "Brutalism"];
-                                        current-index <=> Theme.theme-index;
-                                        changed(i) => {
-                                            Theme.picked(i);
-                                        }
+                                SoundAlertsGroup {
+                                    message-index <=> root.cfg-sound-message-index;
+                                    vote-index <=> root.cfg-sound-vote-index;
+                                    test-sound(s) => {
+                                        root.test-sound(s);
                                     }
                                 }
                             }
-                            DetailGroup {
-                                title: Strings.set-panel-sounds;
-                                FieldLabel {
-                                    label: Strings.field-sound-message;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        AppDropdown {
-                                            width: 200px;
-                                            model: [Strings.sound-off, "Bell", "Chime", "Pop"];
-                                            current-index <=> root.cfg-sound-message-index;
-                                        }
-                                        if root.cfg-sound-message-index > 0: AppButton {
-                                            width: 32px;
-                                            height: 32px;
-                                            pad: 0px;
-                                            label: "🔊";
-                                            clicked => {
-                                                root.test-sound(
-                                                    root.cfg-sound-message-index == 1 ? "bell"
-                                                    : (root.cfg-sound-message-index == 2 ? "chime" : "pop"));
-                                            }
-                                        }
-                                    }
+                            if set-pane.width < 560px: LanguageAppearanceGroup {
+                                lang-index: root.lang-index;
+                                set-language(i) => {
+                                    root.set-language(i);
                                 }
-                                FieldLabel {
-                                    label: Strings.field-sound-vote;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        AppDropdown {
-                                            width: 200px;
-                                            model: [Strings.sound-off, "Bell", "Chime", "Pop"];
-                                            current-index <=> root.cfg-sound-vote-index;
-                                        }
-                                        if root.cfg-sound-vote-index > 0: AppButton {
-                                            width: 32px;
-                                            height: 32px;
-                                            pad: 0px;
-                                            label: "🔊";
-                                            clicked => {
-                                                root.test-sound(
-                                                    root.cfg-sound-vote-index == 1 ? "bell"
-                                                    : (root.cfg-sound-vote-index == 2 ? "chime" : "pop"));
-                                            }
-                                        }
-                                    }
+                            }
+                            if set-pane.width < 560px: SoundAlertsGroup {
+                                message-index <=> root.cfg-sound-message-index;
+                                vote-index <=> root.cfg-sound-vote-index;
+                                test-sound(s) => {
+                                    root.test-sound(s);
                                 }
                             }
                         }
@@ -5018,12 +5061,35 @@ export component AppWindow inherits Window {
                                 height: 1px;
                                 background: Theme.line;
                             }
-                            FieldLabel {
+                            // compact two-row credential block: endpoint with
+                            // the test button beside it, then the three keys
+                            // sharing one row — the mapping table below keeps
+                            // the height this saves
+                            HorizontalLayout {
                                 vertical-stretch: 0;
-                                label: Strings.field-s3-endpoint;
-                                AppField {
-                                    text <=> root.cfg-s3-endpoint;
-                                    placeholder: "https://s3.example.org · http://….onion";
+                                spacing: 12px;
+                                FieldLabel {
+                                    horizontal-stretch: 1;
+                                    label: Strings.field-s3-endpoint;
+                                    AppField {
+                                        text <=> root.cfg-s3-endpoint;
+                                        placeholder: "https://s3.example.org · http://….onion";
+                                    }
+                                }
+                                // bottom-aligned so the button lines up with
+                                // the endpoint field, not its label
+                                VerticalLayout {
+                                    alignment: end;
+                                    AppButton {
+                                        height: 38px;
+                                        icon: @image-url("assets/cloud.svg");
+                                        icon-set: true;
+                                        label: Strings.set-s3-test;
+                                        enabled: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
+                                        clicked => {
+                                            root.show-toast(Strings.toast-s3-ok);
+                                        }
+                                    }
                                 }
                             }
                             HorizontalLayout {
@@ -5045,31 +5111,12 @@ export component AppWindow inherits Window {
                                         text <=> root.cfg-s3-secret;
                                     }
                                 }
-                            }
-                            HorizontalLayout {
-                                vertical-stretch: 0;
-                                spacing: 12px;
                                 FieldLabel {
                                     label: Strings.field-s3-bucket;
                                     horizontal-stretch: 1;
                                     AppField {
                                         text <=> root.cfg-s3-bucket;
                                         placeholder: "media-archive";
-                                    }
-                                }
-                                // bottom-aligned so the button lines up with
-                                // the bucket field, not its label
-                                VerticalLayout {
-                                    alignment: end;
-                                    AppButton {
-                                        height: 38px;
-                                        icon: @image-url("assets/cloud.svg");
-                                        icon-set: true;
-                                        label: Strings.set-s3-test;
-                                        enabled: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
-                                        clicked => {
-                                            root.show-toast(Strings.toast-s3-ok);
-                                        }
                                     }
                                 }
                             }
@@ -5528,20 +5575,29 @@ export component AppWindow inherits Window {
                         if root.set-tab != 2: Rectangle {
                             vertical-stretch: 1;
                         }
-                        // the full config.toml path: directory greyed, the
-                        // file name itself in text color
-                        HorizontalLayout {
-                            alignment: start;
-                            Text {
-                                text: "\{Strings.set-path-label}:  \{root.config-dir}";
-                                color: Theme.faint;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
-                            }
-                            Text {
-                                text: root.config-file;
-                                color: Theme.text;
-                                font-size: Theme.fs-cap;
+                        // the full config.toml path in its own panel, set
+                        // apart from the fields above: directory greyed,
+                        // the file name itself in text color
+                        Rectangle {
+                            vertical-stretch: 0;
+                            background: Theme.zebra;
+                            border-radius: Theme.win95 ? 0px : 6px;
+                            border-width: Theme.border-w;
+                            border-color: Theme.line;
+                            HorizontalLayout {
+                                padding: 8px;
+                                alignment: start;
+                                Text {
+                                    text: "\{Strings.set-path-label}:  \{root.config-dir}";
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: root.config-file;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-cap;
+                                }
                             }
                         }
                         // persistent (not a toast): these values only take
