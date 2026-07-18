@@ -673,7 +673,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_restore_start(move |way, target| {
+        ui.on_restore_start(move |way, target, secret| {
             issue(
                 &rt,
                 &w,
@@ -681,6 +681,10 @@ pub fn run_app(
                 Command::RestoreStart {
                     way: way.to_string(),
                     target: target.to_string(),
+                    secret: secret.to_string(),
+                    // the GUI's default collision policy is the safe refuse
+                    // (design P2); an explicit replace goes through MCP
+                    replace: false,
                 },
             );
         });
@@ -1668,11 +1672,16 @@ fn orphan_remote_label(o: &molt_core::BackupOrphan) -> String {
     if !o.name.is_empty() {
         return o.name.clone();
     }
-    // a real orphan id is 64 ASCII hex chars (parse_backup_key pins it), so
-    // byte slicing is safe — same idiom as the checksum cell
-    match o.id.get(..12) {
-        Some(short) if o.id.len() > 12 => format!("{short}…"),
-        _ => o.id.clone(),
+    short_hex_id(&o.id)
+}
+
+/// Shorten a 64-hex workspace-id pseudonym for a table cell. A real id is
+/// 64 ASCII hex chars (`parse_backup_key` pins it), so byte slicing is
+/// safe — same idiom as the checksum cell.
+fn short_hex_id(id: &str) -> String {
+    match id.get(..12) {
+        Some(short) if id.len() > 12 => format!("{short}…"),
+        _ => id.to_string(),
     }
 }
 
@@ -1695,7 +1704,18 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         .map(|w| BackupRow {
             id: w.id.as_str().into(),
             local: w.name.as_str().into(),
-            remote: if w.s3 { w.name.as_str() } else { "" }.into(),
+            // the bucket-side cell is honest: the last backup attempt's
+            // real failure, else what the last real listing saw in the
+            // bucket (copies × the id pseudonym — the bucket stores no
+            // names), else nothing. The auto-toggle alone claims nothing.
+            remote: if !w.backup_error.is_empty() {
+                w.backup_error.clone()
+            } else if w.backup_copies > 0 {
+                format!("{}\u{00d7} \u{00b7} {}", w.backup_copies, short_hex_id(&w.id))
+            } else {
+                String::new()
+            }
+            .into(),
             has_local: true,
             auto: w.s3,
             size: size_label(w.size_kib).into(),
@@ -2158,6 +2178,17 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
                 ui.set_rv_error("".into());
             }
             RecoverNotice::None => {}
+        }
+        // the same edge-triggered channel carries the backup/restore
+        // honesty notices (story 12/13): toast them once per NEW notice
+        let s = ui.global::<Strings>();
+        if sv.notice == "detached" {
+            // §4.4: knowledge restored, membership not — say exactly that
+            ui.invoke_show_toast(s.get_toast_detached());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
+            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_failed()).into());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
+            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_prune()).into());
         }
     }
     // persistent restart warning: which changed keys only apply on restart
@@ -4841,24 +4872,34 @@ lexicon! {
     rw_title: "Restore", "Wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
-    rw_seed_hint: "Needed for every restore path — all keys derive from this phrase.", "Für jeden Weg erforderlich — alle Schlüssel werden aus dieser Phrase abgeleitet.";
+    rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
     rw_continue: "Continue", "Weiter";
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
     rw_peer_hint: "Rejoins via another member — paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei — füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
-    rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen.";
+    rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
     rw_s3_ok: "reachable", "erreichbar";
+    // honest endpoint status: "reachable" is only claimed after a REAL
+    // probe (session.s3_test == "ok"); before that the state is untested
+    rw_s3_untested: "not tested — use Test in the backup settings", "ungetestet — Test in den Backup-Einstellungen";
+    rw_s3_target_ph: "workspace id from the backup table · or molt/<id>/<ts>.molt.enc", "Workspace-ID aus der Backup-Tabelle · oder molt/<id>/<ts>.molt.enc";
     rw_via_file: "Manual restore", "Manuelles Restore";
     rw_file_hint: "Restores from an encrypted .molt.enc file backup.", "Stellt aus einem verschlüsselten .molt.enc-Datei-Backup wieder her.";
     rw_choose: "Choose file…", "Datei wählen…";
     rw_no_file: "No backup file chosen.", "Keine Backup-Datei gewählt.";
     rw_file_title: "Choose encrypted backup", "Verschlüsseltes Backup wählen";
-    rw_file_body: "Path of the encrypted workspace blob (.molt.enc). (Mock — nothing is read.)", "Pfad des verschlüsselten Workspace-Blobs (.molt.enc). (Mock — es wird nichts gelesen.)";
+    rw_file_body: "Path of the encrypted workspace blob (.molt.enc). It is read, decrypted with your secret, and its chain is verified before anything is created.", "Pfad des verschlüsselten Workspace-Blobs (.molt.enc). Er wird gelesen, mit deinem Geheimnis entschlüsselt, und die Chain wird vor dem Anlegen verifiziert.";
     rw_file_pick: "Select", "Auswählen";
     rw_log_title: "Live details", "Live-Details";
     rw_finish: "Finish", "Fertigstellen";
-    rw_failed: "Failed — timeout while connecting", "Fehlgeschlagen — Timeout beim Verbinden";
+    rw_failed: "Failed — see the live details", "Fehlgeschlagen — siehe Live-Details";
+    // the honest §4.4 boundary: knowledge vs membership
+    // origin-neutral on purpose: the engine derives "detached" from the
+    // directory's state (no group key, no mesh), not from HOW it got there
+    toast_detached: "Workspace is detached — knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached — Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
+    toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
+    toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     rw_ph1: "Connecting…", "Verbinde…";
     rw_ph2: "Fetching encrypted data…", "Lade verschlüsselte Daten…";
     rw_ph3: "Decrypting & verifying…", "Entschlüssele & prüfe…";

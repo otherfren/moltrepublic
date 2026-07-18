@@ -130,6 +130,148 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     parse_response(&buf, head_only)
 }
 
+/// Cap on a streamed download's response HEAD (status + headers).
+const MAX_DOWNLOAD_HEAD: usize = 64 * 1024;
+
+/// Idle deadline for a streamed download: each read must make progress
+/// within this window (a whole-exchange deadline would break large
+/// objects over slow circuits; a stalled peer must still not hang us).
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Send one `GET` and **stream** a 2xx body into `out` (the object
+/// download path — bodies larger than [`MAX_RESPONSE`] never sit in
+/// memory). Returns `(status, bytes streamed)`; for a non-2xx status the
+/// (small, buffered) error body is discarded and `(status, 0)` returned so
+/// the caller maps it to its honest class. A 2xx body must be framed by
+/// `Content-Length` (S3 always does; chunked/close-delimited downloads are
+/// refused — truncation would be undetectable), a declared length beyond
+/// `max_bytes` is refused before a byte is written, and EOF before the
+/// declared length is a hard error.
+pub async fn roundtrip_download<S, W>(
+    stream: &mut S,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    out: &mut W,
+    max_bytes: u64,
+    progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+) -> Result<(u16, u64), S3Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    // --- request (no body) ---
+    let mut req = format!("GET {path_and_query} HTTP/1.1\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    let write = async {
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| S3Error::Protocol(format!("http write: {e}")))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))
+    };
+    timeout(DOWNLOAD_IDLE_TIMEOUT, write)
+        .await
+        .map_err(|_| S3Error::Protocol("http write timed out".to_string()))??;
+
+    // --- head: read until \r\n\r\n ---
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let (status, resp_headers, body_start) = loop {
+        if let Some(parsed) = parse_head(&buf) {
+            break parsed;
+        }
+        if buf.len() > MAX_DOWNLOAD_HEAD {
+            return Err(S3Error::Protocol("http response head exceeds 64 KiB".to_string()));
+        }
+        let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
+            .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
+        if n == 0 {
+            return Err(S3Error::Protocol(
+                "http response head is incomplete or malformed".to_string(),
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+
+    if !(200..=299).contains(&status) {
+        // error bodies are small; drain them bounded and discard
+        let mut drained = buf.len();
+        loop {
+            let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
+                .unwrap_or(0);
+            if n == 0 {
+                return Ok((status, 0));
+            }
+            drained += n;
+            if drained > MAX_RESPONSE {
+                return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
+            }
+        }
+    }
+
+    // --- 2xx body: Content-Length-framed streaming ---
+    if is_chunked(&resp_headers) {
+        return Err(S3Error::Protocol(
+            "chunked download body is not supported (no Content-Length)".to_string(),
+        ));
+    }
+    let Some(total) = content_length(&resp_headers) else {
+        return Err(S3Error::Protocol(
+            "download without a Content-Length — truncation would be undetectable".to_string(),
+        ));
+    };
+    let total = u64::try_from(total).unwrap_or(u64::MAX);
+    if total > max_bytes {
+        return Err(S3Error::Protocol(format!(
+            "object is {total} bytes — beyond the {max_bytes}-byte cap"
+        )));
+    }
+    let mut written: u64 = 0;
+    // whatever body bytes arrived with the head go out first
+    let leftover = &buf[body_start..];
+    let take = usize::try_from(total.min(u64::try_from(leftover.len()).unwrap_or(u64::MAX)))
+        .unwrap_or(leftover.len());
+    if take > 0 {
+        out.write_all(&leftover[..take])
+            .await
+            .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+        written += u64::try_from(take).unwrap_or(0);
+        progress(written, Some(total));
+    }
+    while written < total {
+        let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
+            .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
+        if n == 0 {
+            return Err(S3Error::Protocol(format!(
+                "http body was truncated ({written} of {total} bytes)"
+            )));
+        }
+        let remaining = usize::try_from(total - written).unwrap_or(usize::MAX);
+        let use_n = n.min(remaining);
+        out.write_all(&chunk[..use_n])
+            .await
+            .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+        written += u64::try_from(use_n).unwrap_or(0);
+        progress(written, Some(total));
+    }
+    out.flush()
+        .await
+        .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+    Ok((status, written))
+}
+
 /// The index just past the head's `\r\n\r\n`, once fully received.
 fn head_end(raw: &[u8]) -> Option<usize> {
     raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)

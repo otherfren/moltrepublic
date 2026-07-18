@@ -493,8 +493,9 @@ export component AppWindow inherits Window {
     property <string> decrypt-name;
     property <string> decrypt-phrase;
     callback close-workspace();
-    // restore verbs (engine-backed; the engine ticks progress + log)
-    callback restore-start(string, string);
+    // restore verbs (engine-backed: real fetch + decrypt + chain-verify;
+    // args: way, target, secret — the recovery phrase / export passphrase)
+    callback restore-start(string, string, string);
     callback restore-cancel();
     callback restore-finish();
     // founding verbs (engine-backed; the engine ticks progress + log and
@@ -767,6 +768,9 @@ export component AppWindow inherits Window {
     // restore: chosen backup file + picker modal (continues gate themselves
     // on the inputs, so there are no attempted-validation flags)
     property <string> rw-file;
+    // s3 way: WHICH backup — the workspace-id pseudonym from the settings
+    // backup table, or a full molt/<id>/<ts>.molt.enc object key
+    property <string> rw-s3-target;
     // restore lifecycle, mirrored from the engine session (the engine ticks
     // the progress and the live log; the GUI only renders and sends verbs):
     // step 0 = pick a way in, 1 = run view; outcome 0 = running, 1 = ok, 2 = failed
@@ -775,7 +779,7 @@ export component AppWindow inherits Window {
     in property <string> rw-target;
     in property <float> rw-progress: 0.0;
     in property <int> rw-outcome: 0;
-    // true while the mock restore is in flight — locks every escape hatch
+    // true while the restore is in flight — locks every escape hatch
     // (header ×, back, chrome controls; Rust blocks the window close too)
     out property <bool> restore-running: root.rw-step == 1 && root.rw-outcome == 0;
     // any engine run in flight (restore / founding / join): one lock for the
@@ -2829,9 +2833,9 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- restore from backup / seed (mock) ----
             // ---- restore: the recovery phrase on top, then three ways in,
-            // each with its own continue button ----
+            // each with its own continue button (peer-recovery + the real
+            // blob restore: fetch, decrypt, chain-verify, materialize) ----
             if root.screen == AppScreen.restore: VerticalLayout {
                 padding: 24px;
                 padding-left: 16px;
@@ -2984,19 +2988,30 @@ export component AppWindow inherits Window {
                     title: Strings.rw-via-s3;
                     hint: Strings.rw-s3-hint;
                     icon: @image-url("assets/cloud.svg");
+                    VerticalLayout {
+                    spacing: 8px;
                     HorizontalLayout {
                         spacing: 8px;
-                        // the currently configured S3 endpoint + (mock) reachability
+                        // the configured endpoint with its HONEST state: green
+                        // only after a real probe succeeded (settings "Test"),
+                        // red on a real probe failure, neutral when untested
                         Rectangle {
                             width: 9px;
                             height: 9px;
                             border-radius: 4.5px;
                             y: (parent.height - self.height) / 2;
-                            background: root.cfg-s3-endpoint == "" ? Theme.warn : Theme.good;
+                            background: root.cfg-s3-endpoint == "" ? Theme.warn
+                                : (root.cfg-s3-test == "ok" ? Theme.good
+                                : (root.cfg-s3-test == "" || root.cfg-s3-test == "testing" ? Theme.dim : Theme.bad));
                         }
                         Text {
-                            text: root.cfg-s3-endpoint == "" ? Strings.rw-s3-none : "\{root.cfg-s3-endpoint} · \{Strings.rw-s3-ok}";
-                            color: root.cfg-s3-endpoint == "" ? Theme.warn : Theme.good;
+                            text: root.cfg-s3-endpoint == "" ? Strings.rw-s3-none
+                                : (root.cfg-s3-test == "ok" ? "\{root.cfg-s3-endpoint} · \{Strings.rw-s3-ok}"
+                                : (root.cfg-s3-test == "" || root.cfg-s3-test == "testing" ? "\{root.cfg-s3-endpoint} · \{Strings.rw-s3-untested}"
+                                : "\{root.cfg-s3-endpoint} · \{root.cfg-s3-test}"));
+                            color: root.cfg-s3-endpoint == "" ? Theme.warn
+                                : (root.cfg-s3-test == "ok" ? Theme.good
+                                : (root.cfg-s3-test == "" || root.cfg-s3-test == "testing" ? Theme.dim : Theme.bad));
                             font-size: Theme.fs-body;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
@@ -3014,15 +3029,26 @@ export component AppWindow inherits Window {
                                 root.navigate(AppScreen.settings);
                             }
                         }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        // which backup: the id pseudonym from the backup
+                        // table (newest object), or a full object key
+                        AppField {
+                            text <=> root.rw-s3-target;
+                            placeholder: Strings.rw-s3-target-ph;
+                            horizontal-stretch: 1;
+                        }
                         AppButton {
                             height: 38px;
                             primary: true;
-                            enabled: root.rw-seed != "" && root.cfg-s3-endpoint != "";
+                            enabled: root.rw-seed != "" && root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
                             label: Strings.rw-continue;
                             clicked => {
-                                root.restore-start("s3", root.cfg-s3-endpoint);
+                                root.restore-start("s3", root.rw-s3-target, root.rw-seed);
                             }
                         }
+                    }
                     }
                 }
 
@@ -3092,7 +3118,7 @@ export component AppWindow inherits Window {
                             enabled: root.rw-seed != "" && root.rw-file != "";
                             label: Strings.rw-continue;
                             clicked => {
-                                root.restore-start("file", root.rw-file);
+                                root.restore-start("file", root.rw-file, root.rw-seed);
                             }
                         }
                     }

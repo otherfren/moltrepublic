@@ -396,8 +396,28 @@ impl State {
                 .collect();
             self.session.backup_orphans =
                 molt_core::backup_orphans_from_listing(&objects, &local_ids, crate::now_secs());
+            // reconcile the LOCAL rows' bucket-side cells with the real
+            // listing: how many backup copies of each local workspace the
+            // bucket actually holds (0 = none seen — never invented)
+            for ws in &mut self.session.workspaces {
+                ws.backup_copies = u32::try_from(
+                    objects
+                        .iter()
+                        .filter(|o| {
+                            molt_core::parse_backup_key(&o.key)
+                                .is_some_and(|(id, _)| id == ws.id)
+                        })
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
+            }
         } else {
+            // a failed listing knows nothing about the bucket — no rows,
+            // no per-workspace copy counts
             self.session.backup_orphans.clear();
+            for ws in &mut self.session.workspaces {
+                ws.backup_copies = 0;
+            }
         }
         self.session.s3_list = result;
         self.emit_session(SessionScope::Full);
@@ -555,7 +575,22 @@ impl State {
             self.ensure_demo_net();
         }
         self.session.screen = Screen::Main;
-        self.session.notice = String::new();
+        // the honest DETACHED state (backup_restore_design.md §4.4): an
+        // imported workspace carries a verified chain but deliberately NO
+        // live crypto — no MLS snapshot, no mesh links, no queue creds
+        // (never exported, §3.3). Reading works; the mesh does not come up;
+        // membership comes back via the recovery ritual, and the notice
+        // says exactly that instead of pretending a healthy mesh.
+        self.session.notice = if self.persist
+            && self.chain_head.is_some()
+            && transport_state.mls.is_none()
+            && transport_state.mesh.is_empty()
+            && transport_state.smp_queues.is_none()
+        {
+            "detached".to_string()
+        } else {
+            String::new()
+        };
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1086,11 +1121,11 @@ impl State {
             return Err(MoltError::UnknownWorkspace(id));
         };
         ws.s3 = enabled;
-        if enabled {
-            // enabling runs a first backup right away (the uploader itself
-            // is milestone S5; the stamp keeps list and prefs consistent)
-            ws.last_backup_min = 0;
-        }
+        // honest stamps: enabling persists the pref and nothing else — the
+        // next BackupTick runs a real first upload, and last_backup moves
+        // ONLY on NetBackupDone. A stale failure note from the previous
+        // toggle state no longer describes anything.
+        ws.backup_error = String::new();
         if self.persist {
             self.persist_backup_pref(&id, enabled);
         }
@@ -1107,9 +1142,6 @@ impl State {
         if let Some(a) = &mut self.active {
             if a.id == id {
                 a.prefs.s3_backup = enabled;
-                if enabled {
-                    a.prefs.last_backup = Some(crate::now_secs());
-                }
                 a.handle.set_prefs(a.prefs.clone());
                 return;
             }
@@ -1123,9 +1155,6 @@ impl State {
         };
         let mut prefs = molt_storage::read_prefs(&dir);
         prefs.s3_backup = enabled;
-        if enabled {
-            prefs.last_backup = Some(crate::now_secs());
-        }
         if let Err(e) = molt_storage::write_prefs(&dir, &prefs) {
             tracing::warn!(error = %e, "persisting backup pref failed");
             self.session.notice = "storage-failed".to_string();

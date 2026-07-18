@@ -47,6 +47,7 @@ pub mod sealing;
 pub use sealing::{is_sealed, seal_at_rest, unseal_at_rest};
 
 pub mod export;
+pub mod import;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -974,13 +975,7 @@ impl OpenedWorkspace {
     /// content discarded — this file must never accrete history (from T2
     /// it holds ratchet state whose deletion IS forward secrecy).
     pub fn write_transport_state(&self, state: &TransportState) -> Result<(), StorageError> {
-        let mut state = state.clone();
-        state.version = TRANSPORT_STATE_VERSION;
-        let plaintext = serde_json::to_vec(&state)
-            .map_err(|e| StorageError::Corrupt(format!("encoding transport.state: {e}")))?;
-        let frame =
-            encode_frame(&self.transport_key(), &self.id, TRANSPORT_SEGMENT, 0, &plaintext)?;
-        write_atomic(&self.dir, "transport.state", &frame, true)
+        write_transport_state_at(&self.dir, &self.key, &self.id, state)
     }
 
     /// Read `chain.state`: the republic's persistent commit-block chain
@@ -1104,6 +1099,26 @@ impl OpenedWorkspace {
         }
         Ok(out)
     }
+}
+
+/// Write a `transport.state` for a workspace directory that is not (yet)
+/// open — shared by [`OpenedWorkspace::write_transport_state`] and the
+/// import commit (which writes the fresh minimal identity-only state into
+/// its staging dir before the rename). Same framing, same sub-key
+/// derivation, atomic via `tmp/`, mode 0600.
+fn write_transport_state_at(
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    state: &TransportState,
+) -> Result<(), StorageError> {
+    let mut state = state.clone();
+    state.version = TRANSPORT_STATE_VERSION;
+    let plaintext = serde_json::to_vec(&state)
+        .map_err(|e| StorageError::Corrupt(format!("encoding transport.state: {e}")))?;
+    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
+    let frame = encode_frame(&transport_key, id, TRANSPORT_SEGMENT, 0, &plaintext)?;
+    write_atomic(dir, "transport.state", &frame, true)
 }
 
 /// `000042.mlog`-style segment file name.
@@ -1491,6 +1506,9 @@ impl ScanEntry {
             s3: self.prefs.s3_backup,
             size_kib: u32::try_from(self.size_kib).unwrap_or(u32::MAX),
             last_backup_min,
+            // bucket-side facts appear only from a real listing/attempt
+            backup_copies: 0,
+            backup_error: String::new(),
             seed: String::new(),
             // the manifest carries no network label — the caller stamps the
             // effective global setting (`molt_core::effective_net_label`);

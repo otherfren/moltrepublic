@@ -846,7 +846,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_workspace_backup",
             command: "set_workspace_backup",
-            description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml; enabling stamps a first backup).",
+            description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml). Enabling only persists the pref — the backup ticker runs the real first upload on its next pass, and the last-backup stamp moves ONLY on a confirmed upload (never on enable). Failures land honestly in the workspace entry's backup_error.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -858,6 +858,19 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::SetWorkspaceBackup {
                 id: str_arg(args, "id")?,
                 enabled: bool_arg(args, "enabled")?,
+            }),
+        },
+        ToolDef {
+            name: "backup_now",
+            command: "backup_now",
+            description: "Run one workspace's S3 backup NOW (same task as the automatic ticker, interval ignored): builds the crash-consistent encrypted molt-export-v1 blob in workspace key mode (restorable from the recovery phrase + workspace id — no passphrase involved) and uploads it to the configured bucket over the configured transport (Tor when enabled, fail-closed), then prunes copies beyond s3_keep_copies. Async kickoff — the honest outcome lands in the workspace entry (last_backup stamp only on a confirmed upload; backup_error otherwise). Refused for sealed-at-rest workspaces (no key material is accessible).",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "the workspace id from read_session" } },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::BackupNow {
+                id: str_arg(args, "id")?,
             }),
         },
         ToolDef {
@@ -916,31 +929,35 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "restore_start",
             command: "restore_start",
-            description: "Begin the (mock) restore from a backup. The engine ticks progress and a live log by itself; read_session shows both. Implausible targets fail (~45%). Rejoining via another member is not a restore way — that is the recovery ritual (recover_start).",
+            description: "Begin a REAL restore from an encrypted molt-export-v1 backup blob. way=file reads a *.molt.enc file; way=s3 downloads from the CONFIGURED bucket (saved settings, Tor-capable fail-closed transport) — target is then the workspace-id pseudonym from the backup table (the newest object is used) or a full molt/<id>/<ts>.molt.enc object key. The blob is decrypted and staged off the actor, then the engine HARD-VERIFIES the threshold-signed chain before anything materializes (an unverifiable chain restores nothing). Progress and log lines in read_session's restore state report only what actually happened. The restored workspace opens DETACHED: knowledge (history, verified chain, prefs) is restored, live membership (MLS group, mesh) is NOT — rejoining the live republic is the recovery ritual (recover_start). Same-id collision refuses unless replace=true (which moves the existing dir to the recoverable trash first).",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "way": { "type": "string", "enum": ["s3", "file"] },
-                    "target": { "type": "string", "description": "http(s) S3 URL or a *.molt.enc path" }
+                    "target": { "type": "string", "description": "file way: the *.molt.enc path; s3 way: the 64-hex workspace id (newest backup) or a full molt/<id>/<ts>.molt.enc object key" },
+                    "secret": { "type": "string", "description": "the blob's secret — the recovery phrase (24 words) for automatic S3 backups, the export passphrase for manual file exports" },
+                    "replace": { "type": "boolean", "description": "same-id collision policy: true trashes the existing local workspace first (recoverable 30 days); default false refuses" }
                 },
-                "required": ["way", "target"]
+                "required": ["way", "target", "secret"]
             }),
             build: |args| Ok(Command::RestoreStart {
                 way: str_arg(args, "way")?,
                 target: str_arg(args, "target")?,
+                secret: str_arg(args, "secret")?,
+                replace: args.get("replace").and_then(Value::as_bool).unwrap_or(false),
             }),
         },
         ToolDef {
             name: "restore_cancel",
             command: "restore_cancel",
-            description: "Abandon the restore and return to the choice screen.",
+            description: "Abandon the restore and return to the choice screen: the in-flight download/staging task is aborted and the staging removed — nothing partial stays behind.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::RestoreCancel),
         },
         ToolDef {
             name: "restore_finish",
             command: "restore_finish",
-            description: "Finish a successful restore: the restored workspace becomes active, straight to the main screen.",
+            description: "Finish a successful restore: open the restored workspace — DETACHED (knowledge restored, membership not; the session notice says so) — straight to the main screen.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::RestoreFinish),
         },
@@ -1130,10 +1147,27 @@ mod tests {
         // net_export_done / net_export_failed are the off-actor export task
         // reporting its real outcome (export_workspace is the tool; an agent
         // must not be able to forge an export success or failure).
-        const INTERNAL: [&str; 36] = [
+        // backup_tick is the backup ticker's own heartbeat; net_backup_done /
+        // net_backup_failed are the off-actor backup task reporting its real
+        // outcome (backup_now / set_workspace_backup are the tools; an agent
+        // must not be able to forge a backup stamp or failure).
+        // net_restore_progress / net_restore_staged / net_restore_failed are
+        // the off-actor restore task reporting real progress and its staged/
+        // failed outcome (restore_start is the tool; the staged blob itself
+        // rides an engine-internal slot and the HANDLER re-verifies the
+        // chain, so even a forged internal command cannot materialize an
+        // unverified workspace). RestoreTick is gone: there is no simulated
+        // restore progress anymore.
+        const INTERNAL: [&str; 41] = [
             "net_test_s3_result",
             "net_presence_tick",
             "net_list_backups_result",
+            "backup_tick",
+            "net_backup_done",
+            "net_backup_failed",
+            "net_restore_progress",
+            "net_restore_staged",
+            "net_restore_failed",
             "net_export_done",
             "net_export_failed",
             "net_file_shared",
@@ -1142,7 +1176,6 @@ mod tests {
             "net_file_progress",
             "net_file_done",
             "net_file_failed",
-            "restore_tick",
             "net_delivered",
             "net_peer_seen",
             "net_send_failed",

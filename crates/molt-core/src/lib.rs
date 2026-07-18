@@ -442,10 +442,22 @@ pub struct WorkspaceInfo {
     /// clean close — not continuously.
     #[serde(default)]
     pub size_kib: u32,
-    /// Minutes since the last completed backup; [`WorkspaceInfo::NEVER`]
+    /// Minutes since the last backup THIS node completed (stamped only on
+    /// a confirmed upload — `NetBackupDone`); [`WorkspaceInfo::NEVER`]
     /// = never backed up. Prose is rendered UI-side.
     #[serde(default = "WorkspaceInfo::never")]
     pub last_backup_min: u32,
+    /// Backup copies of this workspace the last REAL bucket listing saw
+    /// (`Command::NetListBackups`); 0 until a listing ran, and reset to 0
+    /// when a listing fails — the table never claims invented bucket
+    /// contents. Additive.
+    #[serde(default)]
+    pub backup_copies: u32,
+    /// The last backup attempt's failure, verbatim (empty = no failure
+    /// since the last success/toggle). Includes the honest "sealed at
+    /// rest" skip status of design P6. Additive.
+    #[serde(default)]
+    pub backup_error: String,
     /// The (mock) recovery seed all of its secret keys derive from.
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
@@ -575,6 +587,8 @@ impl WorkspaceInfo {
                 s3,
                 size_kib,
                 last_backup_min,
+                backup_copies: 0,
+                backup_error: String::new(),
                 seed: seed.to_string(),
                 net: net.to_string(),
                 encrypted: false,
@@ -753,6 +767,15 @@ pub struct BackupObject {
 /// shared by the listing (engine) and [`parse_backup_key`]; story 12's
 /// writer must build its keys from it too.
 pub const BACKUP_OBJECT_PREFIX: &str = "molt/";
+
+/// Build the bucket key of one backup object — the writer half of the
+/// naming scheme [`parse_backup_key`] reads (`backup_restore_design.md`
+/// §6.2): `molt/<workspace_id>/<ts:012>.molt.enc`. The timestamp is
+/// zero-padded to 12 digits so lexicographic key order equals age order
+/// forever — the retention pruner sorts keys, nothing parses times back.
+pub fn backup_key(id: &WorkspaceId, ts: u64) -> String {
+    format!("{BACKUP_OBJECT_PREFIX}{id}/{ts:012}.molt.enc")
+}
 
 /// Parse a bucket key against the backup naming scheme
 /// `molt/<workspace_id>/<unix_ts>.molt.enc` (`backup_restore_design.md`
@@ -2069,8 +2092,10 @@ pub struct JoinState {
     pub awaiting_ratify: bool,
 }
 
-/// The (mock) restore lifecycle. Shared session state: any operator can start
-/// it, both watch the same progress and live log.
+/// The restore lifecycle (real: download/read → decrypt+stage →
+/// chain-verify → materialize). Shared session state: any operator can
+/// start it, both watch the same progress and live log — and every line of
+/// that log reports something that actually happened.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreState {
     /// The shared run lifecycle (step / progress / outcome / log).
@@ -2079,7 +2104,8 @@ pub struct RestoreState {
     /// `"s3" | "file"` (empty while idle). Rejoining via another member is
     /// not a restore way — that is the recovery ritual (`RecoverStart`).
     pub way: String,
-    /// The way-specific target (bucket URL / file path).
+    /// The way-specific target (workspace id / object key for `s3`, blob
+    /// path for `file`).
     pub target: String,
 }
 
@@ -2189,7 +2215,7 @@ pub struct SessionView {
     /// Id of the currently opened workspace (empty = none). The display
     /// name lives in the matching [`WorkspaceInfo`] entry.
     pub active_workspace: WorkspaceId,
-    /// The (mock) restore lifecycle.
+    /// The restore lifecycle (real; see [`RestoreState`]).
     pub restore: RestoreState,
     /// The manual-export lifecycle (real; additive).
     #[serde(default)]
@@ -2481,8 +2507,10 @@ pub enum Command {
         id: WorkspaceId,
     },
     /// Switch automatic S3 backup on or off for one workspace; persisted in
-    /// the workspace's local `prefs.toml`. Enabling runs a first backup
-    /// right away (the uploader itself is not wired yet).
+    /// the workspace's local `prefs.toml`. Enabling only persists the pref
+    /// — the next [`Command::BackupTick`] pass runs the real first upload,
+    /// and the last-backup stamp moves ONLY on a confirmed upload
+    /// ([`Command::NetBackupDone`]); enabling never invents one.
     SetWorkspaceBackup {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
@@ -2553,22 +2581,74 @@ pub enum Command {
         /// The failure, honestly.
         error: String,
     },
-    /// Begin the (mock) restore: moves its lifecycle to the run view; the
-    /// engine ticks the progress and the live log by itself.
+    /// Begin a REAL restore from a `molt-export-v1` backup blob
+    /// (`backup_restore_design.md` §4/§6.6): the blob is read (from a file,
+    /// or downloaded from the configured S3 bucket), decrypted and staged
+    /// off the actor, then the engine **hard-verifies the threshold-signed
+    /// chain before anything materializes** — a blob whose chain does not
+    /// verify restores nothing. Progress and log lines report only what
+    /// actually happened. The restored workspace opens *detached* (§4.4):
+    /// knowledge is restored, membership is not — rejoining the live
+    /// republic is the recovery ritual ([`Command::RecoverStart`]).
     RestoreStart {
         /// `"s3" | "file"` (rejoining via another member is [`Command::RecoverStart`]).
         way: String,
-        /// The way-specific target (bucket URL / file path).
+        /// The way-specific target: for `file` the `.molt.enc` path; for
+        /// `s3` the workspace-id pseudonym from the backup table (the
+        /// NEWEST object is used) or a full `molt/<id>/<ts>.molt.enc`
+        /// object key.
         target: String,
+        /// The secret unlocking the blob — its meaning follows the blob's
+        /// own key mode: the RECOVERY PHRASE for automatic S3 backups
+        /// (`workspace` mode), the export passphrase for manual file
+        /// exports (`passphrase` mode). Additive.
+        #[serde(default)]
+        secret: String,
+        /// Same-id collision policy (design P2): `false` (default) refuses
+        /// when a workspace with this id already exists locally; `true`
+        /// moves the existing directory to the recoverable `.trash` first.
+        #[serde(default)]
+        replace: bool,
     },
-    /// Advance the (mock) restore one step. Sent by the engine's own ticker;
-    /// answered with an error once the run is over (which stops the ticker).
-    RestoreTick,
-    /// Abandon the restore (idle again) and return to the choice screen.
+    /// Abandon the restore (idle again) and return to the choice screen:
+    /// aborts the in-flight task and removes the staging — nothing partial
+    /// stays behind.
     RestoreCancel,
-    /// Finish a successful restore: the restored workspace becomes active and
-    /// the node moves straight to the main screen.
+    /// Finish a successful restore: open the restored workspace (detached —
+    /// §4.4) and move straight to the main screen.
     RestoreFinish,
+    /// Real progress from the off-actor restore task (engine-internal —
+    /// the task speaking to the engine; every line reports something that
+    /// actually happened, there is no simulated progress).
+    NetRestoreProgress {
+        /// Progress percent (0..=99; 100 is set by the verified finish).
+        pct: u8,
+        /// One honest live-log line.
+        line: String,
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The restore task staged the decrypted blob (engine-internal). The
+    /// staging handle rides an engine-internal slot, never the wire; the
+    /// HANDLER runs the mandatory chain verification (`verify_chain` /
+    /// `verify_suffix_chain`, hard-reject) and only then commits — an MCP
+    /// agent must not be able to inject an unverified workspace.
+    NetRestoreStaged {
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The restore task failed (engine-internal); the real reason lands
+    /// verbatim in the run log — never a fake success, never an invented
+    /// failure rule.
+    NetRestoreFailed {
+        /// The failure, honestly.
+        error: String,
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
 
     // --- founding a republic (shared, co-equal) ---
     /// Begin the founding ritual: validates the configuration, derives the
@@ -2761,6 +2841,51 @@ pub enum Command {
         /// dropped instead of overwriting the newer table.
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// Run one workspace's automatic backup NOW (the manual "backup now to
+    /// S3" trigger — a human decision, so a tool on both surfaces): builds
+    /// the crash-consistent `molt-export-v1` blob in `workspace` key mode
+    /// (restorable from recovery phrase + workspace id, no prompt) and PUTs
+    /// it to the configured bucket over the configured dialer (Tor when
+    /// enabled — fail-closed), then prunes old copies beyond
+    /// `s3_keep_copies`. Same off-actor task as the ticker; the honest
+    /// outcome lands in the workspace entry (stamp only on a confirmed
+    /// upload, `backup_error` otherwise).
+    BackupNow {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+    },
+    /// The backup ticker's heartbeat (engine-internal, sent by the engine's
+    /// own clock): the synchronous handler only DECIDES — workspaces whose
+    /// auto-backup pref is on, whose interval elapsed, and whose key is
+    /// accessible spawn an off-actor upload task; sealed-at-rest workspaces
+    /// are skipped with an honest status (design P6).
+    BackupTick,
+    /// The backup task confirmed the upload (engine-internal, from the
+    /// off-actor backup task — an MCP agent must not be able to forge a
+    /// backup stamp). ONLY this moves `prefs.last_backup`.
+    NetBackupDone {
+        /// The backed-up workspace.
+        id: WorkspaceId,
+        /// Unix seconds the blob was built (the object key's timestamp).
+        ts: u64,
+        /// The confirmed bucket object key.
+        object: String,
+        /// Blob size in bytes.
+        bytes: u64,
+        /// Retention-pruning failure, honestly (empty = pruned fine). A
+        /// prune failure never blocks the backup — the next successful
+        /// backup re-prunes.
+        #[serde(default)]
+        prune_error: String,
+    },
+    /// The backup task failed (engine-internal); the stamp stays untouched
+    /// and the real reason is surfaced verbatim — never a fake success.
+    NetBackupFailed {
+        /// The workspace whose backup failed.
+        id: WorkspaceId,
+        /// The failure, honestly.
+        error: String,
     },
     /// A founding seat's real, joinable invite link became available once its
     /// queue was provisioned on the SMP server (engine-internal, from the
@@ -3958,6 +4083,29 @@ mod tests {
         ] {
             assert_eq!(parse_backup_key(&foreign), None, "foreign: {foreign:?}");
         }
+    }
+
+    /// The writer half ([`backup_key`]) round-trips through the parser, and
+    /// its zero-padding keeps lexicographic key order equal to age order —
+    /// the invariant the retention pruner's key sort relies on (§6.2).
+    #[test]
+    fn backup_key_builder_round_trips_and_sorts_by_age() {
+        let id = "cd".repeat(32);
+        for ts in [0u64, 1, 1_752_800_000, 999_999_999_999] {
+            let key = backup_key(&id, ts);
+            assert_eq!(parse_backup_key(&key), Some((id.clone(), ts)), "{key}");
+        }
+        // lexicographic order == age order across magnitude boundaries
+        let mut keys: Vec<String> = [999u64, 1_000, 99_999, 1_752_800_000, 1]
+            .iter()
+            .map(|ts| backup_key(&id, *ts))
+            .collect();
+        keys.sort_unstable();
+        let ts_order: Vec<u64> = keys
+            .iter()
+            .map(|k| parse_backup_key(k).expect("own keys parse").1)
+            .collect();
+        assert_eq!(ts_order, vec![1, 999, 1_000, 99_999, 1_752_800_000]);
     }
 
     /// Classification of a real listing: objects of a locally known

@@ -3,9 +3,13 @@
 //! The engine-run lifecycles: **founding** (create) and **join** are real
 //! over SMP — founding provisions invite queues and waits for real members to
 //! seal; joining runs the member ritual off the actor and enters the republic
-//! once the founder distributes the sealed roster. **restore** is still a mock
-//! (its real backup paths are storage milestones S4/S5). They share a
-//! [`RunCore`] (step / progress / outcome / log) and cancel-to-choice.
+//! once the founder distributes the sealed roster. **restore** is real too
+//! (`backup_restore_design.md` §4/§6.6): an off-actor task fetches (file or
+//! S3) and stages the encrypted blob, the ACTOR hard-verifies the
+//! threshold-signed chain before anything materializes, and the restored
+//! workspace opens *detached* (knowledge, not membership — rejoining is the
+//! recovery ritual). They share a [`RunCore`] (step / progress / outcome /
+//! log) and cancel-to-choice.
 
 use molt_core::{
     demo_workspace_id, roster_members, Command, CreateState, JoinState, MemberId, MemberInfo,
@@ -19,14 +23,6 @@ use crate::{now_secs, ActiveStorage, Envelope, State};
 fn guard_idle(run: &RunCore, err: fn(String) -> MoltError) -> Result<(), MoltError> {
     if run.running() {
         return Err(err("already running".to_string()));
-    }
-    Ok(())
-}
-
-/// Guard shared by every `*Tick`: answering with an error stops the ticker.
-fn guard_ticking(run: &RunCore, err: fn(String) -> MoltError) -> Result<(), MoltError> {
-    if !run.running() {
-        return Err(err("idle".to_string()));
     }
     Ok(())
 }
@@ -202,7 +198,11 @@ impl State {
             sync_queue: 0,
             s3,
             size_kib,
-            last_backup_min: if s3 { 0 } else { WorkspaceInfo::NEVER },
+            // honest: nothing has been uploaded yet — the stamp moves only
+            // on a confirmed upload (NetBackupDone), never on enable
+            last_backup_min: WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
             seed,
             net,
             agenda,
@@ -211,33 +211,356 @@ impl State {
         });
     }
 
-    // ---- restore -------------------------------------------------------
+    // ---- restore (real: design §4 / §6.6) ------------------------------
 
+    /// Begin a real restore: validate synchronously (way, secret, and for
+    /// the s3 way the SAVED backup target + fail-closed dialer), then run
+    /// the fetch + decrypt + stage OFF the actor. The task reports real
+    /// progress as [`Command::NetRestoreProgress`] and parks its staged
+    /// result for [`State::cmd_net_restore_staged`], where the engine
+    /// hard-verifies the chain BEFORE anything materializes.
     pub(crate) fn cmd_restore_start(
         &mut self,
         way: String,
         target: String,
+        secret: String,
+        replace: bool,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.restore.run, MoltError::Restore)?;
-        self.session.restore = RestoreState {
-            run: RunCore::started(),
-            way,
-            target,
+        if !self.persist {
+            return Err(MoltError::Restore(
+                "this node has no workspace storage to restore into".to_string(),
+            ));
+        }
+        // the master secret (phrase / passphrase) rides in a wiped-on-drop
+        // wrapper across the task hop, matching the export path's posture
+        let secret = zeroize::Zeroizing::new(secret.trim().to_string());
+        if secret.is_empty() {
+            return Err(MoltError::Restore(
+                "the restore needs its secret: the recovery phrase for S3/auto \
+                 backups, the export passphrase for manual file exports"
+                    .to_string(),
+            ));
+        }
+        let target = target.trim().to_string();
+        let planned = match way.as_str() {
+            "file" => {
+                if target.is_empty() {
+                    return Err(MoltError::Restore(
+                        "a file restore needs the .molt.enc path".to_string(),
+                    ));
+                }
+                RestorePlan::File(molt_storage::expand_tilde(&target))
+            }
+            "s3" => {
+                let s = &self.session.settings;
+                let config = molt_net::s3::S3Config::from_settings(
+                    &s.s3_endpoint,
+                    &s.s3_access_key,
+                    &s.s3_secret_key,
+                    &s.s3_bucket,
+                )
+                .map_err(|e| MoltError::Restore(format!("backup target: {e}")))?;
+                // fail-closed: a Tor misconfiguration aborts the restore
+                let dialer = self.resolve_dialer().map_err(MoltError::Restore)?;
+                let object = if molt_core::parse_backup_key(&target).is_some() {
+                    S3Pick::Object(target.clone())
+                } else if target.len() == 64
+                    && target
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    S3Pick::NewestOf(target.clone())
+                } else {
+                    return Err(MoltError::Restore(
+                        "pick a backup: pass the workspace id from the backup \
+                         table (64 hex chars) or a full object key \
+                         molt/<id>/<ts>.molt.enc"
+                            .to_string(),
+                    ));
+                };
+                RestorePlan::S3 {
+                    config: Box::new(config),
+                    dialer,
+                    pick: object,
+                }
+            }
+            other => {
+                return Err(MoltError::Restore(format!(
+                    "unknown restore way `{other}` (s3 | file; rejoining is recover_start)"
+                )));
+            }
         };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Restore("engine stopped".to_string()));
+        };
+        // a restarted restore supersedes the one in flight
+        self.restore_generation += 1;
+        let generation = self.restore_generation;
+        self.restore_staging = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = self.restore_staging.clone();
+        self.restore_replace = replace;
+        self.restored_id = None;
+        let root = self.workspace_root();
+        let mut run = RunCore::started();
+        run.log.push(format!("→ restore started · way {way} · {target}"));
+        self.session.restore = RestoreState { run, way, target };
         self.session.screen = Screen::Restore;
         self.emit_session(SessionScope::Full);
-        self.spawn_ticker(Command::RestoreTick);
+        let task =
+            tokio::spawn(
+                async move { restore_task(cmd_tx, generation, planned, root, secret, slot).await },
+            );
+        self.restore_task = Some(task);
         Ok(Reply::Ack)
     }
 
-    pub(crate) fn cmd_restore_tick(&mut self) -> Result<Reply, MoltError> {
-        guard_ticking(&self.session.restore.run, MoltError::Restore)?;
-        self.restore_tick();
+    /// Real progress from the off-actor restore task (engine-internal).
+    pub(crate) fn cmd_net_restore_progress(
+        &mut self,
+        pct: u8,
+        line: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.restore_generation) || !self.session.restore.run.running() {
+            return Ok(Reply::Ack);
+        }
+        // 100 is reserved for the verified finish; the bar never regresses
+        let r = &mut self.session.restore.run;
+        r.progress_pct = r.progress_pct.max(pct.min(99));
+        r.log.push(line);
         self.emit_session(SessionScope::Restore);
         Ok(Reply::Ack)
     }
 
+    /// The staged blob arrived (engine-internal): run the MANDATORY chain
+    /// verification and the genesis/manifest consistency checks on the
+    /// actor — hard-reject, all-or-nothing (`persistent_chain.md`) — and
+    /// only then commit the staging into the workspace root. The staged
+    /// handle rides an engine-internal slot, so a forged command without a
+    /// real staged blob is a no-op failure, never a materialization.
+    pub(crate) fn cmd_net_restore_staged(
+        &mut self,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.restore_generation) || !self.session.restore.run.running() {
+            return Ok(Reply::Ack);
+        }
+        let staged = self.restore_staging.lock().ok().and_then(|mut s| s.take());
+        let Some(staging) = staged else {
+            return self.fail_restore("the restore task lost its staged blob".to_string());
+        };
+
+        // ---- verify (design §4.1 step 2; hard-reject) ----
+        if staging.chain.is_empty() {
+            staging.abort();
+            return self.fail_restore(
+                "the backup carries no verifiable chain — refusing to \
+                 materialize unverified history"
+                    .to_string(),
+            );
+        }
+        // no external anchor exists for an import — the content-derived
+        // republic id the genesis/blob founding table recomputes IS the
+        // trust anchor (the full-chain forgery check), same helper the
+        // recovery adoption uses with its link anchor
+        let (head, sealed) =
+            match crate::chain::verify_served(staging.checkpoint.as_ref(), &staging.chain, None) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    staging.abort();
+                    return self.fail_restore(format!("chain verification failed: {e}"));
+                }
+            };
+        // the manifest is the unauthenticated cover sheet — the verified
+        // genesis is authoritative (name is a display value the republic
+        // may have legitimately renamed; the RULE must agree)
+        if staging.manifest.workspace.rule_m != sealed.rule_m
+            || staging.manifest.workspace.rule_n != sealed.rule_n
+        {
+            staging.abort();
+            return self.fail_restore(
+                "the manifest contradicts the verified genesis (threshold rule)".to_string(),
+            );
+        }
+        // the log's Founded genesis and the chain must describe the SAME
+        // republic, and this workspace's member must hold a roster seat
+        let molt_core::WorkspaceEvent::Founded {
+            member: ws_member,
+            republic_id: log_rid,
+            ..
+        } = staging.genesis.body.clone()
+        else {
+            staging.abort();
+            return self.fail_restore("the log genesis is not a Founded event".to_string());
+        };
+        if log_rid != sealed.republic_id || head.republic_id != sealed.republic_id {
+            staging.abort();
+            return self.fail_restore(
+                "the log genesis and the verified chain disagree on the republic".to_string(),
+            );
+        }
+        if !sealed.roster.contains(&ws_member) {
+            staging.abort();
+            return self.fail_restore(
+                "this workspace's member holds no seat in the verified roster".to_string(),
+            );
+        }
+
+        // the seat identity, when the seed travels: derive BOTH ritual
+        // derivations (founder salts with the workspace id, a joiner with
+        // the shared member salt) and accept only the one the VERIFIED
+        // head anchors — never an unanchored guess (CLAUDE.md: re-deriving
+        // with the wrong salt gives the wrong key silently)
+        let ws_id = staging.manifest.workspace.id.clone();
+        let identity_sk = staging.seed_entropy().and_then(|seed| {
+            let anchored = head.identities.iter().find(|i| i.member == ws_member)?;
+            // joiner salt: the ONE shared derivation of founding.rs
+            let (sk, pk) = crate::founding::member_identity_from_entropy(seed);
+            if pk == anchored.identity_pk {
+                return Some(sk);
+            }
+            // founder salt: the founder's own workspace id (the ritual's
+            // start_ritual derivation — which IS the manifest id here)
+            let (sk, pk) = molt_storage::derive_identity_key(seed, &ws_id);
+            (pk == anchored.identity_pk).then_some(sk)
+        });
+        let seed_present = staging.seed_entropy().is_some();
+
+        // ---- commit (design §4.1 step 3) ----
+        let created = staging.created;
+        let at_rest = staging.at_rest.clone();
+        let name = staging.manifest.workspace.name.clone();
+        let root = self.workspace_root();
+        let dir = match staging.commit(&root, self.restore_replace, identity_sk.as_ref()) {
+            Ok(dir) => dir,
+            Err(molt_storage::StorageError::Exists(_)) => {
+                return self.fail_restore(
+                    "a workspace with this id already exists — it may be AHEAD \
+                     of the backup. Delete it first, or re-run the restore with \
+                     replace enabled to move it to the recoverable trash"
+                        .to_string(),
+                );
+            }
+            Err(e) => return self.fail_restore(format!("materializing failed: {e}")),
+        };
+
+        // ---- the honest finish: knowledge restored, membership not ----
+        let members = roster_members(&sealed.roster, self.presence_now(), |_| MemberInfo::NEVER);
+        let entry_seed = molt_storage::read_sealed_seed(&root, &dir, &ws_id).unwrap_or_default();
+        let size_kib =
+            u32::try_from(molt_storage::workspace_size_kib(&dir)).unwrap_or(u32::MAX);
+        let encrypted = at_rest == molt_core::SEALED_PHRASE;
+        // node-local prefs travel in the blob (§3.2) — the entry mirrors the
+        // RESTORED prefs (same source the boot scan reads), or the list and
+        // the next restart would disagree about the auto-backup toggle
+        let restored_prefs = molt_storage::read_prefs(&dir);
+        // a replace committed NEW content under an existing id — the old
+        // session row (name/size/encrypted/…) no longer describes it
+        self.session.workspaces.retain(|w| w.id != ws_id);
+        {
+            self.session.workspaces.push(WorkspaceInfo {
+                id: ws_id.clone(),
+                name: name.clone(),
+                detail: WorkspaceInfo::rule_detail(sealed.rule_m, usize::from(sealed.rule_n)),
+                // honest §4.4 state: a detached workspace has no mesh and
+                // cannot sync — it is offline, not "synced just now"
+                synced: false,
+                state: 2,
+                last_sync_min: 0,
+                sync_queue: 0,
+                s3: restored_prefs.s3_backup,
+                size_kib,
+                // the restored prefs' own stamp (exactly what the boot scan
+                // would show after a restart), aged to now; NEVER when the
+                // blob never carried one
+                last_backup_min: restored_prefs
+                    .last_backup
+                    .map(|ts| {
+                        u32::try_from(crate::now_secs().saturating_sub(ts) / 60)
+                            .unwrap_or(u32::MAX - 1)
+                    })
+                    .unwrap_or(WorkspaceInfo::NEVER),
+                backup_copies: 0,
+                backup_error: String::new(),
+                seed: entry_seed,
+                net: self.effective_net_label(),
+                encrypted,
+                members,
+                agenda: sealed.agenda.clone(),
+            });
+        }
+        self.restored_id = Some(ws_id.clone());
+        let age_days = crate::now_secs().saturating_sub(created) / 86_400;
+        let r = &mut self.session.restore.run;
+        r.progress_pct = 100;
+        r.outcome = 1;
+        r.log.push(format!(
+            "✓ chain verified · height {} · {}-of-{}",
+            head.height, sealed.rule_m, sealed.rule_n
+        ));
+        r.log.push(format!(
+            "✓ backup from unix {created} ({age_days} day(s) old) · workspace “{name}” materialized"
+        ));
+        if seed_present && identity_sk.is_none() {
+            r.log.push(
+                "→ the blob's seed does not anchor this seat's identity in the \
+                 verified roster — knowledge-only restore"
+                    .to_string(),
+            );
+        }
+        r.log.push(
+            "→ knowledge is restored, membership is NOT — the workspace opens \
+             detached; rejoin the live republic via a recovery link"
+                .to_string(),
+        );
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The restore task failed (engine-internal): surface the reason
+    /// verbatim in the run log.
+    pub(crate) fn cmd_net_restore_failed(
+        &mut self,
+        error: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.restore_generation) || !self.session.restore.run.running() {
+            return Ok(Reply::Ack);
+        }
+        self.fail_restore(error)
+    }
+
+    /// Shared failure tail: flip the run to failed with the honest reason
+    /// and drop any staged blob (removing its staging dir).
+    fn fail_restore(&mut self, error: String) -> Result<Reply, MoltError> {
+        if let Ok(mut slot) = self.restore_staging.lock() {
+            slot.take(); // drop removes the staging dir
+        }
+        tracing::warn!(error = %error, "restore failed");
+        let r = &mut self.session.restore.run;
+        r.outcome = 2;
+        r.log.push(format!("✗ restore failed: {error}"));
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_restore_cancel(&mut self) -> Result<Reply, MoltError> {
+        // invalidate the in-flight task (its late results are dropped by the
+        // generation guard) and abort it — the download is inbound-only, so
+        // abort is safe (nothing outbound is in flight)
+        self.restore_generation += 1;
+        if let Some(task) = self.restore_task.take() {
+            task.abort();
+        }
+        if let Ok(mut slot) = self.restore_staging.lock() {
+            slot.take(); // drop removes the staging dir
+        }
+        // a blocking stage that outlives the abort parks into THIS Arc;
+        // replacing it makes the task's clone the last owner, so the staged
+        // dir is swept the moment the task ends
+        self.restore_staging = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.restored_id = None;
         self.session.restore = RestoreState::default();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
@@ -246,136 +569,35 @@ impl State {
 
     pub(crate) fn cmd_restore_finish(&mut self) -> Result<Reply, MoltError> {
         guard_finished(&self.session.restore.run, MoltError::Restore)?;
-        let name = "Restored Republic".to_string();
-
-        // idempotent: re-running the restore re-opens the already restored
-        // workspace instead of piling up fresh directories and entries
-        if let Some(existing) = self
+        let Some(id) = self.restored_id.clone() else {
+            return Err(MoltError::Restore(
+                "no restored workspace to open".to_string(),
+            ));
+        };
+        // a phrase-sealed blob round-tripped SEALED (S6): there is no key
+        // material to open with — land on the workspace list, where the
+        // existing decrypt flow takes over, instead of dead-ending on the
+        // open refusal
+        if self
             .session
             .workspaces
             .iter()
-            .find(|w| w.name == name)
-            .map(|w| w.id.clone())
+            .any(|w| w.id == id && w.encrypted)
         {
-            self.cmd_open_workspace(existing)?;
+            self.restored_id = None;
             self.session.restore = RestoreState::default();
+            self.session.screen = Screen::Open;
             self.emit_session(SessionScope::Full);
             return Ok(Reply::Ack);
         }
-
-        let member = self.config.member.clone();
-        let roster = self.config.members.clone();
-        let rule_m = u8::try_from(self.config.threshold.max(1)).unwrap_or(u8::MAX);
-        // the fresh dir's phrase, kept for the session entry (empty in demo
-        // mode — a demo entry has no on-disk key hierarchy to restore)
-        let mut entry_seed = String::new();
-        let id = if self.persist {
-            // the real restore paths (S4/S5) will rebuild from the backup;
-            // until then the restored dir is founded fresh, like a create
-            let seed = molt_storage::generate_seed_phrase()
-                .map_err(|e| MoltError::Restore(e.to_string()))?;
-            entry_seed = seed.clone();
-            // restore rebuilds identities from the backup (S4/S5); until
-            // then the fresh local dir carries none
-            self.materialize_workspace(
-                &name,
-                &member,
-                rule_m,
-                roster.clone(),
-                &seed,
-                Vec::new(),
-                Vec::new(),
-                String::new(), // restore rebuilds the republic id at S4/S5
-                String::new(), // …and the charter with it
-                None,          // no chain yet → no signing key (S4/S5)
-                None,          // …and the MLS group (S4/S5)
-                Vec::new(),    // …and the mesh (S4/S5)
-                None,          // no recovered chain — this is the mock restore
-                None,          // …and no checkpoint blob either
-                MoltError::Restore,
-            )?
-        } else {
-            demo_workspace_id(&name)
-        };
-        // honest presence: a mock restore has heard from nobody — every
-        // member starts never-seen until real traffic stamps it
-        let members = roster_members(&roster, self.presence_now(), |_| MemberInfo::NEVER);
-        self.push_workspace_entry(
-            &id,
-            &name,
-            rule_m,
-            roster.len(),
-            members,
-            entry_seed,
-            self.effective_net_label(),
-            false,
-            String::new(), // restore rebuilds the charter at S4/S5
-        );
-        self.session.active_workspace = id;
+        // opens DETACHED: the imported dir carries no mesh credentials and
+        // no MLS state on purpose (§3.3/§4.4) — cmd_open_workspace comes up
+        // without a mesh and sets the honest detached notice
+        self.cmd_open_workspace(id)?;
+        self.restored_id = None;
         self.session.restore = RestoreState::default();
-        // straight into the workspace — no completion-screen stopover
-        self.session.screen = Screen::Main;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
-    }
-
-    /// Whether a restore target looks plausible for its way (the mock
-    /// failure rule): S3 is http(s), files end .molt.enc.
-    fn restore_target_plausible(way: &str, target: &str) -> bool {
-        match way {
-            "s3" => target.starts_with("http"),
-            _ => target.ends_with(".molt.enc"),
-        }
-    }
-
-    /// One tick of the mock restore: advance the percentage and append a
-    /// way-specific live-log line; flip the outcome at the end (success) or
-    /// at ~45 % for implausible targets (timeout).
-    fn restore_tick(&mut self) {
-        let r = &mut self.session.restore;
-        r.run.progress_pct = (r.run.progress_pct + 2).min(100);
-        let t = u32::from(r.run.progress_pct / 2);
-        if r.run.progress_pct >= 45 && !Self::restore_target_plausible(&r.way, &r.target) {
-            r.run.log.push(format!(
-                "✗ error: {} unreachable — timeout after 3 retries",
-                r.target
-            ));
-            r.run.log.push("✗ restore failed".to_string());
-            r.run.outcome = 2;
-            return;
-        }
-        if r.run.progress_pct >= 100 {
-            r.run
-                .log
-                .push("✓ restore complete — workspace verified".to_string());
-            r.run.outcome = 1;
-            return;
-        }
-        if r.run.progress_pct < 30 {
-            r.run.log.push(match r.way.as_str() {
-                "s3" => format!(
-                    "→ https: GET {}/manifest.enc · 200 OK · rtt {} ms",
-                    r.target,
-                    80 + 7 * t
-                ),
-                _ => format!("→ fs: open {} · map segment {t}", r.target),
-            });
-        } else if r.run.progress_pct < 75 {
-            r.run.log.push(format!(
-                "↓ chunk {}/23 fetched · 128 KiB · sha256 ok",
-                t - 14
-            ));
-        } else if t % 3 == 0 {
-            r.run.log.push(format!(
-                "→ copy → ~/.moltrepublic/workspaces/restored/chunk-{}.bin",
-                t - 37
-            ));
-        } else {
-            r.run.log.push(format!(
-                "→ aes-256-gcm: chunk {}/13 decrypted · merkle node ok",
-                t - 37
-            ));
-        }
     }
 
     // ---- founding (create): the ritual (transport concept §3.3) --------
@@ -1090,32 +1312,13 @@ impl State {
             } => (blocks, Some(checkpoint_blob)),
         };
         // full chain: verified from block 0; pruned: the suffix rules run
-        // against the blob (founding-bound anchor, double-apply seed)
-        let head = match &checkpoint_blob {
-            None => match crate::chain::verify_chain(&blocks) {
-                Ok(h) => h,
+        // against the blob (founding-bound anchor, double-apply seed). The
+        // recovery LINK is the external republic anchor.
+        let (head, sealed) =
+            match crate::chain::verify_served(checkpoint_blob.as_ref(), &blocks, Some(&inv.republic_id)) {
+                Ok(pair) => pair,
                 Err(e) => return self.cmd_net_recover_failed(e, generation),
-            },
-            Some(blob) => {
-                match crate::chain::verify_suffix_chain(blob, &blocks, &inv.republic_id) {
-                    Ok(h) => h,
-                    Err(e) => return self.cmd_net_recover_failed(e, generation),
-                }
-            }
-        };
-        // the constitution the workspace materializes from: the genesis, or
-        // the blob's rid-bound founding table on a pruned serve
-        let sealed = match &checkpoint_blob {
-            None => blocks.first().and_then(crate::recovery::sealed_roster_from_genesis),
-            Some(blob) => Some(crate::recovery::sealed_roster_from_blob(blob)),
-        };
-        let Some(sealed) = sealed
-        else {
-            return self.cmd_net_recover_failed(
-                "the recovered chain does not root on a genesis constitution".to_string(),
-                generation,
-            );
-        };
+            };
         // the chain must be THIS recovery's republic (no swapping in another)
         if head.republic_id != inv.republic_id || member != inv.member {
             return self.cmd_net_recover_failed(
@@ -1352,16 +1555,9 @@ impl State {
 
     // ---- the shared self-ticker ------------------------------------------
 
-    /// Drive a mock run from the engine itself (co-equal: the run makes
-    /// progress no matter which operator started it, GUI attached or not).
-    /// `tick` is re-sent every 90 ms; the task stops as soon as a tick is
-    /// answered with an error (the run is over or was cancelled).
-    pub(crate) fn spawn_ticker(&self, tick: Command) {
-        self.spawn_ticker_every(tick, 90);
-    }
-
-    /// [`State::spawn_ticker`] with a caller-chosen period — the presence
-    /// ticker runs on a much slower beat than the 90 ms run tickers.
+    /// Drive a periodic engine-internal command (presence aging, the backup
+    /// ticker) from the engine itself — co-equal: it runs no matter which
+    /// operator is attached.
     ///
     /// The task keeps only the actor's WEAK self-handle and upgrades it
     /// per tick: a long-lived ticker holding a strong sender would be the
@@ -1394,5 +1590,191 @@ impl State {
                 }
             }
         });
+    }
+}
+
+// ---- the off-actor restore task (story 13) --------------------------------
+
+/// Hard cap on a restore download (an export blob has a known scale — a
+/// server claiming more is refused before a byte lands).
+const RESTORE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What the restore task fetches, resolved synchronously in
+/// [`State::cmd_restore_start`] (config + dialer fail fast on the actor).
+pub(crate) enum RestorePlan {
+    /// Read a local `.molt.enc` file.
+    File(std::path::PathBuf),
+    /// Download from the configured bucket.
+    S3 {
+        /// The validated backup target.
+        config: Box<molt_net::s3::S3Config>,
+        /// The fail-closed dialer (Tor when configured).
+        dialer: molt_net::smp::tls::Dialer,
+        /// Which object.
+        pick: S3Pick,
+    },
+}
+
+/// The s3-way target: an explicit object key, or the newest object of one
+/// workspace's prefix (design §6.6: empty/id target → newest).
+pub(crate) enum S3Pick {
+    /// A full `molt/<id>/<ts>.molt.enc` key.
+    Object(String),
+    /// The newest backup of this workspace-id pseudonym.
+    NewestOf(String),
+}
+
+/// Send one engine-internal command (fire-and-forget reply).
+async fn send_internal(cmd_tx: &tokio::sync::mpsc::Sender<Envelope>, cmd: Command) {
+    let (reply, _rx) = oneshot::channel();
+    let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+}
+
+/// The restore fetch+stage task: every progress line reports something
+/// that actually happened; the staged result parks in `slot` and the
+/// actor-side handler runs the mandatory chain verification. Failures
+/// return verbatim as [`Command::NetRestoreFailed`].
+async fn restore_task(
+    cmd_tx: tokio::sync::mpsc::Sender<Envelope>,
+    generation: u64,
+    plan: RestorePlan,
+    root: std::path::PathBuf,
+    secret: zeroize::Zeroizing<String>,
+    slot: std::sync::Arc<std::sync::Mutex<Option<molt_storage::import::ImportStaging>>>,
+) {
+    let progress = |pct: u8, line: String| {
+        send_internal(
+            &cmd_tx,
+            Command::NetRestoreProgress {
+                pct,
+                line,
+                generation: Some(generation),
+            },
+        )
+    };
+    let outcome: Result<(), String> = async {
+        let blob: Vec<u8> = match plan {
+            RestorePlan::File(path) => {
+                progress(5, format!("→ fs: read {}", path.display())).await;
+                let read_path = path.clone();
+                tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                    // the same cap the download path enforces — a crafted
+                    // "blob" must not buffer unbounded memory either way
+                    let len = std::fs::metadata(&read_path)
+                        .map_err(|e| format!("reading {}: {e}", read_path.display()))?
+                        .len();
+                    if len > RESTORE_MAX_BYTES {
+                        return Err(format!(
+                            "file is {len} bytes — beyond the {RESTORE_MAX_BYTES}-byte cap"
+                        ));
+                    }
+                    std::fs::read(&read_path)
+                        .map_err(|e| format!("reading {}: {e}", read_path.display()))
+                })
+                .await
+                .map_err(|e| format!("read task failed: {e}"))??
+            }
+            RestorePlan::S3 { config, dialer, pick } => {
+                let client = molt_net::s3::S3Client::new(*config, dialer);
+                let object = match pick {
+                    S3Pick::Object(key) => key,
+                    S3Pick::NewestOf(id) => {
+                        let prefix = format!("{}{id}/", molt_core::BACKUP_OBJECT_PREFIX);
+                        progress(3, format!("→ s3: list {prefix}")).await;
+                        let listed = client
+                            .list_objects(&prefix)
+                            .await
+                            .map_err(|e| format!("listing the bucket failed: {e}"))?;
+                        // lexicographic max IS the newest (§6.2 zero-padded keys)
+                        let mut keys: Vec<String> = listed
+                            .into_iter()
+                            .filter(|o| {
+                                molt_core::parse_backup_key(&o.key)
+                                    .is_some_and(|(kid, _)| kid == id)
+                            })
+                            .map(|o| o.key)
+                            .collect();
+                        keys.sort_unstable();
+                        keys.pop().ok_or_else(|| {
+                            format!("no backup for workspace {id} in the bucket")
+                        })?
+                    }
+                };
+                progress(8, format!("→ s3: GET {object}")).await;
+                let mut sink: Vec<u8> = Vec::new();
+                // the download callback is synchronous — progress rides a
+                // lossy try_send (a dropped percent line is fine; the final
+                // staged/failed report never travels this path)
+                let tx = cmd_tx.clone();
+                let mut last_pct = 8u8;
+                client
+                    .get_object(&object, &mut sink, RESTORE_MAX_BYTES, &mut |done, total| {
+                        let Some(total) = total.filter(|t| *t > 0) else {
+                            return;
+                        };
+                        let pct =
+                            10u8.saturating_add(u8::try_from(done * 50 / total).unwrap_or(50));
+                        if pct >= last_pct.saturating_add(5) || (done == total && pct > last_pct)
+                        {
+                            last_pct = pct;
+                            let (reply, _rx) = oneshot::channel();
+                            let _ = tx.try_send(Envelope {
+                                cmd: Command::NetRestoreProgress {
+                                    pct,
+                                    line: format!("↓ {done} of {total} bytes"),
+                                    generation: Some(generation),
+                                },
+                                reply,
+                            });
+                        }
+                    })
+                    .await
+                    .map_err(|e| format!("download failed: {e}"))?;
+                sink
+            }
+        };
+        progress(60, "→ decrypting + validating the blob".to_string()).await;
+        // blocking: Argon2 (passphrase blobs) + staging I/O
+        let stage_root = root.clone();
+        let staging = tokio::task::spawn_blocking(move || {
+            molt_storage::import::import_stage(&stage_root, &blob, &secret)
+        })
+        .await
+        .map_err(|e| format!("staging task failed: {e}"))?
+        .map_err(|e| e.to_string())?;
+        progress(
+            85,
+            format!(
+                "→ staged · {} chain block(s) await verification",
+                staging.chain.len()
+            ),
+        )
+        .await;
+        if let Ok(mut s) = slot.lock() {
+            *s = Some(staging);
+        }
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => {
+            send_internal(
+                &cmd_tx,
+                Command::NetRestoreStaged {
+                    generation: Some(generation),
+                },
+            )
+            .await;
+        }
+        Err(error) => {
+            send_internal(
+                &cmd_tx,
+                Command::NetRestoreFailed {
+                    error,
+                    generation: Some(generation),
+                },
+            )
+            .await;
+        }
     }
 }
