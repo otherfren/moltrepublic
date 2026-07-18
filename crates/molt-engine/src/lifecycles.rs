@@ -202,7 +202,11 @@ impl State {
             sync_queue: 0,
             s3,
             size_kib,
-            last_backup_min: if s3 { 0 } else { WorkspaceInfo::NEVER },
+            // honest: nothing has been uploaded yet — the stamp moves only
+            // on a confirmed upload (NetBackupDone), never on enable
+            last_backup_min: WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
             seed,
             net,
             agenda,

@@ -846,7 +846,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_workspace_backup",
             command: "set_workspace_backup",
-            description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml; enabling stamps a first backup).",
+            description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml). Enabling only persists the pref — the backup ticker runs the real first upload on its next pass, and the last-backup stamp moves ONLY on a confirmed upload (never on enable). Failures land honestly in the workspace entry's backup_error.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -858,6 +858,19 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::SetWorkspaceBackup {
                 id: str_arg(args, "id")?,
                 enabled: bool_arg(args, "enabled")?,
+            }),
+        },
+        ToolDef {
+            name: "backup_now",
+            command: "backup_now",
+            description: "Run one workspace's S3 backup NOW (same task as the automatic ticker, interval ignored): builds the crash-consistent encrypted molt-export-v1 blob in workspace key mode (restorable from the recovery phrase + workspace id — no passphrase involved) and uploads it to the configured bucket over the configured transport (Tor when enabled, fail-closed), then prunes copies beyond s3_keep_copies. Async kickoff — the honest outcome lands in the workspace entry (last_backup stamp only on a confirmed upload; backup_error otherwise). Refused for sealed-at-rest workspaces (no key material is accessible).",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "the workspace id from read_session" } },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::BackupNow {
+                id: str_arg(args, "id")?,
             }),
         },
         ToolDef {
@@ -1130,10 +1143,17 @@ mod tests {
         // net_export_done / net_export_failed are the off-actor export task
         // reporting its real outcome (export_workspace is the tool; an agent
         // must not be able to forge an export success or failure).
-        const INTERNAL: [&str; 36] = [
+        // backup_tick is the backup ticker's own heartbeat; net_backup_done /
+        // net_backup_failed are the off-actor backup task reporting its real
+        // outcome (backup_now / set_workspace_backup are the tools; an agent
+        // must not be able to forge a backup stamp or failure).
+        const INTERNAL: [&str; 39] = [
             "net_test_s3_result",
             "net_presence_tick",
             "net_list_backups_result",
+            "backup_tick",
+            "net_backup_done",
+            "net_backup_failed",
             "net_export_done",
             "net_export_failed",
             "net_file_shared",

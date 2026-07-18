@@ -1977,6 +1977,8 @@ mod tests {
             s3: false,
             size_kib: 0,
             last_backup_min: molt_core::WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
             seed: String::new(),
             net: "none".to_string(),
             encrypted: false,

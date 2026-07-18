@@ -1668,11 +1668,16 @@ fn orphan_remote_label(o: &molt_core::BackupOrphan) -> String {
     if !o.name.is_empty() {
         return o.name.clone();
     }
-    // a real orphan id is 64 ASCII hex chars (parse_backup_key pins it), so
-    // byte slicing is safe — same idiom as the checksum cell
-    match o.id.get(..12) {
-        Some(short) if o.id.len() > 12 => format!("{short}…"),
-        _ => o.id.clone(),
+    short_hex_id(&o.id)
+}
+
+/// Shorten a 64-hex workspace-id pseudonym for a table cell. A real id is
+/// 64 ASCII hex chars (`parse_backup_key` pins it), so byte slicing is
+/// safe — same idiom as the checksum cell.
+fn short_hex_id(id: &str) -> String {
+    match id.get(..12) {
+        Some(short) if id.len() > 12 => format!("{short}…"),
+        _ => id.to_string(),
     }
 }
 
@@ -1695,7 +1700,18 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
         .map(|w| BackupRow {
             id: w.id.as_str().into(),
             local: w.name.as_str().into(),
-            remote: if w.s3 { w.name.as_str() } else { "" }.into(),
+            // the bucket-side cell is honest: the last backup attempt's
+            // real failure, else what the last real listing saw in the
+            // bucket (copies × the id pseudonym — the bucket stores no
+            // names), else nothing. The auto-toggle alone claims nothing.
+            remote: if !w.backup_error.is_empty() {
+                w.backup_error.clone()
+            } else if w.backup_copies > 0 {
+                format!("{}\u{00d7} \u{00b7} {}", w.backup_copies, short_hex_id(&w.id))
+            } else {
+                String::new()
+            }
+            .into(),
             has_local: true,
             auto: w.s3,
             size: size_label(w.size_kib).into(),

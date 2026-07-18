@@ -283,6 +283,38 @@ impl S3Client {
         format!("{}/{}", self.config.endpoint.base_path, self.config.bucket)
     }
 
+    /// The path-style path of one object (`[base]/bucket/key`).
+    pub(crate) fn object_path(&self, key: &str) -> String {
+        format!("{}/{}", self.bucket_path(), key)
+    }
+
+    /// Upload one object (`PUT /bucket/key`, path-style), SigV4-signed with
+    /// the body's real SHA-256 — the backup uploader (mock_todo story 12).
+    /// Success means the store confirmed the write (2xx); every failure
+    /// carries its honest class, and the caller must treat anything but
+    /// `Ok(())` as "the backup is NOT in the bucket".
+    pub async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), S3Error> {
+        let resp = self.request("PUT", &self.object_path(key), &[], body).await?;
+        match resp.status {
+            200..=299 => Ok(()),
+            s => Err(self.status_error(s)),
+        }
+    }
+
+    /// Delete one object (`DELETE /bucket/key`) — the retention pruner
+    /// (design §6.3). S3 answers 204 for a deleted AND an already-absent
+    /// key, so pruning is naturally idempotent; a non-2xx status is an
+    /// honest error the caller surfaces (never silently swallowed).
+    pub async fn delete_object(&self, key: &str) -> Result<(), S3Error> {
+        let resp = self
+            .request("DELETE", &self.object_path(key), &[], &[])
+            .await?;
+        match resp.status {
+            200..=299 => Ok(()),
+            s => Err(self.status_error(s)),
+        }
+    }
+
     /// The honest interpretation of a non-success HTTP status against the
     /// bucket — shared by every bucket-level operation (probe, listing) so
     /// the settings verdict and the table status never drift apart.

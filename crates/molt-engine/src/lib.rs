@@ -27,6 +27,7 @@
 //! (navigation, settings, workspaces) and [`lifecycles`] (the three
 //! engine-run mocks: restore / create / join over one `RunCore`).
 
+mod backup;
 mod chain;
 mod chat;
 mod configstore;
@@ -301,6 +302,9 @@ fn spawn_actor(
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
+    // the backup ticker lives as long as the actor: its synchronous decide
+    // pass spawns real upload tasks for due workspaces (backup.rs; story 12)
+    state.spawn_ticker_every(Command::BackupTick, backup::BACKUP_TICK_MS);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -484,6 +488,10 @@ pub(crate) struct State {
     /// backup-target settings change, so a stale off-actor result can never
     /// overwrite a newer table (last-REQUEST wins, not last arrival).
     pub(crate) s3_list_gen: u64,
+    /// Workspaces with a backup upload task in flight (story 12): the
+    /// ticker never spawns a second task for one while its first is out,
+    /// and Done/Failed clear the mark. Runtime-only.
+    pub(crate) backup_inflight: std::collections::HashSet<WorkspaceId>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -648,6 +656,7 @@ impl State {
             net_unreachable: std::collections::HashSet::new(),
             clock_override: None,
             s3_list_gen: 0,
+            backup_inflight: std::collections::HashSet::new(),
             active: None,
             net,
             net_ritual: None,
@@ -893,6 +902,18 @@ impl State {
                 self.cmd_net_export_done(id, dest, bytes, skipped)
             }
             Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
+
+            // backup.rs (story 12: the auto-backup ticker + manual trigger)
+            Command::BackupNow { id } => self.cmd_backup_now(id),
+            Command::BackupTick => self.cmd_backup_tick(),
+            Command::NetBackupDone {
+                id,
+                ts,
+                object,
+                bytes,
+                prune_error,
+            } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error),
+            Command::NetBackupFailed { id, error } => self.cmd_net_backup_failed(id, error),
 
             // lifecycles.rs
             Command::RestoreStart { way, target } => self.cmd_restore_start(way, target),

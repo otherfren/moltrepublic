@@ -442,10 +442,22 @@ pub struct WorkspaceInfo {
     /// clean close — not continuously.
     #[serde(default)]
     pub size_kib: u32,
-    /// Minutes since the last completed backup; [`WorkspaceInfo::NEVER`]
+    /// Minutes since the last backup THIS node completed (stamped only on
+    /// a confirmed upload — `NetBackupDone`); [`WorkspaceInfo::NEVER`]
     /// = never backed up. Prose is rendered UI-side.
     #[serde(default = "WorkspaceInfo::never")]
     pub last_backup_min: u32,
+    /// Backup copies of this workspace the last REAL bucket listing saw
+    /// (`Command::NetListBackups`); 0 until a listing ran, and reset to 0
+    /// when a listing fails — the table never claims invented bucket
+    /// contents. Additive.
+    #[serde(default)]
+    pub backup_copies: u32,
+    /// The last backup attempt's failure, verbatim (empty = no failure
+    /// since the last success/toggle). Includes the honest "sealed at
+    /// rest" skip status of design P6. Additive.
+    #[serde(default)]
+    pub backup_error: String,
     /// The (mock) recovery seed all of its secret keys derive from.
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
@@ -575,6 +587,8 @@ impl WorkspaceInfo {
                 s3,
                 size_kib,
                 last_backup_min,
+                backup_copies: 0,
+                backup_error: String::new(),
                 seed: seed.to_string(),
                 net: net.to_string(),
                 encrypted: false,
@@ -753,6 +767,15 @@ pub struct BackupObject {
 /// shared by the listing (engine) and [`parse_backup_key`]; story 12's
 /// writer must build its keys from it too.
 pub const BACKUP_OBJECT_PREFIX: &str = "molt/";
+
+/// Build the bucket key of one backup object — the writer half of the
+/// naming scheme [`parse_backup_key`] reads (`backup_restore_design.md`
+/// §6.2): `molt/<workspace_id>/<ts:012>.molt.enc`. The timestamp is
+/// zero-padded to 12 digits so lexicographic key order equals age order
+/// forever — the retention pruner sorts keys, nothing parses times back.
+pub fn backup_key(id: &WorkspaceId, ts: u64) -> String {
+    format!("{BACKUP_OBJECT_PREFIX}{id}/{ts:012}.molt.enc")
+}
 
 /// Parse a bucket key against the backup naming scheme
 /// `molt/<workspace_id>/<unix_ts>.molt.enc` (`backup_restore_design.md`
@@ -2481,8 +2504,10 @@ pub enum Command {
         id: WorkspaceId,
     },
     /// Switch automatic S3 backup on or off for one workspace; persisted in
-    /// the workspace's local `prefs.toml`. Enabling runs a first backup
-    /// right away (the uploader itself is not wired yet).
+    /// the workspace's local `prefs.toml`. Enabling only persists the pref
+    /// — the next [`Command::BackupTick`] pass runs the real first upload,
+    /// and the last-backup stamp moves ONLY on a confirmed upload
+    /// ([`Command::NetBackupDone`]); enabling never invents one.
     SetWorkspaceBackup {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
@@ -2761,6 +2786,51 @@ pub enum Command {
         /// dropped instead of overwriting the newer table.
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// Run one workspace's automatic backup NOW (the manual "backup now to
+    /// S3" trigger — a human decision, so a tool on both surfaces): builds
+    /// the crash-consistent `molt-export-v1` blob in `workspace` key mode
+    /// (restorable from recovery phrase + workspace id, no prompt) and PUTs
+    /// it to the configured bucket over the configured dialer (Tor when
+    /// enabled — fail-closed), then prunes old copies beyond
+    /// `s3_keep_copies`. Same off-actor task as the ticker; the honest
+    /// outcome lands in the workspace entry (stamp only on a confirmed
+    /// upload, `backup_error` otherwise).
+    BackupNow {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+    },
+    /// The backup ticker's heartbeat (engine-internal, sent by the engine's
+    /// own clock): the synchronous handler only DECIDES — workspaces whose
+    /// auto-backup pref is on, whose interval elapsed, and whose key is
+    /// accessible spawn an off-actor upload task; sealed-at-rest workspaces
+    /// are skipped with an honest status (design P6).
+    BackupTick,
+    /// The backup task confirmed the upload (engine-internal, from the
+    /// off-actor backup task — an MCP agent must not be able to forge a
+    /// backup stamp). ONLY this moves `prefs.last_backup`.
+    NetBackupDone {
+        /// The backed-up workspace.
+        id: WorkspaceId,
+        /// Unix seconds the blob was built (the object key's timestamp).
+        ts: u64,
+        /// The confirmed bucket object key.
+        object: String,
+        /// Blob size in bytes.
+        bytes: u64,
+        /// Retention-pruning failure, honestly (empty = pruned fine). A
+        /// prune failure never blocks the backup — the next successful
+        /// backup re-prunes.
+        #[serde(default)]
+        prune_error: String,
+    },
+    /// The backup task failed (engine-internal); the stamp stays untouched
+    /// and the real reason is surfaced verbatim — never a fake success.
+    NetBackupFailed {
+        /// The workspace whose backup failed.
+        id: WorkspaceId,
+        /// The failure, honestly.
+        error: String,
     },
     /// A founding seat's real, joinable invite link became available once its
     /// queue was provisioned on the SMP server (engine-internal, from the
@@ -3958,6 +4028,29 @@ mod tests {
         ] {
             assert_eq!(parse_backup_key(&foreign), None, "foreign: {foreign:?}");
         }
+    }
+
+    /// The writer half ([`backup_key`]) round-trips through the parser, and
+    /// its zero-padding keeps lexicographic key order equal to age order —
+    /// the invariant the retention pruner's key sort relies on (§6.2).
+    #[test]
+    fn backup_key_builder_round_trips_and_sorts_by_age() {
+        let id = "cd".repeat(32);
+        for ts in [0u64, 1, 1_752_800_000, 999_999_999_999] {
+            let key = backup_key(&id, ts);
+            assert_eq!(parse_backup_key(&key), Some((id.clone(), ts)), "{key}");
+        }
+        // lexicographic order == age order across magnitude boundaries
+        let mut keys: Vec<String> = [999u64, 1_000, 99_999, 1_752_800_000, 1]
+            .iter()
+            .map(|ts| backup_key(&id, *ts))
+            .collect();
+        keys.sort_unstable();
+        let ts_order: Vec<u64> = keys
+            .iter()
+            .map(|k| parse_backup_key(k).expect("own keys parse").1)
+            .collect();
+        assert_eq!(ts_order, vec![1, 999, 1_000, 99_999, 1_752_800_000]);
     }
 
     /// Classification of a real listing: objects of a locally known
