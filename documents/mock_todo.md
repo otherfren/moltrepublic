@@ -29,8 +29,8 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 | 9 | ✅ ERLEDIGT — Manueller Workspace-Export („Backup als Blob“) ist ein UI-No-op | L |
 | 10 | ✅ ERLEDIGT — At-rest-Verschlüsselung: Flag-Flip, Phrase ungeprüft, nicht persistent (S6) | L |
 | 11 | ✅ ERLEDIGT (Vokabel entfernt) — Plugin-Governance ohne Plugin-Zustand | L |
-| 12 | Auto-Backup nach S3: Einstellungen komplett, Backend fehlt (S5) | XL |
-| 13 | Restore aus S3/Datei: vollständig simulierter Lauf mit Fake-Log (S4/S5) | XL |
+| 12 | ✅ ERLEDIGT — Auto-Backup nach S3: Einstellungen komplett, Backend fehlt (S5) | XL |
+| 13 | ✅ ERLEDIGT — Restore aus S3/Datei: vollständig simulierter Lauf mit Fake-Log (S4/S5) | XL |
 | 14 | Vier Surfaces ohne Implementierung: Memory, Quests, Vault, Wallet | XL |
 
 ---
@@ -340,6 +340,13 @@ fehlt; ohne sie wäre auch Entfernen der Vokabel (S) ehrlich.
 
 ## 12. Auto-Backup nach S3: Einstellungen komplett, Backend fehlt (S5) — **XL**
 
+> **✅ ERLEDIGT (2026-07-19).** Echter Backup-Ticker (60 s, Actor-Muster):
+> crash-konsistenter `molt-export-v1`-Blob im Workspace-Key-Modus, signierter
+> PUT über den fail-closed Dialer, `last_backup` wandert NUR bei bestätigtem
+> Upload, Retention löscht erst nach Bestätigung und nur eigene Keys,
+> versiegelte Workspaces werden ehrlich übersprungen; `backup_now`-Tool;
+> Fake-Stempel beim Einschalten entfernt.
+
 **Fundorte:**
 - `crates/molt-engine/src/session.rs:613–633`: `cmd_set_workspace_backup` — die Pref wird **echt** persistiert (`prefs.toml`), aber der Kommentar sagt es klar: „the uploader itself is milestone S5; the stamp keeps list and prefs consistent“ — `last_backup_min = 0` wird gestempelt, ohne dass ein Backup läuft
 - Settings-Tab „Backup“: Intervall, Kopien-Retention, Endpoint/Keys/Bucket (`app.slint:5013–5133`) — alles wird real nach `config.toml` persistiert (`configstore.rs:336–342`), aber von niemandem konsumiert; kein S3-Code existiert im Workspace (grep über molt-net/molt-storage: keine Treffer)
@@ -362,6 +369,15 @@ Format-Abhängigkeit zu Finding 9; sicherheits- und privacy-relevant (Creds,
 Tor-Routing).
 
 ## 13. Restore aus S3/Datei: vollständig simulierter Lauf mit Fake-Log — **XL**
+
+> **✅ ERLEDIGT (2026-07-19).** Der Fake-Lauf (erfundene Log-Zeilen, ~45 %-
+> Fehlregel, „Restored Republic“) ist gelöscht. Echter zweiphasiger Import:
+> Staging (Allowlist — `keys/`/`transport.state` können nie über einen Blob
+> einwandern) → **Chain-Verify hard-reject vor jeder Materialisierung**
+> (geteiltes `verify_served` mit der Recovery-Adoption) → Commit (Re-Seal
+> unter lokalem Device-Key, frische Minimal-Identität, nie Ratchets/Creds).
+> S3-Weg per Streaming-GET mit Caps; Workspace öffnet ehrlich „detached“ —
+> der Weg zurück in die lebende Republik bleibt das Recovery-Ritual.
 
 **Fundorte:**
 - `crates/molt-engine/src/lifecycles.rs:207–248` (`cmd_restore_start/tick/cancel/finish`), `:312–366` (`restore_tick`: erfundene Log-Zeilen — „GET …/manifest.enc · 200 OK“, „chunk 17/23 fetched · sha256 ok“, „aes-256-gcm: chunk decrypted · merkle node ok“ — und die Fake-Fehlregel „unplausibles Ziel scheitert bei ~45 %“)
