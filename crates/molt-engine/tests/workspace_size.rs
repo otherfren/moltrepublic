@@ -63,7 +63,6 @@ async fn workspace_entry_reports_real_on_disk_size() {
         member: "petra".to_string(),
         threshold: 2,
         members: 3,
-        net: "tor".to_string(),
     })
     .await
     .expect("create start");
