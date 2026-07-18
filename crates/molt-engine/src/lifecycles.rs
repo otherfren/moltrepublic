@@ -3,9 +3,13 @@
 //! The engine-run lifecycles: **founding** (create) and **join** are real
 //! over SMP — founding provisions invite queues and waits for real members to
 //! seal; joining runs the member ritual off the actor and enters the republic
-//! once the founder distributes the sealed roster. **restore** is still a mock
-//! (its real backup paths are storage milestones S4/S5). They share a
-//! [`RunCore`] (step / progress / outcome / log) and cancel-to-choice.
+//! once the founder distributes the sealed roster. **restore** is real too
+//! (`backup_restore_design.md` §4/§6.6): an off-actor task fetches (file or
+//! S3) and stages the encrypted blob, the ACTOR hard-verifies the
+//! threshold-signed chain before anything materializes, and the restored
+//! workspace opens *detached* (knowledge, not membership — rejoining is the
+//! recovery ritual). They share a [`RunCore`] (step / progress / outcome /
+//! log) and cancel-to-choice.
 
 use molt_core::{
     demo_workspace_id, roster_members, Command, CreateState, JoinState, MemberId, MemberInfo,
@@ -228,7 +232,9 @@ impl State {
                 "this node has no workspace storage to restore into".to_string(),
             ));
         }
-        let secret = secret.trim().to_string();
+        // the master secret (phrase / passphrase) rides in a wiped-on-drop
+        // wrapper across the task hop, matching the export path's posture
+        let secret = zeroize::Zeroizing::new(secret.trim().to_string());
         if secret.is_empty() {
             return Err(MoltError::Restore(
                 "the restore needs its secret: the recovery phrase for S3/auto \
@@ -354,33 +360,18 @@ impl State {
                     .to_string(),
             );
         }
-        let head = match &staging.checkpoint {
-            None => crate::chain::verify_chain(&staging.chain),
-            Some(blob) => {
-                let rid = crate::recovery::sealed_roster_from_blob(blob).republic_id;
-                crate::chain::verify_suffix_chain(blob, &staging.chain, &rid)
-            }
-        };
-        let head = match head {
-            Ok(h) => h,
-            Err(e) => {
-                staging.abort();
-                return self.fail_restore(format!("chain verification failed: {e}"));
-            }
-        };
-        let sealed = match &staging.checkpoint {
-            None => staging
-                .chain
-                .first()
-                .and_then(crate::recovery::sealed_roster_from_genesis),
-            Some(blob) => Some(crate::recovery::sealed_roster_from_blob(blob)),
-        };
-        let Some(sealed) = sealed else {
-            staging.abort();
-            return self.fail_restore(
-                "the chain does not root on a genesis constitution".to_string(),
-            );
-        };
+        // no external anchor exists for an import — the content-derived
+        // republic id the genesis/blob founding table recomputes IS the
+        // trust anchor (the full-chain forgery check), same helper the
+        // recovery adoption uses with its link anchor
+        let (head, sealed) =
+            match crate::chain::verify_served(staging.checkpoint.as_ref(), &staging.chain, None) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    staging.abort();
+                    return self.fail_restore(format!("chain verification failed: {e}"));
+                }
+            };
         // the manifest is the unauthenticated cover sheet — the verified
         // genesis is authoritative (name is a display value the republic
         // may have legitimately renamed; the RULE must agree)
@@ -424,13 +415,13 @@ impl State {
         let ws_id = staging.manifest.workspace.id.clone();
         let identity_sk = staging.seed_entropy().and_then(|seed| {
             let anchored = head.identities.iter().find(|i| i.member == ws_member)?;
-            let (sk, pk) = molt_storage::derive_identity_key(
-                seed,
-                &molt_storage::derive_workspace_id(seed, "member"),
-            );
+            // joiner salt: the ONE shared derivation of founding.rs
+            let (sk, pk) = crate::founding::member_identity_from_entropy(seed);
             if pk == anchored.identity_pk {
                 return Some(sk);
             }
+            // founder salt: the founder's own workspace id (the ritual's
+            // start_ritual derivation — which IS the manifest id here)
             let (sk, pk) = molt_storage::derive_identity_key(seed, &ws_id);
             (pk == anchored.identity_pk).then_some(sk)
         });
@@ -460,18 +451,36 @@ impl State {
         let size_kib =
             u32::try_from(molt_storage::workspace_size_kib(&dir)).unwrap_or(u32::MAX);
         let encrypted = at_rest == molt_core::SEALED_PHRASE;
-        if !self.session.workspaces.iter().any(|w| w.id == ws_id) {
+        // node-local prefs travel in the blob (§3.2) — the entry mirrors the
+        // RESTORED prefs (same source the boot scan reads), or the list and
+        // the next restart would disagree about the auto-backup toggle
+        let restored_prefs = molt_storage::read_prefs(&dir);
+        // a replace committed NEW content under an existing id — the old
+        // session row (name/size/encrypted/…) no longer describes it
+        self.session.workspaces.retain(|w| w.id != ws_id);
+        {
             self.session.workspaces.push(WorkspaceInfo {
                 id: ws_id.clone(),
                 name: name.clone(),
                 detail: WorkspaceInfo::rule_detail(sealed.rule_m, usize::from(sealed.rule_n)),
-                synced: true,
-                state: 0,
+                // honest §4.4 state: a detached workspace has no mesh and
+                // cannot sync — it is offline, not "synced just now"
+                synced: false,
+                state: 2,
                 last_sync_min: 0,
                 sync_queue: 0,
-                s3: false,
+                s3: restored_prefs.s3_backup,
                 size_kib,
-                last_backup_min: WorkspaceInfo::NEVER,
+                // the restored prefs' own stamp (exactly what the boot scan
+                // would show after a restart), aged to now; NEVER when the
+                // blob never carried one
+                last_backup_min: restored_prefs
+                    .last_backup
+                    .map(|ts| {
+                        u32::try_from(crate::now_secs().saturating_sub(ts) / 60)
+                            .unwrap_or(u32::MAX - 1)
+                    })
+                    .unwrap_or(WorkspaceInfo::NEVER),
                 backup_copies: 0,
                 backup_error: String::new(),
                 seed: entry_seed,
@@ -565,6 +574,22 @@ impl State {
                 "no restored workspace to open".to_string(),
             ));
         };
+        // a phrase-sealed blob round-tripped SEALED (S6): there is no key
+        // material to open with — land on the workspace list, where the
+        // existing decrypt flow takes over, instead of dead-ending on the
+        // open refusal
+        if self
+            .session
+            .workspaces
+            .iter()
+            .any(|w| w.id == id && w.encrypted)
+        {
+            self.restored_id = None;
+            self.session.restore = RestoreState::default();
+            self.session.screen = Screen::Open;
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
         // opens DETACHED: the imported dir carries no mesh credentials and
         // no MLS state on purpose (§3.3/§4.4) — cmd_open_workspace comes up
         // without a mesh and sets the honest detached notice
@@ -1287,32 +1312,13 @@ impl State {
             } => (blocks, Some(checkpoint_blob)),
         };
         // full chain: verified from block 0; pruned: the suffix rules run
-        // against the blob (founding-bound anchor, double-apply seed)
-        let head = match &checkpoint_blob {
-            None => match crate::chain::verify_chain(&blocks) {
-                Ok(h) => h,
+        // against the blob (founding-bound anchor, double-apply seed). The
+        // recovery LINK is the external republic anchor.
+        let (head, sealed) =
+            match crate::chain::verify_served(checkpoint_blob.as_ref(), &blocks, Some(&inv.republic_id)) {
+                Ok(pair) => pair,
                 Err(e) => return self.cmd_net_recover_failed(e, generation),
-            },
-            Some(blob) => {
-                match crate::chain::verify_suffix_chain(blob, &blocks, &inv.republic_id) {
-                    Ok(h) => h,
-                    Err(e) => return self.cmd_net_recover_failed(e, generation),
-                }
-            }
-        };
-        // the constitution the workspace materializes from: the genesis, or
-        // the blob's rid-bound founding table on a pruned serve
-        let sealed = match &checkpoint_blob {
-            None => blocks.first().and_then(crate::recovery::sealed_roster_from_genesis),
-            Some(blob) => Some(crate::recovery::sealed_roster_from_blob(blob)),
-        };
-        let Some(sealed) = sealed
-        else {
-            return self.cmd_net_recover_failed(
-                "the recovered chain does not root on a genesis constitution".to_string(),
-                generation,
-            );
-        };
+            };
         // the chain must be THIS recovery's republic (no swapping in another)
         if head.republic_id != inv.republic_id || member != inv.member {
             return self.cmd_net_recover_failed(
@@ -1633,7 +1639,7 @@ async fn restore_task(
     generation: u64,
     plan: RestorePlan,
     root: std::path::PathBuf,
-    secret: String,
+    secret: zeroize::Zeroizing<String>,
     slot: std::sync::Arc<std::sync::Mutex<Option<molt_storage::import::ImportStaging>>>,
 ) {
     let progress = |pct: u8, line: String| {
@@ -1651,10 +1657,22 @@ async fn restore_task(
             RestorePlan::File(path) => {
                 progress(5, format!("→ fs: read {}", path.display())).await;
                 let read_path = path.clone();
-                tokio::task::spawn_blocking(move || std::fs::read(&read_path))
-                    .await
-                    .map_err(|e| format!("read task failed: {e}"))?
-                    .map_err(|e| format!("reading {}: {e}", path.display()))?
+                tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                    // the same cap the download path enforces — a crafted
+                    // "blob" must not buffer unbounded memory either way
+                    let len = std::fs::metadata(&read_path)
+                        .map_err(|e| format!("reading {}: {e}", read_path.display()))?
+                        .len();
+                    if len > RESTORE_MAX_BYTES {
+                        return Err(format!(
+                            "file is {len} bytes — beyond the {RESTORE_MAX_BYTES}-byte cap"
+                        ));
+                    }
+                    std::fs::read(&read_path)
+                        .map_err(|e| format!("reading {}: {e}", read_path.display()))
+                })
+                .await
+                .map_err(|e| format!("read task failed: {e}"))??
             }
             RestorePlan::S3 { config, dialer, pick } => {
                 let client = molt_net::s3::S3Client::new(*config, dialer);

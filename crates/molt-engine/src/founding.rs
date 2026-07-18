@@ -1273,8 +1273,18 @@ pub(crate) fn member_identity(
     phrase: &str,
 ) -> Result<(molt_storage::SigningKey, String), String> {
     let entropy = molt_storage::seed_entropy(phrase).map_err(|e| e.to_string())?;
-    let member_id = molt_storage::derive_workspace_id(&entropy, "member");
-    Ok(molt_storage::derive_identity_key(&entropy, &member_id))
+    Ok(member_identity_from_entropy(&entropy))
+}
+
+/// The entropy-level core of [`member_identity`] — shared with the restore
+/// path, which holds raw seed entropy (from the blob meta) instead of a
+/// typed phrase. ONE salt convention: changing it here changes it for the
+/// ritual, the join finish, and the restored-identity check together.
+pub(crate) fn member_identity_from_entropy(
+    entropy: &[u8],
+) -> (molt_storage::SigningKey, String) {
+    let member_id = molt_storage::derive_workspace_id(entropy, "member");
+    molt_storage::derive_identity_key(entropy, &member_id)
 }
 
 /// Run the **member side** of the founding ritual against the founder's

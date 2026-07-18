@@ -59,7 +59,9 @@ impl State {
         ) else {
             return Ok(Reply::Ack);
         };
-        let interval_secs = u64::from(s.s3_interval_min) * 60;
+        // clamp to the tick period: interval 0 must not mean "a full blob
+        // upload every single tick, forever"
+        let interval_secs = u64::from(s.s3_interval_min.max(1)) * 60;
         let now = now_secs();
         let root = self.workspace_root();
         let mut changed = false;
@@ -238,7 +240,7 @@ impl State {
         tracing::info!(id, object, bytes, "backup uploaded");
         if !prune_error.is_empty() {
             tracing::warn!(id, error = %prune_error, "backup retention pruning failed");
-            self.session.notice = format!("backup-prune-failed:{prune_error}");
+            self.note_backup(format!("backup-prune-failed:{prune_error}"));
         }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -253,9 +255,22 @@ impl State {
         self.backup_inflight.remove(&id);
         tracing::warn!(id, error = %error, "backup failed");
         self.set_backup_error(&id, &error);
-        self.session.notice = format!("backup-failed:{error}");
+        self.note_backup(format!("backup-failed:{error}"));
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
+    }
+
+    /// Set a backup notice WITHOUT clobbering a foreign one: the backup
+    /// tasks are the first timer-driven writers of the single-slot session
+    /// notice, and overwriting e.g. a freshly minted `recovery-link:…`
+    /// before the GUI's edge-trigger consumed it would eat a one-shot
+    /// dialog. Backup notices only replace an empty slot or each other;
+    /// the per-workspace `backup_error` state carries the failure anyway.
+    fn note_backup(&mut self, notice: String) {
+        let current = &self.session.notice;
+        if current.is_empty() || current.starts_with("backup-") {
+            self.session.notice = notice;
+        }
     }
 
     /// Persist `prefs.last_backup` for one workspace — the same

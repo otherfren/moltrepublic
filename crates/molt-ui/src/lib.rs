@@ -4872,7 +4872,7 @@ lexicon! {
     rw_title: "Restore", "Wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
-    rw_seed_hint: "Needed for every restore path — all keys derive from this phrase.", "Für jeden Weg erforderlich — alle Schlüssel werden aus dieser Phrase abgeleitet.";
+    rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
     rw_continue: "Continue", "Weiter";
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
     rw_peer_hint: "Rejoins via another member — paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei — füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
@@ -4895,7 +4895,9 @@ lexicon! {
     rw_finish: "Finish", "Fertigstellen";
     rw_failed: "Failed — see the live details", "Fehlgeschlagen — siehe Live-Details";
     // the honest §4.4 boundary: knowledge vs membership
-    toast_detached: "Restored from backup — knowledge is here, membership is not. Rejoin via a recovery link.", "Aus Backup wiederhergestellt — Wissen ist da, Mitgliedschaft nicht. Wiederbeitritt über Recovery-Link.";
+    // origin-neutral on purpose: the engine derives "detached" from the
+    // directory's state (no group key, no mesh), not from HOW it got there
+    toast_detached: "Workspace is detached — knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached — Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
     toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
     toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     rw_ph1: "Connecting…", "Verbinde…";

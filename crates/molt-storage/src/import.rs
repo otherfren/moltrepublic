@@ -423,6 +423,16 @@ impl ImportStaging {
             }
         }
 
+        // prefs travel (§3.2), but `last_backup` is THIS-node bookkeeping —
+        // stamped only when the RUNNING node confirms an upload. The source
+        // node's stamp must not survive the import: the restored node would
+        // claim an upload it never made, and the ticker would skip the
+        // fresh first backup of the imported content.
+        let mut prefs = crate::read_prefs(&self.dir);
+        if prefs.last_backup.take().is_some() {
+            crate::write_prefs(&self.dir, &prefs)?;
+        }
+
         // key material per the at-rest state (a phrase-sealed blob commits
         // WITHOUT keys — S6 semantics survive the round trip)
         if self.at_rest == molt_core::SEALED_DEVICE {

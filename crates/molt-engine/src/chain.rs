@@ -504,6 +504,55 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
     Ok(head)
 }
 
+/// Verify a SERVED chain — the shared front door of the recovery adoption
+/// (`cmd_net_recover_sealed`) and the restore import
+/// (`cmd_net_restore_staged`): full chains from block 0 via
+/// [`verify_chain`], pruned ones against their checkpoint blob via
+/// [`verify_suffix_chain`]. `expected_rid` is the caller's EXTERNAL anchor
+/// when it has one (the recovery link); `None` anchors on the
+/// content-derived id the genesis/blob founding table itself recomputes —
+/// the same trust model a full-chain import has. Hard-reject,
+/// all-or-nothing; returns the verified head plus the founding
+/// constitution the workspace materializes from.
+pub(crate) fn verify_served(
+    checkpoint: Option<&molt_core::CheckpointState>,
+    blocks: &[ChainBlock],
+    expected_rid: Option<&str>,
+) -> Result<(ChainHead, molt_core::SealedRoster), String> {
+    match checkpoint {
+        None => {
+            let head = verify_chain(blocks)?;
+            let sealed = blocks
+                .first()
+                .and_then(crate::recovery::sealed_roster_from_genesis)
+                .ok_or_else(|| {
+                    "the chain does not root on a genesis constitution".to_string()
+                })?;
+            if let Some(rid) = expected_rid {
+                if head.republic_id != rid {
+                    return Err("the chain does not match the expected republic".to_string());
+                }
+            }
+            Ok((head, sealed))
+        }
+        Some(blob) => {
+            // the suffix rules recompute the blob's founding table to the
+            // rid either way; an external anchor additionally pins WHICH
+            // republic the caller expects
+            let rid_owned;
+            let rid = match expected_rid {
+                Some(r) => r,
+                None => {
+                    rid_owned = blob.republic_id.clone();
+                    rid_owned.as_str()
+                }
+            };
+            let head = verify_suffix_chain(blob, blocks, rid)?;
+            Ok((head, crate::recovery::sealed_roster_from_blob(blob)))
+        }
+    }
+}
+
 /// WP4b: verify a SUFFIX chain — one that begins with a checkpoint block
 /// instead of the genesis (`documents/log_compaction.md` §B.5). The
 /// checkpoint is the trust anchor: its blob must hash to the signed
