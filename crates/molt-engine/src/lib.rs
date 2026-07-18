@@ -925,6 +925,10 @@ impl State {
                 bucket,
             } => self.cmd_net_test_s3(endpoint, access_key, secret_key, bucket),
             Command::NetTestS3Result { result } => self.cmd_net_test_s3_result(result),
+            Command::NetListBackups => self.cmd_net_list_backups(),
+            Command::NetListBackupsResult { result, objects } => {
+                self.cmd_net_list_backups_result(result, objects)
+            }
             Command::NetRitualLinkReady {
                 seat,
                 link,

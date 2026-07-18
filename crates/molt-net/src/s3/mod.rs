@@ -20,6 +20,7 @@
 //! `smp/tls.rs::pinned_config`.
 
 pub mod http;
+pub mod list;
 pub mod sigv4;
 
 use std::sync::{Arc, OnceLock};
@@ -33,6 +34,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::smp::tls::Dialer;
 pub use http::HttpResponse;
+pub use list::S3Object;
 
 /// TLS handshake deadline (the dial itself carries the Tor-sized connect
 /// deadline inside [`Dialer::dial_host`]).
@@ -271,26 +273,35 @@ impl S3Client {
         let resp = self.request("HEAD", &path, &[], &[]).await?;
         match resp.status {
             200..=299 => Ok(()),
-            301 | 307 | 308 => Err(S3Error::Http {
-                status: resp.status,
+            s => Err(self.status_error(s)),
+        }
+    }
+
+    /// The honest interpretation of a non-success HTTP status against the
+    /// bucket — shared by every bucket-level operation (probe, listing) so
+    /// the settings verdict and the table status never drift apart.
+    pub(crate) fn status_error(&self, status: u16) -> S3Error {
+        match status {
+            301 | 307 | 308 => S3Error::Http {
+                status,
                 hint: "bucket lives at another endpoint/region (redirect)".to_string(),
-            }),
-            400 => Err(S3Error::Http {
+            },
+            400 => S3Error::Http {
                 status: 400,
                 hint: "bad request — often a region mismatch for this endpoint".to_string(),
-            }),
-            401 | 403 => Err(S3Error::Http {
-                status: resp.status,
+            },
+            401 | 403 => S3Error::Http {
+                status,
                 hint: "access denied — check access key and secret".to_string(),
-            }),
-            404 => Err(S3Error::Http {
+            },
+            404 => S3Error::Http {
                 status: 404,
                 hint: format!("bucket `{}` not found", self.config.bucket),
-            }),
-            s => Err(S3Error::Http {
+            },
+            s => S3Error::Http {
                 status: s,
                 hint: "unexpected status".to_string(),
-            }),
+            },
         }
     }
 

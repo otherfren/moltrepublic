@@ -273,6 +273,99 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// List the configured bucket's backup objects (the settings backup
+    /// table's refresh, mock_todo story 8). Always driven by the SAVED
+    /// settings — the table reflects the configured backup target, not a
+    /// draft. The config is validated in-actor (no backup target configured
+    /// fails fast with an honest note and an EMPTY orphan table — never
+    /// invented rows), then the SigV4-signed ListObjectsV2 under the
+    /// `molt/` prefix (`backup_restore_design.md` §6.2) runs **off the
+    /// actor** through the resolved dialer — fail-closed like every dial.
+    /// The outcome returns as [`molt_core::Command::NetListBackupsResult`].
+    pub(crate) fn cmd_net_list_backups(&mut self) -> Result<Reply, MoltError> {
+        let s = &self.session.settings;
+        let config = match molt_net::s3::S3Config::from_settings(
+            &s.s3_endpoint,
+            &s.s3_access_key,
+            &s.s3_secret_key,
+            &s.s3_bucket,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                self.session.s3_list = format!("error: {e}");
+                self.session.backup_orphans.clear();
+                self.emit_session(SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
+        };
+        let dialer = match self.dialer_for() {
+            Ok(dialer) => dialer,
+            Err(e) => {
+                self.session.s3_list = format!("error: {e}");
+                self.session.backup_orphans.clear();
+                self.emit_session(SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
+        };
+        self.session.s3_list = "listing".to_string();
+        self.emit_session(SessionScope::Full);
+        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+            tokio::spawn(async move {
+                let client = molt_net::s3::S3Client::new(config, dialer);
+                let (result, objects) = match client.list_objects("molt/").await {
+                    Ok(listed) => (
+                        "ok".to_string(),
+                        listed
+                            .into_iter()
+                            .map(|o| molt_core::BackupObject {
+                                key: o.key,
+                                size: o.size,
+                                modified: o.modified,
+                            })
+                            .collect(),
+                    ),
+                    Err(e) => (format!("error: {e}"), Vec::new()),
+                };
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx
+                    .send(crate::Envelope {
+                        cmd: molt_core::Command::NetListBackupsResult { result, objects },
+                        reply,
+                    })
+                    .await;
+            });
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Record a bucket-listing outcome into the session (fed back from the
+    /// off-actor listing task): classify the objects against the locally
+    /// known workspaces — entries with no local counterpart become the REAL
+    /// `backup_orphans` (foreign keys survive as unknown entries); on
+    /// failure the table shows no bucket rows at all rather than stale or
+    /// invented ones.
+    pub(crate) fn cmd_net_list_backups_result(
+        &mut self,
+        result: String,
+        objects: Vec<molt_core::BackupObject>,
+    ) -> Result<Reply, MoltError> {
+        if result == "ok" {
+            let local_ids: Vec<String> = self
+                .session
+                .workspaces
+                .iter()
+                .map(|w| w.id.clone())
+                .collect();
+            self.session.backup_orphans =
+                molt_core::backup_orphans_from_listing(&objects, &local_ids, crate::now_secs());
+        } else {
+            self.session.backup_orphans.clear();
+        }
+        self.session.s3_list = result;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Queue the current session settings for persistence (no-op without a
     /// config store). `notify` puts the outcome into the session notice.
     fn persist_settings(&mut self, notify: bool) {
