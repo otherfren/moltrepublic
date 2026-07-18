@@ -28,6 +28,9 @@ import {
 import {
     ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard
 } from "parts.slint";
+// the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
+// .slint-side only; the real governance views stay below in this file)
+import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
 export { Strings, Theme }
 
@@ -1228,10 +1231,10 @@ export component AppWindow inherits Window {
                             s: s;
                             selected: s.key == root.selected-surface;
                             compact: root.nav-collapsed;
-                            // staged out for now: only Organization and Chat
-                            // are live in the GUI — the other surfaces sit
-                            // greyed until their real implementations land
-                            enabled: s.key == "organization" || s.key == "chat";
+                            // every surface is selectable again: Memory,
+                            // Quests, Vault and Wallet open their badged
+                            // DESIGN-MOCK panes (surfaces.slint) while the
+                            // real implementations land stepwise
                             chosen => {
                                 root.mv-draft = "";
                                 root.select-surface(s.key);
@@ -1249,7 +1252,10 @@ export component AppWindow inherits Window {
                                 // only once something was applied.
                                 if (v.key != "pending" || s.pending-count > 0)
                                     && (v.key != "accepted" || s.applied-count > 0)
-                                    && (v.key != "declined" || s.declined-count > 0): ViewRow {
+                                    && (v.key != "declined" || s.declined-count > 0)
+                                    // Memory's outcome view (key "denied",
+                                    // same semantics as org's "declined")
+                                    && (v.key != "denied" || s.declined-count > 0): ViewRow {
                                     // chat's "today" IS the group view —
                                     // localized like the old group channel
                                     // row it replaces
@@ -4781,17 +4787,45 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // gated (memory / quests / vault / wallet — the
-                        // gated organization has its own views above)
-                        if s.gated && s.key != "organization": VerticalLayout {
+                        // the four staged surfaces: badged DESIGN-MOCK panes
+                        // (surfaces.slint) for every sub-view that is not yet
+                        // real — sample data lives .slint-side only, actions
+                        // that would change shared state render disabled
+                        if s.key == "memory" && root.selected-view != "proposals"
+                            && root.selected-view != "accepted"
+                            && root.selected-view != "denied": MemoryPane {
+                            view: root.selected-view;
+                        }
+                        if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
+                            view: root.selected-view;
+                        }
+                        if s.key == "vault" && root.selected-view != "proposals": VaultPane {
+                            view: root.selected-view;
+                        }
+                        if s.key == "wallet" && root.selected-view != "status": WalletPane {
+                            view: root.selected-view;
+                        }
+
+                        // …and their REAL threshold governance (gated: memory
+                        // / quests / vault / wallet — the gated organization
+                        // has its own views above), routed to the governance
+                        // sub-views: "proposals" (memory splits its outcomes
+                        // into Accepted/Denied like the organization does),
+                        // wallet's "status"
+                        if s.gated && s.key != "organization"
+                            && (((s.key == "memory" || s.key == "quests" || s.key == "vault")
+                                    && (root.selected-view == "proposals"
+                                        || root.selected-view == "accepted"
+                                        || root.selected-view == "denied"))
+                                || (s.key == "wallet" && root.selected-view == "status")): VerticalLayout {
                             spacing: 8px;
-                            Text {
+                            if root.selected-view != "accepted" && root.selected-view != "denied": Text {
                                 text: Strings.mv-pending;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 font-weight: 600;
                             }
-                            Rectangle {
+                            if root.selected-view != "accepted" && root.selected-view != "denied": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
                                 VerticalLayout {
@@ -4830,13 +4864,16 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            Text {
+                            // the applied log: memory shows it under its own
+                            // Accepted sub-view; the other surfaces keep it
+                            // inline under Proposals (resp. wallet Status)
+                            if s.key != "memory" || root.selected-view == "accepted": Text {
                                 text: Strings.mv-applied;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 font-weight: 600;
                             }
-                            Rectangle {
+                            if s.key != "memory" || root.selected-view == "accepted": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
                                 VerticalLayout {
@@ -4878,14 +4915,61 @@ export component AppWindow inherits Window {
                             // beyond one page (page size 20, Rust-side) the
                             // log above shows only the current page and this
                             // row steps through them
-                            if s.applied-pages > 1: PagerRow {
+                            if s.applied-pages > 1 && (s.key != "memory" || root.selected-view == "accepted"): PagerRow {
                                 page: s.applied-page;
                                 pages: s.applied-pages;
                                 paged(delta) => {
                                     root.page-list(s.key, "applied", delta);
                                 }
                             }
-                            HorizontalLayout {
+                            // Memory → Denied: the retained declines, the
+                            // same read-only cards as Organization → Declined
+                            if s.key == "memory" && root.selected-view == "denied": Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                md-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: md-list.preferred-height + 8px;
+                                    md-list := VerticalLayout {
+                                        padding: 4px;
+                                        padding-right: 14px;
+                                        spacing: 16px;
+                                        alignment: start;
+                                        if s.declined-count == 0: Text {
+                                            text: Strings.mv-empty-declined;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        for p in s.declined: ProposalCard {
+                                            p: p;
+                                            read-only: true;
+                                            discuss => {
+                                                // the decided vote's discussion
+                                                // reopens read-only, like the
+                                                // organization outcomes
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{p.id}");
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: md-fl.height;
+                                    content-h: md-fl.viewport-height;
+                                    scroll-y: md-fl.viewport-y;
+                                }
+                            }
+                            if s.declined-pages > 1 && s.key == "memory" && root.selected-view == "denied": PagerRow {
+                                page: s.declined-page;
+                                pages: s.declined-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "declined", delta);
+                                }
+                            }
+                            if root.selected-view != "accepted" && root.selected-view != "denied": HorizontalLayout {
                                 spacing: 8px;
                                 AppField {
                                     horizontal-stretch: 1;
