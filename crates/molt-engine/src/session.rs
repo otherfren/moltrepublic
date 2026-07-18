@@ -194,6 +194,75 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Test the configured S3 backup target (the backup panel's Test button).
+    /// Empty fields fall back to the saved settings (the GUI passes its
+    /// draft, an MCP call may pass nothing to test what is persisted); the
+    /// config is validated in-actor so a missing/malformed endpoint fails
+    /// fast, then the SigV4-signed `HEAD /bucket` probe runs **off the
+    /// actor** through the resolved dialer — over Tor exactly like the SMP
+    /// traffic when Tor is configured, and a misconfigured Tor setting is
+    /// itself the test failure (fail-closed, T4 §P7). The outcome returns as
+    /// [`molt_core::Command::NetTestS3Result`].
+    pub(crate) fn cmd_net_test_s3(
+        &mut self,
+        endpoint: String,
+        access_key: String,
+        secret_key: String,
+        bucket: String,
+    ) -> Result<Reply, MoltError> {
+        let s = &self.session.settings;
+        let or_saved = |v: String, saved: &str| if v.trim().is_empty() { saved.to_string() } else { v };
+        let endpoint = or_saved(endpoint, &s.s3_endpoint);
+        let access_key = or_saved(access_key, &s.s3_access_key);
+        let secret_key = or_saved(secret_key, &s.s3_secret_key);
+        let bucket = or_saved(bucket, &s.s3_bucket);
+        let config =
+            match molt_net::s3::S3Config::from_settings(&endpoint, &access_key, &secret_key, &bucket)
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    self.session.s3_test = format!("error: {e}");
+                    self.emit_session(SessionScope::Full);
+                    return Ok(Reply::Ack);
+                }
+            };
+        let dialer = match self.dialer_for() {
+            Ok(dialer) => dialer,
+            Err(e) => {
+                self.session.s3_test = format!("error: {e}");
+                self.emit_session(SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
+        };
+        self.session.s3_test = "testing".to_string();
+        self.emit_session(SessionScope::Full);
+        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+            tokio::spawn(async move {
+                let client = molt_net::s3::S3Client::new(config, dialer);
+                let result = match client.probe_bucket().await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e}"),
+                };
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx
+                    .send(crate::Envelope {
+                        cmd: molt_core::Command::NetTestS3Result { result },
+                        reply,
+                    })
+                    .await;
+            });
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Record an S3 probe outcome into the session (fed back from the
+    /// off-actor probe task).
+    pub(crate) fn cmd_net_test_s3_result(&mut self, result: String) -> Result<Reply, MoltError> {
+        self.session.s3_test = result;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Queue the current session settings for persistence (no-op without a
     /// config store). `notify` puts the outcome into the session notice.
     fn persist_settings(&mut self, notify: bool) {
