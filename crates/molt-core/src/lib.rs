@@ -3752,7 +3752,7 @@ mod tests {
             // a foreign key → a per-key unknown entry
             obj("molt/leftover.bin", 512, now - 60),
         ];
-        let got = backup_orphans_from_listing(&objects, &[local.clone()], now);
+        let got = backup_orphans_from_listing(&objects, std::slice::from_ref(&local), now);
         assert_eq!(got.len(), 2, "one orphan + one unknown: {got:?}");
         let o = &got[0];
         assert_eq!(o.id, orphan, "the orphan carries the workspace-id pseudonym");

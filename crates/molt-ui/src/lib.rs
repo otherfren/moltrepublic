@@ -315,6 +315,19 @@ pub fn run_app(
         });
     }
     {
+        // Refresh the backup table's bucket side: a real ListObjectsV2
+        // against the SAVED backup target (never a draft — the table shows
+        // the configured bucket). Fired on opening the backup tab and by
+        // the explicit refresh button; the honest outcome streams back into
+        // `cfg-bk-list` and the orphan rows.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_list_backups(move || {
+            issue(&rt, &w, &weak, Command::NetListBackups);
+        });
+    }
+    {
         // Leaving settings is guarded: a clean draft navigates straight back;
         // a dirty one raises the unsaved-changes modal (save / discard / stay).
         let rt = rt.clone();
@@ -1597,8 +1610,25 @@ fn backup_when_label(lang: i32, minutes: u32) -> String {
     }
 }
 
+/// The bucket-side label of an orphan/unknown backup row: a foreign key
+/// shows its raw object key; a real orphan is known only by its
+/// workspace-id pseudonym (backup objects carry no display names —
+/// `backup_restore_design.md` §6.2), shortened for the table.
+fn orphan_remote_label(o: &molt_core::BackupOrphan) -> String {
+    if !o.name.is_empty() {
+        return o.name.clone();
+    }
+    if o.id.chars().count() > 12 {
+        let short: String = o.id.chars().take(12).collect();
+        format!("{short}…")
+    } else {
+        o.id.clone()
+    }
+}
+
 /// The settings backup table: every local workspace mapped to its bucket
-/// backup (if auto-backup is on), then the bucket-only orphans.
+/// backup (if auto-backup is on), then the bucket-only orphans from the
+/// last real listing (none until one ran).
 fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
     let lang = i32::from(sv.language == "de");
     // machine sort key for the last-backup column ("never" sorts last)
@@ -1627,7 +1657,7 @@ fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
     rows.extend(sv.backup_orphans.iter().map(|o| BackupRow {
         id: "".into(),
         local: "".into(),
-        remote: o.name.as_str().into(),
+        remote: orphan_remote_label(o).into(),
         has_local: false,
         auto: false,
         size: size_label(o.size_kib).into(),
@@ -2056,6 +2086,7 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // an unsaved URL open and `settings_changed` is suppressed
     ui.set_cfg_smp_test(sv.smp_test.clone().into());
     ui.set_cfg_s3_test(sv.s3_test.clone().into());
+    ui.set_cfg_bk_list(sv.s3_list.clone().into());
 
     // transport health for the header "chat" pill: tone (green/amber/red) plus
     // the engine's reason string as the hover tooltip (P6). Pushed on every
@@ -4775,6 +4806,10 @@ lexicon! {
     bk_col_auto: "Auto", "Auto";
     bk_col_size: "Size", "Größe";
     bk_col_last: "Last backup", "Letztes Backup";
+    bk_refresh: "Refresh bucket", "Bucket aktualisieren";
+    bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport — Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport — via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
+    bk_listing: "listing the bucket…", "Bucket wird gelesen…";
+    bk_list_ok: "bucket listed — the table shows its real contents ✓", "Bucket gelesen — die Tabelle zeigt den echten Inhalt ✓";
     set_save: "Save", "Speichern";
     set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";
     set_close: "Close", "Schließen";
@@ -5765,9 +5800,31 @@ mod tests {
         assert_eq!(backup_when_label(1, 129_600), "vor 90 Tagen");
     }
 
+    /// A session with bucket-only entries, as a real listing would produce
+    /// them: one true orphan (id only, no name) and one foreign key. The
+    /// production DEFAULT has none — molt-core pins that.
+    fn sv_with_orphans() -> SessionView {
+        let mut sv = SessionView::default();
+        sv.backup_orphans = vec![
+            molt_core::BackupOrphan {
+                id: "ab".repeat(32),
+                name: String::new(),
+                size_kib: 480,
+                last_backup_min: 129_600,
+            },
+            molt_core::BackupOrphan {
+                id: String::new(),
+                name: "molt/leftover.bin".to_string(),
+                size_kib: 75,
+                last_backup_min: 43_200,
+            },
+        ];
+        sv
+    }
+
     #[test]
     fn sort_bk_rows_by_size_and_names_with_empties_last() {
-        let sv = SessionView::default();
+        let sv = sv_with_orphans();
         let mut rows = backup_rows(&sv);
         sort_bk_rows(&mut rows, "size", false);
         let sizes: Vec<i32> = rows.iter().map(|r| r.size_kib).collect();
@@ -5787,7 +5844,7 @@ mod tests {
 
     #[test]
     fn backup_rows_map_locals_then_orphans() {
-        let sv = SessionView::default();
+        let sv = sv_with_orphans();
         let rows = backup_rows(&sv);
         assert_eq!(rows.len(), sv.workspaces.len() + sv.backup_orphans.len());
         // locals first: name on the left, bucket side only when auto is on
@@ -5797,13 +5854,27 @@ mod tests {
             assert_eq!(row.auto, w.s3);
             assert_eq!(!row.remote.is_empty(), w.s3);
         }
-        // orphans last: bucket side only, no toggle
-        for (row, o) in rows[sv.workspaces.len()..].iter().zip(&sv.backup_orphans) {
+        // orphans last: bucket side only, no toggle. A true orphan shows
+        // its shortened workspace-id pseudonym (no name exists in the
+        // bucket — never invent one); a foreign key shows its raw key.
+        let orphans = &rows[sv.workspaces.len()..];
+        for row in orphans {
             assert!(!row.has_local);
             assert_eq!(row.local.as_str(), "");
-            assert_eq!(row.remote.as_str(), o.name);
             assert!(!row.auto);
         }
+        assert_eq!(orphans[0].remote.as_str(), "abababababab…");
+        assert_eq!(orphans[1].remote.as_str(), "molt/leftover.bin");
+    }
+
+    /// The production default renders a table with ONLY the local rows —
+    /// no invented bucket entries (story 8's regression fence, UI side).
+    #[test]
+    fn backup_rows_default_has_no_bucket_only_rows() {
+        let sv = SessionView::default();
+        let rows = backup_rows(&sv);
+        assert_eq!(rows.len(), sv.workspaces.len());
+        assert!(rows.iter().all(|r| r.has_local));
     }
 
     #[test]

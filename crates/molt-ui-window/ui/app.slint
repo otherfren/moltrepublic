@@ -855,6 +855,11 @@ export component AppWindow inherits Window {
     in property <string> cfg-s3-test;
     // run a live signed probe against the S3 target in the draft
     callback test-s3();
+    // pushed from Rust: "" never listed · "listing" · "ok" · "error: …"
+    in property <string> cfg-bk-list;
+    // list the SAVED backup target's bucket (real ListObjectsV2); the
+    // outcome fills the orphan rows of the mapping table below
+    callback list-backups();
     in-out property <int> cfg-s3-interval: 60;
     // the Chain-History panel's rows + pager (built Rust-side, paged at 20)
     in property <[ChainRow]> chain-rows;
@@ -5101,6 +5106,12 @@ export component AppWindow inherits Window {
                         if root.set-tab == 2: bk-tab := VerticalLayout {
                             spacing: 12px;
                             vertical-stretch: 1;
+                            // opening the tab refreshes the bucket side of
+                            // the table from a real listing (a no-op note
+                            // when no backup target is configured)
+                            init => {
+                                root.list-backups();
+                            }
                             // both name columns get the SAME fixed share of
                             // the width — a stretch would distribute by each
                             // row's preferred size and the column edges would
@@ -5257,7 +5268,38 @@ export component AppWindow inherits Window {
                                 background: Theme.line;
                             }
                             // local ↔ bucket mapping: every row has at least
-                            // one side; auto-backup toggles per workspace
+                            // one side; auto-backup toggles per workspace.
+                            // The bucket side comes from a REAL listing —
+                            // refreshed on opening the tab and on demand;
+                            // the status line says honestly what happened.
+                            HorizontalLayout {
+                                vertical-stretch: 0;
+                                spacing: 12px;
+                                AppButton {
+                                    height: 30px;
+                                    emoji: "🔄";
+                                    label: Strings.bk-refresh;
+                                    tooltip: Strings.bk-refresh-tip;
+                                    tooltip-below: true;
+                                    enabled: root.cfg-bk-list != "listing";
+                                    clicked => {
+                                        root.list-backups();
+                                    }
+                                }
+                                if root.cfg-bk-list != "": Text {
+                                    horizontal-stretch: 1;
+                                    text: root.cfg-bk-list == "listing" ? Strings.bk-listing
+                                        : root.cfg-bk-list == "ok" ? Strings.bk-list-ok
+                                        : root.cfg-bk-list;
+                                    color: root.cfg-bk-list == "ok" ? Theme.good
+                                        : root.cfg-bk-list == "listing" ? Theme.faint
+                                        : Theme.bad;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    preferred-width: 0px;
+                                }
+                            }
                             HorizontalLayout {
                                 vertical-stretch: 0;
                                 padding-left: 12px;

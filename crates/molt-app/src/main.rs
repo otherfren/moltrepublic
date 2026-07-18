@@ -169,7 +169,8 @@ fn main() -> anyhow::Result<()> {
         },
         // the scanned on-disk workspaces replace the demo list
         workspaces,
-        // active workspace, restore lifecycle, demo backup orphans
+        // active workspace, restore lifecycle; backup orphans start EMPTY
+        // and fill only from a real bucket listing (NetListBackups)
         ..molt_core::SessionView::default()
     };
     // Group is workspace-specific: outside an open workspace the node runs
