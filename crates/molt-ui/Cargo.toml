@@ -32,3 +32,6 @@ base64.workspace = true
 image.workspace = true
 chrono.workspace = true
 paste.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

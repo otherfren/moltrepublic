@@ -4639,6 +4639,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "slint",
+ "tempfile",
  "tokio",
  "tracing",
 ]

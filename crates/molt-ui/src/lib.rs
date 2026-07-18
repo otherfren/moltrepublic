@@ -1152,6 +1152,34 @@ pub fn run_app(
             });
         });
     }
+    // browse for the workspace folder via the native dialog (async XDG
+    // portal, like the logo picker) — the picked path lands in the modal's
+    // draft field, which stays hand-editable as a fallback
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        ui.on_ws_dir_pick(move || {
+            let weak = weak.clone();
+            let start_dir = weak
+                .upgrade()
+                .and_then(|ui| browse_start_dir(ui.get_ws_dir_draft().as_str()));
+            rt.spawn(async move {
+                let mut picker = rfd::AsyncFileDialog::new();
+                if let Some(dir) = start_dir {
+                    picker = picker.set_directory(dir);
+                }
+                let Some(folder) = picker.pick_folder().await else {
+                    return; // cancelled
+                };
+                let path = folder.path().display().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_ws_dir_draft(path.into());
+                    }
+                });
+            });
+        });
+    }
     // the proposed image behind a pending set_image: the bytes RODE the
     // proposal payload (sign-what-you-see), so the viewer decodes them
     // locally on every member's device — no transfer, no proposer needed.
@@ -1409,6 +1437,17 @@ fn sync_strings(
 /// file) into a renderable [`slint::Image`]. The bytes rode the proposal
 /// gossip (sign-what-you-see), so this runs locally on every member's
 /// device — no transfer, no proposer needed. `None` on any decode failure.
+/// The directory the workspace-folder browse dialog should start in, given
+/// the modal's hand-editable draft: the draft itself when it names an
+/// existing directory, otherwise `None` — an empty draft, an unexpanded
+/// "~/…" or a typo must not derail the dialog (rfd then opens at its
+/// platform default).
+fn browse_start_dir(draft: &str) -> Option<String> {
+    std::path::Path::new(draft)
+        .is_dir()
+        .then(|| draft.to_string())
+}
+
 fn proposal_image_from_b64(img_b64: &str) -> Option<slint::Image> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -4673,7 +4712,8 @@ lexicon! {
     chain_empty: "No chain — this workspace is not chain-governed.", "Keine Chain — dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
-    set_ws_dir_body: "Path of the folder that holds your workspaces. (Mock — no real file dialog.)", "Pfad des Ordners, der deine Workspaces enthält. (Mock — kein echter Dateidialog.)";
+    set_ws_dir_body: "Path of the folder that holds your workspaces — browse via the file dialog or type it directly.", "Pfad des Ordners, der deine Workspaces enthält — per Datei-Dialog auswählen oder direkt eintippen.";
+    set_ws_dir_browse: "Browse…", "Durchsuchen…";
     set_ws_found_one: "workspace found in this folder", "Workspace in diesem Ordner gefunden";
     set_ws_found_many: "workspaces found in this folder", "Workspaces in diesem Ordner gefunden";
     field_s3_access: "Access key", "Access-Key";
@@ -5996,6 +6036,36 @@ mod tests {
                 reason: "embedded Tor not built into this binary".to_string(),
             }),
             (2, "embedded Tor not built into this binary".to_string()),
+        );
+    }
+
+    /// The workspace-folder browse dialog starts where the hand-editable
+    /// draft points ONLY when that is a real directory — anything else
+    /// (empty draft, unexpanded "~/…", typo, a file) must yield no start
+    /// dir so the dialog opens at its platform default instead of failing.
+    #[test]
+    fn ws_dir_browse_starts_at_the_draft_only_when_it_is_a_real_directory() {
+        let dir = tempfile::tempdir().expect("create a temp directory");
+        let dir_path = dir.path().display().to_string();
+        assert_eq!(
+            browse_start_dir(&dir_path),
+            Some(dir_path.clone()),
+            "an existing directory is a usable start dir"
+        );
+        // a FILE is not a directory to start browsing in
+        let file_path = dir.path().join("config.toml");
+        std::fs::write(&file_path, b"x").expect("write a probe file");
+        assert_eq!(browse_start_dir(&file_path.display().to_string()), None);
+        assert_eq!(browse_start_dir(""), None, "empty draft → dialog default");
+        assert_eq!(
+            browse_start_dir("~/.moltrepublic/workspaces"),
+            None,
+            "an unexpanded ~ path never names a real directory"
+        );
+        assert_eq!(
+            browse_start_dir(&format!("{dir_path}/definitely-missing")),
+            None,
+            "a stale/typoed draft → dialog default"
         );
     }
 }
