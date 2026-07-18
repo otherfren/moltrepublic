@@ -218,94 +218,278 @@ component GlyphCaption inherits HorizontalLayout {
 // Memory — the shared brain
 // ---------------------------------------------------------------------------
 
+// A retired note in the Archive sub-view's list.
 struct MockNote {
     title: string,
-    excerpt: string,
-    tags: [string],
     author: string,
     ver: string,
     when: string,
-    links: int,
-    pinned: bool,
 }
 
-component NoteCard inherits Rectangle {
-    in property <MockNote> n;
+// One rendered-ish block of a brain document (design mock — no real
+// markdown engine): 0 = h1, 1 = h2, 2 = paragraph, 3 = bullet, 4 = code.
+struct BrainBlock {
+    kind: int,
+    text: string,
+}
+
+// One .md file of the shared-brain tree, with its pseudo-rendered content
+// and the cross-links that make the tree a brain rather than a folder.
+struct BrainDoc {
+    path: string,
+    author: string,
+    ver: string,
+    when: string,
+    blocks: [BrainBlock],
+    links: [string],
+}
+
+// The slim toolbar strip on top of the navigator / content panes.
+component ToolStrip inherits Rectangle {
+    height: 34px;
     background: Theme.panel-2;
-    border-radius: Theme.win95 ? 0px : 10px;
-    border-width: Theme.border-w;
-    border-color: Theme.line;
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        padding-top: 4px;
+        padding-bottom: 5px;
+        spacing: 3px;
+        @children
+    }
+    // bottom hairline separating the strip from the pane body
+    Rectangle {
+        x: 0;
+        y: parent.height - Theme.border-w;
+        width: parent.width;
+        height: Theme.border-w;
+        background: Theme.line;
+    }
+}
+
+// A compact square toolbar button: Twemoji glyph, named tooltip below.
+// Disabled by default — the pane idiom: an action that would change shared
+// state renders greyed with the honest "not yet" suffix; pure view-state
+// actions (collapse) pass `enabled: true` and really work.
+component ToolBtn inherits Rectangle {
+    in property <string> glyph;
+    in property <string> name;
+    in property <bool> enabled: false;
+    callback clicked();
+    width: 30px;
+    border-radius: Theme.win95 ? 0px : 5px;
+    background: root.enabled && ta.has-hover ? Theme.raised : transparent;
+    Rectangle {
+        width: 18px;
+        height: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        clip: true;
+        Text {
+            text: root.glyph;
+            font-family: "Twemoji Mozilla";
+            font-size: 13px;
+            width: 100%;
+            height: 100%;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: root.enabled ? 1.0 : 0.4;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.clicked();
+        }
+    }
+    HoverTip {
+        label: root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
+        shown: ta.has-hover;
+        x: 0;
+        y: parent.height + 6px;
+    }
+}
+
+// The scrolling body under a ToolStrip (PanePanel's padless cousin for
+// panes that carry their own chrome): Flickable + scroll hint, with the
+// caller's padding/spacing.
+component ScrollBody inherits Rectangle {
+    in property <length> pad: 8px;
+    in property <length> gap: 2px;
+    vertical-stretch: 1;
     clip: true;
-    // pinned notes carry the accent rim the selected nav row uses
-    if root.n.pinned: Rectangle {
+    fl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: self.width;
+        viewport-height: body.preferred-height;
+        body := VerticalLayout {
+            padding: root.pad;
+            spacing: root.gap;
+            alignment: start;
+            @children
+        }
+    }
+    ScrollHint {
+        x: parent.width - 5px;
+        view-h: fl.height;
+        content-h: fl.viewport-height;
+        scroll-y: fl.viewport-y;
+    }
+}
+
+// A folder row of the brain tree: click folds/unfolds (pure view state).
+component BrainFolderRow inherits Rectangle {
+    in property <string> name;
+    in-out property <bool> open: true;
+    height: 26px;
+    border-radius: Theme.win95 ? 0px : 5px;
+    background: ta.has-hover ? Theme.zebra : transparent;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 6px;
+        Rectangle {
+            width: 18px;
+            height: 100%;
+            clip: true;
+            Text {
+                text: root.open ? "📂" : "📁";
+                font-family: "Twemoji Mozilla";
+                font-size: 12px;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.name + "/";
+            color: Theme.dim;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.open = !root.open;
+        }
+    }
+}
+
+// A file row of the brain tree; the selected one carries the accent rim
+// (the selected-nav-row idiom).
+component BrainFileRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> nested: false;
+    in property <bool> selected: false;
+    callback pick();
+    height: 26px;
+    border-radius: Theme.win95 ? 0px : 5px;
+    background: root.selected ? Theme.accent-soft : (ta.has-hover ? Theme.zebra : transparent);
+    clip: true;
+    if root.selected: Rectangle {
         x: 0;
         y: 0;
         width: 3px;
         height: parent.height;
         background: Theme.accent;
     }
-    VerticalLayout {
-        padding: 12px;
-        spacing: 7px;
-        HorizontalLayout {
-            spacing: 6px;
-            Text {
-                text: root.n.title;
-                color: Theme.text;
-                font-size: Theme.fs-body;
-                font-weight: 700;
-                overflow: elide;
-                horizontal-stretch: 1;
-            }
-            if root.n.pinned: Rectangle {
-                width: 16px;
-                height: 18px;
-                clip: true;
-                Text {
-                    text: "📌";
-                    font-family: "Twemoji Mozilla";
-                    font-size: 12px;
-                    width: 100%;
-                    height: 100%;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-        // the excerpt takes what is left of the fixed card height
+    HorizontalLayout {
+        padding-left: root.nested ? 24px : 8px;
+        padding-right: 6px;
+        spacing: 6px;
         Rectangle {
-            vertical-stretch: 1;
+            width: 16px;
+            height: 100%;
             clip: true;
             Text {
-                x: 0;
-                y: 0;
+                text: "📄";
+                font-family: "Twemoji Mozilla";
+                font-size: 11px;
                 width: 100%;
-                text: root.n.excerpt;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                wrap: word-wrap;
-            }
-        }
-        HorizontalLayout {
-            spacing: 5px;
-            for t in root.n.tags: TagChip {
-                label: t;
-                y: (parent.height - self.height) / 2;
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            // the signature of the shared brain: how connected a note is
-            GlyphCaption {
-                glyph: "🔗";
-                label: "\{root.n.links} \{Strings.mem-links-word}";
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
         Text {
-            text: "\{root.n.author} · \{root.n.ver} · \{root.n.when}";
-            color: Theme.faint;
-            font-size: 11px;
+            text: root.name;
+            color: root.selected ? Theme.text : Theme.dim;
+            font-size: 13px;
+            font-weight: root.selected ? 600 : 400;
+            vertical-alignment: center;
             overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.pick();
+        }
+    }
+}
+
+// One pseudo-rendered markdown block of the content pane.
+component BrainBlockView inherits VerticalLayout {
+    in property <BrainBlock> b;
+    // an h2 gets extra air above — the one spacing exception a doc needs
+    padding-top: root.b.kind == 1 ? 6px : 0px;
+    if root.b.kind == 0: Text {
+        text: root.b.text;
+        color: Theme.text;
+        font-size: Theme.fs-h2;
+        font-weight: 800;
+        wrap: word-wrap;
+    }
+    if root.b.kind == 1: Text {
+        text: root.b.text;
+        color: Theme.text;
+        font-size: Theme.fs-body;
+        font-weight: 700;
+        wrap: word-wrap;
+    }
+    if root.b.kind == 2: Text {
+        text: root.b.text;
+        color: Theme.text;
+        font-size: Theme.fs-body;
+        wrap: word-wrap;
+    }
+    if root.b.kind == 3: HorizontalLayout {
+        spacing: 7px;
+        Text {
+            text: "•";
+            color: Theme.accent;
+            font-size: Theme.fs-body;
+            vertical-alignment: top;
+        }
+        Text {
+            text: root.b.text;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+    if root.b.kind == 4: Rectangle {
+        background: Theme.bg;
+        border-radius: Theme.win95 ? 0px : 6px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        height: ct.preferred-height + 16px;
+        ct := Text {
+            x: 10px;
+            y: 8px;
+            width: parent.width - 20px;
+            text: root.b.text;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
         }
     }
 }
@@ -314,55 +498,299 @@ export component MemoryPane inherits VerticalLayout {
     in property <string> view;
     spacing: 8px;
 
-    // sample data — design mock only, never engine state
-    property <[MockNote]> notes: [
-        { title: "Founding decisions", excerpt: "Why we chose 3-of-4, the SMP relay we pay for, and the recovery drill every member runs quarterly.", tags: ["governance", "canon"], author: "petra", ver: "v12", when: "3 d", links: 7, pinned: true },
-        { title: "Node recovery runbook", excerpt: "Restore from seed, re-adopt the queue credentials, verify the chain before the first send.", tags: ["ops", "runbook"], author: "walter", ver: "v6", when: "1 w", links: 4, pinned: false },
-        { title: "Treasury policy", excerpt: "Transfers above 5 XMR need a written purpose in the proposal text.", tags: ["treasury", "policy"], author: "mara", ver: "v3", when: "2 w", links: 5, pinned: true },
-        { title: "Reading list: MLS & SMP", excerpt: "Annotated links for new members — start with the messaging layer, the ritual paper last.", tags: ["onboarding"], author: "petra", ver: "v9", when: "5 d", links: 2, pinned: false },
-        { title: "Meeting notes 2026-07-02", excerpt: "Quest rewards, the vault release drill, and the still-open logo vote.", tags: ["minutes"], author: "jonas", ver: "v1", when: "2 w", links: 3, pinned: false },
-        { title: "Glossary", excerpt: "Ritual, seal, threshold, patch channel — the words we keep using, pinned down once.", tags: ["onboarding", "canon"], author: "mara", ver: "v17", when: "1 d", links: 11, pinned: false },
+    // brain-view state — pure view state (selection, folds, splitter),
+    // kept on the pane root so it survives sub-view switches
+    property <int> sel: 0;
+    property <float> split: 0.32;
+    property <bool> open-decisions: true;
+    property <bool> open-quests: true;
+    property <bool> open-runbooks: true;
+    // the open document (single source for breadcrumb, body and links)
+    property <BrainDoc> cur: root.docs[root.sel];
+
+    // sample data — design mock only, never engine state. Indices into
+    // `docs` are the tree rows' hand-written `sel` values below.
+    property <[BrainDoc]> docs: [
+        { path: "charter.md", author: "petra", ver: "v12", when: "3 d", links: ["decisions/2026-07-02-treasury.md", "glossary.md"], blocks: [
+            { kind: 0, text: "Charter" },
+            { kind: 2, text: "What we agreed to at the founding — the purpose, the rule, and the habits that keep four people one republic." },
+            { kind: 1, text: "Purpose" },
+            { kind: 2, text: "Pool funds, share knowledge and act as one signer where a single person would be a single point of failure." },
+            { kind: 1, text: "Consensus" },
+            { kind: 3, text: "Every gated change needs 3 of 4 signatures — no exceptions, not even for the founder." },
+            { kind: 3, text: "Proposals live in chat until sealed; only sealed changes are canon." },
+            { kind: 1, text: "Habits" },
+            { kind: 3, text: "Quarterly recovery drill (see runbooks/node-recovery.md)." },
+            { kind: 3, text: "Decisions get a dated file under decisions/ — if it is not written down, it was not decided." }] },
+        { path: "decisions/2026-06-14-relay.md", author: "walter", ver: "v4", when: "1 m", links: ["runbooks/node-recovery.md"], blocks: [
+            { kind: 0, text: "Decision: paid SMP relay" },
+            { kind: 2, text: "Free relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate." },
+            { kind: 1, text: "Options weighed" },
+            { kind: 3, text: "Stay on public relays — free, but no uptime promise." },
+            { kind: 3, text: "Self-host — full control, but one member becomes ops." },
+            { kind: 3, text: "Rent + cert-pin — chosen: predictable, and no single admin." },
+            { kind: 4, text: "relay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault" },
+            { kind: 2, text: "Revisit when the second-relay quest lands." }] },
+        { path: "decisions/2026-07-02-treasury.md", author: "mara", ver: "v3", when: "2 w", links: ["charter.md"], blocks: [
+            { kind: 0, text: "Decision: treasury policy" },
+            { kind: 2, text: "Rules for spending from the shared wallet, sealed 3-of-4 on 2026-07-02." },
+            { kind: 3, text: "Transfers above 5 XMR need a written purpose in the proposal text." },
+            { kind: 3, text: "Recurring costs (relay, domain) are pre-approved up to 3 XMR per quarter." },
+            { kind: 3, text: "Quest rewards are paid out only after the claim is marked done." }] },
+        { path: "quests/onboarding-guide.md", author: "petra", ver: "v9", when: "5 d", links: ["glossary.md", "runbooks/node-recovery.md"], blocks: [
+            { kind: 0, text: "Onboarding guide" },
+            { kind: 2, text: "The path from invite link to first signed proposal, for the next member." },
+            { kind: 3, text: "Read charter.md first — it is short on purpose." },
+            { kind: 3, text: "Work through the MLS & SMP reading list, messaging layer first." },
+            { kind: 3, text: "Run the recovery drill once with a buddy before you hold real shares." }] },
+        { path: "runbooks/node-recovery.md", author: "walter", ver: "v6", when: "1 w", links: ["charter.md"], blocks: [
+            { kind: 0, text: "Node recovery" },
+            { kind: 2, text: "Total-loss restore, tested at every quarterly drill. Budget an hour." },
+            { kind: 3, text: "Restore from your seed phrase — it derives every key you had." },
+            { kind: 3, text: "Re-adopt the queue credentials from the last clean-close backup." },
+            { kind: 3, text: "Verify the chain before your first send; a red check means stop." },
+            { kind: 4, text: "drill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)" }] },
+        { path: "glossary.md", author: "mara", ver: "v17", when: "1 d", links: ["charter.md"], blocks: [
+            { kind: 0, text: "Glossary" },
+            { kind: 2, text: "The words we keep using, pinned down once." },
+            { kind: 3, text: "Ritual — the founding ceremony that seals the roster; nothing touches disk before the seal." },
+            { kind: 3, text: "Seal — the moment a proposal reaches the threshold and becomes canon." },
+            { kind: 3, text: "Threshold — our 3-of-4 rule: three signatures make a change real." },
+            { kind: 3, text: "Patch — one gated change on the chain, like a commit." }] },
     ];
     property <[MockNote]> archived: [
-        { title: "Old relay migration plan", excerpt: "", tags: [], author: "walter", ver: "v4", when: "Mar 2026", links: 0, pinned: false },
-        { title: "Logo drafts, round 1", excerpt: "", tags: [], author: "mara", ver: "v2", when: "Feb 2026", links: 0, pinned: false },
-        { title: "Bootstrapping diary", excerpt: "", tags: [], author: "petra", ver: "v8", when: "Jan 2026", links: 0, pinned: false },
+        { title: "Old relay migration plan", author: "walter", ver: "v4", when: "Mar 2026" },
+        { title: "Logo drafts, round 1", author: "mara", ver: "v2", when: "Feb 2026" },
+        { title: "Bootstrapping diary", author: "petra", ver: "v8", when: "Jan 2026" },
     ];
 
     if root.view == "brain": VerticalLayout {
         spacing: 8px;
+        vertical-stretch: 1;
         PaneHeader {
             glyph: "🧠";
             title: Strings.mem-title-brain;
-            hint: Strings.mem-hint-brain;
         }
-        HorizontalLayout {
-            alignment: start;
-            AppButton {
-                emoji: "✨";
-                label: Strings.mem-new-note;
-                primary: true;
-                enabled: false;
-                tooltip: Strings.not-implemented-yet;
-                tooltip-below: true;
+        // the two-pane split: file navigator | draggable splitter | content.
+        // The navigator width is a stored FRACTION of the row, so a window
+        // resize keeps the proportion; both sides keep a hard minimum.
+        srow := HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+            property <length> avail: self.width - 8px;
+            // ONE clamp for layout and drag: navigator ≥ 170px, content
+            // ≥ 300px (below their sum the navigator floor wins — the
+            // window is far below any usable width there anyway)
+            pure function clamp-nav(w: length) -> length {
+                return max(170px, min(self.avail - 300px, w));
             }
-        }
-        // note cards in as many 300px-minimum columns as fit (the presence
-        // strip's index-computed grid — Slint has no flow layout)
-        pp := PanePanel {
+            property <length> nav-w: self.clamp-nav(root.split * self.avail);
+
+            // ---- navigator: browse the shared-brain tree ----
             Rectangle {
-                property <length> card-h: 158px;
-                property <length> gap: 10px;
-                property <int> cols: max(1, Math.floor((pp.inner-width - 24px) / (300px + self.gap)));
-                property <length> card-w: ((pp.inner-width - 24px) - (self.cols - 1) * self.gap) / self.cols;
-                property <int> rows: Math.ceil(root.notes.length / self.cols);
-                height: self.rows * self.card-h + max(0, self.rows - 1) * self.gap;
-                for n[i] in root.notes: NoteCard {
-                    x: Math.mod(i, parent.cols) * (parent.card-w + parent.gap);
-                    y: Math.floor(i / parent.cols) * (parent.card-h + parent.gap);
-                    width: parent.card-w;
-                    height: parent.card-h;
-                    n: n;
+                width: srow.nav-w;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                VerticalLayout {
+                    ToolStrip {
+                        ToolBtn {
+                            glyph: "📝";
+                            name: Strings.mem-tb-new-file;
+                        }
+                        ToolBtn {
+                            glyph: "📁";
+                            name: Strings.mem-tb-new-folder;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        ToolBtn {
+                            glyph: "🔼";
+                            name: Strings.mem-tb-collapse;
+                            enabled: true;
+                            clicked => {
+                                root.open-decisions = false;
+                                root.open-quests = false;
+                                root.open-runbooks = false;
+                            }
+                        }
+                    }
+                    ScrollBody {
+                        pad: 6px;
+                        gap: 2px;
+                        BrainFolderRow {
+                            name: "decisions";
+                            open <=> root.open-decisions;
+                        }
+                        if root.open-decisions: BrainFileRow {
+                            name: "2026-06-14-relay.md";
+                            nested: true;
+                            selected: root.sel == 1;
+                            pick => {
+                                root.sel = 1;
+                            }
+                        }
+                        if root.open-decisions: BrainFileRow {
+                            name: "2026-07-02-treasury.md";
+                            nested: true;
+                            selected: root.sel == 2;
+                            pick => {
+                                root.sel = 2;
+                            }
+                        }
+                        BrainFolderRow {
+                            name: "quests";
+                            open <=> root.open-quests;
+                        }
+                        if root.open-quests: BrainFileRow {
+                            name: "onboarding-guide.md";
+                            nested: true;
+                            selected: root.sel == 3;
+                            pick => {
+                                root.sel = 3;
+                            }
+                        }
+                        BrainFolderRow {
+                            name: "runbooks";
+                            open <=> root.open-runbooks;
+                        }
+                        if root.open-runbooks: BrainFileRow {
+                            name: "node-recovery.md";
+                            nested: true;
+                            selected: root.sel == 4;
+                            pick => {
+                                root.sel = 4;
+                            }
+                        }
+                        BrainFileRow {
+                            name: "charter.md";
+                            selected: root.sel == 0;
+                            pick => {
+                                root.sel = 0;
+                            }
+                        }
+                        BrainFileRow {
+                            name: "glossary.md";
+                            selected: root.sel == 5;
+                            pick => {
+                                root.sel = 5;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- the draggable splitter (Slint has no built-in one) ----
+            Rectangle {
+                width: 8px;
+                // center line, accent-lit under hover/drag
+                Rectangle {
+                    x: 3px;
+                    width: 2px;
+                    height: 100%;
+                    background: sta.pressed || sta.has-hover ? Theme.accent : transparent;
+                }
+                // the grip pill
+                Rectangle {
+                    x: 2px;
+                    y: (parent.height - self.height) / 2;
+                    width: 4px;
+                    height: 30px;
+                    border-radius: Theme.win95 ? 0px : 2px;
+                    background: sta.pressed || sta.has-hover ? Theme.accent : Theme.line;
+                }
+                sta := TouchArea {
+                    mouse-cursor: MouseCursor.col-resize;
+                    property <length> press-w;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down) {
+                            self.press-w = srow.nav-w;
+                        }
+                    }
+                    moved => {
+                        // clamp in pixel space (same bounds as nav-w), then
+                        // store the fraction so resizes keep the proportion
+                        root.split = srow.clamp-nav(self.press-w + (self.mouse-x - self.pressed-x)) / max(srow.avail, 1px);
+                    }
+                }
+            }
+
+            // ---- content: the selected file, pseudo-rendered ----
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.panel;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                VerticalLayout {
+                    ToolStrip {
+                        Rectangle {
+                            width: 4px;
+                        }
+                        // the open file's path is the strip's breadcrumb
+                        Text {
+                            text: root.cur.path;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        ToolBtn {
+                            glyph: "✏️";
+                            name: Strings.mem-tb-edit;
+                        }
+                        ToolBtn {
+                            glyph: "🕘";
+                            name: Strings.mem-tb-history;
+                        }
+                        ToolBtn {
+                            glyph: "🔗";
+                            name: Strings.mem-tb-link;
+                        }
+                    }
+                    ScrollBody {
+                        pad: 16px;
+                        gap: 8px;
+                        // author · version · age — the note-footer idiom
+                        Text {
+                            text: "\{root.cur.author} · \{root.cur.ver} · \{root.cur.when}";
+                            color: Theme.faint;
+                            font-size: 11px;
+                        }
+                        for b in root.cur.blocks: BrainBlockView {
+                            b: b;
+                        }
+                        // cross-links — what makes the tree a brain. One
+                        // chip per line: paths are long and the chips
+                        // neither wrap nor elide, so a row would clip at
+                        // the content pane's minimum width.
+                        if root.cur.links.length > 0: VerticalLayout {
+                            padding-top: 10px;
+                            spacing: 6px;
+                            Rectangle {
+                                height: Theme.border-w;
+                                background: Theme.line;
+                            }
+                            Text {
+                                text: Strings.mem-linked;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                            }
+                            for l in root.cur.links: HorizontalLayout {
+                                alignment: start;
+                                TagChip {
+                                    glyph: "🔗";
+                                    label: l;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

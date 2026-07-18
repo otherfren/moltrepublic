@@ -1280,7 +1280,17 @@ export component AppWindow inherits Window {
                                     // row it replaces
                                     label: s.key == "chat" && v.key == "today" ? Strings.ch-group : v.name;
                                     icon: v.icon;
-                                    selected: v.key == root.selected-view;
+                                    // exactly ONE active sub-item per surface:
+                                    // while an OPEN discussion is the chat
+                                    // filter, ITS row below is the active one.
+                                    // A filter with no row of its own — group,
+                                    // a topic, a decided vote's read-only
+                                    // discussion (the sections lists open
+                                    // votes only) — keeps the Gruppe row lit;
+                                    // the compose banner names the filter.
+                                    selected: v.key == root.selected-view
+                                        && (s.key != "chat" || v.key != "today"
+                                            || !root.selected-channel-votable || root.selected-channel-closed);
                                     pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
                                         : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
@@ -1288,10 +1298,12 @@ export component AppWindow inherits Window {
                                     chosen => {
                                         root.mv-draft = "";
                                         root.select-view(s.key, v.key);
-                                        // the Gruppe row replaces the old
-                                        // group channel row: entering it
-                                        // resets the channel filter
-                                        if (s.key == "chat" && v.key == "today") {
+                                        // entering ANY chat view resets the
+                                        // channel filter (the Gruppe row
+                                        // replaces the old group channel row;
+                                        // Archive must not stay silently
+                                        // scoped to a stale discussion)
+                                        if (s.key == "chat") {
                                             root.select-channel("group");
                                         }
                                     }
@@ -1319,7 +1331,11 @@ export component AppWindow inherits Window {
                             for c in root.chat-channels: ViewRow {
                                 label: c.label;
                                 icon: c.icon;
-                                selected: c.key == root.selected-channel;
+                                // …and a discussion row only while the log
+                                // view shows it (Archive selected = only the
+                                // Archive row is active)
+                                selected: c.key == root.selected-channel
+                                    && root.selected-view == "today";
                                 pending: c.unread;
                                 chosen => {
                                     // channel switches keep the compose

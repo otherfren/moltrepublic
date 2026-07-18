@@ -4964,9 +4964,13 @@ lexicon! {
     mock_badge: "DESIGN MOCK", "DESIGN-MOCK";
     mock_tip: "A design draft with sample data — nothing here is stored, sent, or real.", "Ein Design-Entwurf mit Beispieldaten — nichts hier wird gespeichert, gesendet oder ist echt.";
     mem_title_brain: "Shared brain", "Gemeinsames Gedächtnis";
-    mem_hint_brain: "Versioned, cross-linked notes — republic knowledge that outlives the chat. Every new note and edit is a gated proposal.", "Versionierte, verknüpfte Notizen — Wissen der Republik, das den Chat überdauert. Jede neue Notiz und Änderung ist ein geschützter Vorschlag.";
-    mem_new_note: "New note", "Neue Notiz";
-    mem_links_word: "links", "Verweise";
+    mem_tb_new_file: "New file", "Neue Datei";
+    mem_tb_new_folder: "New folder", "Neuer Ordner";
+    mem_tb_collapse: "Collapse all", "Alles einklappen";
+    mem_tb_edit: "Edit", "Bearbeiten";
+    mem_tb_history: "History", "Verlauf";
+    mem_tb_link: "Copy link", "Link kopieren";
+    mem_linked: "Linked", "Verknüpft";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
     mem_hint_archive: "Retired from the brain — still readable, no longer linked.", "Aus dem Gedächtnis zurückgezogen — weiter lesbar, nicht mehr verknüpft.";
     qb_title_board: "Quest board", "Quest-Board";
