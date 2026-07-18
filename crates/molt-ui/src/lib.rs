@@ -6058,7 +6058,14 @@ mod tests {
             assert!(row.has_local);
             assert_eq!(row.local.as_str(), w.name);
             assert_eq!(row.auto, w.s3);
-            assert_eq!(!row.remote.is_empty(), w.s3);
+            // the bucket cell claims nothing the bucket didn't confirm: a
+            // real backup error, else really listed copies, else empty —
+            // never derived from the auto toggle alone (story 12 honesty)
+            if w.backup_error.is_empty() && w.backup_copies == 0 {
+                assert!(row.remote.is_empty());
+            } else {
+                assert!(!row.remote.is_empty());
+            }
         }
         // orphans last: bucket side only, no toggle. A true orphan shows
         // its shortened workspace-id pseudonym (no name exists in the
