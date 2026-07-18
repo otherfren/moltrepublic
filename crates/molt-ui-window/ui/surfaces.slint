@@ -14,7 +14,7 @@
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
 import { Theme, Strings } from "theme.slint";
-import { AppButton, AppField, AppArea, ScrollHint, HoverTip } from "components.slint";
+import { AppButton, AppField, AppArea, ScrollHint, HoverTip, DotLabel } from "components.slint";
 
 // ---------------------------------------------------------------------------
 // shared chrome
@@ -122,20 +122,65 @@ component PanePanel inherits Rectangle {
     }
 }
 
-// A tiny accent-tinted tag chip ("governance", "runbook", …).
+// A tiny accent-tinted chip: tags, rewards, badges, signer marks. The
+// optional leading glyph renders in the Twemoji font (never plain-text
+// emoji in labels); `muted` turns it into a quiet outline (e.g. a signer
+// who has not signed yet).
 component TagChip inherits Rectangle {
     in property <string> label;
-    background: Theme.accent-soft;
+    in property <string> glyph: "";
+    in property <bool> muted: false;
+    background: root.muted ? transparent : Theme.accent-soft;
     border-radius: Theme.win95 ? 0px : 4px;
-    width: tt.preferred-width + 12px;
-    height: tt.preferred-height + 4px;
-    tt := Text {
+    border-width: root.muted ? 1px : 0px;
+    border-color: Theme.line;
+    width: row.preferred-width + 12px;
+    height: row.preferred-height + 5px;
+    row := HorizontalLayout {
         x: 6px;
-        y: 2px;
-        text: root.label;
-        color: Theme.win95 ? Theme.text : Theme.accent;
-        font-size: 11px;
-        font-weight: 600;
+        y: 2.5px;
+        spacing: 4px;
+        if root.glyph != "": Text {
+            text: root.glyph;
+            font-family: "Twemoji Mozilla";
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : Theme.accent);
+            font-size: 11px;
+            font-weight: root.muted ? 400 : 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The signature-collection meter (the pending-proposal progress idiom):
+// a thin track with an accent fill plus the "x/y signed" caption.
+component SigMeter inherits HorizontalLayout {
+    in property <int> signed;
+    in property <int> need;
+    spacing: 10px;
+    Rectangle {
+        height: 6px;
+        y: (parent.height - self.height) / 2;
+        border-radius: Theme.win95 ? 0px : 3px;
+        background: Theme.line;
+        horizontal-stretch: 1;
+        Rectangle {
+            x: 0;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            width: parent.width * min(1.0, root.signed * 1.0 / max(root.need, 1));
+            background: Theme.accent;
+        }
+    }
+    Text {
+        text: "\{root.signed}/\{root.need} \{Strings.vt-signed-word}";
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+        vertical-alignment: center;
     }
 }
 
@@ -417,30 +462,10 @@ component QuestCard inherits Rectangle {
         }
         HorizontalLayout {
             spacing: 8px;
-            if root.q.reward != "": Rectangle {
-                background: Theme.accent-soft;
-                border-radius: Theme.win95 ? 0px : 4px;
-                width: rw.preferred-width + 12px;
-                height: rw.preferred-height + 4px;
+            if root.q.reward != "": TagChip {
+                glyph: "🪙";
+                label: root.q.reward;
                 y: (parent.height - self.height) / 2;
-                rw := HorizontalLayout {
-                    x: 6px;
-                    y: 2px;
-                    spacing: 4px;
-                    Text {
-                        text: "🪙";
-                        font-family: "Twemoji Mozilla";
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: root.q.reward;
-                        color: Theme.win95 ? Theme.text : Theme.accent;
-                        font-size: 11px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
             }
             Rectangle {
                 horizontal-stretch: 1;
@@ -468,19 +493,11 @@ component QuestColumn inherits Rectangle {
         spacing: 8px;
         HorizontalLayout {
             spacing: 7px;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                y: (parent.height - self.height) / 2;
-                background: root.tone;
-            }
-            Text {
-                text: root.title;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                font-weight: 700;
-                vertical-alignment: center;
+            DotLabel {
+                tone: root.tone;
+                label: root.title;
+                label-size: Theme.fs-cap;
+                label-weight: 700;
                 horizontal-stretch: 1;
             }
             Text {
@@ -654,9 +671,17 @@ export component QuestsPane inherits VerticalLayout {
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
                             }
-                            GlyphCaption {
-                                glyph: "⏳";
-                                label: "\{q.when} · 🪙 \{q.reward}";
+                            HorizontalLayout {
+                                spacing: 14px;
+                                alignment: start;
+                                GlyphCaption {
+                                    glyph: "⏳";
+                                    label: q.when;
+                                }
+                                GlyphCaption {
+                                    glyph: "🪙";
+                                    label: q.reward;
+                                }
                             }
                         }
                         VerticalLayout {
@@ -749,6 +774,7 @@ struct MockRelease {
     by: string,
     reason: string,
     signers: [MockSigner],
+    signed: int, // collected signatures (matches the signers marked true)
     need: int,
 }
 
@@ -858,22 +884,15 @@ export component VaultPane inherits VerticalLayout {
         { name: "Domain registrar login", glyph: "🔑", by: "petra", when: "3 w", need: 3, total: 4 },
     ];
     property <[MockRelease]> releases: [
-        { secret: "S3 backup credentials", by: "walter", reason: "Rotating the bucket keys after the provider notice.", need: 3, signers: [
+        { secret: "S3 backup credentials", by: "walter", reason: "Rotating the bucket keys after the provider notice.", signed: 2, need: 3, signers: [
             { name: "walter", signed: true }, { name: "petra", signed: true }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
-        { secret: "Emergency contact list", by: "mara", reason: "Yearly check that the numbers still work.", need: 3, signers: [
+        { secret: "Emergency contact list", by: "mara", reason: "Yearly check that the numbers still work.", signed: 1, need: 3, signers: [
             { name: "mara", signed: true }, { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "jonas", signed: false }] },
     ];
     property <[MockExposed]> exposed: [
         { name: "Old relay admin password", content: "relay-2025 · root · \"circular-otter-42\"", by: "walter", when: "2 m" },
         { name: "Budget sheet key (2025)", content: "age1q…8vte — decrypts budget-2025.age in the uploads", by: "petra", when: "5 m" },
     ];
-
-    // one release request's collected signatures, counted .slint-side
-    pure function sig-count(r: MockRelease) -> int {
-        // sample data keeps signers sorted signed-first, so counting is a
-        // prefix scan — good enough for a design mock
-        return r.signers[0].signed ? (r.signers[1].signed ? (r.signers[2].signed ? (r.signers[3].signed ? 4 : 3) : 2) : 1) : 0;
-    }
 
     if root.view == "secrets": VerticalLayout {
         spacing: 8px;
@@ -950,58 +969,17 @@ export component VaultPane inherits VerticalLayout {
                         font-size: Theme.fs-cap;
                         wrap: word-wrap;
                     }
-                    // signature progress: the pending-proposal meter idiom
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            height: 6px;
-                            y: (parent.height - self.height) / 2;
-                            border-radius: Theme.win95 ? 0px : 3px;
-                            background: Theme.line;
-                            horizontal-stretch: 1;
-                            Rectangle {
-                                x: 0;
-                                height: parent.height;
-                                border-radius: parent.border-radius;
-                                width: parent.width * min(1.0, root.sig-count(r) * 1.0 / max(r.need, 1));
-                                background: Theme.accent;
-                            }
-                        }
-                        Text {
-                            text: "\{root.sig-count(r)}/\{r.need} \{Strings.vt-signed-word}";
-                            color: Theme.dim;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                        }
+                    SigMeter {
+                        signed: r.signed;
+                        need: r.need;
                     }
                     HorizontalLayout {
                         spacing: 6px;
                         alignment: start;
-                        for m in r.signers: Rectangle {
-                            background: m.signed ? Theme.accent-soft : transparent;
-                            border-radius: Theme.win95 ? 0px : 4px;
-                            border-width: m.signed ? 0px : 1px;
-                            border-color: Theme.line;
-                            width: mrow.preferred-width + 12px;
-                            height: mrow.preferred-height + 6px;
-                            mrow := HorizontalLayout {
-                                x: 6px;
-                                y: 3px;
-                                spacing: 4px;
-                                if m.signed: Text {
-                                    text: "✍️";
-                                    font-family: "Twemoji Mozilla";
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: m.name;
-                                    color: m.signed ? (Theme.win95 ? Theme.text : Theme.accent) : Theme.faint;
-                                    font-size: 11px;
-                                    font-weight: m.signed ? 700 : 400;
-                                    vertical-alignment: center;
-                                }
-                            }
+                        for m in r.signers: TagChip {
+                            glyph: m.signed ? "✍️" : "";
+                            label: m.name;
+                            muted: !m.signed;
                         }
                     }
                 }
@@ -1083,7 +1061,7 @@ struct MockPendingTx {
     amount: string,
     signed: int,
     need: int,
-    signers: string, // "petra ✓ · walter …"
+    signers: [MockSigner],
 }
 
 component SettingRow inherits Rectangle {
@@ -1132,8 +1110,10 @@ export component WalletPane inherits VerticalLayout {
         { incoming: true, amount: "100.0000", label: "Founding treasury", when: "4 m", conf: 10, txid: "a0b1…c2" },
     ];
     property <[MockPendingTx]> pending-tx: [
-        { label: "Quest reward — recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: "petra ✍ · walter — · mara — · jonas —" },
-        { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: "petra — · walter — · mara — · jonas —" },
+        { label: "Quest reward — recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: [
+            { name: "petra", signed: true }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
+        { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: [
+            { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
     ];
     // send form: pure pane state for design iteration (priority chip row)
     property <int> prio: 1;
@@ -1193,19 +1173,8 @@ export component WalletPane inherits VerticalLayout {
                     }
                     VerticalLayout {
                         alignment: center;
-                        Rectangle {
-                            background: Theme.accent-soft;
-                            border-radius: Theme.win95 ? 0px : 4px;
-                            width: msc.preferred-width + 12px;
-                            height: msc.preferred-height + 6px;
-                            msc := Text {
-                                x: 6px;
-                                y: 3px;
-                                text: "3 \{Strings.cw-rule-b} 4 \{Strings.wl-multisig-word}";
-                                color: Theme.win95 ? Theme.text : Theme.accent;
-                                font-size: Theme.fs-cap;
-                                font-weight: 700;
-                            }
+                        TagChip {
+                            label: "3 \{Strings.cw-rule-b} 4 \{Strings.wl-multisig-word}";
                         }
                     }
                 }
@@ -1259,34 +1228,18 @@ export component WalletPane inherits VerticalLayout {
                             vertical-alignment: center;
                         }
                     }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            height: 6px;
-                            y: (parent.height - self.height) / 2;
-                            border-radius: Theme.win95 ? 0px : 3px;
-                            background: Theme.line;
-                            horizontal-stretch: 1;
-                            Rectangle {
-                                x: 0;
-                                height: parent.height;
-                                border-radius: parent.border-radius;
-                                width: parent.width * min(1.0, t.signed * 1.0 / max(t.need, 1));
-                                background: Theme.accent;
-                            }
-                        }
-                        Text {
-                            text: "\{t.signed}/\{t.need} \{Strings.vt-signed-word}";
-                            color: Theme.dim;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                        }
+                    SigMeter {
+                        signed: t.signed;
+                        need: t.need;
                     }
-                    Text {
-                        text: t.signers;
-                        color: Theme.faint;
-                        font-size: Theme.fs-cap;
-                        overflow: elide;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for m in t.signers: TagChip {
+                            glyph: m.signed ? "✍️" : "";
+                            label: m.name;
+                            muted: !m.signed;
+                        }
                     }
                 }
             }
@@ -1493,11 +1446,13 @@ export component WalletPane inherits VerticalLayout {
                         border-width: Theme.border-w;
                         border-color: Theme.line;
                         height: addr.preferred-height + 16px;
+                        // deliberately mid-truncated: a design-mock address
+                        // must never be transcribable into a send field
                         addr := Text {
                             x: 10px;
                             y: 8px;
                             width: parent.width - 20px;
-                            text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTvUuMbNkXaWpEjHfRgCiA5oq31TzKeYw6vNhSdJrLmPxQbUcFgAt2iE9oRk4";
+                            text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTv … PxQbUcFgAt2iE9oRk4";
                             color: Theme.text;
                             font-size: Theme.fs-cap;
                             wrap: char-wrap;

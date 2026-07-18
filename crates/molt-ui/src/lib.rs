@@ -4823,7 +4823,6 @@ lexicon! {
     qb_col_open: "Open", "Offen";
     qb_col_claimed: "Claimed", "Übernommen";
     qb_col_done: "Done", "Erledigt";
-    qb_claim: "Claim", "Übernehmen";
     qb_title_create: "Put forward a quest", "Quest ausschreiben";
     qb_hint_create: "Describe the task and pin a reward from the treasury. Putting it forward starts a gated proposal.", "Beschreibe die Aufgabe und setze eine Belohnung aus der Kasse aus. Das Ausschreiben startet einen geschützten Vorschlag.";
     qb_ph_title: "Quest title", "Titel der Quest";
@@ -4857,7 +4856,6 @@ lexicon! {
     wl_pending_sigs: "Awaiting signatures", "Warten auf Signaturen";
     wl_title_history: "Transfers", "Transfers";
     wl_hint_history: "Every movement of the treasury, confirmations included.", "Jede Bewegung der Kasse, samt Bestätigungen.";
-    wl_conf_word: "confirmations", "Bestätigungen";
     wl_title_send: "Send from the treasury", "Aus der Kasse senden";
     wl_hint_send: "A transfer is a gated proposal — the wallet signs only once the threshold approves.", "Ein Transfer ist ein geschützter Vorschlag — die Wallet signiert erst, wenn die Schwelle zustimmt.";
     wl_to_address: "Recipient address", "Empfängeradresse";
