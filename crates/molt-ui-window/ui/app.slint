@@ -120,6 +120,131 @@ component SoundAlertsGroup inherits DetailGroup {
     }
 }
 
+// Settings → Network: the two form groups — the anonymity network (tor
+// mode + SOCKS port) and the SMP messaging server (public/custom, URL,
+// live test) — factored like the General pair so the wide pane can seat
+// them side by side and a narrow pane stacks the SAME content.
+component AnonNetworkGroup inherits DetailGroup {
+    in-out property <int> network-index;
+    in-out property <int> tor-mode-index;
+    in-out property <int> tor-port;
+    in property <[bool]> tor-modes-enabled;
+    title: Strings.field-network;
+    AppDropdown {
+        width: 200px;
+        model: ["tor", "none"];
+        current-index <=> root.network-index;
+    }
+    // tor mode only applies to tor; the SOCKS port only to tor+local
+    // (embedded/whonix configure themselves)
+    if root.network-index == 0: FieldLabel {
+        label: Strings.field-tor-mode;
+        AppDropdown {
+            width: 200px;
+            model: ["local", "embedded", "whonix"];
+            // "embedded" greys out unless this binary was built with
+            // the embedded-tor feature
+            enabled: root.tor-modes-enabled;
+            current-index <=> root.tor-mode-index;
+        }
+        // honest copy: say WHY embedded is greyed
+        if !root.tor-modes-enabled[1]: Text {
+            text: Strings.set-tor-embedded-missing;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+            // keep the long hint out of the group's preferred width —
+            // it wraps at whatever width the pane grants the panel
+            preferred-width: 0px;
+        }
+    }
+    if root.network-index == 0 && root.tor-mode-index == 0: FieldLabel {
+        label: Strings.field-tor-port;
+        AppStepper {
+            width: 200px;
+            value <=> root.tor-port;
+            minimum: 1;
+            maximum: 65535;
+        }
+    }
+}
+
+component SmpServerGroup inherits DetailGroup {
+    in-out property <bool> smp-custom;
+    in-out property <string> smp-url;
+    in property <string> smp-test;
+    callback test();
+    title: Strings.field-smp-server;
+    // wrap room for the URL field, the test verdict and the hint when
+    // the wide pane seats this panel beside the network one
+    min-width: 340px;
+    HorizontalLayout {
+        spacing: 8px;
+        AppButton {
+            label: Strings.smp-public;
+            primary: !root.smp-custom;
+            clicked => {
+                root.smp-custom = false;
+            }
+        }
+        AppButton {
+            label: Strings.smp-custom;
+            primary: root.smp-custom;
+            clicked => {
+                root.smp-custom = true;
+            }
+        }
+    }
+    if root.smp-custom: FieldLabel {
+        label: Strings.field-smp-url;
+        AppField {
+            text <=> root.smp-url;
+            placeholder: "smp://<fingerprint>@host";
+        }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        // NO alignment:start here — with the verdict text's zeroed
+        // preferred width it would collapse to 0px (the documented
+        // trap); explicit stretches keep the button at its size and
+        // hand the verdict the rest
+        AppButton {
+            horizontal-stretch: 0;
+            label: Strings.smp-test;
+            // honest copy (P7): the probe dials over the configured
+            // transport — Tor when enabled, an onion host if the server
+            // advertises one
+            tooltip: Strings.smp-test-tip;
+            tooltip-below: true;
+            clicked => {
+                root.test();
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            text: root.smp-test == "" ? Strings.smp-untested
+                : root.smp-test == "testing" ? Strings.smp-testing
+                : root.smp-test == "ok" ? Strings.smp-ok
+                : root.smp-test;
+            color: root.smp-test == "ok" ? Theme.good
+                : (root.smp-test != "" && root.smp-test != "testing")
+                    ? Theme.bad
+                    : Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+            preferred-width: 0px;
+        }
+    }
+    Text {
+        text: Strings.smp-hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+}
+
 // The paged lists' footer: ‹ Page x of y › — the caller shows it only when
 // the list exceeds one page (count > 20); the actual paging (slice, clamp
 // on shrink) runs in Rust, this row merely steps and displays the echo.
@@ -456,8 +581,7 @@ export component AppWindow inherits Window {
         || root.org-retention-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
-        || root.recover-link-open
-        || root.img-preview-open;
+        || root.recover-link-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
             esc.focus();
@@ -668,12 +792,18 @@ export component AppWindow inherits Window {
     callback org-logo-pick();
     // image preview overlay: a proposed image after its (mock) download —
     // the chat file-share mechanism (download from the proposer's device)
-    in-out property <bool> img-preview-open: false;
-    in property <string> img-preview-title;
-    in property <image> img-preview-src;
-    // (mock-)download the proposed image behind a pending set_image and
-    // open the preview; Rust toasts if the bytes are not local
-    callback download-proposal-image(string /* base64 payload bytes */, string /* title */);
+    // inline proposed-image viewer: ONE decoded image at a time, keyed by
+    // the proposal id it belongs to (-1 = none open) — the card whose id
+    // matches renders it inside its own panel, no modal
+    in-out property <int> img-inline-id: -1;
+    in property <image> img-inline-src;
+    // decode the proposed image behind a pending set_image and show it
+    // inline in that proposal's card (same id → toggle off); Rust toasts
+    // if the bytes do not decode
+    callback view-proposal-image(int /* proposal id */, string /* base64 payload bytes */);
+    // save the proposed image's original bytes to disk (save dialog,
+    // suggested file name = the proposal's value)
+    callback save-proposal-image(string /* base64 payload bytes */, string /* file name */);
     property <bool> org-charter-modal-open: false;
     property <string> org-charter-draft;
     property <bool> org-name-modal-open: false;
@@ -863,9 +993,7 @@ export component AppWindow inherits Window {
     // clickable (never during a running engine mock-run). An open modal is
     // closed first, like a click on its scrim.
     function handle-escape() {
-        if (root.img-preview-open) {
-            root.img-preview-open = false;
-        } else if (root.recover-link-open) {
+        if (root.recover-link-open) {
             root.recover-link-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
@@ -946,12 +1074,6 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.handle-escape();
-                return accept;
-            }
-            // the image preview's only action is closing — Enter mirrors ×
-            // (the ConfirmModal dialogs handle their own Enter via focus)
-            if (event.text == Key.Return && root.img-preview-open) {
-                root.img-preview-open = false;
                 return accept;
             }
             // welcome screen keyboard driving: Up/Down mark a card (hover
@@ -3179,7 +3301,7 @@ export component AppWindow inherits Window {
                             // composing into a non-group channel? a quiet
                             // banner names it (for a fresh topic this is the
                             // only signal until its first message exists);
-                            // × returns to the group channel
+                            // back to the group goes via the sidebar row
                             if root.selected-channel != "group": Rectangle {
                                 height: 26px;
                                 background: Theme.panel;
@@ -3238,32 +3360,14 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    Rectangle {
-                                        width: 20px;
-                                        height: 20px;
-                                        y: (parent.height - self.height) / 2;
-                                        border-radius: Theme.win95 ? 0px : 5px;
-                                        background: chx-ta.has-hover ? Theme.raised : transparent;
-                                        Text {
-                                            text: "×";
-                                            color: Theme.dim;
-                                            font-size: 13px;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        chx-ta := TouchArea {
-                                            mouse-cursor: MouseCursor.pointer;
-                                            clicked => {
-                                                root.select-channel("group");
-                                            }
-                                        }
-                                    }
                                 }
                             }
 
                             // new-topic reveal row (send-to-new-topic): name
-                            // a topic and the NEXT message opens the channel
-                            if root.nt-open: HorizontalLayout {
+                            // a topic and the NEXT message opens the channel —
+                            // only in the general chat: a specific discussion
+                            // already HAS its topic
+                            if root.nt-open && root.selected-channel == "group": HorizontalLayout {
                                 spacing: 8px;
                                 Rectangle {
                                     horizontal-stretch: 1;
@@ -3437,8 +3541,9 @@ export component AppWindow inherits Window {
                                 }
                                 // send-to-new-topic: reveals the topic-name
                                 // row above (a channel exists because a
-                                // message exists — no create ritual)
-                                VerticalLayout {
+                                // message exists — no create ritual); only
+                                // in the general chat, like the reveal row
+                                if root.selected-channel == "group": VerticalLayout {
                                     alignment: end;
                                     Rectangle {
                                         width: 38px;
@@ -4513,8 +4618,13 @@ export component AppWindow inherits Window {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{p.id}");
                                             }
+                                            inline-open: root.img-inline-id == p.id;
+                                            inline-img: root.img-inline-src;
                                             view-image => {
-                                                root.download-proposal-image(p.img-b64, p.text);
+                                                root.view-proposal-image(p.id, p.img-b64);
+                                            }
+                                            save-image => {
+                                                root.save-proposal-image(p.img-b64, p.proposed);
                                             }
                                         }
                                     }
@@ -4576,8 +4686,13 @@ export component AppWindow inherits Window {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{p.id}");
                                             }
+                                            inline-open: root.img-inline-id == p.id;
+                                            inline-img: root.img-inline-src;
                                             view-image => {
-                                                root.download-proposal-image(p.img-b64, p.text);
+                                                root.view-proposal-image(p.id, p.img-b64);
+                                            }
+                                            save-image => {
+                                                root.save-proposal-image(p.img-b64, p.proposed);
                                             }
                                         }
                                     }
@@ -4648,7 +4763,8 @@ export component AppWindow inherits Window {
                                             if l.patch-id >= 0: AppButton {
                                                 height: 26px;
                                                 pad: 8px;
-                                                label: "💬 \{Strings.pc-discuss}";
+                                                emoji: "💬";
+                                                label: Strings.pc-discuss;
                                                 clicked => {
                                                     // the vote's discussion is its
                                                     // patch channel on the chat bus
@@ -4716,8 +4832,13 @@ export component AppWindow inherits Window {
                                             root.select-view("chat", "today");
                                             root.select-channel("patch:\{p.id}");
                                         }
+                                        inline-open: root.img-inline-id == p.id;
+                                        inline-img: root.img-inline-src;
                                         view-image => {
-                                            root.download-proposal-image(p.img-b64, p.text);
+                                            root.view-proposal-image(p.id, p.img-b64);
+                                        }
+                                        save-image => {
+                                            root.save-proposal-image(p.img-b64, p.proposed);
                                         }
                                     }
                                 }
@@ -4757,7 +4878,7 @@ export component AppWindow inherits Window {
                                         if l.patch-id >= 0: AppButton {
                                             height: 26px;
                                             pad: 8px;
-                                            label: "💬";
+                                            emoji: "💬";
                                             clicked => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{l.patch-id}");
@@ -4884,6 +5005,11 @@ export component AppWindow inherits Window {
                     // groups sit side by side; below it they stack. ONE
                     // predicate, so the two arrangements stay complementary.
                     property <bool> side-groups: self.width >= 560px;
+                    // the Network pair needs more room than the General
+                    // one: ~220px anon panel + 14px gap + the SMP panel's
+                    // 340px min-width + 2×20px pane padding ≈ 614px — below
+                    // that, side-by-side would overflow the pane border
+                    property <bool> side-groups-net: self.width >= 620px;
                     vertical-stretch: 1;
                     background: Theme.panel;
                     border-radius: Theme.radius;
@@ -5288,106 +5414,44 @@ export component AppWindow inherits Window {
                         if root.set-tab == 3: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            FieldLabel {
-                                label: Strings.field-network;
-                                AppDropdown {
-                                    width: 200px;
-                                    model: ["tor", "none"];
-                                    current-index <=> root.cfg-network-index;
-                                }
-                            }
-                            // tor mode only applies to tor; the SOCKS port
-                            // only to tor+local (embedded/whonix configure
-                            // themselves)
-                            if root.cfg-network-index == 0: FieldLabel {
-                                label: Strings.field-tor-mode;
-                                AppDropdown {
-                                    width: 200px;
-                                    model: ["local", "embedded", "whonix"];
-                                    // "embedded" greys out unless this binary
-                                    // was built with the embedded-tor feature
-                                    enabled: root.tor-mode-enabled;
-                                    current-index <=> root.cfg-tor-mode-index;
-                                }
-                                // honest copy: say WHY embedded is greyed
-                                if !root.tor-mode-enabled[1]: Text {
-                                    text: Strings.set-tor-embedded-missing;
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    wrap: word-wrap;
-                                }
-                            }
-                            if root.cfg-network-index == 0 && root.cfg-tor-mode-index == 0: FieldLabel {
-                                label: Strings.field-tor-port;
-                                AppStepper {
-                                    width: 200px;
-                                    value <=> root.cfg-tor-port;
-                                    minimum: 1;
-                                    maximum: 65535;
-                                }
-                            }
-                            // SMP messaging server: public default vs a custom
-                            // URL, with a live connectivity test
-                            FieldLabel {
-                                label: Strings.field-smp-server;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    AppButton {
-                                        label: Strings.smp-public;
-                                        primary: !root.cfg-smp-custom;
-                                        clicked => {
-                                            root.cfg-smp-custom = false;
-                                        }
-                                    }
-                                    AppButton {
-                                        label: Strings.smp-custom;
-                                        primary: root.cfg-smp-custom;
-                                        clicked => {
-                                            root.cfg-smp-custom = true;
-                                        }
-                                    }
-                                }
-                            }
-                            if root.cfg-smp-custom: FieldLabel {
-                                label: Strings.field-smp-url;
-                                AppField {
-                                    text <=> root.cfg-smp-url;
-                                    placeholder: "smp://<fingerprint>@host";
-                                }
-                            }
-                            HorizontalLayout {
-                                spacing: 12px;
+                            // two visual panels (anonymity network | SMP
+                            // messaging server), seated like the General
+                            // tab's pair: side by side when wide, stacked
+                            // when narrow — one set of bindings either way
+                            if set-pane.side-groups-net: HorizontalLayout {
+                                spacing: 14px;
                                 alignment: start;
-                                AppButton {
-                                    label: Strings.smp-test;
-                                    // honest copy (P7): the probe dials over the
-                                    // configured transport — Tor when enabled,
-                                    // an onion host if the server advertises one
-                                    tooltip: Strings.smp-test-tip;
-                                    tooltip-below: true;
-                                    clicked => {
+                                AnonNetworkGroup {
+                                    network-index <=> root.cfg-network-index;
+                                    tor-mode-index <=> root.cfg-tor-mode-index;
+                                    tor-port <=> root.cfg-tor-port;
+                                    tor-modes-enabled: root.tor-mode-enabled;
+                                }
+                                SmpServerGroup {
+                                    smp-custom <=> root.cfg-smp-custom;
+                                    smp-url <=> root.cfg-smp-url;
+                                    smp-test: root.cfg-smp-test;
+                                    test => {
                                         root.test-smp-server();
                                     }
                                 }
-                                Text {
-                                    vertical-alignment: center;
-                                    text: root.cfg-smp-test == "" ? Strings.smp-untested
-                                        : root.cfg-smp-test == "testing" ? Strings.smp-testing
-                                        : root.cfg-smp-test == "ok" ? Strings.smp-ok
-                                        : root.cfg-smp-test;
-                                    color: root.cfg-smp-test == "ok" ? Theme.good
-                                        : (root.cfg-smp-test != "" && root.cfg-smp-test != "testing")
-                                            ? Theme.bad
-                                            : Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    wrap: word-wrap;
-                                }
                             }
-                            Text {
-                                text: Strings.smp-hint;
-                                color: Theme.faint;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
+                            if !set-pane.side-groups-net: VerticalLayout {
+                                spacing: 14px;
+                                AnonNetworkGroup {
+                                    network-index <=> root.cfg-network-index;
+                                    tor-mode-index <=> root.cfg-tor-mode-index;
+                                    tor-port <=> root.cfg-tor-port;
+                                    tor-modes-enabled: root.tor-mode-enabled;
+                                }
+                                SmpServerGroup {
+                                    smp-custom <=> root.cfg-smp-custom;
+                                    smp-url <=> root.cfg-smp-url;
+                                    smp-test: root.cfg-smp-test;
+                                    test => {
+                                        root.test-smp-server();
+                                    }
+                                }
                             }
                         }
                         if root.set-tab == 4: VerticalLayout {
@@ -6200,63 +6264,6 @@ export component AppWindow inherits Window {
             color: Theme.warn;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
-        }
-    }
-
-    // =================================================================
-    // Image preview: a proposed image after its (mock) download — the
-    // chat file-share mechanism. Scrim or Escape closes it.
-    // =================================================================
-    if root.img-preview-open: Rectangle {
-        width: 100%;
-        height: 100%;
-        background: #000000a0;
-        TouchArea {
-            clicked => {
-                root.img-preview-open = false;
-            }
-        }
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: min(parent.width - 120px, 720px);
-            height: min(parent.height - 120px, 560px);
-            background: Theme.panel;
-            border-radius: Theme.win95 ? 0px : 10px;
-            border-width: Theme.border-w;
-            border-color: Theme.line;
-            // absorb clicks so only the scrim dismisses
-            TouchArea { }
-            VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text {
-                        text: root.img-preview-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-body;
-                        font-weight: 700;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                    }
-                    AppButton {
-                        width: 28px;
-                        height: 28px;
-                        pad: 0px;
-                        label: "×";
-                        clicked => {
-                            root.img-preview-open = false;
-                        }
-                    }
-                }
-                Image {
-                    source: root.img-preview-src;
-                    image-fit: contain;
-                    vertical-stretch: 1;
-                }
-            }
         }
     }
 

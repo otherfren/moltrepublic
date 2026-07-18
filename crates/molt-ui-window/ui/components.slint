@@ -46,6 +46,10 @@ export component AppButton inherits Rectangle {
     in property <image> icon;
     in property <bool> icon-set: false;
     in property <length> icon-size: 15px;
+    // optional leading emoji glyph, rendered in the colorful Twemoji font
+    // (a plain-text emoji in `label` falls back to thin monochrome
+    // outlines — never do that for pictographic icons)
+    in property <string> emoji;
     callback clicked();
 
     height: 34px;
@@ -85,6 +89,12 @@ export component AppButton inherits Rectangle {
             width: root.icon-size;
             height: root.icon-size;
             y: (parent.height - self.height) / 2;
+        }
+        if root.emoji != "": Text {
+            text: root.emoji;
+            font-family: "Twemoji Mozilla";
+            font-size: Theme.fs-body + 2px;
+            vertical-alignment: center;
         }
         Text {
             text: root.label;

@@ -952,8 +952,14 @@ export component ProposalCard inherits Rectangle {
     // bus (channels are views over the ONE log, chat_bus.md)
     callback discuss();
     // image op only: decode the proposed image from the proposal payload
-    // (the bytes crossed the wire with it) and show it
+    // (the bytes crossed the wire with it) and toggle it INLINE below the
+    // share card; `inline-open`/`inline-img` echo the window's one-at-a-
+    // time viewer state back into this card
     callback view-image();
+    in property <bool> inline-open: false;
+    in property <image> inline-img;
+    // save the proposed image's original bytes to disk (save dialog)
+    callback save-image();
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
@@ -995,6 +1001,7 @@ export component ProposalCard inherits Rectangle {
             alignment: start;
             Text {
                 text: "👎";
+                font-family: "Twemoji Mozilla";
                 font-size: 22px;
                 vertical-alignment: center;
             }
@@ -1087,63 +1094,100 @@ export component ProposalCard inherits Rectangle {
                 }
             }
         }
-        if root.p.image-op && root.p.proposed != "": pi-line := HorizontalLayout {
-            // NO alignment:start here: it would size the card to its
-            // preferred width, which is 0 (the explicitly-positioned
-            // pi-row is excluded from it) — a 0-wide card means an
-            // invisible, unclickable TouchArea. The card takes an
-            // EXPLICIT content-derived width instead (capped so a long
-            // file name elides), and the trailing filler absorbs the
-            // remaining stretch.
+        if root.p.image-op && root.p.proposed != "": VerticalLayout {
             spacing: 8px;
-            Text {
-                text: Strings.pc-proposed;
-                color: Theme.faint;
-                font-size: Theme.fs-cap;
-                width: 76px;
+            pi-line := HorizontalLayout {
+                // NO alignment:start here: it would size the card to its
+                // preferred width, which is 0 (the explicitly-positioned
+                // pi-row is excluded from it) — a 0-wide card means an
+                // invisible, unclickable TouchArea. The card takes an
+                // EXPLICIT content-derived width instead (capped so a long
+                // file name elides), and the trailing filler absorbs the
+                // remaining stretch.
+                spacing: 8px;
+                Text {
+                    text: Strings.pc-proposed;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    width: 76px;
+                }
+                // the proposed image, as a chat-style share card: the bytes
+                // travel with the proposal (sign-what-you-see) — clicking
+                // decodes them locally and toggles the picture below
+                Rectangle {
+                    // content-sized with two caps: 320px, and the row space
+                    // left of the 76px label, the save button and the three
+                    // 8px gaps (narrow panes must elide, never overflow)
+                    width: min(min(320px, max(0px, pi-line.width - 76px - 34px - 24px)), pi-row.preferred-width + 20px);
+                    height: pi-row.preferred-height + 16px;
+                    border-radius: Theme.win95 ? 0px : 6px;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    background: pi-ta.has-hover ? Theme.raised : Theme.zebra;
+                    pi-ta := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.view-image();
+                        }
+                    }
+                    pi-row := HorizontalLayout {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            spacing: 1px;
+                            Text {
+                                text: root.p.proposed;
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: Strings.pc-img-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                            }
+                        }
+                    }
+                }
+                // save the original image bytes to disk, right of the card
+                AppButton {
+                    width: 34px;
+                    pad: 0px;
+                    emoji: "💾";
+                    tooltip: Strings.pc-img-save;
+                    clicked => {
+                        root.save-image();
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
             }
-            // the proposed image, as a chat-style share card: the bytes
-            // travel with the proposal (sign-what-you-see) — clicking
-            // decodes them locally and shows the picture
-            Rectangle {
-                // content-sized with two caps: 320px, and the row space left
-                // of the 76px label + 8px spacing (narrow panes must elide,
-                // never overflow the card)
-                width: min(min(320px, max(0px, pi-line.width - 84px)), pi-row.preferred-width + 20px);
-                height: pi-row.preferred-height + 16px;
+            // the inline viewer: the decoded picture inside the panel —
+            // no modal; clicking it (or the share card again) closes it
+            if root.inline-open: Rectangle {
+                height: 240px;
                 border-radius: Theme.win95 ? 0px : 6px;
                 border-width: Theme.border-w;
                 border-color: Theme.line;
-                background: pi-ta.has-hover ? Theme.raised : Theme.zebra;
-                pi-ta := TouchArea {
+                background: Theme.zebra;
+                clip: true;
+                Image {
+                    width: parent.width - 12px;
+                    height: parent.height - 12px;
+                    x: 6px;
+                    y: 6px;
+                    source: root.inline-img;
+                    image-fit: contain;
+                }
+                TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
                         root.view-image();
                     }
                 }
-                pi-row := HorizontalLayout {
-                    x: 10px;
-                    y: 8px;
-                    width: parent.width - 20px;
-                    spacing: 8px;
-                    VerticalLayout {
-                        spacing: 1px;
-                        Text {
-                            text: root.p.proposed;
-                            color: Theme.text;
-                            font-size: Theme.fs-cap;
-                            font-weight: 600;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: Strings.pc-img-hint;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                        }
-                    }
-                }
             }
-            Rectangle { horizontal-stretch: 1; }
         }
         // the voting row: one pill per roster member with their stance —
         // a big ? while open, 👍 approved (green), 👎 declined (red); the
@@ -1177,11 +1221,21 @@ export component ProposalCard inherits Rectangle {
                                 height: 100%;
                                 spacing: 7px;
                                 alignment: start;
-                                Text {
-                                    text: v.vote == 1 ? "👍" : (v.vote == 2 ? "👎" : "?");
-                                    color: v.vote == 2 ? Theme.bad : (v.vote == 1 ? Theme.good : Theme.warn);
-                                    font-size: v.vote == 0 ? 26px : 24px;
+                                // thumbs render in the colorful Twemoji font
+                                // (a plain-text glyph falls back to a thin
+                                // monochrome outline); the open "?" is a
+                                // deliberate TEXT glyph, bold and warn-tinted
+                                if v.vote == 0: Text {
+                                    text: "?";
+                                    color: Theme.warn;
+                                    font-size: 26px;
                                     font-weight: 800;
+                                    vertical-alignment: center;
+                                }
+                                if v.vote != 0: Text {
+                                    text: v.vote == 1 ? "👍" : "👎";
+                                    font-family: "Twemoji Mozilla";
+                                    font-size: 24px;
                                     vertical-alignment: center;
                                 }
                                 Text {
@@ -1210,20 +1264,23 @@ export component ProposalCard inherits Rectangle {
         HorizontalLayout {
             spacing: 8px;
             if !root.read-only: AppButton {
-                label: "👍 \{Strings.mv-approve}";
+                emoji: "👍";
+                label: Strings.mv-approve;
                 primary: true;
                 clicked => {
                     root.approve();
                 }
             }
             if !root.read-only: AppButton {
-                label: "👎 \{Strings.mv-decline}";
+                emoji: "👎";
+                label: Strings.mv-decline;
                 clicked => {
                     root.decline();
                 }
             }
             AppButton {
-                label: "💬 \{Strings.pc-discuss}";
+                emoji: "💬";
+                label: Strings.pc-discuss;
                 clicked => {
                     root.discuss();
                 }

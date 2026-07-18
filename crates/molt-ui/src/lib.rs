@@ -1162,26 +1162,79 @@ pub fn run_app(
         });
     }
     // the proposed image behind a pending set_image: the bytes RODE the
-    // proposal payload (sign-what-you-see), so the preview decodes them
-    // locally on every member's device — no transfer, no proposer needed
+    // proposal payload (sign-what-you-see), so the viewer decodes them
+    // locally on every member's device — no transfer, no proposer needed.
+    // Shown INLINE in the proposal's card; the same id toggles it off.
     {
         let weak = ui.as_weak();
-        ui.on_download_proposal_image(move |img_b64, title| {
+        ui.on_view_proposal_image(move |id, img_b64| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let decoded = proposal_image_from_b64(img_b64.as_str());
-            match decoded {
+            if ui.get_img_inline_id() == id {
+                ui.set_img_inline_id(-1);
+                return;
+            }
+            match proposal_image_from_b64(img_b64.as_str()) {
                 Some(img) => {
-                    ui.set_img_preview_title(title);
-                    ui.set_img_preview_src(img);
-                    ui.set_img_preview_open(true);
+                    ui.set_img_inline_src(img);
+                    ui.set_img_inline_id(id);
                 }
                 None => {
                     let s = ui.global::<Strings>();
                     ui.invoke_show_toast(s.get_pc_img_missing());
                 }
             }
+        });
+    }
+    // save the ORIGINAL proposed-image bytes (no re-encode) wherever the
+    // save dialog points; the suggested name is the proposal's file-name
+    // value. Local bytes → the write happens right here, no engine hop.
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        ui.on_save_proposal_image(move |img_b64, name| {
+            use base64::Engine as _;
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            // an empty/absent payload decodes to zero bytes — that is a
+            // missing image, not a file worth a save dialog (a minimal
+            // MCP proposal may carry no bytes_b64 at all)
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(img_b64.as_str()) {
+                Ok(b) if !b.is_empty() => b,
+                _ => {
+                    let s = ui.global::<Strings>();
+                    ui.invoke_show_toast(s.get_pc_img_missing());
+                    return;
+                }
+            };
+            let saved_prefix = ui.global::<Strings>().get_toast_dl_done();
+            let weak = weak.clone();
+            rt.spawn(async move {
+                let Some(dest) = rfd::AsyncFileDialog::new()
+                    .set_file_name(name.as_str())
+                    .save_file()
+                    .await
+                else {
+                    return; // cancelled
+                };
+                let path = dest.path().to_path_buf();
+                let write = tokio::task::spawn_blocking(move || {
+                    std::fs::write(&path, &bytes).map(|()| path)
+                })
+                .await;
+                let msg = match write {
+                    Ok(Ok(path)) => format!("{saved_prefix} {}", path.display()),
+                    Ok(Err(e)) => format!("⚠ {e}"),
+                    Err(e) => format!("⚠ {e}"),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_show_toast(msg.into());
+                    }
+                });
+            });
         });
     }
     {
@@ -1235,6 +1288,17 @@ pub fn run_app(
                         // chat/proposal event firing. Run-scoped ticks
                         // (90 ms) deliberately skip this.
                         if scope == SessionScope::Full {
+                            // a Full change can be a workspace open/close:
+                            // proposal ids are per-workspace counters, so a
+                            // stale inline-viewer id would light up an id-
+                            // colliding card in the NEXT workspace with the
+                            // previous one's decoded image — drop it
+                            let weak2 = weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak2.upgrade() {
+                                    ui.set_img_inline_id(-1);
+                                }
+                            });
                             push_surfaces(&w, &weak, &chat_ui).await;
                         }
                     }
@@ -3948,8 +4012,8 @@ impl UnreadLedger {
 
 /// A short human label for a surface transition payload: the human title
 /// alone — the op code stays wire-side (nobody proposes "set_image", they
-/// propose "Logo der Republik ändern"). The op is only the fallback when a
-/// payload (e.g. a minimal MCP proposal) carries no display key at all.
+/// propose "Logo"). The op is only the fallback when a payload (e.g. a
+/// minimal MCP proposal) carries no display key at all.
 fn summarize(v: &serde_json::Value) -> String {
     if let Some(obj) = v.as_object() {
         for key in ["title", "label", "memo", "note", "text", "name", "summary"] {
@@ -3973,14 +4037,17 @@ fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
     Some(match (lang, op) {
         (1, "set_name") => "Name ändern",
         (_, "set_name") => "Rename",
-        (1, "set_charter") => "Satzung ändern",
-        (_, "set_charter") => "Change the charter",
-        (1, "set_image") => "Logo der Republik ändern",
-        (_, "set_image") => "Change the republic's image",
-        (1, "remove_image") => "Logo der Republik entfernen",
-        (_, "remove_image") => "Remove the republic's image",
-        (1, "set_chat_retention") => "Löschfrist für Chat-Logs ändern",
-        (_, "set_chat_retention") => "Change when chat logs are deleted",
+        // short noun labels, no leading "Change …"/"… ändern" verb: a
+        // proposal is a change by definition, and the sidebar channel
+        // list elides anything long
+        (1, "set_charter") => "Satzung",
+        (_, "set_charter") => "Charter",
+        (1, "set_image") => "Logo",
+        (_, "set_image") => "Logo",
+        (1, "remove_image") => "Logo entfernen",
+        (_, "remove_image") => "Remove logo",
+        (1, "set_chat_retention") => "Chat-Löschfrist",
+        (_, "set_chat_retention") => "Chat retention",
         _ => return None,
     })
 }
@@ -4503,6 +4570,7 @@ lexicon! {
     pc_proposal: "Proposal:", "Vorschlag:";
     pc_img_hint: "Click to view the proposed image", "Klicken zum Anzeigen des vorgeschlagenen Bilds";
     pc_img_missing: "The proposed image could not be decoded.", "Das vorgeschlagene Bild konnte nicht dekodiert werden.";
+    pc_img_save: "Save image to disk", "Bild auf der Platte speichern";
     os_founded: "Founded", "Gegründet";
     os_consensus: "Consensus", "Konsens";
     cv_shrink: "Shrink", "Verkleinern";
@@ -5046,7 +5114,9 @@ mod tests {
         // the op placeholder still wins for governance ops
         let legacy =
             serde_json::json!({"op": "set_image", "title": "Logo ändern", "value": "x.png"});
-        assert_eq!(display_title(0, &legacy), "Change the republic's image");
+        // short noun labels: the sidebar channel list elides long titles,
+        // and a leading "Change …" verb is redundant on a proposal anyway
+        assert_eq!(display_title(0, &legacy), "Logo");
         // user content is the title — untouched, in any language
         let note = serde_json::json!({"op": "add_note", "title": "budget"});
         assert_eq!(display_title(0, &note), "budget");
