@@ -198,6 +198,125 @@ async fn delete_object_surfaces_a_403_honestly() {
     assert!(matches!(err, S3Error::Http { status: 403, .. }), "{err:?}");
 }
 
+/// A single-shot stub answering one request with raw response bytes.
+async fn raw_stub(response: Vec<u8>) -> (String, Arc<Mutex<Seen>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+    let addr = listener.local_addr().expect("stub addr");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let record = seen.clone();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut chunk).await.expect("read request");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        {
+            let head = String::from_utf8_lossy(&buf);
+            let mut lines = head.split("\r\n");
+            let mut seen = record.lock().expect("record lock");
+            seen.request_line = lines.next().unwrap_or_default().to_string();
+        }
+        sock.write_all(&response).await.expect("write response");
+        sock.shutdown().await.ok();
+    });
+    (format!("http://127.0.0.1:{}", addr.port()), seen)
+}
+
+/// The download is streamed, byte-exact, with monotonic progress that
+/// ends at the declared total — and the request is a signed GET on the
+/// path-style object path.
+#[tokio::test]
+async fn get_object_streams_the_body_with_honest_progress() {
+    let body: Vec<u8> = (0..100_000u32).map(|i| u8::try_from(i % 251).expect("byte")).collect();
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(&body);
+    let (endpoint, seen) = raw_stub(response).await;
+
+    let mut sink: Vec<u8> = Vec::new();
+    let mut seen_progress: Vec<(u64, Option<u64>)> = Vec::new();
+    let bytes = client_for(&endpoint)
+        .get_object(
+            "molt/aa/001.molt.enc",
+            &mut sink,
+            10 * 1024 * 1024,
+            &mut |done, total| seen_progress.push((done, total)),
+        )
+        .await
+        .expect("download succeeds");
+    assert_eq!(bytes, u64::try_from(body.len()).expect("len"));
+    assert_eq!(sink, body, "byte-exact");
+    assert_eq!(
+        seen.lock().expect("seen").request_line,
+        "GET /molt-bucket/molt/aa/001.molt.enc HTTP/1.1"
+    );
+    assert!(!seen_progress.is_empty(), "progress was reported");
+    assert!(
+        seen_progress.windows(2).all(|w| w[0].0 <= w[1].0),
+        "progress is monotonic: {seen_progress:?}"
+    );
+    let last = seen_progress.last().expect("nonempty");
+    assert_eq!(*last, (bytes, Some(bytes)), "progress ends at the total");
+}
+
+/// EOF before the declared Content-Length is a hard error — a partial
+/// blob must never look like a completed download.
+#[tokio::test]
+async fn get_object_rejects_a_truncated_body() {
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".to_vec();
+    response.extend_from_slice(&[7u8; 40]); // 40 of 100 bytes, then close
+    let (endpoint, _seen) = raw_stub(response).await;
+    let mut sink: Vec<u8> = Vec::new();
+    let err = client_for(&endpoint)
+        .get_object("k", &mut sink, 1024, &mut |_, _| {})
+        .await
+        .expect_err("truncation must reject");
+    assert!(
+        matches!(&err, S3Error::Protocol(m) if m.contains("truncated")),
+        "honest truncation error, got {err:?}"
+    );
+}
+
+/// A declared length beyond the cap is refused BEFORE any byte lands.
+#[tokio::test]
+async fn get_object_refuses_a_body_beyond_the_size_cap() {
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 2048\r\n\r\n".to_vec();
+    response.extend_from_slice(&[0u8; 2048]);
+    let (endpoint, _seen) = raw_stub(response).await;
+    let mut sink: Vec<u8> = Vec::new();
+    let err = client_for(&endpoint)
+        .get_object("k", &mut sink, 1024, &mut |_, _| {})
+        .await
+        .expect_err("over-cap must reject");
+    assert!(
+        matches!(&err, S3Error::Protocol(m) if m.contains("cap")),
+        "honest cap error, got {err:?}"
+    );
+    assert!(sink.is_empty(), "nothing was written");
+}
+
+/// A 404 names the OBJECT (not the bucket) — the honest class for a
+/// restore pointed at a key that is not there.
+#[tokio::test]
+async fn get_object_maps_404_to_the_missing_object_class() {
+    let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+    let (endpoint, _seen) = raw_stub(response).await;
+    let mut sink: Vec<u8> = Vec::new();
+    let err = client_for(&endpoint)
+        .get_object("molt/zz/9.molt.enc", &mut sink, 1024, &mut |_, _| {})
+        .await
+        .expect_err("404 is an error");
+    let S3Error::Http { status: 404, hint } = err else {
+        panic!("expected http 404, got {err:?}");
+    };
+    assert!(hint.contains("molt/zz/9.molt.enc"), "names the object: {hint}");
+}
+
 #[tokio::test]
 async fn unreachable_endpoint_is_the_connect_class_for_both_ops() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

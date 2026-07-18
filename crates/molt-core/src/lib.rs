@@ -2092,8 +2092,10 @@ pub struct JoinState {
     pub awaiting_ratify: bool,
 }
 
-/// The (mock) restore lifecycle. Shared session state: any operator can start
-/// it, both watch the same progress and live log.
+/// The restore lifecycle (real: download/read → decrypt+stage →
+/// chain-verify → materialize). Shared session state: any operator can
+/// start it, both watch the same progress and live log — and every line of
+/// that log reports something that actually happened.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreState {
     /// The shared run lifecycle (step / progress / outcome / log).
@@ -2102,7 +2104,8 @@ pub struct RestoreState {
     /// `"s3" | "file"` (empty while idle). Rejoining via another member is
     /// not a restore way — that is the recovery ritual (`RecoverStart`).
     pub way: String,
-    /// The way-specific target (bucket URL / file path).
+    /// The way-specific target (workspace id / object key for `s3`, blob
+    /// path for `file`).
     pub target: String,
 }
 
@@ -2212,7 +2215,7 @@ pub struct SessionView {
     /// Id of the currently opened workspace (empty = none). The display
     /// name lives in the matching [`WorkspaceInfo`] entry.
     pub active_workspace: WorkspaceId,
-    /// The (mock) restore lifecycle.
+    /// The restore lifecycle (real; see [`RestoreState`]).
     pub restore: RestoreState,
     /// The manual-export lifecycle (real; additive).
     #[serde(default)]
@@ -2578,22 +2581,74 @@ pub enum Command {
         /// The failure, honestly.
         error: String,
     },
-    /// Begin the (mock) restore: moves its lifecycle to the run view; the
-    /// engine ticks the progress and the live log by itself.
+    /// Begin a REAL restore from a `molt-export-v1` backup blob
+    /// (`backup_restore_design.md` §4/§6.6): the blob is read (from a file,
+    /// or downloaded from the configured S3 bucket), decrypted and staged
+    /// off the actor, then the engine **hard-verifies the threshold-signed
+    /// chain before anything materializes** — a blob whose chain does not
+    /// verify restores nothing. Progress and log lines report only what
+    /// actually happened. The restored workspace opens *detached* (§4.4):
+    /// knowledge is restored, membership is not — rejoining the live
+    /// republic is the recovery ritual ([`Command::RecoverStart`]).
     RestoreStart {
         /// `"s3" | "file"` (rejoining via another member is [`Command::RecoverStart`]).
         way: String,
-        /// The way-specific target (bucket URL / file path).
+        /// The way-specific target: for `file` the `.molt.enc` path; for
+        /// `s3` the workspace-id pseudonym from the backup table (the
+        /// NEWEST object is used) or a full `molt/<id>/<ts>.molt.enc`
+        /// object key.
         target: String,
+        /// The secret unlocking the blob — its meaning follows the blob's
+        /// own key mode: the RECOVERY PHRASE for automatic S3 backups
+        /// (`workspace` mode), the export passphrase for manual file
+        /// exports (`passphrase` mode). Additive.
+        #[serde(default)]
+        secret: String,
+        /// Same-id collision policy (design P2): `false` (default) refuses
+        /// when a workspace with this id already exists locally; `true`
+        /// moves the existing directory to the recoverable `.trash` first.
+        #[serde(default)]
+        replace: bool,
     },
-    /// Advance the (mock) restore one step. Sent by the engine's own ticker;
-    /// answered with an error once the run is over (which stops the ticker).
-    RestoreTick,
-    /// Abandon the restore (idle again) and return to the choice screen.
+    /// Abandon the restore (idle again) and return to the choice screen:
+    /// aborts the in-flight task and removes the staging — nothing partial
+    /// stays behind.
     RestoreCancel,
-    /// Finish a successful restore: the restored workspace becomes active and
-    /// the node moves straight to the main screen.
+    /// Finish a successful restore: open the restored workspace (detached —
+    /// §4.4) and move straight to the main screen.
     RestoreFinish,
+    /// Real progress from the off-actor restore task (engine-internal —
+    /// the task speaking to the engine; every line reports something that
+    /// actually happened, there is no simulated progress).
+    NetRestoreProgress {
+        /// Progress percent (0..=99; 100 is set by the verified finish).
+        pct: u8,
+        /// One honest live-log line.
+        line: String,
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The restore task staged the decrypted blob (engine-internal). The
+    /// staging handle rides an engine-internal slot, never the wire; the
+    /// HANDLER runs the mandatory chain verification (`verify_chain` /
+    /// `verify_suffix_chain`, hard-reject) and only then commits — an MCP
+    /// agent must not be able to inject an unverified workspace.
+    NetRestoreStaged {
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The restore task failed (engine-internal); the real reason lands
+    /// verbatim in the run log — never a fake success, never an invented
+    /// failure rule.
+    NetRestoreFailed {
+        /// The failure, honestly.
+        error: String,
+        /// Restore incarnation (stale task output is dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
 
     // --- founding a republic (shared, co-equal) ---
     /// Begin the founding ritual: validates the configuration, derives the

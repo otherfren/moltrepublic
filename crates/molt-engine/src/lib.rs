@@ -492,6 +492,24 @@ pub(crate) struct State {
     /// ticker never spawns a second task for one while its first is out,
     /// and Done/Failed clear the mark. Runtime-only.
     pub(crate) backup_inflight: std::collections::HashSet<WorkspaceId>,
+    /// Restore incarnation (story 13): bumped per `RestoreStart`/cancel so
+    /// a superseded task's late progress/staged/failed reports are dropped.
+    pub(crate) restore_generation: u64,
+    /// The in-flight restore fetch+stage task (aborted on cancel — the
+    /// download is inbound-only, so abort is safe).
+    pub(crate) restore_task: Option<tokio::task::JoinHandle<()>>,
+    /// The slot the restore task parks its staged blob in
+    /// (`lifecycles.rs::restore_task` → `cmd_net_restore_staged`): the
+    /// staging handle never rides a Command — a forged internal command
+    /// without a really-staged blob can materialize nothing. Replaced per
+    /// restore incarnation.
+    pub(crate) restore_staging:
+        std::sync::Arc<std::sync::Mutex<Option<molt_storage::import::ImportStaging>>>,
+    /// The collision policy of the restore in flight (design P2).
+    pub(crate) restore_replace: bool,
+    /// The workspace a successful restore materialized — what
+    /// `RestoreFinish` opens (detached).
+    pub(crate) restored_id: Option<WorkspaceId>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -657,6 +675,11 @@ impl State {
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
+            restore_generation: 0,
+            restore_task: None,
+            restore_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            restore_replace: false,
+            restored_id: None,
             active: None,
             net,
             net_ritual: None,
@@ -916,8 +939,21 @@ impl State {
             Command::NetBackupFailed { id, error } => self.cmd_net_backup_failed(id, error),
 
             // lifecycles.rs
-            Command::RestoreStart { way, target } => self.cmd_restore_start(way, target),
-            Command::RestoreTick => self.cmd_restore_tick(),
+            Command::RestoreStart {
+                way,
+                target,
+                secret,
+                replace,
+            } => self.cmd_restore_start(way, target, secret, replace),
+            Command::NetRestoreProgress {
+                pct,
+                line,
+                generation,
+            } => self.cmd_net_restore_progress(pct, line, generation),
+            Command::NetRestoreStaged { generation } => self.cmd_net_restore_staged(generation),
+            Command::NetRestoreFailed { error, generation } => {
+                self.cmd_net_restore_failed(error, generation)
+            }
             Command::RestoreCancel => self.cmd_restore_cancel(),
             Command::RestoreFinish => self.cmd_restore_finish(),
             Command::CreateStart {
@@ -1668,6 +1704,15 @@ mod tests {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             // "Savings-DAO" ships without auto-backup
+            let before = match w.execute(Command::ReadSession).await.expect("read0") {
+                Reply::Session(s) => s
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.name == "Savings-DAO")
+                    .expect("workspace")
+                    .last_backup_min,
+                other => panic!("unexpected: {other:?}"),
+            };
             w.execute(Command::SetWorkspaceBackup {
                 id: demo_workspace_id("Savings-DAO"),
                 enabled: true,
@@ -1682,7 +1727,13 @@ mod tests {
                         .find(|ws| ws.name == "Savings-DAO")
                         .expect("workspace");
                     assert!(ws.s3);
-                    assert_eq!(ws.last_backup_min, 0, "enabling stamps a first backup");
+                    // honest stamps (story 12): enabling persists the pref and
+                    // NOTHING else — the stamp moves only on a confirmed
+                    // upload (NetBackupDone), never on the toggle
+                    assert_eq!(
+                        ws.last_backup_min, before,
+                        "enabling must never invent a backup stamp"
+                    );
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -3399,60 +3450,22 @@ mod tests {
                 Err(MoltError::UnknownWorkspace(_))
             ));
 
-            // a plausible restore ticks to success; finishing lands in the
-            // restored workspace (no completion-screen stopover)
-            w.execute(Command::RestoreStart {
-                way: "s3".to_string(),
-                target: "https://backups.example/bucket".to_string(),
-            })
-            .await
-            .expect("start");
-            for _ in 0..60 {
-                if w.execute(Command::RestoreTick).await.is_err() {
-                    break;
-                }
-            }
-            match w.execute(Command::ReadSession).await.expect("read2") {
-                Reply::Session(s) => {
-                    assert_eq!(s.restore.run.progress_pct, 100);
-                    assert_eq!(s.restore.run.outcome, 1);
-                    assert!(!s.restore.run.log.is_empty());
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
-            w.execute(Command::RestoreFinish).await.expect("finish");
-            match w.execute(Command::ReadSession).await.expect("read3") {
-                Reply::Session(s) => {
-                    assert_eq!(s.screen, Screen::Main);
-                    assert_eq!(s.active_workspace, demo_workspace_id("Restored Republic"));
-                    assert!(s
-                        .workspaces
-                        .iter()
-                        .any(|ws| ws.name == "Restored Republic"));
-                    assert_eq!(s.restore.run.step, 0);
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
-
-            // an implausible target fails at ~45 %
-            w.execute(Command::RestoreStart {
-                way: "s3".to_string(),
-                target: "asd".to_string(),
-            })
-            .await
-            .expect("start2");
-            for _ in 0..60 {
-                if w.execute(Command::RestoreTick).await.is_err() {
-                    break;
-                }
-            }
-            match w.execute(Command::ReadSession).await.expect("read4") {
-                Reply::Session(s) => {
-                    assert_eq!(s.restore.run.outcome, 2);
-                    assert!(s.restore.run.progress_pct < 100);
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
+            // the fake-progress restore is GONE: a storage-less engine has
+            // nowhere to restore into and refuses honestly instead of
+            // running a progress show (story 13 — the real pipeline is
+            // exercised end-to-end in tests/restore_real.rs)
+            let err = w
+                .execute(Command::RestoreStart {
+                    way: "s3".to_string(),
+                    target: "ab".repeat(32),
+                    secret: "some secret".to_string(),
+                    replace: false,
+                })
+                .await
+                .expect_err("no storage → no restore");
+            assert!(err.to_string().contains("storage"), "{err}");
+            // finishing without a successful restore stays refused
+            assert!(w.execute(Command::RestoreFinish).await.is_err());
         });
     }
 

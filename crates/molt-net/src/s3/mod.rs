@@ -355,6 +355,96 @@ impl S3Client {
         query: &[(String, String)],
         body: &[u8],
     ) -> Result<HttpResponse, S3Error> {
+        let payload_hash = if body.is_empty() {
+            sigv4::EMPTY_PAYLOAD_SHA256.to_string()
+        } else {
+            hex::encode(Sha256::digest(body))
+        };
+        let (path_and_query, wire_headers) =
+            self.sign_wire(method, path, query, &payload_hash)?;
+        let stream = self.dial().await?;
+        match self.config.endpoint.scheme {
+            S3Scheme::Https => {
+                let mut tls = self.tls_handshake(stream).await?;
+                http::roundtrip(&mut tls, method, &path_and_query, &wire_headers, body).await
+            }
+            S3Scheme::Http => {
+                let mut tcp = stream;
+                http::roundtrip(&mut tcp, method, &path_and_query, &wire_headers, body).await
+            }
+        }
+    }
+
+    /// Download one object (`GET /bucket/key`), **streaming** the body into
+    /// `out` — the restore-from-S3 fetch (mock_todo story 13). Unlike
+    /// [`S3Client::request`] the body never sits in memory whole; the wire
+    /// framing must carry a `Content-Length` (S3 always does), a declared
+    /// length beyond `max_bytes` is refused before a byte is written, and
+    /// truncation (EOF before the declared length) is a hard error — a
+    /// partial blob must never look like a download. `progress` is called
+    /// with `(bytes so far, total)` as the body streams. Returns the byte
+    /// count on success.
+    pub async fn get_object<W>(
+        &self,
+        key: &str,
+        out: &mut W,
+        max_bytes: u64,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<u64, S3Error>
+    where
+        W: tokio::io::AsyncWrite + Unpin + ?Sized,
+    {
+        let path = self.object_path(key);
+        let (path_and_query, wire_headers) =
+            self.sign_wire("GET", &path, &[], sigv4::EMPTY_PAYLOAD_SHA256)?;
+        let stream = self.dial().await?;
+        let (status, bytes) = match self.config.endpoint.scheme {
+            S3Scheme::Https => {
+                let mut tls = self.tls_handshake(stream).await?;
+                http::roundtrip_download(
+                    &mut tls,
+                    &path_and_query,
+                    &wire_headers,
+                    out,
+                    max_bytes,
+                    progress,
+                )
+                .await?
+            }
+            S3Scheme::Http => {
+                let mut tcp = stream;
+                http::roundtrip_download(
+                    &mut tcp,
+                    &path_and_query,
+                    &wire_headers,
+                    out,
+                    max_bytes,
+                    progress,
+                )
+                .await?
+            }
+        };
+        match status {
+            200..=299 => Ok(bytes),
+            // a 404 on an object GET means THIS key (the bucket-level 404
+            // wording would blame the wrong thing)
+            404 => Err(S3Error::Http {
+                status: 404,
+                hint: format!("object `{key}` not found"),
+            }),
+            s => Err(self.status_error(s)),
+        }
+    }
+
+    /// SigV4-sign one request: returns the wire `path?query` (byte-identical
+    /// to what was signed) and the headers to send, `Authorization` included.
+    fn sign_wire(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(String, String)],
+        payload_hash: &str,
+    ) -> Result<(String, Vec<(String, String)>), S3Error> {
         let cfg = &self.config;
         let path = if path.is_empty() { "/" } else { path };
         let now = std::time::SystemTime::now()
@@ -362,14 +452,9 @@ impl S3Client {
             .map_err(|e| S3Error::Protocol(format!("system clock before 1970: {e}")))?
             .as_secs();
         let datetime = sigv4::amz_datetime(now);
-        let payload_hash = if body.is_empty() {
-            sigv4::EMPTY_PAYLOAD_SHA256.to_string()
-        } else {
-            hex::encode(Sha256::digest(body))
-        };
         let signed_headers = vec![
             ("host".to_string(), cfg.endpoint.host_header()),
-            ("x-amz-content-sha256".to_string(), payload_hash.clone()),
+            ("x-amz-content-sha256".to_string(), payload_hash.to_string()),
             ("x-amz-date".to_string(), datetime.clone()),
         ];
         let auth = sigv4::authorization_header(&sigv4::SignParams {
@@ -377,7 +462,7 @@ impl S3Client {
             uri: path,
             query,
             headers: &signed_headers,
-            payload_hash: &payload_hash,
+            payload_hash,
             datetime: &datetime,
             region: &cfg.region,
             service: "s3",
@@ -386,36 +471,36 @@ impl S3Client {
         });
         let mut wire_headers = signed_headers;
         wire_headers.push(("Authorization".to_string(), auth));
-
-        // the wire path/query must be byte-identical to what was signed
         let mut path_and_query = sigv4::uri_encode(path, false);
         let cq = sigv4::canonical_query(query);
         if !cq.is_empty() {
             path_and_query.push('?');
             path_and_query.push_str(&cq);
         }
+        Ok((path_and_query, wire_headers))
+    }
 
-        let stream = self
-            .dialer
-            .dial_host(&cfg.endpoint.host, cfg.endpoint.port)
+    /// Dial the endpoint through the fail-closed dialer.
+    async fn dial(&self) -> Result<crate::smp::tls::DialStream, S3Error> {
+        self.dialer
+            .dial_host(&self.config.endpoint.host, self.config.endpoint.port)
             .await
-            .map_err(|e| S3Error::Connect(e.to_string()))?;
-        match cfg.endpoint.scheme {
-            S3Scheme::Https => {
-                let connector = TlsConnector::from(public_tls_config()?);
-                let sni = ServerName::try_from(cfg.endpoint.host.clone())
-                    .map_err(|_| S3Error::Endpoint(format!("bad host `{}`", cfg.endpoint.host)))?;
-                let mut tls = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, stream))
-                    .await
-                    .map_err(|_| S3Error::Tls("handshake timed out".to_string()))?
-                    .map_err(|e| S3Error::Tls(e.to_string()))?;
-                http::roundtrip(&mut tls, method, &path_and_query, &wire_headers, body).await
-            }
-            S3Scheme::Http => {
-                let mut tcp = stream;
-                http::roundtrip(&mut tcp, method, &path_and_query, &wire_headers, body).await
-            }
-        }
+            .map_err(|e| S3Error::Connect(e.to_string()))
+    }
+
+    /// Run the TLS 1.3 handshake against the public WebPKI.
+    async fn tls_handshake(
+        &self,
+        stream: crate::smp::tls::DialStream,
+    ) -> Result<tokio_rustls::client::TlsStream<crate::smp::tls::DialStream>, S3Error> {
+        let connector = TlsConnector::from(public_tls_config()?);
+        let host = &self.config.endpoint.host;
+        let sni = ServerName::try_from(host.clone())
+            .map_err(|_| S3Error::Endpoint(format!("bad host `{host}`")))?;
+        timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, stream))
+            .await
+            .map_err(|_| S3Error::Tls("handshake timed out".to_string()))?
+            .map_err(|e| S3Error::Tls(e.to_string()))
     }
 }
 

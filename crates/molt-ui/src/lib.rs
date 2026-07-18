@@ -673,7 +673,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_restore_start(move |way, target| {
+        ui.on_restore_start(move |way, target, secret| {
             issue(
                 &rt,
                 &w,
@@ -681,6 +681,10 @@ pub fn run_app(
                 Command::RestoreStart {
                     way: way.to_string(),
                     target: target.to_string(),
+                    secret: secret.to_string(),
+                    // the GUI's default collision policy is the safe refuse
+                    // (design P2); an explicit replace goes through MCP
+                    replace: false,
                 },
             );
         });
@@ -2174,6 +2178,17 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
                 ui.set_rv_error("".into());
             }
             RecoverNotice::None => {}
+        }
+        // the same edge-triggered channel carries the backup/restore
+        // honesty notices (story 12/13): toast them once per NEW notice
+        let s = ui.global::<Strings>();
+        if sv.notice == "detached" {
+            // §4.4: knowledge restored, membership not — say exactly that
+            ui.invoke_show_toast(s.get_toast_detached());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
+            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_failed()).into());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
+            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_prune()).into());
         }
     }
     // persistent restart warning: which changed keys only apply on restart
@@ -4862,19 +4877,27 @@ lexicon! {
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
     rw_peer_hint: "Rejoins via another member — paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei — füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
-    rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen.";
+    rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
     rw_s3_ok: "reachable", "erreichbar";
+    // honest endpoint status: "reachable" is only claimed after a REAL
+    // probe (session.s3_test == "ok"); before that the state is untested
+    rw_s3_untested: "not tested — use Test in the backup settings", "ungetestet — Test in den Backup-Einstellungen";
+    rw_s3_target_ph: "workspace id from the backup table · or molt/<id>/<ts>.molt.enc", "Workspace-ID aus der Backup-Tabelle · oder molt/<id>/<ts>.molt.enc";
     rw_via_file: "Manual restore", "Manuelles Restore";
     rw_file_hint: "Restores from an encrypted .molt.enc file backup.", "Stellt aus einem verschlüsselten .molt.enc-Datei-Backup wieder her.";
     rw_choose: "Choose file…", "Datei wählen…";
     rw_no_file: "No backup file chosen.", "Keine Backup-Datei gewählt.";
     rw_file_title: "Choose encrypted backup", "Verschlüsseltes Backup wählen";
-    rw_file_body: "Path of the encrypted workspace blob (.molt.enc). (Mock — nothing is read.)", "Pfad des verschlüsselten Workspace-Blobs (.molt.enc). (Mock — es wird nichts gelesen.)";
+    rw_file_body: "Path of the encrypted workspace blob (.molt.enc). It is read, decrypted with your secret, and its chain is verified before anything is created.", "Pfad des verschlüsselten Workspace-Blobs (.molt.enc). Er wird gelesen, mit deinem Geheimnis entschlüsselt, und die Chain wird vor dem Anlegen verifiziert.";
     rw_file_pick: "Select", "Auswählen";
     rw_log_title: "Live details", "Live-Details";
     rw_finish: "Finish", "Fertigstellen";
-    rw_failed: "Failed — timeout while connecting", "Fehlgeschlagen — Timeout beim Verbinden";
+    rw_failed: "Failed — see the live details", "Fehlgeschlagen — siehe Live-Details";
+    // the honest §4.4 boundary: knowledge vs membership
+    toast_detached: "Restored from backup — knowledge is here, membership is not. Rejoin via a recovery link.", "Aus Backup wiederhergestellt — Wissen ist da, Mitgliedschaft nicht. Wiederbeitritt über Recovery-Link.";
+    toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
+    toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     rw_ph1: "Connecting…", "Verbinde…";
     rw_ph2: "Fetching encrypted data…", "Lade verschlüsselte Daten…";
     rw_ph3: "Decrypting & verifying…", "Entschlüssele & prüfe…";

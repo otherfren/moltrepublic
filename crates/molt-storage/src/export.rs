@@ -598,21 +598,15 @@ impl<'a> ChunkWriter<'a> {
 // Read side (the storage-layer decrypt story 13's import stages on)
 // ---------------------------------------------------------------------------
 
-/// Parse, decrypt and verify one export blob. Every failure is honest and
-/// hard: bad magic, unknown version (refused *before* any KDF work), KDF
-/// parameters beyond the caps, a failed chunk (wrong secret and tampering are
-/// deliberately indistinguishable — the AEAD cannot tell and we do not
-/// guess), truncation, reorder, a short non-final chunk, malformed entry
-/// paths, or a payload whose seed does not derive its workspace key.
-/// Blocking (Argon2) — call off-actor only. v1 buffers the whole blob and
-/// its decrypted payload in memory (bounded by the blob the caller chose to
-/// open); story 13's import should stream chunks into its staging dir
-/// instead of holding large archives resident.
-pub fn read_export(
+/// Parse and gate the plaintext magic + header of one export blob (shared
+/// by [`read_export`] and the import's secret-mode dispatch): bad magic,
+/// unknown format, a newer version (polite [`StorageError::NewerVersion`],
+/// refused *before* any KDF work), an unsupported cipher and implausible
+/// lengths all reject here. Returns the parsed header plus its verbatim
+/// bytes (the stream-key binding input).
+pub(crate) fn read_header(
     input: &mut dyn Read,
-    secret: &ExportSecret,
-) -> Result<ExportArchive, StorageError> {
-    // magic + header
+) -> Result<(ExportHeader, Vec<u8>), StorageError> {
     let mut magic = [0u8; 15];
     read_exact(input, &mut magic, "export magic")?;
     if magic != *EXPORT_MAGIC {
@@ -649,6 +643,24 @@ pub fn read_export(
     if header.chunk_bytes == 0 || header.chunk_bytes > IMPORT_CHUNK_BYTES_MAX {
         return Err(StorageError::BadFile("implausible export chunk size".to_string()));
     }
+    Ok((header, header_bytes))
+}
+
+/// Parse, decrypt and verify one export blob. Every failure is honest and
+/// hard: bad magic, unknown version (refused *before* any KDF work), KDF
+/// parameters beyond the caps, a failed chunk (wrong secret and tampering are
+/// deliberately indistinguishable — the AEAD cannot tell and we do not
+/// guess), truncation, reorder, a short non-final chunk, malformed entry
+/// paths, or a payload whose seed does not derive its workspace key.
+/// Blocking (Argon2) — call off-actor only. v1 buffers the whole blob and
+/// its decrypted payload in memory (bounded by the blob the caller chose to
+/// open); story 13's import should stream chunks into its staging dir
+/// instead of holding large archives resident.
+pub fn read_export(
+    input: &mut dyn Read,
+    secret: &ExportSecret,
+) -> Result<ExportArchive, StorageError> {
+    let (header, header_bytes) = read_header(input)?;
     let id = crate::id_bytes(&header.workspace_id)?;
 
     // derive the stream key per key mode

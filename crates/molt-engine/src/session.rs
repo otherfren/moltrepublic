@@ -575,7 +575,22 @@ impl State {
             self.ensure_demo_net();
         }
         self.session.screen = Screen::Main;
-        self.session.notice = String::new();
+        // the honest DETACHED state (backup_restore_design.md §4.4): an
+        // imported workspace carries a verified chain but deliberately NO
+        // live crypto — no MLS snapshot, no mesh links, no queue creds
+        // (never exported, §3.3). Reading works; the mesh does not come up;
+        // membership comes back via the recovery ritual, and the notice
+        // says exactly that instead of pretending a healthy mesh.
+        self.session.notice = if self.persist
+            && self.chain_head.is_some()
+            && transport_state.mls.is_none()
+            && transport_state.mesh.is_empty()
+            && transport_state.smp_queues.is_none()
+        {
+            "detached".to_string()
+        } else {
+            String::new()
+        };
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
