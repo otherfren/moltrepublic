@@ -85,6 +85,7 @@ rustls             = { version = "0.23", default-features = false, features = ["
 tokio-rustls       = { version = "0.26", default-features = false, features = ["tls12"] }
 rustls-rustcrypto  = "0.0.2-alpha"
 rustls-pki-types   = "1"
+webpki-roots       = "1"      # Mozilla CA roots as pure-Rust data (S3-over-https verify)
 x509-parser        = { version = "0.18", features = ["verify"] }   # parse the chain, verify leaf ⟵ pinned CA
 base64             = "0.22"   # smp:// fingerprint is base64url(sha256(CA DER))
 x25519-dalek       = { version = "2", features = ["static_secrets"] }  # queue DH keys

@@ -444,6 +444,15 @@ impl Dialer {
     /// uniformly.
     pub async fn dial(&self, server: &SmpServer) -> Result<DialStream, NetError> {
         let (host, port) = server.dial_target(self.tor_on());
+        self.dial_host(host, port).await
+    }
+
+    /// Open the raw byte stream to an arbitrary `host:port` per this dialer —
+    /// the transport core `dial` shares, also used by non-SMP clients (the S3
+    /// backup probe). All fail-closed properties hold here: an `.onion` host
+    /// under `Direct` is refused (never a clearnet dial/DNS leak), SOCKS
+    /// circuits are per-host isolated, and the connect deadline is Tor-sized.
+    pub async fn dial_host(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
         match self {
             Dialer::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail

@@ -38,6 +38,7 @@ pub mod invite;
 pub mod loopback;
 pub mod mesh;
 pub mod mls;
+pub mod s3;
 pub mod smp;
 pub mod socks5;
 pub mod supervisor;
