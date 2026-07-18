@@ -20,6 +20,14 @@ use molt_core::{
 
 use crate::{ActiveStorage, State};
 
+/// A workspace directory's real on-disk size, clamped into the list
+/// entry's `u32` KiB field. One recursive walk of a single directory —
+/// called only at the entry choke points (materialize, open, close, an
+/// applied Organization change), never per message.
+pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
+    u32::try_from(molt_storage::workspace_size_kib(dir)).unwrap_or(u32::MAX)
+}
+
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
         // leaving an in-flight founding abandons it (the session is in-memory):
@@ -497,6 +505,7 @@ impl State {
         ws.name = eff.name;
         ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
         ws.agenda = eff.agenda;
+        ws.size_kib = entry_size_kib(&active.dir);
         // members are a projection of the replayed roster — always rebuilt,
         // so a roster grown by MemberJoined never leaves a stale list
         ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");
@@ -555,7 +564,18 @@ impl State {
     pub(crate) fn close_active_storage(&mut self) {
         if let Some(active) = self.active.take() {
             let snap = self.snapshot_now();
+            // close is synchronous (acked by the writer thread), so the
+            // flushed log + closing snapshot are on disk — the moment the
+            // list entry's size is exact
             active.handle.close(Some(snap));
+            if let Some(ws) = self
+                .session
+                .workspaces
+                .iter_mut()
+                .find(|w| w.id == active.id)
+            {
+                ws.size_kib = entry_size_kib(&active.dir);
+            }
             self.reset_workspace_state();
         }
     }

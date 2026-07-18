@@ -388,7 +388,10 @@ pub struct WorkspaceInfo {
     pub sync_queue: u32,
     /// Automatic S3 backup configured.
     pub s3: bool,
-    /// On-disk size in KiB (mock).
+    /// Real on-disk size of the workspace directory in KiB, rounded up
+    /// (0 for a session-only entry with no directory). Measured at the
+    /// entry choke points — materialize, open, clean close, an applied
+    /// Organization change — not continuously.
     #[serde(default)]
     pub size_kib: u32,
     /// Minutes since the last completed backup; [`WorkspaceInfo::NEVER`]

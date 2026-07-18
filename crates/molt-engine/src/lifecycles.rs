@@ -183,6 +183,15 @@ impl State {
         if self.session.workspaces.iter().any(|w| w.id == *id) {
             return;
         }
+        // the finishes materialize the directory before pushing the entry,
+        // so its real footprint is on disk right now; a session-only demo
+        // entry has no directory and honestly reports 0
+        let size_kib = self
+            .active
+            .as_ref()
+            .filter(|a| a.id == *id)
+            .map(|a| crate::session::entry_size_kib(&a.dir))
+            .unwrap_or(0);
         self.session.workspaces.push(WorkspaceInfo {
             id: id.clone(),
             name: name.to_string(),
@@ -192,7 +201,7 @@ impl State {
             last_sync_min: 0,
             sync_queue: 0,
             s3,
-            size_kib: 16,
+            size_kib,
             last_backup_min: if s3 { 0 } else { WorkspaceInfo::NEVER },
             seed,
             net,
