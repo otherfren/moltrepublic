@@ -246,7 +246,7 @@ pub struct CheckpointState {
 /// same length-prefixed framing as [`roster_canonical_bytes`], so the
 /// layouts stay siblings. JSON payloads serialize canonically because
 /// `serde_json::Map` is a BTreeMap here (no `preserve_order` feature —
-/// pinned by test).
+/// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"molt-chain-checkpoint-v1\0");
@@ -315,6 +315,37 @@ mod tests {
             member: name.to_string(),
             identity_pk: pk.to_string(),
         }
+    }
+
+    /// The determinism keystone the canonical-bytes comments PROMISE (and a
+    /// total-review finding flagged missing): `serde_json::Value::Object`
+    /// must serialize with sorted keys, i.e. the `preserve_order` feature
+    /// must NOT be active anywhere in the build graph. If a dependency ever
+    /// enables it, `Value::Object` becomes insertion-ordered and two nodes
+    /// building the same logical payload differently would produce diverging
+    /// `approval_bytes`/`checkpoint_canonical_bytes` — silent signature and
+    /// convergence failure. This pins it at compile+test time.
+    #[test]
+    fn serde_json_object_serializes_with_sorted_keys() {
+        // insertion order z, a, m — canonical output must reorder to a, m, z
+        let mut v = serde_json::Value::Object(serde_json::Map::new());
+        if let serde_json::Value::Object(m) = &mut v {
+            m.insert("z".to_string(), json!(1));
+            m.insert("a".to_string(), json!(2));
+            m.insert("m".to_string(), json!(3));
+        }
+        assert_eq!(
+            serde_json::to_string(&v).expect("serialize"),
+            r#"{"a":2,"m":3,"z":1}"#,
+            "serde_json preserve_order is ON — canonical signed bytes are no longer deterministic"
+        );
+        // and a byte-for-byte re-parse → re-serialize is stable
+        let reparsed: serde_json::Value =
+            serde_json::from_str(r#"{"m":3,"z":1,"a":2}"#).expect("parse");
+        assert_eq!(
+            serde_json::to_vec(&reparsed).expect("serialize"),
+            r#"{"a":2,"m":3,"z":1}"#.as_bytes()
+        );
     }
 
     /// The genesis approval bytes must equal the roster bytes every member
