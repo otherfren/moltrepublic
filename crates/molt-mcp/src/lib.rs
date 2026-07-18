@@ -645,7 +645,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_members",
             command: "read_members",
-            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), mock last-seen/presence, how many pending proposals still await that member's vote, and how many files it shared into the chat.",
+            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds of the last authenticated traffic from that member, 0 = never seen by this install; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, and how many files it shared into the chat.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMembers),
         },
@@ -1095,8 +1095,9 @@ mod tests {
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own
         // transport tasks speaking, not agent-forgeable.
-        const INTERNAL: [&str; 32] = [
+        const INTERNAL: [&str; 33] = [
             "net_test_s3_result",
+            "net_presence_tick",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",

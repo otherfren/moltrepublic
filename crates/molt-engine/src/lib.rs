@@ -64,6 +64,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 const CMD_QUEUE: usize = 128;
 /// Capacity of the outbound event broadcast.
 const EVENT_QUEUE: usize = 512;
+/// Period of the presence-aging ticker (30 s): pill states move at
+/// minutes-scale thresholds ([`molt_core::MemberInfo::ONLINE_SECS`] /
+/// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
+const PRESENCE_TICK_MS: u64 = 30_000;
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {
@@ -291,6 +295,9 @@ fn spawn_actor(
     state.ritual_bootstrap = ritual_bootstrap;
     state.recovery_material_sink = recovery_material_sink;
     state.demo_mesh = demo_mesh;
+    // the presence ticker lives as long as the actor: it re-ages the member
+    // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
+    state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -458,6 +465,16 @@ pub(crate) struct State {
     /// the window is ignored — one rotation per member per minute is ample,
     /// and it caps the churn a misbehaving member can inflict.
     pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
+    /// Members whose sends keep failing (outbox backoff): their pill is
+    /// pinned unreachable (state 2) regardless of how fresh the last-seen
+    /// stamp is, until the next real sighting clears the pin. Runtime-only,
+    /// active workspace scope (cleared with the mesh).
+    pub(crate) net_unreachable: std::collections::HashSet<MemberId>,
+    /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
+    /// `None` in every production context — presence stamping/aging then
+    /// runs on the shared [`now_secs`] clock; tests pin it to age pills
+    /// deterministically.
+    pub(crate) clock_override: Option<u64>,
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
@@ -619,6 +636,8 @@ impl State {
             recovery_tickets: std::collections::HashSet::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
+            net_unreachable: std::collections::HashSet::new(),
+            clock_override: None,
             active: None,
             net,
             net_ritual: None,
@@ -652,6 +671,14 @@ impl State {
             .as_ref()
             .map(|r| r.member.clone())
             .unwrap_or_else(|| self.config.member.clone())
+    }
+
+    /// The presence clock: seconds since the unix epoch — the shared
+    /// [`now_secs`] clock, unless a test pinned [`State::clock_override`].
+    /// Every presence stamp, aging pass and activity-trio read runs on
+    /// THIS accessor so tests can age pills deterministically.
+    pub(crate) fn presence_now(&self) -> u64 {
+        self.clock_override.unwrap_or_else(now_secs)
     }
 
     /// The member roster: the open workspace's, else the boot group's.
@@ -810,6 +837,7 @@ impl State {
                 reason,
                 generation,
             } => self.cmd_net_send_failed(member, reason, generation),
+            Command::NetPresenceTick => self.cmd_net_presence_tick(),
 
             // session.rs
             Command::ReadSession => Ok(Reply::Session(Box::new(self.session.clone()))),
@@ -1852,8 +1880,8 @@ mod tests {
 
     /// The status summary carries the founding date (the genesis envelope's
     /// timestamp — real on replayed workspaces, 0 on the sessionless demo)
-    /// and the mock activity trio the Organization → Status info panel
-    /// renders (synced = hour-active, syncing = day-active, roster = week).
+    /// and the REAL activity trio: nobody in the demo boot group has ever
+    /// been seen on the wire, so only the local member counts anywhere.
     #[test]
     fn status_carries_founding_date_and_activity() {
         rt().block_on(async {
@@ -1861,7 +1889,10 @@ mod tests {
             match w.execute(Command::Status).await.expect("status") {
                 Reply::Status(st) => {
                     assert_eq!(st.founded_ts, 0, "the demo group has no genesis event");
-                    assert_eq!(st.active_7d, 3, "mock: the whole roster is week-active");
+                    assert_eq!(
+                        st.active_7d, 1,
+                        "honest presence: never-seen peers count nowhere — only the local member"
+                    );
                     assert!(st.active_1h <= st.active_24h && st.active_24h <= st.active_7d);
                 }
                 other => panic!("unexpected: {other:?}"),

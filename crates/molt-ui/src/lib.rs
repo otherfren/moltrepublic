@@ -1516,14 +1516,16 @@ fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
     slint::Image::load_from_svg_data(bytes).ok()
 }
 
-/// Map a session workspace into the Slint-side row struct.
-fn workspace_item(lang: i32, w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
+/// Map a session workspace into the Slint-side row struct. Member chips
+/// render the relative age from the real stamp; a never-seen member (all
+/// of them, on a closed workspace) shows a bare chip.
+fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
     let members: Vec<MemberSync> = w
         .members
         .iter()
         .map(|m| MemberSync {
             name: m.name.as_str().into(),
-            last: m.last.as_str().into(),
+            last: seen_label(lang, now, m.last_seen, "").into(),
             state: i32::from(m.state),
         })
         .collect();
@@ -1564,6 +1566,32 @@ fn ago_label(lang: i32, minutes: u32) -> String {
             m => format!("{} d ago", m / 1440),
         }
     }
+}
+
+/// Human "last seen" label from a member's REAL unix stamp — the
+/// `last_sync_min` pattern: the shared data carries the number, prose is
+/// rendered here. `never` is what a stamp-less member shows ("" keeps an
+/// Open-list chip bare; the live surfaces say so explicitly).
+fn seen_label(lang: i32, now: u64, last_seen: u64, never: &str) -> String {
+    if last_seen == molt_core::MemberInfo::NEVER {
+        return never.to_string();
+    }
+    let min = u32::try_from(now.saturating_sub(last_seen) / 60).unwrap_or(u32::MAX);
+    ago_label(lang, min)
+}
+
+/// The honest "never seen" cell text.
+fn never_seen_label(lang: i32) -> &'static str {
+    if lang == 1 {
+        "noch nie gesehen"
+    } else {
+        "never seen"
+    }
+}
+
+/// Unix seconds now — the UI-side render clock for relative age labels.
+fn unix_now() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
 }
 
 /// Render the human sync-status line from the machine fields — prose is
@@ -1744,15 +1772,15 @@ fn filter_uploads(rows: Vec<UploadRowData>, needle: &str) -> Vec<UploadRowData> 
 
 /// Sort the Organization → Members rows by a header column key ("name" /
 /// "id" / "pk" / "last" / "uploads"); an empty or unknown key keeps the
-/// roster order. Unanchored (empty) id/pk cells sort last ascending; no
-/// real last-seen timestamp exists yet (mock presence), so "last" orders
-/// by the presence state first, then the label.
+/// roster order. Unanchored (empty) id/pk cells sort last ascending;
+/// "last" orders by the REAL last-seen stamp, most recent first, with
+/// never-seen members at the end.
 fn sort_members(rows: &mut [MemberRowData], column: &str, ascending: bool) {
     match column {
         "name" => rows.sort_by_key(|r| r.name.to_lowercase()),
         "id" => rows.sort_by_key(|r| (r.id.is_empty(), r.id.to_lowercase())),
         "pk" => rows.sort_by_key(|r| (r.pk.is_empty(), r.pk.to_lowercase())),
-        "last" => rows.sort_by_key(|r| (r.state, r.last.to_lowercase())),
+        "last" => rows.sort_by_key(|r| (r.last_ts == 0, std::cmp::Reverse(r.last_ts))),
         "uploads" => rows.sort_by_key(|r| r.uploads),
         _ => return,
     }
@@ -1912,10 +1940,11 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
 
     // the Open screen's list mirrors the session's workspaces, re-applying
     // whatever column sort the user picked
+    let now = unix_now();
     let mut items: Vec<WorkspaceItem> = sv
         .workspaces
         .iter()
-        .map(|w| workspace_item(lang, w))
+        .map(|w| workspace_item(lang, now, w))
         .collect();
     sort_ws_items(
         &mut items,
@@ -1964,7 +1993,7 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
                 .iter()
                 .map(|m| MemberSync {
                     name: m.name.as_str().into(),
-                    last: m.last.as_str().into(),
+                    last: seen_label(lang, now, m.last_seen, never_seen_label(lang)).into(),
                     state: i32::from(m.state),
                 })
                 .collect()
@@ -2288,8 +2317,14 @@ struct MemberRowData {
     id: String,
     /// Full anchored identity key, lowercase hex ("" unanchored).
     pk: String,
+    /// Rendered "last seen" label (prose is presentation; the engine
+    /// serves the numeric stamp).
     last: String,
-    /// 0 = synced, 1 = syncing, 2 = offline (mock presence).
+    /// The real last-seen unix stamp (0 = never) — the sort key behind
+    /// the rendered label.
+    last_ts: u64,
+    /// 0 = online, 1 = stale, 2 = offline/unreachable (aged from the
+    /// real stamp engine-side).
     state: i32,
     uploads: i32,
 }
@@ -2666,7 +2701,8 @@ async fn push_surfaces(
                 name: m.member,
                 id: m.id,
                 pk: m.identity_pk,
-                last: m.last_seen,
+                last: seen_label(lang, unix_now(), m.last_seen, never_seen_label(lang)),
+                last_ts: m.last_seen,
                 state: i32::from(m.presence),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
             })
@@ -5924,12 +5960,13 @@ mod tests {
     }
 
     /// Members-table row for the sort tests.
-    fn member(name: &str, id: &str, last: &str, state: i32, uploads: i32) -> MemberRowData {
+    fn member(name: &str, id: &str, last_ts: u64, state: i32, uploads: i32) -> MemberRowData {
         MemberRowData {
             name: name.to_string(),
             id: id.to_string(),
             pk: id.to_string(),
-            last: last.to_string(),
+            last: String::new(),
+            last_ts,
             state,
             uploads,
         }
@@ -5938,9 +5975,9 @@ mod tests {
     #[test]
     fn sort_members_by_name_uploads_and_presence() {
         let mut rows = vec![
-            member("bob", "0b", "just now", 0, 3),
-            member("Alice", "aa", "5 min ago", 1, 10),
-            member("carol", "", "offline", 2, 2),
+            member("bob", "0b", 10_000, 0, 3),
+            member("Alice", "aa", 9_700, 1, 10),
+            member("carol", "", 0, 2, 2),
         ];
         let names = |rows: &[MemberRowData]| -> Vec<String> {
             rows.iter().map(|r| r.name.clone()).collect()
@@ -5951,8 +5988,8 @@ mod tests {
         assert_eq!(names(&rows), ["carol", "bob", "Alice"], "2 < 3 < 10 numeric");
         sort_members(&mut rows, "uploads", false);
         assert_eq!(names(&rows), ["Alice", "bob", "carol"]);
-        // no real timestamp exists (mock presence) — recency approximates
-        // as presence state first: synced < syncing < offline
+        // "last" is the REAL stamp: most recent first, never-seen (0) at
+        // the end — regardless of pill state
         sort_members(&mut rows, "last", true);
         assert_eq!(names(&rows), ["bob", "Alice", "carol"]);
         // unanchored (empty) identity cells sort last ascending

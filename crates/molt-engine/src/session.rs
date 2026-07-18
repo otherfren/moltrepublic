@@ -582,6 +582,7 @@ impl State {
             return;
         };
         let eff = self.org_effective();
+        let now = self.presence_now();
         let Some(active) = &self.active else {
             return;
         };
@@ -597,8 +598,27 @@ impl State {
         ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
         ws.agenda = eff.agenda;
         // members are a projection of the replayed roster — always rebuilt,
-        // so a roster grown by MemberJoined never leaves a stale list
-        ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");
+        // so a roster grown by MemberJoined never leaves a stale list. The
+        // rebuild PRESERVES the real last-seen stamps: the local member is
+        // trivially present, everyone else keeps their stamp (a member new
+        // to the roster honestly starts never-seen).
+        let prev = std::mem::take(&mut ws.members);
+        ws.members = roster_members(&replica.roster, now, |m| {
+            if m == replica.member {
+                now
+            } else {
+                prev.iter()
+                    .find(|p| p.name == m)
+                    .map(|p| p.last_seen)
+                    .unwrap_or(molt_core::MemberInfo::NEVER)
+            }
+        });
+        // a send-failure pin survives the rebuild until the next sighting
+        for m in &mut ws.members {
+            if self.net_unreachable.contains(&m.name) {
+                m.state = 2;
+            }
+        }
     }
 
     /// An Organization change was applied: ripple the effective identity

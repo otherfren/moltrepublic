@@ -1545,19 +1545,25 @@ impl State {
         self.record_file_remove(index, id, from);
     }
 
-    /// Passive presence: mark the member's pill live.
+    /// Passive presence: stamp the member with the engine clock's real
+    /// unix time (authenticated inbound traffic is the ONLY thing that
+    /// moves a stamp) and lift a send-failure pin.
     pub(crate) fn cmd_net_peer_seen(
         &mut self,
         member: MemberId,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            self.update_member_pill(&member, 0, "just now");
+            self.net_unreachable.remove(&member);
+            let now = self.presence_now();
+            self.stamp_member_pill(&member, now);
         }
         Ok(Reply::Ack)
     }
 
-    /// Transport trouble: mark the member's pill unreachable.
+    /// Transport trouble: pin the member's pill unreachable. The last-seen
+    /// stamp stays untouched — it records real sightings only; the pin
+    /// holds through aging ticks until the next sighting clears it.
     pub(crate) fn cmd_net_send_failed(
         &mut self,
         member: MemberId,
@@ -1568,19 +1574,24 @@ impl State {
             return Ok(Reply::Ack);
         }
         tracing::warn!(%member, %reason, "sends to a member keep failing — outbox is backing off");
-        self.update_member_pill(&member, 2, "unreachable");
+        self.net_unreachable.insert(member);
+        self.refresh_member_pills();
         Ok(Reply::Ack)
     }
 
-    /// Update one member's presence pill in the active workspace entry;
+    /// The presence ticker (spawned with the actor, period
+    /// [`crate::PRESENCE_TICK_MS`]): re-age every pill from its stamp so
+    /// a silent member drifts online → stale → offline. The stamps only
+    /// ever move on real traffic; reads additionally re-derive live, so
+    /// the tick exists for the PUSHED session pills.
+    pub(crate) fn cmd_net_presence_tick(&mut self) -> Result<Reply, MoltError> {
+        self.refresh_member_pills();
+        Ok(Reply::Ack)
+    }
+
+    /// Record a real sighting on the active workspace entry's pill;
     /// emits only when something actually changed.
-    ///
-    /// Honest limitation (T5 closes it): `MemberInfo.last` is a prose
-    /// label, so "just now" cannot age while a member stays silent —
-    /// proper staleness needs a numeric last-seen field rendered UI-side
-    /// (the `last_sync_min` pattern), which lands with the real transport
-    /// health wiring.
-    fn update_member_pill(&mut self, member: &MemberId, state: u8, label: &str) {
+    fn stamp_member_pill(&mut self, member: &MemberId, now: u64) {
         let active = self.session.active_workspace.clone();
         let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
             return;
@@ -1588,12 +1599,39 @@ impl State {
         let Some(m) = entry.members.iter_mut().find(|m| m.name == *member) else {
             return;
         };
-        if m.state == state && m.last == label {
+        let state = molt_core::presence_state(now, now);
+        if m.state == state && m.last_seen == now {
             return;
         }
         m.state = state;
-        m.last = label.to_string();
+        m.last_seen = now;
         self.emit_session(SessionScope::Full);
+    }
+
+    /// Re-derive every pill state of the active entry from its stamp
+    /// (send-failure pins win); emits only when a state actually changed.
+    fn refresh_member_pills(&mut self) {
+        let now = self.presence_now();
+        let active = self.session.active_workspace.clone();
+        let unreachable = &self.net_unreachable;
+        let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
+            return;
+        };
+        let mut changed = false;
+        for m in &mut entry.members {
+            let state = if unreachable.contains(&m.name) {
+                2
+            } else {
+                molt_core::presence_state(now, m.last_seen)
+            };
+            if m.state != state {
+                m.state = state;
+                changed = true;
+            }
+        }
+        if changed {
+            self.emit_session(SessionScope::Full);
+        }
     }
 }
 
@@ -1896,6 +1934,190 @@ mod tests {
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&(u64::try_from(n).expect("small")).to_le_bytes());
         MessageId(b)
+    }
+
+    // --- real presence: numeric stamps, aging, the activity trio -----------
+
+    use molt_core::MemberInfo;
+
+    /// A base instant for the presence tests, far from the thresholds.
+    const T: u64 = 1_750_000_000;
+
+    /// A state with an active workspace entry and a real 2-of-3 roster —
+    /// ada is the local member; nobody has been seen yet.
+    fn presence_fixture() -> crate::State {
+        let mut st = crate::tests::plain_state();
+        st.clock_override = Some(T);
+        let roster: Vec<String> =
+            vec!["ada".to_string(), "bob".to_string(), "cid".to_string()];
+        st.replica = Some(crate::ReplicaState {
+            member: "ada".to_string(),
+            roster: roster.clone(),
+            rule_m: 2,
+            ..Default::default()
+        });
+        let id = "w-presence".to_string();
+        st.session.active_workspace = id.clone();
+        st.session.workspaces.push(molt_core::WorkspaceInfo {
+            id,
+            name: "Presence".to_string(),
+            detail: "2-of-3".to_string(),
+            synced: true,
+            state: 0,
+            last_sync_min: 0,
+            sync_queue: 0,
+            s3: false,
+            size_kib: 0,
+            last_backup_min: molt_core::WorkspaceInfo::NEVER,
+            seed: String::new(),
+            net: "none".to_string(),
+            encrypted: false,
+            members: molt_core::roster_members(&roster, T, |_| MemberInfo::NEVER),
+            agenda: String::new(),
+        });
+        st
+    }
+
+    fn pill(st: &crate::State, name: &str) -> MemberInfo {
+        st.session
+            .workspaces
+            .iter()
+            .find(|w| w.id == st.session.active_workspace)
+            .expect("active entry")
+            .members
+            .iter()
+            .find(|m| m.name == name)
+            .expect("member pill")
+            .clone()
+    }
+
+    /// A peer sighting stamps the member with the engine clock's REAL unix
+    /// time, and the activity trio counts it in every window it falls into
+    /// (ada, the local member, always counts — it is the one reading).
+    #[test]
+    fn a_peer_sighting_stamps_the_real_clock_and_feeds_the_trio() {
+        let mut st = presence_fixture();
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        let bob = pill(&st, "bob");
+        assert_eq!(bob.last_seen, T, "the stamp is the engine clock's time");
+        assert_eq!(bob.state, 0, "a fresh sighting is online");
+        let s = st.status();
+        assert_eq!((s.active_1h, s.active_24h, s.active_7d), (2, 2, 2));
+        // two hours of silence: bob leaves the 1h window by pure clock
+        // advance — no event needed, the trio reads the stamps
+        st.clock_override = Some(T + 7_200);
+        let s = st.status();
+        assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 2, 2));
+        // eight days of silence: bob leaves every window
+        st.clock_override = Some(T + 8 * 86_400);
+        let s = st.status();
+        assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 1, 1));
+    }
+
+    /// The presence ticker ages a silent member's pill: online → stale
+    /// after `ONLINE_SECS`, stale → offline after `STALE_SECS` — the stamp
+    /// itself never moves without real traffic.
+    #[test]
+    fn the_ticker_ages_a_silent_pill_stale_then_offline() {
+        let mut st = presence_fixture();
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        st.clock_override = Some(T + MemberInfo::ONLINE_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 1, "silence past ONLINE_SECS is stale");
+        st.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        let bob = pill(&st, "bob");
+        assert_eq!(bob.state, 2, "silence past STALE_SECS is offline");
+        assert_eq!(bob.last_seen, T, "aging never invents a sighting");
+    }
+
+    /// A member the transport never heard from stays honestly never-seen:
+    /// sentinel stamp, offline pill, counted in NO activity window — and
+    /// the ticker does not invent presence for it.
+    #[test]
+    fn a_member_without_traffic_stays_never_seen_and_counts_nowhere() {
+        let mut st = presence_fixture();
+        st.cmd_net_presence_tick().expect("tick");
+        let cid = pill(&st, "cid");
+        assert_eq!(cid.last_seen, MemberInfo::NEVER);
+        assert_eq!(cid.state, 2);
+        let view = st
+            .members_view()
+            .into_iter()
+            .find(|m| m.member == "cid")
+            .expect("cid row");
+        assert_eq!(view.last_seen, MemberInfo::NEVER);
+        assert_eq!(view.presence, 2);
+        let s = st.status();
+        // only ada (the local member) is active anywhere
+        assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 1, 1));
+    }
+
+    /// A send-failure pins the member unreachable (state 2) WITHOUT
+    /// touching its last-seen stamp — the stamp records real sightings
+    /// only — and the pin outlives the ticker until the next sighting.
+    #[test]
+    fn a_send_failure_pins_unreachable_until_the_next_sighting() {
+        let mut st = presence_fixture();
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        st.cmd_net_send_failed("bob".to_string(), "queue gone".to_string(), None)
+            .expect("ack");
+        let bob = pill(&st, "bob");
+        assert_eq!(bob.state, 2, "failing sends mark the member unreachable");
+        assert_eq!(bob.last_seen, T, "a failure is not a sighting");
+        // the ticker must not lift the pin while the stamp is still fresh
+        st.clock_override = Some(T + 10);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 2, "unreachable is sticky");
+        assert_eq!(
+            st.members_view()
+                .into_iter()
+                .find(|m| m.member == "bob")
+                .expect("bob row")
+                .presence,
+            2,
+            "reads see the pin too"
+        );
+        // real inbound traffic lifts it
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        let bob = pill(&st, "bob");
+        assert_eq!(bob.state, 0);
+        assert_eq!(bob.last_seen, T + 10);
+    }
+
+    /// Upload availability ("sharer online?") derives from the same real
+    /// stamps: a never-seen sharer is offline, a sighting flips it.
+    #[test]
+    fn upload_availability_follows_the_real_stamps() {
+        fn cid_online(st: &crate::State) -> bool {
+            st.uploads_view()
+                .into_iter()
+                .find(|u| u.member == "cid")
+                .expect("cid share")
+                .online
+        }
+        let mut st = presence_fixture();
+        // the share's ts must sit inside the retention window, which is
+        // measured on the REAL clock (chat visibility is not presence)
+        let ts = crate::now_secs();
+        let mut msg = ChatMessage::text(id(9), "cid", "", ts);
+        msg.file = Some(molt_core::FileMeta {
+            name: "notes.pdf".to_string(),
+            size: 10,
+            kind: "PDF".to_string(),
+            modified: ts,
+            available: true,
+            checksum: String::new(),
+        });
+        st.apply(&EventEnvelope {
+            seq: 1,
+            ts,
+            by: "cid".to_string(),
+            body: WorkspaceEvent::Chat(msg),
+        });
+        assert!(!cid_online(&st), "a never-seen sharer is honestly offline");
+        st.cmd_net_peer_seen("cid".to_string(), None).expect("ack");
+        assert!(cid_online(&st), "a sighting makes the sharer reachable");
     }
 
     fn react(by: &str) -> PendingRef {

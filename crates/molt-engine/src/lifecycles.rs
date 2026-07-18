@@ -297,7 +297,9 @@ impl State {
         } else {
             demo_workspace_id(&name)
         };
-        let members = roster_members(&roster, |_| true, "just now");
+        // honest presence: a mock restore has heard from nobody — every
+        // member starts never-seen until real traffic stamps it
+        let members = roster_members(&roster, self.presence_now(), |_| MemberInfo::NEVER);
         self.push_workspace_entry(
             &id,
             &name,
@@ -641,8 +643,10 @@ impl State {
         if s3 && self.persist {
             self.persist_backup_pref(&id, true);
         }
-        // members show live (the ritual just sealed them all)
-        let members = roster_members(&roster, |_| true, "just now");
+        // the ritual just sealed with every member's live participation —
+        // that IS a real sighting, so all stamps start at now
+        let now = self.presence_now();
+        let members = roster_members(&roster, now, |_| now);
         // the phrase stays in the entry (and on disk, device-sealed —
         // decision 2026-07-15): the Open screen's details panel shows it
         // while the workspace is at-rest-unencrypted
@@ -906,7 +910,10 @@ impl State {
         // (finished) join task can't retroactively touch the reset run
         self.join_generation += 1;
         self.join_confirm = None;
-        let members = roster_members(&sealed.roster, |_| true, "just now");
+        // every roster member just took part in the join ritual's seal —
+        // a real sighting for each of them
+        let now = self.presence_now();
+        let members = roster_members(&sealed.roster, now, |_| now);
         self.session.join = JoinState::default();
         self.push_workspace_entry(
             &id,
@@ -1168,7 +1175,10 @@ impl State {
         // the (finished) rejoin task can't touch the recovered state
         self.recover_generation += 1;
         self.recover_ctx = None;
-        let members = roster_members(&sealed.roster, |_| true, "just now");
+        // the recovery re-key just ran over the live mesh — a real
+        // sighting for the members that welcomed us back
+        let now = self.presence_now();
+        let members = roster_members(&sealed.roster, now, |_| now);
         self.push_workspace_entry(
             &id,
             &sealed.name,
@@ -1347,13 +1357,25 @@ impl State {
     /// `tick` is re-sent every 90 ms; the task stops as soon as a tick is
     /// answered with an error (the run is over or was cancelled).
     pub(crate) fn spawn_ticker(&self, tick: Command) {
-        // upgrade the actor's weak self-handle; a stopping actor spawns no ticker
-        let Some(tx) = self.cmd_tx.upgrade() else {
-            return;
-        };
+        self.spawn_ticker_every(tick, 90);
+    }
+
+    /// [`State::spawn_ticker`] with a caller-chosen period — the presence
+    /// ticker runs on a much slower beat than the 90 ms run tickers.
+    ///
+    /// The task keeps only the actor's WEAK self-handle and upgrades it
+    /// per tick: a long-lived ticker holding a strong sender would be the
+    /// reference cycle that keeps the actor alive after the last operator
+    /// handle is gone (see `engine_and_mesh_shut_down_when_the_last_handle_drops`).
+    pub(crate) fn spawn_ticker_every(&self, tick: Command, period_ms: u64) {
+        let weak = self.cmd_tx.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(period_ms)).await;
+                // a stopping/stopped actor ends the ticker
+                let Some(tx) = weak.upgrade() else {
+                    break;
+                };
                 let (reply, rx) = oneshot::channel();
                 if tx
                     .send(Envelope {
@@ -1365,6 +1387,7 @@ impl State {
                 {
                     break;
                 }
+                drop(tx);
                 match rx.await {
                     Ok(Ok(_)) => {}
                     _ => break,

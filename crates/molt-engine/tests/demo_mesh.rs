@@ -167,7 +167,10 @@ async fn demo_workspace_mesh_updates_presence_on_reply() {
                 .find(|m| m.name == reply_from)
                 .expect("the replier is a roster member");
             assert_eq!(member.state, 0, "presence pill is live");
-            assert_eq!(member.last, "just now");
+            assert!(
+                member.last_seen > 0,
+                "the sighting carries a real unix stamp"
+            );
             // offline members never joined the mesh, so they never spoke
             let offline = ws.members.iter().find(|m| m.name == "notary").expect("notary");
             assert_eq!(offline.state, 2, "offline members stay offline");
