@@ -1103,10 +1103,12 @@ pub struct WorkspacePrefs {
     /// Unix seconds of the last completed backup; `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_backup: Option<u64>,
-    /// This republic's other members are in-process simulations (founded
-    /// before the real network exists, T3): the node runs their loopback
-    /// peer engines while the workspace is open. Never set on workspaces
-    /// whose members joined over a real transport.
+    /// Legacy marker: this republic was founded by the pre-network
+    /// in-process simulation (its other members never existed as real
+    /// nodes). **Inert in production** — no engine spawns fake peers, and
+    /// governance never counts for peers; only the demo-mesh test seam
+    /// reads it to decide which loopback contexts get demo peers. Kept so
+    /// old prefs files stay parseable and honestly labeled.
     #[serde(default)]
     pub simulated_members: bool,
     /// MY shares: chat message id (hex) → absolute local source path, so
@@ -1476,8 +1478,8 @@ pub enum WorkspaceEvent {
     /// One member's approval landed on a pending proposal. On a chain-governed
     /// republic it also carries the member's **signature** over the committed
     /// change at a target chain `height` (the real threshold co-signature the
-    /// committer bundles into the block); both default empty on the legacy
-    /// counted-simulation path.
+    /// committer bundles into the block); both default empty on the
+    /// single-operator (non-chain) path.
     Approved {
         /// The proposal.
         id: ProposalId,
@@ -3368,6 +3370,17 @@ pub enum MoltError {
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),
+    /// A repeated `Approve` in a context without chain governance. This
+    /// node contributes exactly ONE real approval — its own; it never
+    /// counts invented approvals on behalf of other members. The missing
+    /// approvals must come from the members themselves, which takes a
+    /// chain-governed republic (real signed m-of-n over the mesh).
+    #[error(
+        "proposal {0:?} already carries this node's approval — the remaining \
+         approvals must come from the other members themselves, which needs \
+         a chain-governed republic"
+    )]
+    AlreadyApproved(ProposalId),
     /// A write into the discussion channel of a decided vote (the
     /// discussion stays readable, linked from the vote's card — but the
     /// deliberation ended with the vote).

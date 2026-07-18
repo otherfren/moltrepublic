@@ -10,11 +10,14 @@
 //! mutation through one owner removes a class of races and gives a single,
 //! authoritative event order that both frontends mirror.
 //!
-//! The approval logic here is a faithful but *simulated* stand-in for the real
-//! threshold machine: there is no FROST, no MLS. Each `Approve` counts as one
-//! member's co-signature; when the count reaches the group threshold the
-//! proposal is applied. Swapping in the real signing backend is a future
-//! surface-crate concern and does not change this contract.
+//! The approval logic is honest on both of its paths: a **chain-governed**
+//! republic (every ritual-founded workspace) runs real signed m-of-n
+//! threshold governance over the MLS-encrypted mesh ([`chain`]); every
+//! other context (the solo boot group, legacy pre-chain workspaces) runs a
+//! **single-operator** path where this node records at most its OWN
+//! approval — a proposal applies only when that one real vote meets the
+//! threshold (honest 1-of-1), and a repeated `Approve` is refused instead
+//! of being counted as an invented peer.
 //!
 //! The implementation is split by concern: [`chat`] (the ungated surface,
 //! typed messages, reactions, deletion), [`net`] (the `molt-net` glue: the
@@ -414,7 +417,7 @@ pub(crate) struct State {
     pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
     /// The gated surfaces' applied logs **derived from the chain** — a separate
     /// projection from the legacy log-driven [`State::applied`] so the two never
-    /// collide: a solo/simulation workspace keeps its counted governance in
+    /// collide: a single-operator workspace keeps its counted governance in
     /// `applied` (chain genesis-only → this stays empty), while real
     /// threshold-committed governance lands here. Reads combine both. Re-folded
     /// wholesale on every chain change, so a re-base is free. Same
@@ -1695,8 +1698,15 @@ mod tests {
     #[test]
     fn propose_then_threshold_applies() {
         rt().block_on(async {
-            // 2-of-3 demo, self_cosign => propose=1 approval, one more applies.
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            // 1-of-3, no self-cosign: the proposal genuinely waits for a
+            // vote, and this node's OWN single approval honestly meets the
+            // threshold — no peer is ever counted for.
+            let cfg = GroupConfig {
+                threshold: 1,
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
             let id = match w
                 .execute(Command::Propose {
                     surface: Surface::Memory,
@@ -1708,6 +1718,11 @@ mod tests {
                 Reply::Proposed { id } => id,
                 other => panic!("unexpected: {other:?}"),
             };
+            assert_eq!(
+                read_surface(&w, Surface::Memory).await.pending.len(),
+                1,
+                "no self-cosign: the proposal waits for this node's vote"
+            );
             w.execute(Command::Approve { proposal: id })
                 .await
                 .expect("approve");
@@ -1726,6 +1741,133 @@ mod tests {
                 }
                 other => panic!("unexpected: {other:?}"),
             }
+        });
+    }
+
+    /// Without chain governance this node records at most its OWN approval.
+    /// The pre-chain counting simulation (a repeated `Approve` counted as
+    /// the next member's co-signature) is gone from the production path: a
+    /// repeat is refused with an honest error, the counter never moves, and
+    /// no proposal applies on invented peer approvals.
+    #[test]
+    fn approve_never_counts_invented_peer_approvals() {
+        rt().block_on(async {
+            // self_cosign: proposing already recorded my one real approval
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"t"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            for _ in 0..2 {
+                let err = w
+                    .execute(Command::Approve { proposal: id })
+                    .await
+                    .expect_err("a second local approval cannot stand in for a peer");
+                assert!(
+                    matches!(err, MoltError::AlreadyApproved(got) if got == id),
+                    "unexpected: {err:?}"
+                );
+            }
+            let snap = read_surface(&w, Surface::Memory).await;
+            assert!(snap.applied.is_empty(), "2-of-3 never applies on one member");
+            assert_eq!(snap.pending.len(), 1);
+            assert_eq!(
+                snap.pending[0].approvals, 1,
+                "exactly this node's own approval, nothing invented"
+            );
+            assert!(snap.pending[0].approved_by_me);
+        });
+    }
+
+    /// The explicit-vote twin: without self-cosign the FIRST `Approve` is
+    /// this node's real vote and is recorded; the second is the refused
+    /// simulation. The votes row attributes only what is known — me.
+    #[test]
+    fn second_local_approval_is_refused_without_chain_governance() {
+        rt().block_on(async {
+            let cfg = GroupConfig {
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"t"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            w.execute(Command::Approve { proposal: id })
+                .await
+                .expect("my own first approval is real");
+            let err = w
+                .execute(Command::Approve { proposal: id })
+                .await
+                .expect_err("no second local approval");
+            assert!(
+                matches!(err, MoltError::AlreadyApproved(got) if got == id),
+                "unexpected: {err:?}"
+            );
+            let snap = read_surface(&w, Surface::Memory).await;
+            assert!(snap.applied.is_empty());
+            assert_eq!(snap.pending[0].approvals, 1);
+            // honest attribution: my vote is mine, the peers stay open
+            for v in &snap.pending[0].votes {
+                let expect = if v.member == "me" {
+                    molt_core::VoteState::Approved
+                } else {
+                    molt_core::VoteState::Open
+                };
+                assert_eq!(v.vote, expect, "stance of {}", v.member);
+            }
+        });
+    }
+
+    /// The solo boot group (1-of-1) is REAL governance, not a simulation:
+    /// the only member's own self-cosigned approval meets the threshold,
+    /// so a proposal applies through the same honest single-operator path.
+    #[test]
+    fn solo_boot_group_runs_real_one_of_one_governance() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::solo(), SessionView::default());
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: json!({"op":"add_note","title":"solo"}),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let snap = read_surface(&w, Surface::Memory).await;
+            assert_eq!(
+                snap.applied.len(),
+                1,
+                "the sole member's own approval meets threshold 1"
+            );
+            assert!(snap.pending.is_empty());
+            // a late vote on the decided proposal names the terminal state
+            let err = w
+                .execute(Command::Approve { proposal: id })
+                .await
+                .expect_err("the vote is decided");
+            assert!(
+                matches!(err, MoltError::AlreadyTerminal(got, _) if got == id),
+                "unexpected: {err:?}"
+            );
         });
     }
 
@@ -1950,7 +2092,14 @@ mod tests {
     #[test]
     fn effective_identity_follows_the_applied_org_ops() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            // 1-of-3, no self-cosign: this node's own single approval
+            // honestly applies each change (no peer is counted for)
+            let cfg = GroupConfig {
+                threshold: 1,
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
             let status = |w: &WalletHandle| {
                 let w = w.clone();
                 async move {
@@ -2406,7 +2555,14 @@ mod tests {
     fn current_image_follows_the_applied_org_ops() {
         use base64::Engine as _;
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            // 1-of-3, no self-cosign: this node's own single approval
+            // honestly applies each change (no peer is counted for)
+            let cfg = GroupConfig {
+                threshold: 1,
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
             let status = |w: &WalletHandle| {
                 let w = w.clone();
                 async move {
@@ -2440,7 +2596,7 @@ mod tests {
                 }
             };
             assert_eq!(status(&w).await.image, "", "no image before any change");
-            // 2-of-3 with self-cosign: one approval applies the change
+            // 1-of-3: this node's own approval applies the change
             let id = propose("set_image", "team.png", true).await;
             w.execute(Command::Approve { proposal: id }).await.expect("approve");
             assert_eq!(status(&w).await.image, "team.png");
@@ -2549,7 +2705,14 @@ mod tests {
     #[test]
     fn organization_changes_are_gated_proposals() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            // 1-of-3, no self-cosign: propose leaves the vote genuinely
+            // open, this node's own approval honestly applies it
+            let cfg = GroupConfig {
+                threshold: 1,
+                self_cosign: false,
+                ..GroupConfig::demo()
+            };
+            let w = spawn(cfg, SessionView::default());
             let id = match w
                 .execute(Command::Propose {
                     surface: Surface::Organization,
@@ -2566,7 +2729,7 @@ mod tests {
             let pending = read_surface(&w, Surface::Organization).await.pending;
             assert_eq!(pending[0].proposed, "neue Satzung");
             assert_eq!(pending[0].current, "");
-            // 2-of-3 with self-cosign: one more approval applies the change
+            // threshold 1: this node's own approval applies the change
             w.execute(Command::Approve { proposal: id })
                 .await
                 .expect("approve");
@@ -2578,9 +2741,9 @@ mod tests {
     }
 
     /// The pending cards render a voting row: per-member stance in roster
-    /// order. The legacy counted simulation attributes its anonymous
-    /// approval counter deterministically (the local member first, then
-    /// roster order), so the pills always agree with the `approvals` count.
+    /// order. On the single-operator path the only attributable vote is
+    /// this node's own — my approval flips exactly my pill, every peer
+    /// honestly stays open.
     #[test]
     fn pending_views_carry_per_member_votes() {
         rt().block_on(async {

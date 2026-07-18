@@ -779,10 +779,12 @@ impl State {
         }
     }
 
-    /// Record in the workspace's `prefs.toml` that its other members are
-    /// in-process simulations (founded before the real network exists) —
-    /// so a later open knows to run their loopback peer engines. Same
-    /// writer-vs-direct discipline as [`Self::persist_backup_pref`].
+    /// Record in the workspace's `prefs.toml` whether its other members
+    /// are in-process simulations (a sim-seam founding). The flag is a
+    /// truthful legacy label with no production effect — no engine spawns
+    /// fake peers and governance never counts for peers; only the
+    /// demo-mesh test seam reads it. Same writer-vs-direct discipline as
+    /// [`Self::persist_backup_pref`].
     pub(crate) fn persist_simulated_members(&mut self, id: &str, simulated: bool) {
         if let Some(a) = &mut self.active {
             if a.id == id {

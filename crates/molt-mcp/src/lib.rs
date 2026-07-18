@@ -572,7 +572,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "approve",
             command: "approve",
-            description: "Contribute one member's approval toward a pending proposal.",
+            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval — it can never approve on behalf of other members.",
             schema: || json!({
                 "type": "object",
                 "properties": { "proposal_id": { "type": "integer" } },

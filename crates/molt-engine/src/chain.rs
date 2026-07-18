@@ -621,7 +621,7 @@ impl State {
     /// Build block 0 of the persistent chain from a sealed roster — but only
     /// for a **real** founding (a content-derived republic id and one
     /// attestation per member). A pre-ritual/demo materialize gets no chain
-    /// (empty), so the running single-operator simulation is untouched.
+    /// (empty) and stays on the honest single-operator path.
     pub(crate) fn genesis_chain(&self, sealed: &SealedRoster) -> Vec<ChainBlock> {
         if sealed.republic_id.is_empty()
             || sealed.identities.is_empty()
@@ -728,7 +728,7 @@ impl State {
 
 impl State {
     /// A workspace whose governance runs through the chain (real m-of-n
-    /// signatures) rather than the legacy counted simulation.
+    /// signatures) rather than the single-operator path.
     pub(crate) fn is_chain_governed(&self) -> bool {
         self.chain_head.is_some()
     }
