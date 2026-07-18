@@ -390,8 +390,8 @@ pub struct WorkspaceInfo {
     pub s3: bool,
     /// Real on-disk size of the workspace directory in KiB, rounded up
     /// (0 for a session-only entry with no directory). Measured at the
-    /// entry choke points — materialize, open, clean close, an applied
-    /// Organization change — not continuously.
+    /// quiescent entry choke points — boot scan, materialize, open,
+    /// clean close — not continuously.
     #[serde(default)]
     pub size_kib: u32,
     /// Minutes since the last completed backup; [`WorkspaceInfo::NEVER`]

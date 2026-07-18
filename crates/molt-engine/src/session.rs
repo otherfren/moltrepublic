@@ -22,8 +22,10 @@ use crate::{ActiveStorage, State};
 
 /// A workspace directory's real on-disk size, clamped into the list
 /// entry's `u32` KiB field. One recursive walk of a single directory —
-/// called only at the entry choke points (materialize, open, close, an
-/// applied Organization change), never per message.
+/// called only at the quiescent entry choke points (materialize, open,
+/// clean close), never per message and never on the org-apply path: a
+/// wire-driven block apply must not stat-walk on the actor, and the
+/// async writer may not have flushed the change yet anyway.
 pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
     u32::try_from(molt_storage::workspace_size_kib(dir)).unwrap_or(u32::MAX)
 }
@@ -444,6 +446,16 @@ impl State {
             self.request_catchup(height + 1);
         }
         self.refresh_active_entry();
+        // the size is stamped outside refresh_active_entry on purpose: at
+        // open the directory is quiescent (nothing queued on the writer yet)
+        // so the walk is exact; the org-apply refresh path skips it
+        if let Some((id, dir)) = self
+            .active
+            .as_ref()
+            .map(|a| (a.id.clone(), a.dir.clone()))
+        {
+            self.set_entry_size(&id, &dir);
+        }
         // rebuild the logo file from the replayed log if it went missing
         // (crash, restore) — deterministic, the bytes live in the payload
         self.sync_logo_file();
@@ -505,7 +517,6 @@ impl State {
         ws.name = eff.name;
         ws.detail = WorkspaceInfo::rule_detail(replica.rule_m, replica.roster.len());
         ws.agenda = eff.agenda;
-        ws.size_kib = entry_size_kib(&active.dir);
         // members are a projection of the replayed roster — always rebuilt,
         // so a roster grown by MemberJoined never leaves a stale list
         ws.members = roster_members(&replica.roster, |m| m == replica.member, "not seen yet");
@@ -561,6 +572,16 @@ impl State {
 
     /// Flush + closing snapshot + LOCK release for the open workspace (if
     /// any), then drop its in-memory state. No-op on a session-only open.
+    /// Stamp the real on-disk size into the list entry for `id` (no-op on
+    /// an unknown id). Callers pick the quiescent moments — open and clean
+    /// close — where the directory matches what the writer has flushed.
+    fn set_entry_size(&mut self, id: &str, dir: &std::path::Path) {
+        let size = entry_size_kib(dir);
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            ws.size_kib = size;
+        }
+    }
+
     pub(crate) fn close_active_storage(&mut self) {
         if let Some(active) = self.active.take() {
             let snap = self.snapshot_now();
@@ -568,14 +589,7 @@ impl State {
             // flushed log + closing snapshot are on disk — the moment the
             // list entry's size is exact
             active.handle.close(Some(snap));
-            if let Some(ws) = self
-                .session
-                .workspaces
-                .iter_mut()
-                .find(|w| w.id == active.id)
-            {
-                ws.size_kib = entry_size_kib(&active.dir);
-            }
+            self.set_entry_size(&active.id, &active.dir);
             self.reset_workspace_state();
         }
     }
