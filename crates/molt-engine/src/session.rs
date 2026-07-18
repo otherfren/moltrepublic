@@ -317,7 +317,8 @@ impl State {
         // credentials into a fresh transport (recv keys + secured sender keys, so
         // it can subscribe AND send) and load the advanced MLS ratchet. A
         // workspace never cleanly closed (crash, or founded on another node) has
-        // no `smp_queues` → falls through to the demo/sim mesh.
+        // no `smp_queues` → no mesh (offline until a recovery/rejoin; only the
+        // demo-mesh test seam stands simulated peers up here).
         // fail-closed resume: resolve the dialer first. A misconfigured Tor
         // setting sets the health pill Down and skips the real mesh rather
         // than resuming over an unintended clearnet path.
@@ -566,7 +567,8 @@ impl State {
         self.teardown_net();
         self.close_active_storage();
         self.session.active_workspace = String::new();
-        // back on the boot group: its mesh stands up for the next chat
+        // back on the boot context: no transport there (production runs no
+        // fake peers; only the demo-mesh test seam re-arms its loopback mesh)
         self.ensure_demo_net();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);

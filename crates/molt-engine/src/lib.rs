@@ -134,7 +134,7 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None, false);
     (handle, rx)
 }
 
@@ -150,7 +150,7 @@ pub fn __spawn_manual_founding_bootstrap(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None, false);
     (handle, rx)
 }
 
@@ -173,9 +173,23 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
     let (rtx, rrx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let handle = spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx),
+        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx), false,
     );
     (handle, rx, rrx)
+}
+
+/// Engine with the **demo loopback mesh** enabled ([`State::demo_mesh`]):
+/// on a session-only context the roster's other members run as real
+/// loopback peers with canned-reply brains, so transport-path tests get a
+/// deterministic answering mesh without a network. The product never runs
+/// it — a production engine (every public spawner) keeps the seam OFF and
+/// spawns no fake peers, ever.
+#[doc(hidden)]
+pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(
+        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, false, None, true,
+    )
 }
 
 /// Storage-backed engine whose founding runs in the offline **sim** seam:
@@ -185,7 +199,7 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None, false)
 }
 
 /// Like [`__spawn_manual_founding`], but the founding runs over the **real
@@ -200,7 +214,7 @@ pub fn __spawn_manual_founding_over_smp(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None, false);
     (handle, rx)
 }
 
@@ -235,6 +249,9 @@ pub fn spawn_with_config(
         // peer-to-peer MLS chat the moment the republic is founded
         true,
         None,
+        // the production engine: the demo-mesh test seam stays OFF — no
+        // context ever spawns simulated peers here
+        false,
     );
     Ok((handle, store))
 }
@@ -246,7 +263,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -263,6 +280,7 @@ fn spawn_actor(
     ritual_sim: bool,
     ritual_bootstrap: bool,
     recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
+    demo_mesh: bool,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
@@ -272,6 +290,7 @@ fn spawn_actor(
     state.ritual_sim = ritual_sim;
     state.ritual_bootstrap = ritual_bootstrap;
     state.recovery_material_sink = recovery_material_sink;
+    state.demo_mesh = demo_mesh;
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
             let res = state.handle(env.cmd);
@@ -442,8 +461,10 @@ pub(crate) struct State {
     /// The open workspace's storage writer (None = nothing open, or a
     /// session-only workspace on a storage-less engine).
     pub(crate) active: Option<ActiveStorage>,
-    /// The transport runtime (the demo loopback mesh today; a persisted
-    /// workspace's supervisor once the T2 join flow wires real peers).
+    /// The transport runtime: the open workspace's real mesh supervisor
+    /// (T2), or — on the [`State::demo_mesh`] test seam only — the demo
+    /// loopback mesh. `None` in every other context (production runs no
+    /// transport without an open, mesh-backed workspace).
     pub(crate) net: Option<net::NetRuntime>,
     /// The founding-ritual runtime (present only while a founding is in
     /// flight — the workspace does not exist yet).
@@ -473,6 +494,13 @@ pub(crate) struct State {
     /// in-app founding is always real over SMP; this keeps the founder-side
     /// sealing a fast, deterministic, offline test.
     pub(crate) ritual_sim: bool,
+    /// Loopback demo-mesh **test seam only** ([`__spawn_demo_mesh`]): when
+    /// set, a session-only context (and a workspace flagged
+    /// `prefs.simulated_members`) runs the roster's other members as
+    /// loopback peers with canned-reply brains. The product never sets it —
+    /// a production engine spawns no fake peers, in no context; the flag in
+    /// the prefs stays parsed but inert.
+    pub(crate) demo_mesh: bool,
     /// Opt-in: after sealing, the founder runs the post-founding **mesh
     /// bootstrap** over the star (exchanges [`molt_net::mesh::MeshAnnounce`]s
     /// with the members, assembles the direct mesh, persists it). Off by
@@ -599,6 +627,7 @@ impl State {
             recovery_material_sink: None,
             ritual_over_smp: false,
             ritual_sim: false,
+            demo_mesh: false,
             ritual_bootstrap: false,
             founder_mesh_in: None,
             runtime_transport: None,

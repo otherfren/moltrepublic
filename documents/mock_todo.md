@@ -115,6 +115,16 @@ umziehen.
 
 **Komplexität: S** (Entscheidung + Entfernen/Labeln; kein Neubau).
 
+**Status (2026-07-18): ENTFERNT** (Produktentscheidung). moltd bootet mit
+`GroupConfig::solo()` (nur der Operator, keine erfundenen Peers); das
+Demo-Mesh liegt hinter dem default-OFF Test-Seam `State::demo_mesh`
+(Spawner `__spawn_demo_mesh`, analog `ritual_sim`), und
+`prefs.simulated_members` wird weiter geparst, spawnt aber keine Peers mehr
+(inert). Chat ohne offenen Workspace ist ein ehrliches lokales Notizlog —
+niemand antwortet. Negativ-Tests pinnen beides in `tests/demo_mesh.rs`;
+`GroupConfig::demo()` / `demo_workspace_id` leben als reine Test-Fixtures
+weiter.
+
 ## 5. S3 „Verbindung testen“ zeigt immer Erfolg — **M**
 
 **Fundorte:**
