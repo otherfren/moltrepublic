@@ -181,21 +181,22 @@ component SmpServerGroup inherits DetailGroup {
     // wrap room for the URL field, the test verdict and the hint when
     // the wide pane seats this panel beside the network one
     min-width: 340px;
-    HorizontalLayout {
-        spacing: 8px;
-        AppButton {
-            label: Strings.smp-public;
-            primary: !root.smp-custom;
-            clicked => {
-                root.smp-custom = false;
-            }
-        }
-        AppButton {
-            label: Strings.smp-custom;
-            primary: root.smp-custom;
-            clicked => {
-                root.smp-custom = true;
-            }
+    // mode picker — the same selection control the anonymity panel uses;
+    // choosing "custom" reveals the URL field below. The bool stays the
+    // single source of truth: clicking a row breaks the dropdown's own
+    // declarative current-index binding (AppDropdown assigns it), so this
+    // change-callback re-imposes the bool on the display when the draft is
+    // re-seeded externally (config reload / MCP save with a clean draft —
+    // the buttons this replaces re-rendered from the bool too)
+    changed smp-custom => {
+        mode-dd.current-index = root.smp-custom ? 1 : 0;
+    }
+    mode-dd := AppDropdown {
+        width: 200px;
+        model: [Strings.smp-public, Strings.smp-custom];
+        current-index: root.smp-custom ? 1 : 0;
+        changed(i) => {
+            root.smp-custom = i == 1;
         }
     }
     if root.smp-custom: FieldLabel {
@@ -5510,14 +5511,21 @@ export component AppWindow inherits Window {
                             // when narrow — one set of bindings either way
                             if set-pane.side-groups-net: HorizontalLayout {
                                 spacing: 14px;
-                                alignment: start;
+                                // no alignment:start — the two panels SHARE
+                                // the pane width (Backup-tab posture) instead
+                                // of floating at preferred size in the empty
+                                // pane; surplus splits evenly, except near
+                                // the 620px threshold where SMP's 340px
+                                // min-width pins it and anon takes the rest
                                 AnonNetworkGroup {
+                                    horizontal-stretch: 1;
                                     network-index <=> root.cfg-network-index;
                                     tor-mode-index <=> root.cfg-tor-mode-index;
                                     tor-port <=> root.cfg-tor-port;
                                     tor-modes-enabled: root.tor-mode-enabled;
                                 }
                                 SmpServerGroup {
+                                    horizontal-stretch: 1;
                                     smp-custom <=> root.cfg-smp-custom;
                                     smp-url <=> root.cfg-smp-url;
                                     smp-test: root.cfg-smp-test;
