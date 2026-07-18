@@ -41,6 +41,8 @@
 //! workspace dir, not a fully compromised home directory (passphrase sealing
 //! is the opt-in v2, milestone S6).
 
+pub mod export;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
