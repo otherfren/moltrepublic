@@ -1087,11 +1087,14 @@ export component ProposalCard inherits Rectangle {
                 }
             }
         }
-        if root.p.image-op && root.p.proposed != "": HorizontalLayout {
+        if root.p.image-op && root.p.proposed != "": pi-line := HorizontalLayout {
             // NO alignment:start here: it would size the card to its
             // preferred width, which is 0 (the explicitly-positioned
             // pi-row is excluded from it) — a 0-wide card means an
-            // invisible, unclickable TouchArea. Stretch is load-bearing.
+            // invisible, unclickable TouchArea. The card takes an
+            // EXPLICIT content-derived width instead (capped so a long
+            // file name elides), and the trailing filler absorbs the
+            // remaining stretch.
             spacing: 8px;
             Text {
                 text: Strings.pc-proposed;
@@ -1103,7 +1106,10 @@ export component ProposalCard inherits Rectangle {
             // travel with the proposal (sign-what-you-see) — clicking
             // decodes them locally and shows the picture
             Rectangle {
-                horizontal-stretch: 1;
+                // content-sized with two caps: 320px, and the row space left
+                // of the 76px label + 8px spacing (narrow panes must elide,
+                // never overflow the card)
+                width: min(min(320px, max(0px, pi-line.width - 84px)), pi-row.preferred-width + 20px);
                 height: pi-row.preferred-height + 16px;
                 border-radius: Theme.win95 ? 0px : 6px;
                 border-width: Theme.border-w;
@@ -1120,11 +1126,6 @@ export component ProposalCard inherits Rectangle {
                     y: 8px;
                     width: parent.width - 20px;
                     spacing: 8px;
-                    Text {
-                        text: "🖼";
-                        font-size: 20px;
-                        vertical-alignment: center;
-                    }
                     VerticalLayout {
                         spacing: 1px;
                         Text {
@@ -1142,6 +1143,7 @@ export component ProposalCard inherits Rectangle {
                     }
                 }
             }
+            Rectangle { horizontal-stretch: 1; }
         }
         // the voting row: one pill per roster member with their stance —
         // a big ? while open, 👍 approved (green), 👎 declined (red); the
