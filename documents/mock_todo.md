@@ -23,9 +23,9 @@ zum Aufräumen, aber kein Implementierungsbedarf.
 | 3 | ✅ ERLEDIGT (Größe; Sync-Felder → Nr. 6/12) — Statische Statusfelder der Workspace-Liste | S |
 | 4 | ✅ ERLEDIGT (entfernt) — Demo-Boot-Gruppe + Demo-Mesh mit Antwort-„Brains“ | S |
 | 5 | ✅ ERLEDIGT — S3 „Verbindung testen“ zeigt immer Erfolg (reiner UI-Toast) | M |
-| 6 | Präsenz ohne echte Zeitstempel: keine Alterung, Mock-Aktivitäts-Trio | M |
-| 7 | Legacy-Zähl-Simulation der Governance (Demo-/Alt-Workspaces) | M |
-| 8 | Backup-Orphans: statische Demo-Daten in der Backup-Tabelle | M |
+| 6 | ✅ ERLEDIGT — Präsenz ohne echte Zeitstempel: keine Alterung, Mock-Aktivitäts-Trio | M |
+| 7 | ✅ ERLEDIGT (entfernt) — Legacy-Zähl-Simulation der Governance | M |
+| 8 | ✅ ERLEDIGT — Backup-Orphans: statische Demo-Daten in der Backup-Tabelle | M |
 | 9 | Manueller Workspace-Export („Backup als Blob“) ist ein UI-No-op | L |
 | 10 | At-rest-Verschlüsselung: Flag-Flip, Phrase ungeprüft, nicht persistent (S6) | L |
 | 11 | Plugin-Governance ohne Plugin-Zustand | L |
@@ -176,6 +176,12 @@ S3-Client-Baustein (der dann Finding 8/12/13 zuarbeitet) inkl. Tor-Routing.
 
 ## 6. Präsenz ohne echte Zeitstempel; Mock-Aktivitäts-Trio — **M**
 
+> **✅ ERLEDIGT (2026-07-18).** `MemberInfo.last_seen` ist ein echter
+> Unix-Stempel (0 = nie gesehen); ein 30-s-Ticker altert Pills (online ≤5 min,
+> stale ≤30 min, sonst offline; Send-Backoff pinnt unreachable bis zur nächsten
+> Sichtung); das 1h/24h/7d-Trio und die Upload-Verfügbarkeit rechnen aus echten
+> Stempeln; UI rendert die relative Zeit clientseitig.
+
 **Fundorte:**
 - `crates/molt-engine/src/net.rs:1537–1587`: `cmd_net_peer_seen` / `cmd_net_send_failed` / `update_member_pill` — inkl. ehrlichem Kommentar „Honest limitation (T5 closes it)“: das Label „just now“ kann nicht altern
 - `crates/molt-engine/src/proposals.rs:740, 758–776` (read_members: Präsenz = Session-Label), `:826–843` (Aktivitäts-Trio 1h/24h/7d = Projektion der Mock-Präsenz), `:815` (Upload-„verfügbar“ hängt an dieser Präsenz)
@@ -201,6 +207,13 @@ Durchfädel-Arbeit über 4 Crates plus Testanpassung.
 
 ## 7. Legacy-Zähl-Simulation der Governance — **M**
 
+> **✅ ERLEDIGT (2026-07-18): entfernt** (Produktentscheidung). Ohne
+> Chain-Governance zeichnet ein Knoten höchstens seine EIGENE Zustimmung auf
+> (Wiederholung = `AlreadyApproved`); niemand zählt mehr erfundene Peers hoch.
+> Die Solo-Boot-Gruppe läuft als echte 1-of-1-Governance. `simulated_members`
+> ist ein inertes Legacy-Label. Recovery kann aus alten simulierten
+> Zählerständen keine frischen Applied mehr münzen (gepinnt).
+
 **Fundorte:**
 - `crates/molt-engine/src/lib.rs:13` („faithful but *simulated* stand-in for the real FROST threshold machine“)
 - `crates/molt-engine/src/proposals.rs:213, 352–366, 718–721` (ein lokaler Operator zählt für die Peers hoch; anonymer Zähler; jede pending Proposal gilt für Peers als offen)
@@ -220,6 +233,13 @@ Betroffen: molt-engine (`proposals.rs`), ggf. Migrationspfad in `chain.rs`.
 **Komplexität: M** — Migrationsdesign für Altbestände; die Maschine selbst ist da.
 
 ## 8. Backup-Orphans: statische Demo-Daten — **M**
+
+> **✅ ERLEDIGT (2026-07-18).** `demo_set()` ist gelöscht; die Backup-Tabelle
+> speist sich aus einem echten, signierten `ListObjectsV2` über den fail-closed
+> Dialer (`Command::NetListBackups` + MCP-Tool, Pagination, gehärtetes
+> XML-Parsing, Generation-Counter gegen stale Ergebnisse); Refresh beim Öffnen
+> des Backup-Tabs + expliziter Knopf; Fehler werden ehrlich angezeigt, nie
+> erfundene Zeilen.
 
 **Fundorte:**
 - `crates/molt-core/src/lib.rs:656–676` (`BackupOrphan`, „(mock). Shows up in the settings backup table“, `demo_set()`)
