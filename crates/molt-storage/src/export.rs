@@ -262,13 +262,19 @@ pub(crate) fn export_dir_chunked(
     }
 
     let manifest = crate::read_manifest(ws_dir)?;
+    // a phrase-sealed dir (story 10 / S6) has NO key material on disk —
+    // refuse on the MARKER, not on the missing file, so the typed error
+    // routes to the decrypt flow and a half-sealed crash window can never
+    // export an inconsistent blob
+    if crate::is_sealed(&manifest) {
+        return Err(StorageError::Sealed(manifest.workspace.id.clone()));
+    }
     let id_hex = manifest.workspace.id.clone();
     let id = crate::id_bytes(&id_hex)?;
     let device_key = crate::load_or_create_device_key(&crate::device_key_path(root))?;
     let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file)).map_err(|e| {
         StorageError::BadFile(format!(
-            "no device-sealed workspace key ({e}) — a phrase-sealed workspace \
-             cannot be exported without its phrase yet"
+            "no device-sealed workspace key ({e}) — cannot export"
         ))
     })?;
     let ws_key = Zeroizing::new(crate::unseal_workspace_key(&device_key, &id, &sealed)?);
@@ -342,10 +348,10 @@ pub(crate) fn export_dir_chunked(
     let meta = ExportMeta {
         created,
         exporter: env!("CARGO_PKG_VERSION").to_string(),
-        // story 10 (S6) introduces the "phrase" state; today every
-        // exportable dir is device-sealed (a phrase-sealed dir has no
-        // key file and was refused above)
-        at_rest: "device".to_string(),
+        // every exportable dir is device-sealed (a phrase-sealed dir was
+        // refused on its marker above); shared vocabulary with the S6
+        // manifest marker
+        at_rest: molt_core::SEALED_DEVICE.to_string(),
         workspace_key: hex::encode(*ws_key),
         seed: seed.as_ref().map(|s| hex::encode(s.as_slice())),
         files: u64::try_from(files.len()).unwrap_or(0),

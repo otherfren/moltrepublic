@@ -331,6 +331,30 @@ mod tests {
         }
     }
 
+    /// Story 9 × story 10: exporting a phrase-sealed dir refuses on the
+    /// marker with the TYPED sealed error (design §5 — the blob would need
+    /// the phrase-derived key, which is not on disk).
+    #[test]
+    fn a_sealed_dir_refuses_export_honestly() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, id) = make_ws(&root);
+        seal_at_rest(&dir, &phrase).expect("seal");
+        let mut out = Vec::new();
+        match crate::export::export_dir(
+            &root,
+            &dir,
+            &crate::export::ExportKey::Passphrase(zeroize::Zeroizing::new(
+                "long enough passphrase".to_string(),
+            )),
+            &mut out,
+        ) {
+            Err(StorageError::Sealed(sealed_id)) => assert_eq!(sealed_id, id),
+            other => panic!("expected Sealed, got {other:?}"),
+        }
+        assert!(out.is_empty(), "not a single blob byte written");
+    }
+
     /// The materialized plaintext logo is republic content — it must not
     /// stay readable in a sealed dir (it is rebuilt from the log at the
     /// next open after a decrypt).

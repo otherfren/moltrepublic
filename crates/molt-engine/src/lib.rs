@@ -1456,6 +1456,19 @@ mod tests {
         });
     }
 
+
+    /// Poll the session until the in-flight export settles (~Argon2-bounded).
+    async fn await_export(w: &WalletHandle) -> molt_core::ExportState {
+        for _ in 0..600 {
+            let sv = read_session(w).await;
+            if !sv.export.running && !sv.export.result.is_empty() {
+                return sv.export;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("export did not settle in time");
+    }
+
     /// **The story-10 keystone:** at-rest sealing is real, phrase-verified
     /// and derived from the directory (design §8.2, engine level). Found a
     /// republic on a storage engine, close it, seal it with the real phrase

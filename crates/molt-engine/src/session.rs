@@ -945,7 +945,9 @@ impl State {
                 roster, agenda: a, ..
             } = genesis.body
             {
-                members = roster_members(&roster, |_| false, "");
+                // a closed workspace has no presence knowledge — every
+                // member is honestly never-seen (same as the boot scan)
+                members = roster_members(&roster, 0, |_| molt_core::MemberInfo::NEVER);
                 agenda = a;
             }
         }
