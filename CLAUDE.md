@@ -220,8 +220,19 @@ resumes from the last-persisted ratchet, and a few in-flight messages may be
 replay-rejected by the peer (MLS's per-message `reuse_guard` prevents the
 worse nonce-reuse). A workspace with mesh evidence on disk that cannot
 resume opens HONESTLY offline (`notice = "detached"`, `net_health = Down`),
-never silently transport-less. Per-drain MLS persist (full crash-safety) and
-the reconnect/resubscribe supervisor (Stage B) are the remaining hardenings.
+never silently transport-less. **Sender keys are deterministic since the
+2026-07-19 fix**: each queue's `SKEY` key is derived from a persisted
+per-transport `sender_seed` (`derive_sender_key`, in `transport.state` from
+mesh-up on; additive V2 creds with a V1 read-fallback), so a reopened
+transport re-asserts the SAME key — and on an SKEY reject it still attempts
+the signed SEND (the server's send verdict is authoritative). Stage B is in
+(`documents/stage_b.md`): a died subscription resubscribes itself (per-peer
+watchdog, capped backoff; a server `END` ends the stream instead of a zombie
+wait), and `net_health` is honest — `Ok` means every mesh leg's subscription
+confirmed, a dead inbound leg or a stuck outbox shows as `Degraded` naming
+peer + reason. Per-drain MLS persist (full crash-safety of the ratchet) is
+the remaining hardening: a hard-killed node's regressed-window messages are
+replay-rejected (loudly) at the peers; the leg heals from the next message.
 
 ## Build, test, run
 

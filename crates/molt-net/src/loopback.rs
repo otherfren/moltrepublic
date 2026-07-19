@@ -118,6 +118,19 @@ impl LoopbackHub {
         }
     }
 
+    /// Sever every queue's live subscription (test seam for the resubscribe
+    /// watchdog): each subscriber's channel sender is dropped, so its
+    /// receiver ends — exactly how a died SMP recv loop looks to the
+    /// supervisor. Unacked blocks stay pending and redeliver to the NEXT
+    /// subscriber, like a real server's store-and-forward.
+    pub fn sever_subscriptions(&self) {
+        if let Ok(mut hub) = self.inner.lock() {
+            for q in hub.queues.values_mut() {
+                q.sub = None;
+            }
+        }
+    }
+
     /// A transport endpoint on this hub.
     pub fn transport(&self) -> LoopbackTransport {
         LoopbackTransport {

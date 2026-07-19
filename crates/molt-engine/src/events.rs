@@ -488,6 +488,14 @@ impl State {
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.net_unreachable.clear();
+        self.net_link_down.clear();
+        self.net_send_stuck.clear();
+        // a runtime-derived Degraded belongs to the mesh that just ended —
+        // it resets with its backing maps (a Down verdict is the open/config
+        // path's and stays until the next resolve)
+        if matches!(self.session.net_health, molt_core::NetHealth::Degraded { .. }) {
+            self.session.net_health = molt_core::NetHealth::Ok;
+        }
         self.replica = None;
         self.identity_sk = None;
         self.chain.clear();

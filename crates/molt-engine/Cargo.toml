@@ -32,6 +32,9 @@ image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# make WARN/DEBUG from the engine + net visible in the ignored live-server
+# tests (a silent tracing::warn is how the 2026-07-19 mesh stall hid)
+tracing-subscriber.workspace = true
 # test-util only: paused-clock tests (the join accept-deadline elapses
 # instantly on an idle runtime instead of waiting out the real 90 s)
 tokio = { workspace = true, features = ["test-util"] }

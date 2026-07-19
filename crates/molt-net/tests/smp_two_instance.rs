@@ -17,7 +17,10 @@ async fn round_trip(url: &str, label: &str) {
     // Instance S: an independent connection, secure the queue then send
     // three messages to its sender id
     let mut sender = SmpConn::connect(&molt_net::smp::tls::Dialer::Direct, &s).await.expect("S connect");
-    let key = sender.secure_as_sender(&q.sender_id).await.expect("SKEY");
+    let mut key_bytes = [0u8; 32];
+    getrandom::getrandom(&mut key_bytes).expect("rng");
+    let key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+    sender.secure_as_sender(&q.sender_id, &key).await.expect("SKEY");
     for i in 0..3u8 {
         let payload = format!("molt ritual message {i} from instance S");
         sender.send_to(&q.sender_id, &key, payload.as_bytes()).await.expect("SEND");

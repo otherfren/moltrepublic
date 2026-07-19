@@ -234,13 +234,27 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     a2.execute(Command::OpenWorkspace { id: id.clone() })
         .await
         .expect("reopen after hard kill");
-    let sv = read_session(&a2).await;
-    assert_eq!(
-        sv.net_health,
-        NetHealth::Ok,
-        "the resumed mesh is healthy, not silently absent"
-    );
-    assert_eq!(sv.notice, "", "no detached notice — the mesh resumed");
+    // Stage B honest open: the pill starts amber ("connecting") until every
+    // leg's watchdog confirms its subscription — poll until the honest Ok.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sv = read_session(&a2).await;
+        assert_eq!(sv.notice, "", "no detached notice — the mesh resumed");
+        assert!(
+            !matches!(sv.net_health, NetHealth::Down { .. }),
+            "the resumed mesh must not be Down: {:?}",
+            sv.net_health
+        );
+        if sv.net_health == NetHealth::Ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "net_health never reached the honest Ok (all legs confirmed): {:?}",
+            sv.net_health
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // the surviving member's runtime supervisor (kept alive across A's kill)
     let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();

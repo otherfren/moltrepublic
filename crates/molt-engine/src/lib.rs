@@ -256,6 +256,32 @@ pub fn __spawn_manual_founding_over_smp(
     (handle, rx)
 }
 
+/// Like [`__spawn_manual_founding_over_smp`], but the founder ALSO runs the
+/// post-founding **mesh bootstrap** — the production configuration
+/// (`spawn_with_config` founds with the bootstrap on). The multi-node
+/// restart-over-SMP test needs the real direct mesh, not just the sealed
+/// founding.
+#[doc(hidden)]
+pub fn __spawn_manual_founding_over_smp_bootstrap(
+    config: GroupConfig,
+    session: SessionView,
+) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, true, None, false, None);
+    (handle, rx)
+}
+
+/// Storage-backed engine with the post-founding **mesh bootstrap** ON — the
+/// production joiner configuration (`spawn_with_config` sets the same flag),
+/// as a seam for multi-instance tests whose joiners must assemble a real
+/// direct mesh after `JoinStart`.
+#[doc(hidden)]
+pub fn __spawn_with_storage_bootstrap(config: GroupConfig, session: SessionView) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, None, false, false, true, None, false, None)
+}
+
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
 /// every settings change to that file (format-preserving, atomic) and watches
 /// it for external edits, which are validated and mirrored into the shared
@@ -511,6 +537,12 @@ pub(crate) struct State {
     /// active-workspace scope — [`State::reset_workspace_state`] clears it
     /// at the close/switch boundary so a pin never leaks into the next.
     pub(crate) net_unreachable: std::collections::HashSet<MemberId>,
+    /// Inbound legs currently down (member → reason), reported by the
+    /// resubscribe watchdog — drives `NetHealth::Degraded` (Stage B).
+    pub(crate) net_link_down: std::collections::BTreeMap<MemberId, String>,
+    /// Outbound legs whose sends keep failing (member → reason) — set by
+    /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
+    pub(crate) net_send_stuck: std::collections::BTreeMap<MemberId, String>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -717,6 +749,8 @@ impl State {
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
+            net_link_down: std::collections::BTreeMap::new(),
+            net_send_stuck: std::collections::BTreeMap::new(),
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -948,6 +982,17 @@ impl State {
                 reason,
                 generation,
             } => self.cmd_net_send_failed(member, reason, generation),
+            Command::NetLinkUp { member, generation } => {
+                self.cmd_net_link_up(member, generation)
+            }
+            Command::NetLinkDown {
+                member,
+                reason,
+                generation,
+            } => self.cmd_net_link_down(member, reason, generation),
+            Command::NetSendOk { member, generation } => {
+                self.cmd_net_send_ok(member, generation)
+            }
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
 
             // session.rs

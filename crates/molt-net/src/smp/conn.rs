@@ -229,23 +229,24 @@ impl SmpConn {
         Ok(())
     }
 
-    /// Secure a queue as the **sender** (`SKEY`, v8+): assert a fresh
+    /// Secure a queue as the **sender** (`SKEY`, v8+): assert the GIVEN
     /// Ed25519 sender key so the server will accept our signed `SEND`s.
-    /// Returns the key to sign subsequent sends with. Needs the queue's
-    /// `NEW` to have set `sndSecure`.
+    /// The caller derives the key deterministically (per-queue, from the
+    /// transport's persisted sender seed) so a reopened node re-asserts the
+    /// SAME key it secured the queue with — a random key here is what broke
+    /// the 2026-07-19 restart (`SKEY` with a fresh key → `ERR AUTH`).
+    /// Needs the queue's `NEW` to have set `sndSecure`.
     pub async fn secure_as_sender(
         &mut self,
         sender_id: &[u8],
-    ) -> Result<ed25519_dalek::SigningKey, NetError> {
-        let mut sk_bytes = [0u8; 32];
-        getrandom::getrandom(&mut sk_bytes).map_err(|e| NetError::Crypto(e.to_string()))?;
-        let sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        sk: &ed25519_dalek::SigningKey,
+    ) -> Result<(), NetError> {
         let mut cmd = Vec::new();
         cmd.extend_from_slice(b"SKEY ");
         push_short(&mut cmd, &spki_ed25519(&sk.verifying_key().to_bytes()));
-        let (_c, _e, resp) = self.send_signed(&sk, sender_id, &cmd).await?;
+        let (_c, _e, resp) = self.send_signed(sk, sender_id, &cmd).await?;
         if resp.starts_with(b"OK") {
-            Ok(sk)
+            Ok(())
         } else {
             Err(NetError::Crypto(format!(
                 "SKEY rejected: {}",
@@ -325,12 +326,21 @@ impl SmpConn {
                 };
                 return Ok(body);
             }
-            // OK (or "END"/"ERR") — keep waiting for a pushed MSG
+            // OK — keep waiting for a pushed MSG
             if command.starts_with(b"ERR") {
                 return Err(NetError::Crypto(format!(
                     "server error during subscribe: {}",
                     String::from_utf8_lossy(&command[..command.len().min(32)])
                 )));
+            }
+            // END: the server ended THIS connection's subscription (e.g. a
+            // newer SUB elsewhere took the queue over). Swallowing it (the
+            // pre-Stage-B behavior) left a ZOMBIE loop waiting forever on a
+            // subscription the server no longer serves — a silently deaf
+            // leg. Ending the stream lets the resubscribe watchdog take it
+            // from here.
+            if command.starts_with(b"END") {
+                return Err(NetError::Closed);
             }
         }
     }

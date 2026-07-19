@@ -1170,7 +1170,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 41] = [
+        const INTERNAL: [&str; 44] = [
             "net_test_s3_result",
             "net_presence_tick",
             "net_list_backups_result",
@@ -1191,6 +1191,9 @@ mod tests {
             "net_delivered",
             "net_peer_seen",
             "net_send_failed",
+            "net_link_up",
+            "net_link_down",
+            "net_send_ok",
             "net_join_requested",
             "net_seal_signed",
             "net_recover_requested",
