@@ -182,10 +182,24 @@ fn element<'a>(xml: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     Some((&xml[start..end], &xml[end + close.len()..]))
 }
 
+/// Whether `c` is a legal XML-1.0 character (tab/LF/CR plus the printable
+/// ranges). NUL and the other C0 controls are illegal — smuggled into a UI
+/// label or JSON they are at best corruption, at worst an injection vector.
+fn xml_char_legal(c: char) -> bool {
+    matches!(c, '\u{9}' | '\u{A}' | '\u{D}')
+        || ('\u{20}'..='\u{D7FF}').contains(&c)
+        || ('\u{E000}'..='\u{FFFD}').contains(&c)
+        || c >= '\u{10000}'
+}
+
 /// Decode the XML escapes S3 may emit in element content: the five
 /// predefined entities plus numeric character references. A malformed or
 /// unknown entity is a hard [`S3Error::Protocol`] — guessing at hostile
-/// input is how parsers get lied to.
+/// input is how parsers get lied to. The decoded output is then checked as a
+/// WHOLE against [`xml_char_legal`], so an illegal character reaches us the
+/// same way whether it arrived as a numeric ref (`&#1;`) or as a literal
+/// control byte in the source XML — the numeric-ref path is not a special
+/// case with its own guard.
 fn unescape_xml(s: &str) -> Result<String, S3Error> {
     let bad = || S3Error::Protocol("listing response: malformed XML entity".to_string());
     let mut out = String::with_capacity(s.len());
@@ -207,22 +221,17 @@ fn unescape_xml(s: &str) -> Result<String, S3Error> {
                     Some(hex) => u32::from_str_radix(hex, 16).map_err(|_| bad())?,
                     None => digits.parse::<u32>().map_err(|_| bad())?,
                 };
-                let c = char::from_u32(code).ok_or_else(bad)?;
-                // only XML-1.0-legal characters: NUL/C0 controls smuggled in
-                // via numeric refs would flow into UI labels and JSON
-                let legal = matches!(c, '\u{9}' | '\u{A}' | '\u{D}')
-                    || ('\u{20}'..='\u{D7FF}').contains(&c)
-                    || ('\u{E000}'..='\u{FFFD}').contains(&c)
-                    || c >= '\u{10000}';
-                if !legal {
-                    return Err(bad());
-                }
-                out.push(c);
+                out.push(char::from_u32(code).ok_or_else(bad)?);
             }
         }
         rest = &entity_rest[end + 1..];
     }
     out.push_str(rest);
+    // one guard over the whole decoded string: literal control bytes copied
+    // through above are rejected exactly like an illegal numeric ref
+    if out.chars().any(|c| !xml_char_legal(c)) {
+        return Err(bad());
+    }
     Ok(out)
 }
 
@@ -475,6 +484,40 @@ mod tests {
         ] {
             assert_eq!(parse_iso8601(bad), None, "must reject {bad:?}");
         }
+    }
+
+    /// A raw C0 control byte sitting literally in a <Key> (not via a numeric
+    /// character reference) must be rejected exactly like an illegal numeric
+    /// ref — otherwise a NUL/control smuggled straight into the XML would flow
+    /// into UI labels and JSON, bypassing the numeric-ref-only guard.
+    #[test]
+    fn literal_control_bytes_in_a_key_are_rejected() {
+        let lbr = |inner: &str| format!("<ListBucketResult>{inner}</ListBucketResult>");
+        for raw in ['\u{1}', '\u{0}', '\u{7}', '\u{1F}'] {
+            let body = lbr(&format!(
+                "<Contents><Key>a{raw}b</Key><LastModified>1970-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>"
+            ));
+            assert!(
+                matches!(parse_list_page(&body), Err(S3Error::Protocol(_))),
+                "a literal control byte {:#x} in a key must be rejected",
+                raw as u32
+            );
+        }
+        // a literal control byte in the continuation token is rejected too
+        let body = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                    <NextContinuationToken>tok\u{1}en</NextContinuationToken></ListBucketResult>";
+        assert!(
+            matches!(parse_list_page(body), Err(S3Error::Protocol(_))),
+            "a literal control byte in the continuation token must be rejected"
+        );
+    }
+
+    /// The XML-1.0-legal predicate applies to literal characters as well as
+    /// numeric refs — the two paths share one guard.
+    #[test]
+    fn a_literal_control_byte_in_unescape_is_rejected() {
+        assert!(unescape_xml("ok\u{1}bad").is_err(), "literal C0 must reject");
+        assert!(unescape_xml("plain text").is_ok(), "legal text passes");
     }
 
     #[test]
