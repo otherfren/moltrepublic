@@ -3431,6 +3431,83 @@ export component AppWindow inherits Window {
                     height: 1px;
                     background: Theme.line;
                 }
+                // mesh self-heal Phase 4 — honest connection-health banner.
+                // `net-health-tone` is set from SessionView.net_health (0 ok /
+                // 1 degraded / 2 down; the reason names the troubled peer(s)).
+                // Green is silent (no chrome); amber says we are reconnecting
+                // (the Stage 3 auto-heal runs and clears it on its own); red is
+                // honest that nothing flows, notes the ephemeral gap, and offers
+                // a repair route into the existing recovery rejoin.
+                if root.net-health-tone > 0: Rectangle {
+                    background: root.net-health-tone == 1
+                        ? Theme.warn.transparentize(0.9)
+                        : Theme.bad.transparentize(0.9);
+                    HorizontalLayout {
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: root.net-health-tone == 1 ? Theme.warn : Theme.bad;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 3px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                if root.net-health-tone == 1: VerticalLayout {
+                                    alignment: center;
+                                    Spinner {
+                                        size: 13px;
+                                        tone: Theme.warn;
+                                    }
+                                }
+                                Text {
+                                    text: root.net-health-tone == 1
+                                        ? Strings.banner-reconnecting
+                                        : Strings.banner-disconnected;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if root.net-health-reason != "": Text {
+                                text: root.net-health-reason;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                overflow: elide;
+                            }
+                            if root.net-health-tone == 2: Text {
+                                text: Strings.banner-gap-note;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.net-health-tone == 2: VerticalLayout {
+                            alignment: center;
+                            AppButton {
+                                label: Strings.banner-repair;
+                                primary: true;
+                                tooltip: Strings.banner-repair-tip;
+                                tooltip-left: true;
+                                clicked => {
+                                    root.navigate(AppScreen.restore);
+                                }
+                            }
+                        }
+                    }
+                }
                 Rectangle {
                     vertical-stretch: 1;
                     for s in root.surfaces: Rectangle {

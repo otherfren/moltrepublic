@@ -5045,6 +5045,12 @@ lexicon! {
     toast_detached: "Workspace is detached — knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached — Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
     toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
     toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
+    // mesh self-heal Phase 4 — connection-health banner (net_health tone 1/2)
+    banner_reconnecting: "Reconnecting…", "Verbinde erneut…";
+    banner_disconnected: "Disconnected — you're not sending or receiving.", "Getrennt — du sendest und empfängst nichts.";
+    banner_repair: "Repair connection", "Verbindung reparieren";
+    banner_repair_tip: "Rejoin via a recovery link from a member who's online.", "Wiederbeitritt über einen Recovery-Link eines Mitglieds, das online ist.";
+    banner_gap_note: "Messages sent while you were disconnected won't appear.", "Während der Trennung gesendete Nachrichten erscheinen nicht.";
     rw_ph1: "Connecting…", "Verbinde…";
     rw_ph2: "Fetching encrypted data…", "Lade verschlüsselte Daten…";
     rw_ph3: "Decrypting & verifying…", "Entschlüssele & prüfe…";

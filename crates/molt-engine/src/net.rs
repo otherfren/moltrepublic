@@ -1766,7 +1766,12 @@ impl State {
                 let d = match tokio::time::timeout(remaining, rx.recv()).await {
                     Ok(Some(d)) => d,
                     _ => {
+                        // no adopter replied (the peer is simply offline, or the
+                        // partition is total) — delete the unused fresh queue so
+                        // a peer that stays offline never leaks one server-side
+                        // queue per rotate cooldown; detection will retry later
                         tracing::warn!(%peer, "mesh rotate: no reply before timeout — leg stays deaf, detection will retry");
+                        let _ = transport.delete_queue(&pair.rcv).await;
                         return;
                     }
                 };
