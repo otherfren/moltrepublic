@@ -92,6 +92,13 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // after a decrypt. The manifest (name, m/n) deliberately stays — the
     // Open screen lists sealed workspaces by their identity card.
     remove_logo_files(ws_dir)?;
+    // sweep the atomic-write staging dir: an unseal interrupted between
+    // write_atomic's tmp write and its rename can leave a device-sealed key
+    // blob under tmp/ (keys/workspace.key → tmp/keys_workspace.key) — key
+    // material inside a dir that claims to hold none. tmp/ only ever holds
+    // transient staging, so clearing it in a CLOSED (locked) workspace is
+    // always safe and idempotent.
+    remove_tmp_staging(ws_dir)?;
     manifest.crypto.sealed = SEALED_PHRASE.to_string();
     manifest.version = manifest.version.max(STORAGE_VERSION_SEALED);
     crate::write_manifest(ws_dir, &manifest)
@@ -207,6 +214,27 @@ fn remove_logo_files(ws_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Scrub the atomic-write staging dir (`tmp/`). `write_atomic` stages every
+/// write there (`keys/workspace.key` → `tmp/keys_workspace.key`) and renames
+/// into place; an unseal interrupted between the tmp write and the rename can
+/// leave a device-sealed key blob behind — key material inside a sealed dir.
+/// `tmp/` only ever holds transient staging, so overwrite-then-unlinking
+/// every file in a CLOSED (flock-held) workspace is safe and idempotent.
+fn remove_tmp_staging(ws_dir: &Path) -> Result<(), StorageError> {
+    let rd = match fs::read_dir(ws_dir.join("tmp")) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            secure_remove(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Best-effort overwrite-then-unlink (design §5.1). Honest limits: on
 /// modern filesystems/SSDs (journaling, wear leveling, snapshots) the
 /// overwrite is not guaranteed to reach the old blocks — the threat model
@@ -227,17 +255,29 @@ fn secure_remove(path: &Path) -> Result<(), StorageError> {
             // sealed: without the parent-dir fsync a power loss could keep
             // the durably-sealed marker while resurrecting the key file —
             // key material riding along in every "sealed" backup, and no
-            // path that ever notices (same rule as write_atomic's rename)
+            // path that ever notices (same rule as write_atomic's rename).
+            // A FAILED barrier is a hard error, NOT a swallowed success: the
+            // seal must not be reported durable when the unlink might not be.
             if let Some(parent) = path.parent() {
-                if let Ok(d) = fs::File::open(parent) {
-                    let _ = d.sync_all();
-                }
+                fsync_dir(parent)?;
             }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// fsync a directory so an unlink/rename within it survives a power loss.
+/// Both the open and the sync are propagated — a durability barrier that
+/// silently failed would let a `sealed` marker outlive the key file it was
+/// supposed to have durably removed (finding: a failed barrier read as
+/// success). Overwriting the file's contents stays best-effort; *removing*
+/// it durably does not.
+fn fsync_dir(dir: &Path) -> Result<(), StorageError> {
+    let d = fs::File::open(dir)?;
+    d.sync_all()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +393,39 @@ mod tests {
             other => panic!("expected Sealed, got {other:?}"),
         }
         assert!(out.is_empty(), "not a single blob byte written");
+    }
+
+    /// An unseal interrupted between `write_atomic`'s tmp write and its
+    /// rename leaves a device-sealed key blob under `tmp/` (write_atomic
+    /// maps `keys/workspace.key` → `tmp/keys_workspace.key`). Sealing must
+    /// sweep it: key material must not survive inside a dir claiming to
+    /// hold none.
+    #[test]
+    fn sealing_sweeps_stale_tmp_key_blobs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        // plant staging blobs exactly as an interrupted write_atomic would
+        let staging = dir.join("tmp");
+        fs::create_dir_all(&staging).expect("tmp dir");
+        fs::write(staging.join("keys_workspace.key"), b"stale device-sealed key blob")
+            .expect("plant key blob");
+        fs::write(staging.join("keys_seed.sealed"), b"stale sealed seed blob")
+            .expect("plant seed blob");
+
+        seal_at_rest(&dir, &phrase).expect("seal");
+
+        // not one key blob remains under tmp/ in a sealed dir
+        assert!(!staging.join("keys_workspace.key").exists(), "stale key blob swept");
+        assert!(!staging.join("keys_seed.sealed").exists(), "stale seed blob swept");
+        let leftover: Vec<String> = fs::read_dir(&staging)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(leftover.is_empty(), "tmp/ holds no staging material, found {leftover:?}");
     }
 
     /// The materialized plaintext logo is republic content — it must not
@@ -563,6 +636,21 @@ mod tests {
         assert_eq!(m.version, STORAGE_VERSION, "version untouched — no gate change");
         assert!(!scan_workspaces(&root)[0].info().encrypted);
         assert!(open_workspace(&dir).is_ok(), "opens exactly as before");
+    }
+
+    /// The parent-dir fsync is the durability barrier that stops a power
+    /// loss from resurrecting a deleted key file under a "sealed" marker.
+    /// A FAILED barrier must propagate, never report a silent success —
+    /// fault-injecting a real fsync error is impractical, so this pins the
+    /// error-propagation shape: an existing dir syncs, a missing one errors.
+    #[test]
+    fn fsync_dir_propagates_a_failed_barrier() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        fsync_dir(tmp.path()).expect("an existing dir fsyncs cleanly");
+        assert!(
+            fsync_dir(&tmp.path().join("does-not-exist")).is_err(),
+            "a barrier that cannot open its dir must surface the error, not swallow it"
+        );
     }
 
     /// The crash window between key deletion and the manifest write leaves
