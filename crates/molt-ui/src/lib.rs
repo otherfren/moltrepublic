@@ -4800,7 +4800,7 @@ lexicon! {
     ocs_days: "days", "Tage";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
-    ou_note: "Only metadata is shared — the bytes move user-to-user via the share link, as long as the sharer keeps the file. (Transfer and expiry are mocks.)", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über den Share-Link, solange der Teilende die Datei behält. (Übertragung und Ablauf sind Mocks.)";
+    ou_note: "Only metadata is shared — the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
     ow_change_folder: "Change folder", "Ordner wechseln";
@@ -4838,7 +4838,7 @@ lexicon! {
     ow_hold_tip: "Hold to reveal", "Halten zum Anzeigen";
     toast_copied: "Copied to clipboard", "In die Zwischenablage kopiert";
     del_ws_title: "Delete workspace?", "Workspace löschen?";
-    del_ws_body: "This removes the republic from this device. Type its name to confirm. (Mock — nothing on disk is touched.)", "Dies entfernt die Republik von diesem Gerät. Tippe zur Bestätigung ihren Namen aus. (Mock — auf der Platte wird nichts angefasst.)";
+    del_ws_body: "This moves the republic's folder into the trash on this device — recoverable for 30 days, then purged. Type its name to confirm.", "Dies verschiebt den Ordner der Republik in den Papierkorb dieses Geräts — 30 Tage wiederherstellbar, danach entfernt. Tippe zur Bestätigung ihren Namen aus.";
     del_ws_confirm: "Delete permanently", "Endgültig löschen";
     bk_title: "Manual backup", "Manuelles Backup";
     bk_body: "The whole workspace is written to this location as one encrypted file — history, chain, and (when stored here) the recovery seed. Live group/transport state is never included: restoring reads everything, rejoining runs the recovery ritual. Caution: this backup + its passphrase can restore your seat like the recovery phrase — guard both.", "Der gesamte Workspace wird als eine verschlüsselte Datei an diesen Ort geschrieben — Historie, Chain und (wenn hier gespeichert) der Recovery-Seed. Live-Gruppen-/Transport-Zustand ist nie enthalten: Wiederherstellen macht alles lesbar, der Wiederbeitritt läuft über das Recovery-Ritual. Achtung: dieses Backup + seine Passphrase kann deinen Sitz wiederherstellen wie die Recovery-Phrase — beides gut verwahren.";
@@ -4992,11 +4992,11 @@ lexicon! {
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
     toast_file_removed: "Local file deleted — the share is no longer available.", "Lokale Datei gelöscht — die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";
-    dm_body: "The text disappears for everyone and only a deletion notice remains. (Mock — nothing on disk.)", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt. (Mock — nichts auf der Platte.)";
+    dm_body: "The text disappears for everyone and only a deletion notice remains — a replicated tombstone addressed by message id, kept in the event log.", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt — ein replizierter Tombstone, per Nachrichten-ID adressiert und im Event-Log gehalten.";
     dm_confirm: "Delete", "Löschen";
     mv_close_ws: "Close workspace", "Workspace schließen";
     close_ws_title: "Close workspace?", "Workspace schließen?";
-    close_ws_body: "You'll return to the start screen. This is a mock, so nothing is written to disk.", "Du kehrst zum Startbildschirm zurück. Dies ist ein Mock, es wird nichts auf die Platte geschrieben.";
+    close_ws_body: "You'll return to the start screen. Closing cleanly persists the group and transport state, so reopening resumes the live mesh where you left off.", "Du kehrst zum Startbildschirm zurück. Ein sauberes Schließen sichert den Gruppen- und Transport-Zustand, sodass das erneute Öffnen das Live-Mesh dort fortsetzt, wo du aufgehört hast.";
     close_ws_confirm: "Close workspace", "Workspace schließen";
     close_ws_cancel: "Cancel", "Abbrechen";
     tip_theme: "Theme", "Theme";

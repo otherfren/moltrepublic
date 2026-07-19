@@ -458,14 +458,18 @@ pub struct WorkspaceInfo {
     /// rest" skip status of design P6. Additive.
     #[serde(default)]
     pub backup_error: String,
-    /// The (mock) recovery seed all of its secret keys derive from.
+    /// The real recovery phrase every secret key of this workspace derives
+    /// from — a secret. Populated from the device-sealed seed while the
+    /// workspace is unsealed; cleared to "" the moment it is sealed at rest
+    /// (no key material on disk means none in session memory either).
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
     /// entry was founded/joined — a display label (routing always follows
     /// the LIVE global settings); demo entries may carry legacy values.
     pub net: String,
-    /// Encrypted at rest (mock): an encrypted workspace is inactive —
-    /// opening requires a decrypt with the recovery phrase.
+    /// Sealed at rest: an encrypted workspace has had its device-stored key
+    /// material removed, so it is inactive — opening it again requires a
+    /// decrypt with the recovery phrase.
     #[serde(default)]
     pub encrypted: bool,
     /// Members and when each of them last synced.
@@ -778,9 +782,10 @@ pub fn backup_key(id: &WorkspaceId, ts: u64) -> String {
 }
 
 /// Parse a bucket key against the backup naming scheme
-/// `molt/<workspace_id>/<unix_ts>.molt.enc` (`backup_restore_design.md`
-/// §6.2): the id is 64 lowercase hex chars, the stem decimal digits.
-/// Returns `(workspace_id, ts)`, or `None` for any foreign key.
+/// `molt/<workspace_id>/<unix_ts:012>.molt.enc` (`backup_restore_design.md`
+/// §6.2): the id is 64 lowercase hex chars, the stem EXACTLY 12 decimal
+/// digits (the writer's fixed zero-padded width). Returns `(workspace_id,
+/// ts)`, or `None` for any foreign key.
 pub fn parse_backup_key(key: &str) -> Option<(WorkspaceId, u64)> {
     let rest = key.strip_prefix(BACKUP_OBJECT_PREFIX)?;
     let (id, file) = rest.split_once('/')?;
@@ -788,8 +793,12 @@ pub fn parse_backup_key(key: &str) -> Option<(WorkspaceId, u64)> {
         return None;
     }
     let stem = file.strip_suffix(".molt.enc")?;
-    // digits only — u64::parse alone would also accept a leading '+'
-    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
+    // EXACTLY the writer's 12-wide zero-padded width, digits only. Any other
+    // width is a foreign key, never a backup: a short planted stem (e.g. `9`)
+    // would otherwise sort lexicographically after a real newer key and invert
+    // the retention pruner's oldest/newest pick. Digits-only also rejects the
+    // leading '+' that `u64::parse` alone would accept.
+    if stem.len() != 12 || !stem.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let ts: u64 = stem.parse().ok()?;
@@ -2205,7 +2214,7 @@ pub struct SessionView {
     pub restart_required: Vec<String>,
     /// The editable settings.
     pub settings: SessionSettings,
-    /// The locally known workspaces (mock list, shared).
+    /// The locally known workspaces, from the real on-disk directory scan.
     pub workspaces: Vec<WorkspaceInfo>,
     /// Backups in the S3 bucket without a local workspace, from the last
     /// real listing ([`Command::NetListBackups`]). Empty until a listing
@@ -3431,8 +3440,9 @@ pub struct SurfaceStat {
 
 /// One row of the Organization → Members table. The identity anchor
 /// (`id` / `identity_pk`) is real on a ritual-founded workspace and empty
-/// on demo/legacy ones; presence (`last_seen` / `presence`) is still the
-/// session's mock label — real presence is transport work.
+/// on demo/legacy ones; presence is real too — `last_seen` is the last time
+/// this member was actually observed on the wire, and `presence` is aged
+/// live from it ([`presence_state`]; a send-failure pins offline).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberView {
     /// Display handle (the member id).
@@ -3499,8 +3509,9 @@ pub struct UploadView {
     /// filters on. 0 = unknown age (`ts` 0), no deadline.
     pub expires_ts: u64,
     /// Whether the sharer is reachable right now — a user-to-user transfer
-    /// needs the sharer online (mock presence; the own node is always
-    /// online). Additive with a default.
+    /// needs the sharer online. Derived from the same real presence as the
+    /// Members table (`presence != offline`); the own node is always online.
+    /// Additive with a default.
     #[serde(default)]
     pub online: bool,
     /// Content checksum, lowercase sha256 hex — the sharer's log-anchored
@@ -4108,6 +4119,37 @@ mod tests {
         assert_eq!(ts_order, vec![1, 999, 1_000, 99_999, 1_752_800_000]);
     }
 
+    /// Canonical-width enforcement (§6.2): the writer always emits a fixed
+    /// 12-wide zero-padded stem so lexicographic key order equals age order.
+    /// A stem of any other width is a FOREIGN key, never a backup — otherwise
+    /// a planted `molt/<id>/9.molt.enc` (age ts 9) would sort lexicographically
+    /// AFTER a real `molt/<id>/000000000010.molt.enc` (age ts 10) and invert
+    /// the retention pruner's oldest/newest pick.
+    #[test]
+    fn backup_key_requires_canonical_12_wide_stem() {
+        let id = "ef".repeat(32);
+        let make = |stem: &str| format!("molt/{id}/{stem}.molt.enc");
+        // the real writer's fixed 12-digit width IS a backup
+        assert_eq!(
+            parse_backup_key(&make("000000000009")),
+            Some((id.clone(), 9)),
+            "the canonical 12-wide stem parses"
+        );
+        // every other width is a foreign key — never counted, pruned or picked
+        for stem in ["9", "09", "00000000009", "0000000000009", "999999999999999"] {
+            assert_ne!(stem.len(), 12, "negative fixture {stem:?} must be off-width");
+            assert_eq!(parse_backup_key(&make(stem)), None, "off-width {stem:?} is foreign");
+        }
+        // the concrete corruption the fix prevents: a planted short key (age 9)
+        // sorts lexicographically AFTER a real 12-wide key (age 10) — so it
+        // must not parse at all, leaving the real key the sole age-ordered one.
+        let planted = make("9");
+        let real = backup_key(&id, 10);
+        assert!(planted > real, "the short planted key sorts later than the newer real one");
+        assert_eq!(parse_backup_key(&planted), None, "yet the planted key is not a backup");
+        assert_eq!(parse_backup_key(&real), Some((id, 10)));
+    }
+
     /// Classification of a real listing: objects of a locally known
     /// workspace are NOT orphans (their row exists locally); parseable
     /// prefixes without a local workspace aggregate into one orphan entry
@@ -4150,12 +4192,14 @@ mod tests {
             backup_orphans_from_listing(&objects[..2], &[local], now).is_empty()
         );
         // a future-dated object (clock skew) clamps to "just now", and an
-        // empty listing stays empty
+        // empty listing stays empty (canonical 12-wide key so it is a real
+        // orphan, not a foreign off-width key)
         let skew = backup_orphans_from_listing(
-            &[obj(&format!("molt/{orphan}/9.molt.enc"), 10, now + 500)],
+            &[obj(&format!("molt/{orphan}/000000000009.molt.enc"), 10, now + 500)],
             &[],
             now,
         );
+        assert_eq!(skew[0].id, orphan, "a canonical-width object is a real orphan");
         assert_eq!(skew[0].last_backup_min, 0);
         assert!(backup_orphans_from_listing(&[], &[], now).is_empty());
     }
