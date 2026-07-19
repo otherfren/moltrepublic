@@ -568,6 +568,17 @@ pub(crate) struct State {
     /// for [`crate::net::MESH_KEEPALIVE_SECS`], so an actively-chatting mesh
     /// sends zero extra frames. Runtime-only; reset with the workspace.
     pub(crate) last_mesh_out: u64,
+    /// Per-peer cooldown for self-initiated **mesh rotates** (mesh self-heal
+    /// Stage 3): `member → presence_now of the last rotate we started`, so the
+    /// periodic deaf-leg detector re-triggers at most one rotate per peer per
+    /// [`crate::net::MESH_ROTATE_COOLDOWN_SECS`] while the heal completes (or
+    /// the peer stays offline). Runtime-only; reset with the workspace.
+    pub(crate) rotate_at: std::collections::HashMap<MemberId, u64>,
+    /// Bounded FIFO of self-heal re-announce nonces already relayed
+    /// (`WorkspaceEvent::MeshAnnounced.nonce`) — the Stage 3 loop-prevention
+    /// seen-set: a nonce'd re-announce is adopted+relayed once, and copies of
+    /// it arriving later (the hub fan-out) are dropped. Runtime-only.
+    pub(crate) seen_announces: net::SeenNonces,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -778,6 +789,8 @@ impl State {
             net_send_stuck: std::collections::BTreeMap::new(),
             mesh_up: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
+            rotate_at: std::collections::HashMap::new(),
+            seen_announces: net::SeenNonces::default(),
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -1133,6 +1146,12 @@ impl State {
             }
             Command::NetMeshExtended { link, generation } => {
                 self.cmd_net_mesh_extended(link, generation)
+            }
+            Command::NetMeshRotate { peer, generation } => {
+                self.cmd_net_mesh_rotate(peer, generation)
+            }
+            Command::NetMeshReAnnounce { ct, nonce, generation } => {
+                self.cmd_net_re_announce(ct, nonce, generation)
             }
             Command::NetRecoverRequested {
                 member,

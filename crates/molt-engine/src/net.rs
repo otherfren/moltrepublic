@@ -69,6 +69,58 @@ pub(crate) const MESH_DEAF_SECS: u64 = 600;
 /// cadence never drifts far past this.
 pub(crate) const MESH_KEEPALIVE_SECS: u64 = 240;
 
+/// Minimum seconds between self-initiated **mesh rotates** for one peer
+/// (Stage 3, `documents/mesh_selfheal.md`): the periodic deaf-leg detector
+/// re-evaluates every presence tick, so without a cooldown it would spawn a
+/// fresh rotate every tick while a leg stays deaf. One rotate per peer per
+/// this window is ample — it gives the announce → adopt → reply round trip
+/// time to complete (or the peer to prove it is simply offline) before
+/// another is tried.
+pub(crate) const MESH_ROTATE_COOLDOWN_SECS: u64 = 60;
+
+/// How long a rotate's off-actor task waits for the peer's reply announce on
+/// the freshly-minted queue before giving up (the leg stays deaf and the next
+/// detection re-triggers). Bounded so the task never lingers.
+const MESH_ROTATE_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Cap of the self-heal re-announce seen-set FIFO. A nonce past the window
+/// would at worst cause one extra (cooldown-bounded) relay, never a storm.
+const SEEN_NONCES_CAP: usize = 512;
+
+/// Bounded FIFO of self-heal re-announce nonces already relayed (Stage 3
+/// loop-prevention seen-set): newest kept, oldest evicted past the cap.
+/// Runtime-only, like [`ParkedRefs`].
+#[derive(Default)]
+pub(crate) struct SeenNonces {
+    fifo: std::collections::VecDeque<u64>,
+    set: std::collections::HashSet<u64>,
+}
+
+impl SeenNonces {
+    /// Whether this nonce has already been relayed.
+    pub(crate) fn contains(&self, nonce: u64) -> bool {
+        self.set.contains(&nonce)
+    }
+
+    /// Mark a nonce relayed; evict the oldest past the cap.
+    pub(crate) fn insert(&mut self, nonce: u64) {
+        if self.set.insert(nonce) {
+            self.fifo.push_back(nonce);
+            if self.fifo.len() > SEEN_NONCES_CAP {
+                if let Some(old) = self.fifo.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Drop every remembered nonce (workspace close/switch boundary).
+    pub(crate) fn clear(&mut self) {
+        self.fifo.clear();
+        self.set.clear();
+    }
+}
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -1064,17 +1116,37 @@ impl State {
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
             // relay) and extend this node's own mesh toward it
-            WorkspaceEvent::MeshAnnounced { ct } if self.is_chain_governed() => {
-                let me = self.member();
-                if let Ok(raw) = hex::decode(&ct) {
-                    if let Some((announcer, plain)) =
-                        self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
-                    {
-                        if announcer != me && self.roster().contains(&announcer) {
-                            if let Ok(a) =
-                                serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain)
-                            {
-                                self.spawn_mesh_extension(announcer, &a);
+            WorkspaceEvent::MeshAnnounced { ct, nonce } if self.is_chain_governed() => {
+                // Stage 3 relay loop-prevention: a self-heal re-announce carries
+                // a nonce. The first time we see it, re-broadcast ONCE so a hub
+                // reaches members the announcer's own legs could not (each
+                // recipient dedups on the nonce; the announcer drops its own by
+                // the `announcer != me` check below). A copy already relayed is
+                // dropped. Recovery/bootstrap announces carry no nonce and are
+                // single-hop — adopt only, exactly as before.
+                let fresh = match nonce {
+                    Some(n) => !self.seen_announces.contains(n),
+                    None => true,
+                };
+                if fresh {
+                    if let Some(n) = nonce {
+                        self.seen_announces.insert(n);
+                        let me = self.member();
+                        let relay =
+                            self.make_env(me, WorkspaceEvent::MeshAnnounced { ct: ct.clone(), nonce });
+                        self.record(relay);
+                    }
+                    let me = self.member();
+                    if let Ok(raw) = hex::decode(&ct) {
+                        if let Some((announcer, plain)) =
+                            self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
+                        {
+                            if announcer != me && self.roster().contains(&announcer) {
+                                if let Ok(a) =
+                                    serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain)
+                                {
+                                    self.spawn_mesh_extension(announcer, &a);
+                                }
                             }
                         }
                     }
@@ -1401,9 +1473,11 @@ impl State {
             return Ok(Reply::Ack);
         }
         // relay VERBATIM: each survivor decrypts (and thereby authenticates)
-        // the announcer itself, exactly like the founding star relay
+        // the announcer itself, exactly like the founding star relay. A
+        // recovery re-announce is single-hop over the live mesh (no nonce —
+        // the Stage 3 relay is only for self-initiated deaf-leg rotates).
         let me = self.member();
-        let env = self.make_env(me, WorkspaceEvent::MeshAnnounced { ct });
+        let env = self.make_env(me, WorkspaceEvent::MeshAnnounced { ct, nonce: None });
         self.record(env);
         self.spawn_mesh_extension(announcer, &announce);
         Ok(Reply::Ack)
@@ -1579,6 +1653,229 @@ impl State {
             tracing::warn!(%member, "mesh extension rebuild failed");
         }
         Ok(Reply::Ack)
+    }
+
+    /// Self-initiated **mesh rotate** (mesh self-heal Stage 3): a leg to `peer`
+    /// went live-but-deaf (its inbound queue idle-expired on the server), so
+    /// this node mints a FRESH inbound queue for that peer, re-announces the
+    /// new address over the still-working legs, and — when the peer adopts and
+    /// replies onto the fresh queue — folds the reciprocal link back in through
+    /// the same `cmd_net_mesh_extended` path the recovery/dynamic-mesh flows
+    /// use. Debounced per peer ([`MESH_ROTATE_COOLDOWN_SECS`]) so the periodic
+    /// deaf-leg detector re-triggers at most one rotate per window. Off the
+    /// actor — queue creation + the reply round-trip are live.
+    pub(crate) fn cmd_net_mesh_rotate(
+        &mut self,
+        peer: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let now = self.presence_now();
+        if let Some(last) = self.rotate_at.get(&peer) {
+            if now.saturating_sub(*last) < MESH_ROTATE_COOLDOWN_SECS {
+                return Ok(Reply::Ack);
+            }
+        }
+        let (transport, group) = {
+            let Some(net) = self.net.as_ref() else {
+                return Ok(Reply::Ack);
+            };
+            if !net.is_real() {
+                return Ok(Reply::Ack);
+            }
+            let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+                return Ok(Reply::Ack);
+            };
+            (transport, group)
+        };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Ok(Reply::Ack);
+        };
+        // workspace scope (not mesh generation): a concurrent rebuild must not
+        // drop this rotate's fold-in — both fold into the live net
+        let scope = self.net_scope;
+        let me = self.member();
+        self.rotate_at.insert(peer.clone(), now);
+        tracing::info!(%peer, "mesh rotate: re-establishing a deaf inbound leg");
+        tokio::spawn(async move {
+            // 1) fresh per-pair inbound queue, SUBSCRIBED before the announce so
+            //    a fast reply cannot race the subscription (same discipline as
+            //    the recovery rejoin's reader)
+            let pair = match transport.create_queue().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%peer, error = %e, "mesh rotate: queue creation failed");
+                    return;
+                }
+            };
+            let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
+                return;
+            };
+            let mut rx = match transport.subscribe(&pair.rcv).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(%peer, error = %e, "mesh rotate: subscribe failed");
+                    return;
+                }
+            };
+            // 2) encrypt the re-announce (this peer → our new inbound) on the
+            //    SHARED runtime group (one ratchet, used in sequence)
+            let mut queues = std::collections::BTreeMap::new();
+            queues.insert(
+                peer.clone(),
+                molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
+            );
+            let announce = molt_net::mesh::MeshAnnounce { queues };
+            let Ok(bytes) = serde_json::to_vec(&announce) else {
+                return;
+            };
+            let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(&bytes).ok()) else {
+                tracing::warn!(%peer, "mesh rotate: encrypting the re-announce failed");
+                return;
+            };
+            // 3) mint a relay nonce and ask the actor to record + broadcast the
+            //    self-authored announce over every working leg
+            let mut nb = [0u8; 8];
+            if getrandom::getrandom(&mut nb).is_err() {
+                return;
+            }
+            let nonce = u64::from_le_bytes(nb);
+            let (rtx, _rrx) = oneshot::channel();
+            if cmd_tx
+                .send(Envelope {
+                    cmd: Command::NetMeshReAnnounce {
+                        ct: hex::encode(&ct),
+                        nonce,
+                        generation: Some(scope),
+                    },
+                    reply: rtx,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            // 4) await the peer's reply announce on our fresh queue (bounded),
+            //    authenticate it by decryption, and fold the reciprocal link in
+            let deadline = tokio::time::Instant::now() + MESH_ROTATE_REPLY_TIMEOUT;
+            let mut reasm = molt_net::Reassembler::new();
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let d = match tokio::time::timeout(remaining, rx.recv()).await {
+                    Ok(Some(d)) => d,
+                    _ => {
+                        tracing::warn!(%peer, "mesh rotate: no reply before timeout — leg stays deaf, detection will retry");
+                        return;
+                    }
+                };
+                let Ok(plain) = molt_net::wrap::unwrap_block(&wrap_in, &d.block) else {
+                    d.ack.ack();
+                    continue;
+                };
+                let outcome = reasm.push(&plain);
+                d.ack.ack();
+                let Ok(molt_net::chunk::PushOutcome::Complete(_, framed)) = outcome else {
+                    continue;
+                };
+                let Ok(molt_net::invite::RitualMsg::MeshAnnounce { ct: reply_ct }) =
+                    serde_json::from_slice::<molt_net::invite::RitualMsg>(&framed)
+                else {
+                    continue;
+                };
+                let Ok(raw) = hex::decode(&reply_ct) else {
+                    continue;
+                };
+                let decrypted = {
+                    let Ok(mut g) = group.lock() else {
+                        return;
+                    };
+                    match g.decrypt(&raw) {
+                        Ok(molt_net::MlsIncoming::Application { from, plaintext }) => {
+                            Some((from, plaintext))
+                        }
+                        _ => None,
+                    }
+                };
+                let Some((from, reply_plain)) = decrypted else {
+                    continue;
+                };
+                // only the peer we rotated toward may re-point our link to it
+                if from != peer {
+                    continue;
+                }
+                let Ok(reply_ann) =
+                    serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&reply_plain)
+                else {
+                    continue;
+                };
+                let Some(handover) = reply_ann.queues.get(&me) else {
+                    continue;
+                };
+                let (Some(snd), Some(wrap_out)) = (handover.addr(), handover.wrap_key()) else {
+                    continue;
+                };
+                let link = PeerLink {
+                    member: peer.clone(),
+                    snd,
+                    wrap_out,
+                    rcv: pair.rcv,
+                    wrap_in,
+                }
+                .to_mesh();
+                let (etx, _erx) = oneshot::channel();
+                let _ = cmd_tx
+                    .send(Envelope {
+                        cmd: Command::NetMeshExtended {
+                            link,
+                            generation: Some(scope),
+                        },
+                        reply: etx,
+                    })
+                    .await;
+                return;
+            }
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// Record + broadcast this node's self-initiated mesh re-announce (mesh
+    /// self-heal Stage 3): the off-actor rotate task built the ciphertext for a
+    /// fresh inbound queue; recording it as a self-authored
+    /// `WorkspaceEvent::MeshAnnounced` fans it out over every working leg. The
+    /// nonce is marked seen so a relayed copy coming back is not re-broadcast.
+    pub(crate) fn cmd_net_re_announce(
+        &mut self,
+        ct: String,
+        nonce: u64,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        self.seen_announces.insert(nonce);
+        let me = self.member();
+        let env = self.make_env(
+            me,
+            WorkspaceEvent::MeshAnnounced {
+                ct,
+                nonce: Some(nonce),
+            },
+        );
+        self.record(env);
+        Ok(Reply::Ack)
+    }
+
+    /// Trigger a debounced rotate for every leg the Stage 1 cross-check reports
+    /// live-but-deaf (mesh self-heal Stage 3). Called from the presence tick —
+    /// the periodic beat that also re-evaluates health — so a leg that has been
+    /// deaf longer than [`MESH_DEAF_SECS`] gets a self-initiated re-announce,
+    /// and the per-peer cooldown keeps it to one attempt per window.
+    fn rotate_deaf_legs(&mut self) {
+        for peer in self.deaf_legs() {
+            let _ = self.cmd_net_mesh_rotate(peer, None);
+        }
     }
 
     // ---- the P5 appliers (live wire arrivals AND P6 drains) --------------
@@ -1836,6 +2133,9 @@ impl State {
     pub(crate) fn cmd_net_presence_tick(&mut self) -> Result<Reply, MoltError> {
         self.refresh_member_pills();
         self.recompute_net_health();
+        // Stage 3: a leg that has stayed deaf past the window gets a debounced
+        // self-initiated rotate (the periodic tick is the detection beat).
+        self.rotate_deaf_legs();
         Ok(Reply::Ack)
     }
 
@@ -2569,6 +2869,30 @@ mod tests {
             st.keepalive_due(st.presence_now()),
             "past the interval a keepalive is due again"
         );
+    }
+
+    /// Stage 3 relay loop-prevention: the seen-set dedups a nonce, evicts the
+    /// oldest past the cap, and clears wholesale at the workspace boundary.
+    #[test]
+    fn seen_nonces_dedups_evicts_oldest_and_clears() {
+        let mut seen = super::SeenNonces::default();
+        assert!(!seen.contains(7));
+        seen.insert(7);
+        seen.insert(7); // idempotent — still one entry
+        assert!(seen.contains(7));
+        // fill exactly to the cap with fresh nonces; 7 is now the oldest and
+        // one more insert must evict it
+        let cap = u64::try_from(super::SEEN_NONCES_CAP).expect("cap fits u64");
+        for n in 0..cap {
+            seen.insert(1000 + n);
+        }
+        assert!(!seen.contains(7), "the oldest nonce evicts once the cap is exceeded");
+        assert!(
+            seen.contains(1000 + cap - 1),
+            "the most recent nonces are kept"
+        );
+        seen.clear();
+        assert!(!seen.contains(1000), "clear drops every remembered nonce");
     }
 
     /// The mesh-up map is active-workspace scope: the close/switch boundary

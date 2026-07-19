@@ -527,6 +527,8 @@ impl State {
         self.net_send_stuck.clear();
         self.mesh_up.clear();
         self.last_mesh_out = 0;
+        self.rotate_at.clear();
+        self.seen_announces.clear();
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)

@@ -2876,7 +2876,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let ct = loop {
             let got = c_reply_sink.messages().into_iter().find_map(|(_, env)| {
-                if let WorkspaceEvent::MeshAnnounced { ct } = env.body {
+                if let WorkspaceEvent::MeshAnnounced { ct, .. } = env.body {
                     hex::decode(&ct).ok()
                 } else {
                     None
@@ -3102,7 +3102,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         seq: 2,
         ts: 1_751_000_002,
         by: "member-b".to_string(),
-        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct), nonce: None },
     });
     let _ = member_wake.send(2);
 
@@ -3231,7 +3231,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         seq: 2,
         ts: 1_751_000_003,
         by: "member-b".to_string(),
-        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct), nonce: None },
     });
     let _ = wake2.send(2);
     let mut rx3 = hub.subscribe(&third_q.rcv).await.expect("subscribe third queue");
@@ -4107,7 +4107,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         seq: 2,
         ts: 1_751_000_002,
         by: "member-b".to_string(),
-        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct) },
+        body: WorkspaceEvent::MeshAnnounced { ct: hex::encode(&ct), nonce: None },
     });
     let _ = b_wake.send(2);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

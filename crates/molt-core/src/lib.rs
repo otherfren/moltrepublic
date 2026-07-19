@@ -1821,6 +1821,14 @@ pub enum WorkspaceEvent {
     MeshAnnounced {
         /// Hex of the announcer's MLS-encrypted `MeshAnnounce`.
         ct: String,
+        /// Optional relay loop-prevention token (mesh self-heal Stage 3): a
+        /// self-initiated re-announce carries a random nonce so a hub that
+        /// re-broadcasts it can drop copies it has already relayed (the
+        /// runtime `seen`-set). Absent on the recovery-relay and
+        /// founding-bootstrap announces, which are single-hop — additive, so
+        /// those serialize byte-identically as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<u64>,
     },
 }
 
@@ -3143,6 +3151,32 @@ pub enum Command {
         /// The ready-to-run link to the (re)announced member.
         link: MeshLink,
         /// Mesh incarnation (a torn-down mesh drops the extension).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Self-initiated **mesh rotate** (engine-internal, mesh self-heal Stage 3):
+    /// a leg to `peer` is detected live-but-deaf, so this node mints a fresh
+    /// inbound queue for it and re-announces the new address over the still-
+    /// working legs. The node's own transport speaking — never an MCP tool (an
+    /// agent must not forge mesh churn).
+    NetMeshRotate {
+        /// The peer whose deaf inbound leg to re-establish.
+        peer: MemberId,
+        /// Mesh incarnation (a torn-down mesh drops the rotate).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The off-actor **mesh-rotate task** has minted its fresh queue and built
+    /// the re-announce ciphertext; the engine records it as a self-authored
+    /// `WorkspaceEvent::MeshAnnounced` so the outbox broadcasts it over every
+    /// working leg (engine-internal, mesh self-heal Stage 3). Never an MCP tool.
+    NetMeshReAnnounce {
+        /// Hex of this node's MLS-encrypted `MeshAnnounce` (the new address).
+        ct: String,
+        /// Relay loop-prevention nonce (also marked seen locally so a relayed
+        /// copy coming back is not re-broadcast).
+        nonce: u64,
+        /// Mesh incarnation (a torn-down mesh drops the re-announce).
         #[serde(default)]
         generation: Option<u64>,
     },
@@ -4500,6 +4534,36 @@ mod tests {
         let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
         assert_eq!(back.read_by, m.read_by);
         assert_eq!(back, m);
+    }
+
+    /// Mesh self-heal Stage 3: the additive `nonce` on `MeshAnnounced` must be
+    /// invisible when absent (recovery/bootstrap announces stay byte-identical
+    /// to the pre-self-heal wire shape), decode to `None` from legacy JSON, and
+    /// round-trip when present (the relay loop-prevention token).
+    #[test]
+    fn mesh_announced_nonce_is_additive_and_invisible_when_absent() {
+        // (a) no nonce → no "nonce" key on the wire (skip_serializing_if)
+        let none = WorkspaceEvent::MeshAnnounced {
+            ct: "deadbeef".to_string(),
+            nonce: None,
+        };
+        let wire = serde_json::to_string(&none).expect("encode");
+        assert!(!wire.contains("nonce"), "absent nonce must stay invisible: {wire}");
+        assert_eq!(wire, r#"{"type":"mesh_announced","ct":"deadbeef"}"#);
+
+        // (b) legacy JSON without nonce decodes to None
+        let legacy = r#"{"type":"mesh_announced","ct":"cafe"}"#;
+        let back: WorkspaceEvent = serde_json::from_str(legacy).expect("decode");
+        assert_eq!(back, WorkspaceEvent::MeshAnnounced { ct: "cafe".to_string(), nonce: None });
+
+        // (c) a self-heal re-announce carries and round-trips its nonce
+        let rot = WorkspaceEvent::MeshAnnounced {
+            ct: "f00d".to_string(),
+            nonce: Some(0x1234_5678_9abc_def0),
+        };
+        let wire = serde_json::to_string(&rot).expect("encode");
+        assert!(wire.contains(r#""nonce":1311768467463790320"#), "nonce on the wire: {wire}");
+        assert_eq!(serde_json::from_str::<WorkspaceEvent>(&wire).expect("decode"), rot);
     }
 
     #[test]
