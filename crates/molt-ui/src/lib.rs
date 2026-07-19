@@ -4785,6 +4785,9 @@ lexicon! {
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
     cw_charter_agenda_ph: "Agenda / charter — what this republic is for", "Agenda / Satzung — wofür diese Republik steht";
     cw_charter_hint: "Every member has joined. Propose the charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage die Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
+    cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
+    cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
+    cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
     cw_declined_hint: "A member declined the charter. This ritual cannot continue — close it and found the republic anew.", "Ein Mitglied hat die Satzung abgelehnt. Dieses Ritual kann nicht fortgesetzt werden — schließe es und gründe die Republik neu.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";

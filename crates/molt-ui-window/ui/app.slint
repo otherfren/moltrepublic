@@ -550,6 +550,8 @@ export component AppWindow inherits Window {
     in-out property <AppScreen> settings-return: AppScreen.choice;
     // modal: leaving settings with unsaved draft edits (raised from Rust)
     in-out property <bool> confirm-leave-open: false;
+    // modal: aborting a RUNNING founding ritual (voids every invite link)
+    in-out property <bool> confirm-abort-ritual-open: false;
     // mirrored from the engine session (co-equal): which surface the main
     // view shows and which of its sub-views is active; changing them is a
     // SelectSurface / SelectView command
@@ -586,6 +588,7 @@ export component AppWindow inherits Window {
     // focus so the global key handler keeps hearing the keyboard
     property <bool> any-modal-open: root.confirm-close-open
         || root.confirm-leave-open
+        || root.confirm-abort-ritual-open
         || root.confirm-quit-open
         || root.confirm-delete-open
         || root.confirm-delmsg-open
@@ -1050,6 +1053,8 @@ export component AppWindow inherits Window {
             root.recover-link-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
+        } else if (root.confirm-abort-ritual-open) {
+            root.confirm-abort-ritual-open = false;
         } else if (root.confirm-leave-open) {
             root.confirm-leave-open = false;
         } else if (root.confirm-close-open) {
@@ -1086,13 +1091,18 @@ export component AppWindow inherits Window {
             } else {
                 root.navigate(AppScreen.choice);
             }
-        } else if (root.screen == AppScreen.create && !root.cw-running) {
-            if (root.cw-step == 1) {
+        } else if (root.screen == AppScreen.create) {
+            if (root.cw-running) {
+                // mid-ritual: ask before voiding every distributed link
+                root.confirm-abort-ritual-open = true;
+            } else if (root.cw-step == 1) {
                 root.create-cancel();
             } else {
                 root.navigate(AppScreen.choice);
             }
-        } else if (root.screen == AppScreen.join && !root.jw-running) {
+        } else if (root.screen == AppScreen.join) {
+            // a joiner may bail out any time — a stuck wait (spent link,
+            // vanished founder) must never trap them
             if (root.jw-step == 1) {
                 root.join-cancel();
             } else {
@@ -1614,11 +1624,13 @@ export component AppWindow inherits Window {
                     }
                     AppButton {
                         label: "×";
-                        // no bailing out while the founding is running; after
-                        // success it discards the (not yet entered) republic
-                        enabled: !root.cw-running;
+                        // always armed: a stuck ritual (a spent link, absent
+                        // joiners) must be abortable. Mid-run it asks first —
+                        // aborting voids every distributed invite link.
                         clicked => {
-                            if (root.cw-step == 1) {
+                            if (root.cw-running) {
+                                root.confirm-abort-ritual-open = true;
+                            } else if (root.cw-step == 1) {
                                 root.create-cancel();
                             } else {
                                 root.navigate(AppScreen.choice);
@@ -2803,9 +2815,9 @@ export component AppWindow inherits Window {
                     }
                     AppButton {
                         label: "×";
-                        // no bailing out while the join is running; after a
-                        // failure it works again
-                        enabled: !root.jw-running;
+                        // always armed: a joiner stuck waiting (spent link,
+                        // vanished founder) must never be trapped — cancel
+                        // invalidates the in-flight join task engine-side
                         clicked => {
                             if (root.jw-step == 1) {
                                 root.join-cancel();
@@ -3951,8 +3963,17 @@ export component AppWindow inherits Window {
                                     HorizontalLayout {
                                         padding: 14px;
                                         spacing: 12px;
+                                        // the republic's image stretches to
+                                        // ALL surplus width (a banner) once
+                                        // one is set — the name keeps its
+                                        // preferred width first (a layout
+                                        // hands non-stretch children their
+                                        // preferred size before surplus, so
+                                        // the name always has room)
                                         Rectangle {
-                                            width: 56px;
+                                            min-width: 56px;
+                                            preferred-width: 56px;
+                                            horizontal-stretch: root.org-img-set ? 1 : 0;
                                             height: 56px;
                                             y: (parent.height - self.height) / 2;
                                             border-radius: Theme.win95 ? 0px : 8px;
@@ -4013,7 +4034,11 @@ export component AppWindow inherits Window {
                                                 wrap: word-wrap;
                                             }
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
+                                        // without an image the spacer pushes
+                                        // the rename control to the right
+                                        // edge; with the stretching banner
+                                        // the image itself is the filler
+                                        if !root.org-img-set: Rectangle { horizontal-stretch: 1; }
                                         // renaming the republic is a gated
                                         // change — the edit opens a proposal
                                         // draft, top-right like an app bar
@@ -6169,6 +6194,22 @@ export component AppWindow inherits Window {
     // Modal: leaving the settings screen with unsaved draft edits. Three ways
     // out: save to config.toml and leave, discard the draft and leave, or
     // stay (cancel / Escape / scrim click).
+    // Modal: abort a RUNNING founding ritual — every distributed invite
+    // link becomes invalid and each participant's join ends; the founding
+    // can be started fresh afterwards.
+    if root.confirm-abort-ritual-open: ConfirmModal {
+        title: Strings.cw-abort-title;
+        body: Strings.cw-abort-body;
+        confirm-label: Strings.cw-abort-confirm;
+        dismissed => {
+            root.confirm-abort-ritual-open = false;
+        }
+        confirmed => {
+            root.confirm-abort-ritual-open = false;
+            root.create-cancel();
+        }
+    }
+
     if root.confirm-leave-open: ConfirmModal {
         title: Strings.unsaved-title;
         body: Strings.unsaved-body;

@@ -542,6 +542,7 @@ fn spawn_founder_recv(
                 invite::RitualMsg::JoinAccepted { .. }
                 | invite::RitualMsg::Seal { .. }
                 | invite::RitualMsg::Genesis { .. }
+                | invite::RitualMsg::LinkSpent { .. }
                 | invite::RitualMsg::Recover(_)
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
@@ -1379,6 +1380,17 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                     let _ = r.accepted.try_send(());
                 }
             }
+            // the founder rejected this activation: the single-use ticket was
+            // already spent by another member (the same link went to two
+            // people). Fail fast with the reason — the joiner needs their
+            // own, unused link.
+            invite::RitualMsg::LinkSpent { .. } => {
+                return Err(
+                    "this invite link was already used by another member — every \
+                     member needs their own link; ask the founder for a fresh one"
+                        .to_string(),
+                );
+            }
             invite::RitualMsg::Seal { proposal } => break proposal,
             _ => {}
         }
@@ -1782,16 +1794,59 @@ mod ritual_ops {
             if !self.ritual_generation_current(generation) {
                 return Ok(molt_core::Reply::Ack);
             }
+            let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            // the ticket is single-use — handle a spent seat FIRST, on an
+            // immutable borrow (the log/transport access below must not fight
+            // the mutable seat borrow). The SAME member re-announcing itself
+            // is at-least-once delivery (a redelivered JoinRequest) — stay
+            // silent, the seat is already theirs. A DIFFERENT member with a
+            // valid MAC means the founder sent one link to two people: reject
+            // the second activation on its reply queue so it fails fast
+            // instead of waiting forever, and say so in the ritual log — the
+            // anchored seat and the ritual stay untouched.
+            let spent = self
+                .net_ritual
+                .as_ref()
+                .and_then(|r| r.seats.get(idx))
+                .and_then(|s| {
+                    s.identity
+                        .as_ref()
+                        .map(|a| (a.member.clone(), a.identity_pk.clone(), s.ticket.clone()))
+                });
+            if let Some((anchored_member, anchored_pk, ticket)) = spent {
+                let same = anchored_member == member && anchored_pk == identity_pk;
+                if !same && invite::verify_join_mac(&ticket, &member, &identity_pk, &proof) {
+                    if let (Some((snd, wrap)), Some(ritual)) =
+                        (parse_reply_handover(&reply), &self.net_ritual)
+                    {
+                        if let Ok(payload) =
+                            serde_json::to_vec(&invite::RitualMsg::LinkSpent { seat })
+                        {
+                            let transport = ritual.transport.clone();
+                            let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
+                            tokio::spawn(async move {
+                                let _ = supervisor::send_framed(
+                                    &transport, &snd, &wrap, id, &payload,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    self.session.create.run.log.push(format!(
+                        "✗ invite {} was activated a second time (by {member}) — that \
+                         link is spent; they need their own, unused link",
+                        idx + 1
+                    ));
+                    self.emit_session(molt_core::SessionScope::Create);
+                }
+                return Ok(molt_core::Reply::Ack);
+            }
             let Some(ritual) = &mut self.net_ritual else {
                 return Ok(molt_core::Reply::Ack);
             };
-            let idx = usize::try_from(seat).unwrap_or(usize::MAX);
             let Some(s) = ritual.seats.get_mut(idx) else {
                 return Ok(molt_core::Reply::Ack);
             };
-            if s.identity.is_some() {
-                return Ok(molt_core::Reply::Ack); // ticket already spent
-            }
             if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
                 return Ok(molt_core::Reply::Ack);

@@ -168,6 +168,16 @@ pub enum RitualMsg {
         /// Which invite this answers (0-based seat index).
         seat: u32,
     },
+    /// founder → member: this activation was REJECTED because the invite's
+    /// single-use ticket was already spent by another member (the founder
+    /// sent the same link twice by mistake). Sent on the second joiner's
+    /// advertised reply queue so they fail fast with the reason instead of
+    /// waiting forever; they need their own, unused link. Additive: an older
+    /// joiner simply fails to parse it and keeps its (old) silent wait.
+    LinkSpent {
+        /// Which invite this answers (0-based seat index).
+        seat: u32,
+    },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
     /// member → founder: the member explicitly **declined** the proposed
