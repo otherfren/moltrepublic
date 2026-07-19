@@ -1,3 +1,47 @@
+# Abschlussbericht — Mock-Abbau Stories 1–13 (Session 2026-07-18/19)
+
+**Alle 13 Stories dieses Dokuments sind umgesetzt und auf master** (getestet-grün,
+clippy 0, Slint-Window-Build sauber). Vorgehen: test-driven, jede Story auf
+eigenem Branch, in Dokument-Reihenfolge auf master gemergt, jede mit eigenem
+Code-Review vor dem Merge.
+
+**Was echt wurde (1–13):** echter `rfd`-Ordnerdialog (1); ehrliche Netzwerk-Anzeige
+beim Gründen statt kosmetischem Dropdown (2); echte Workspace-Größe aus dem
+Verzeichnis (3); Demo-Mesh/-Peers aus dem Produktions-Binary entfernt, Solo-Boot,
+Test-Seam (4); echter S3-Verbindungstest — neuer pure-Rust-S3-Client (SigV4, HTTP,
+fail-closed/Tor), Basis für 8/12/13 (5); echte Präsenz-Zeitstempel + Alterungs-Ticker,
+Aktivitäts-Trio aus echten Stempeln (6); Governance-Zähl-Simulation entfernt, ohne
+Chain nur noch die eigene Zustimmung, ehrlicher `AlreadyApproved` (7); echte
+Backup-Orphans aus signiertem `ListObjectsV2` mit gehärtetem XML-Parsing (8); echter
+verschlüsselter Ein-Datei-Export `.molt.enc` (Argon2id, XChaCha20-Poly1305; MLS-Ratchets
+und Queue-Creds werden nie exportiert) (9); echte At-rest-Versiegelung (derive-and-verify,
+Schlüssel verlässt die Platte, Phrase real geprüft, überlebt Neustart) (10); Plugin-Vokabel
+entfernt (11); echtes S3-Auto-Backup (Ticker, ehrliche Stempel nur nach bestätigtem
+Upload, Retention) (12); echter zweiphasiger Restore aus Datei/S3 — Staging →
+Chain-Verify hard-reject vor Materialisierung → Commit, Öffnen „detached", der Weg
+zurück in die lebende Republik bleibt das Recovery-Ritual (13). Design in
+`documents/backup_restore_design.md`. Story 14 (Memory/Quests/Vault/Wallet als echte
+Produkte) bleibt bewusst offen.
+
+**UI-Arbeiten (Nutzer-Aufträge):** die vier stillgelegten Surfaces (Memory/Quests/Vault/
+Wallet) als klar gebadgte „Design-Mock"-Panes reaktiviert; das Memory-„Brain"-Pane als
+Datei-Navigator + Markdown-Content mit verschiebbarem Trenner; Settings→Netzwerk breiter
+gelegt und der SMP-Server als Auswahl mit einblendbarem Custom-Feld.
+
+**Abschluss-Review + Security-Analyse:** adversariales Multi-Agenten-Review über den
+gesamten Session-Diff (`86b72db..`, ~15,7k Zeilen, 10 Dimensionen, jedes Finding von
+3 perspektiv-diversen Skeptikern verifiziert). Ergebnis: **keine kritischen Bugs**;
+gefunden und behoben wurden 3 HIGH (Cross-Blob-Splice ohne per-Blob-Salt im Export;
+PUT-Upload lief in den 30-s-Gesamttimeout und hätte reale Backups über Tor scheitern
+lassen; nicht-kanonische Backup-Key-Breiten brachen die Retention-Reihenfolge), 1
+HIGH-Interaktions-Gap (Restore-Replace konnte den offenen Workspace zerstören), 8 MEDIUM
+und ~19 LOW (u. a. Zeroize der Secret-Puffer, ehrliche S3-Fehlerklassen, versiegelte-tmp-
+Bereinigung, Phrase-Leak im Boot-Scan eines halb-versiegelten Verzeichnisses, veraltete
+„Mock"-Modal-Texte). Alle bestätigten Findings sind auf master gefixt, test-driven,
+erneut grün.
+
+---
+
 # Mock-Inventur — was noch nicht echt ist
 
 Stand: 2026-07-18
