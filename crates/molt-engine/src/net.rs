@@ -115,6 +115,12 @@ pub(crate) enum PendingRef {
         /// The removing member (the link identity).
         by: MemberId,
     },
+    /// A read receipt — honored at drain unless the target turns out to be a
+    /// tombstone or `by`'s own message (the ChatRead commute rules).
+    Read {
+        /// The reading member (the link identity).
+        by: MemberId,
+    },
 }
 
 /// The P6 parking buffer: cross-sender ordering is not guaranteed (per-sender
@@ -359,6 +365,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
         WorkspaceEvent::Chat(_)
             | WorkspaceEvent::ChatReacted { .. }
             | WorkspaceEvent::ChatDeleted { .. }
+            | WorkspaceEvent::ChatRead { .. }
             | WorkspaceEvent::FileRemoved { .. }
             | WorkspaceEvent::Proposed { .. }
             | WorkspaceEvent::Approved { .. }
@@ -900,6 +907,7 @@ impl State {
                         PendingRef::React { by, emoji, op } => self.wire_react(id, by, emoji, op),
                         PendingRef::Delete { by } => self.wire_delete(id, by),
                         PendingRef::FileRemove { by } => self.wire_file_remove(id, by),
+                        PendingRef::Read { by } => self.wire_read(id, by),
                     }
                 }
             }
@@ -936,6 +944,29 @@ impl State {
                     return Ok(Reply::Ack);
                 };
                 self.wire_file_remove(id, from);
+            }
+            // read receipts (batched, id-only). `by` is discarded — the acting
+            // member is ALWAYS the link identity, so a peer cannot forge
+            // another member's receipt. Known targets record in one batched
+            // event; a target that has not arrived here yet parks (P6) and
+            // re-applies when its message lands — see the Chat arm's drain.
+            WorkspaceEvent::ChatRead { ids, .. } => {
+                let mut known: Vec<MessageId> = Vec::new();
+                for id in ids {
+                    match self.chat_by_id(&id) {
+                        Ok((_, msg)) => {
+                            // skip a tombstone or `from`'s own message (commute
+                            // with the local apply guard); the rest are receiptable
+                            if msg.deleted_by.is_none() && msg.from != from {
+                                known.push(id);
+                            }
+                        }
+                        Err(_) => self.parked.park(id, PendingRef::Read { by: from.clone() }),
+                    }
+                }
+                if !known.is_empty() {
+                    self.record_read(known, from);
+                }
             }
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
@@ -1589,6 +1620,23 @@ impl State {
             return;
         }
         self.record_file_remove(index, id, from);
+    }
+
+    /// Apply (or park) a link-authenticated wire read receipt for a single
+    /// message (the P6 drain path; the live arm batches and parks inline).
+    /// Skips a tombstoned target or `from`'s own message so the read/delete
+    /// pair commutes — the same guard as the apply arm.
+    fn wire_read(&mut self, id: MessageId, from: MemberId) {
+        let Ok((_, msg)) = self.chat_by_id(&id) else {
+            tracing::debug!(%from, %id, "a wire read receipt arrived before its message — parked (P6)");
+            self.parked.park(id, PendingRef::Read { by: from });
+            return;
+        };
+        if msg.deleted_by.is_some() || msg.from == from {
+            tracing::debug!(%from, %id, "skipping a wire read receipt on a tombstone or own message");
+            return;
+        }
+        self.record_read(vec![id], from);
     }
 
     /// Passive presence: stamp the member with the engine clock's real

@@ -93,11 +93,21 @@ pub struct StorageConfig {
     /// Alert sound for a new incoming vote, same vocabulary.
     #[serde(default = "default_sound")]
     pub sound_vote: String,
+    /// Send (and show) per-message chat read receipts (local privacy switch,
+    /// on by default). Mirrors `molt_core::SessionSettings::read_receipts`.
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
 }
 
 /// Default alert sound — silent. Mirrors `molt_core::SessionSettings`.
 pub fn default_sound() -> String {
     "none".to_string()
+}
+
+/// Default for an opt-out boolean — on unless the operator disables it (and
+/// present-by-absence in an older `config.toml`).
+pub fn default_true() -> bool {
+    true
 }
 
 impl Default for StorageConfig {
@@ -114,6 +124,7 @@ impl Default for StorageConfig {
             download_dir: default_download_dir(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            read_receipts: true,
         }
     }
 }
@@ -374,6 +385,8 @@ pub struct Settings {
     pub sound_message: String,
     /// Alert sound for a new incoming vote.
     pub sound_vote: String,
+    /// Send (and show) per-message chat read receipts (local privacy switch).
+    pub read_receipts: bool,
     /// Anonymity network: `"tor" | "nym" | "none"`.
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
@@ -412,6 +425,7 @@ impl Default for Settings {
             download_dir: default_download_dir(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            read_receipts: true,
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
@@ -465,6 +479,7 @@ impl From<&Config> for Settings {
             download_dir: c.storage.download_dir.clone(),
             sound_message: c.storage.sound_message.clone(),
             sound_vote: c.storage.sound_vote.clone(),
+            read_receipts: c.storage.read_receipts,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
@@ -512,6 +527,9 @@ download_dir = {download_dir}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}
 sound_vote = {sound_vote}
+# Send (and show) per-message chat read receipts. false = this node reveals no
+# read confirmations and hides others' from its chat view (symmetric).
+read_receipts = {read_receipts}
 
 [mcp]
 # MCP server TCP port. Always served (UI + headless).
@@ -567,6 +585,7 @@ theme = {theme}
         download_dir = toml_str(&settings.download_dir),
         sound_message = toml_str(&settings.sound_message),
         sound_vote = toml_str(&settings.sound_vote),
+        read_receipts = settings.read_receipts,
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
         mcp_token = toml_str(&settings.mcp_token),
@@ -641,6 +660,9 @@ pub fn salvage(text: &str) -> Settings {
             if valid_sound(v) {
                 s.sound_vote = v.to_string();
             }
+        }
+        if let Some(b) = storage.get("read_receipts").and_then(toml::Value::as_bool) {
+            s.read_receipts = b;
         }
     }
     if let Some(anonymity) = value.get("transport").and_then(|t| t.get("anonymity")) {
@@ -799,6 +821,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_str(storage, "download_dir", &settings.download_dir);
     set_str(storage, "sound_message", &settings.sound_message);
     set_str(storage, "sound_vote", &settings.sound_vote);
+    set_bool(storage, "read_receipts", settings.read_receipts);
 
     let mcp = table_at(doc.as_table_mut(), &["mcp"]);
     set_int(mcp, "port", i64::from(settings.mcp_port));
@@ -988,6 +1011,7 @@ mod tests {
             s3_keep_copies: 9,
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
+            read_receipts: false,
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,

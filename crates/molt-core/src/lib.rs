@@ -14,7 +14,7 @@
 //! `molt-ui`. See `documents` in `../../moltrepublic-docs` for the design
 //! (the generalized approval engine, R0, and the five surfaces).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -272,11 +272,22 @@ pub struct SessionSettings {
     /// Alert sound for a new incoming vote (proposal), same vocabulary.
     #[serde(default = "default_sound")]
     pub sound_vote: String,
+    /// Send (and show) per-message chat read receipts. A local per-node
+    /// privacy switch, on by default; while off this node broadcasts no
+    /// receipts and hides others' from its chat view (symmetric).
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
 }
 
 /// Default alert sound: silent until the operator opts in.
 fn default_sound() -> String {
     "none".to_string()
+}
+
+/// Default for an opt-out boolean preference (on unless the operator
+/// disables it, and present-by-absence in an older `config.toml`).
+fn default_true() -> bool {
+    true
 }
 
 /// The display label for an anonymity-network setting — what
@@ -316,6 +327,7 @@ impl Default for SessionSettings {
             download_dir: default_download_dir(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            read_receipts: true,
         }
     }
 }
@@ -1078,6 +1090,7 @@ impl ChatMessage {
             channel: ChannelRef::Group,
             kind: ChatKind::User,
             reactions: BTreeMap::new(),
+            read_by: BTreeSet::new(),
             deleted_by: None,
             file: None,
         }
@@ -1135,6 +1148,14 @@ pub struct ChatMessage {
     /// BTreeMap keeps the pill order stable across re-renders).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reactions: BTreeMap<String, Vec<MemberId>>,
+    /// Members (never the author) who have confirmed reading this message
+    /// (read receipts). Monotonic — insert-only, there is no "un-read";
+    /// bounded by the roster; a `BTreeSet` keeps the dot order stable.
+    /// Empty on every legacy message and invisible on the wire while it is
+    /// (the byte-identity fixtures pin that an empty set serializes exactly
+    /// as before this field — the `skip_serializing_if` is load-bearing).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub read_by: BTreeSet<MemberId>,
     /// Who deleted the message (`None` = live).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_by: Option<MemberId>,
@@ -1652,6 +1673,21 @@ pub enum WorkspaceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<MessageId>,
         /// The sharer.
+        by: MemberId,
+    },
+    /// A member confirmed reading these messages (read receipts). Batched —
+    /// one event carries a whole channel-open's worth of ids, encrypted once
+    /// and fanned out like any chat event. A post-chat-bus feature, so it
+    /// addresses purely by stable id (no legacy `index` fallback: every
+    /// message has an id by the time it can be read). `by` is bound to the
+    /// authenticated link identity on receive (like [`WorkspaceEvent::ChatReacted`]),
+    /// so a member cannot forge another's receipt. No `op` — reads are
+    /// monotonic (insert-only), so at-least-once redelivery is a harmless
+    /// idempotent set insert.
+    ChatRead {
+        /// The stable ids the sender has read.
+        ids: Vec<MessageId>,
+        /// Who read them.
         by: MemberId,
     },
     /// An object was put forward for threshold approval.
@@ -2401,6 +2437,17 @@ pub enum Command {
         /// The reaction emoji.
         emoji: String,
     },
+    /// Confirm the local member has read these chat messages (read
+    /// receipts). Co-equal: the GUI issues it when a channel is opened; an
+    /// MCP agent may issue it explicitly. The engine binds the receipt to
+    /// the local member, filters to messages not authored by them and not
+    /// already read (so a repeat is a no-op), and — only when read receipts
+    /// are enabled locally — records and broadcasts a batched
+    /// [`WorkspaceEvent::ChatRead`]. Unknown or own-authored ids are ignored.
+    MarkRead {
+        /// The messages the local member has read.
+        ids: Vec<MessageId>,
+    },
     /// Share a local file into the ungated chat. The engine derives the
     /// metadata (name, size, date, kind) and streams the real sha256 off
     /// the actor; the share message posts when hashing completes. Only
@@ -2507,6 +2554,14 @@ pub enum Command {
     SetTheme {
         /// The new theme name.
         theme: String,
+    },
+    /// Turn this node's chat read receipts on or off (a local per-node
+    /// preference, persisted to `config.toml` — never governance-gated, never
+    /// on the wire). Symmetric: while off, the node sends no receipts of its
+    /// own AND hides others' receipts from its chat view.
+    SetReadReceipts {
+        /// New read-receipts state.
+        enabled: bool,
     },
     /// Store the settings into the session and persist them to the node's
     /// `config.toml` (format-preserving, atomic). The reply does not wait for
@@ -3757,6 +3812,14 @@ pub enum Event {
         /// Who toggled it.
         by: MemberId,
     },
+    /// A member confirmed reading chat messages (read receipts) — the newly
+    /// recorded ids only.
+    Read {
+        /// The messages now marked read by `by`.
+        ids: Vec<MessageId>,
+        /// Who read them.
+        by: MemberId,
+    },
     /// A shared file became unavailable (its sharer deleted it locally).
     FileRemoved {
         /// The share message's stable id.
@@ -4405,6 +4468,32 @@ mod tests {
         let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
         assert_eq!(back.kind, ChatKind::System);
         assert_eq!(back, sys);
+    }
+
+    #[test]
+    fn read_by_is_additive_empty_invisible_populated_roundtrips() {
+        // (a) an empty read_by emits NO "read_by" key — byte-identical to the
+        // pre-read-receipts wire shape (the skip_serializing_if is load-bearing)
+        let plain = ChatMessage::text(MessageId::NIL, "petra", "gm", 102);
+        assert!(plain.read_by.is_empty());
+        let wire = serde_json::to_string(&plain).expect("encode");
+        assert!(!wire.contains("read_by"), "empty read_by must stay invisible: {wire}");
+        assert_eq!(wire, r#"{"from":"petra","body":"gm","ts":102}"#);
+
+        // (b) legacy JSON without read_by decodes to the empty-set default
+        let legacy = r#"{"from":"walter","body":"re: gm","ts":103}"#;
+        let msg: ChatMessage = serde_json::from_str(legacy).expect("decode");
+        assert!(msg.read_by.is_empty());
+
+        // (c) a populated read_by round-trips (sorted set, stable order)
+        let mut m = ChatMessage::text(MessageId::NIL, "petra", "hi", 104);
+        m.read_by.insert("walter".to_string());
+        m.read_by.insert("clara".to_string());
+        let wire = serde_json::to_string(&m).expect("encode");
+        assert!(wire.contains(r#""read_by":["clara","walter"]"#), "sorted set on the wire: {wire}");
+        let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
+        assert_eq!(back.read_by, m.read_by);
+        assert_eq!(back, m);
     }
 
     #[test]

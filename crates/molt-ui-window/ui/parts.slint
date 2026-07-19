@@ -4,7 +4,7 @@
 // Strings globals and its own properties — no AppWindow state. The window
 // (app.slint) composes these into the actual screens.
 
-import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, MemberSync, ProposalRow } from "theme.slint";
+import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip } from "theme.slint";
 import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
@@ -382,6 +382,9 @@ export component ChatRow inherits Rectangle {
     // trash on own live shares = delete the local file
     callback file-clicked();
     callback file-remove-requested();
+    // the local read-receipts switch: when off, the per-member receipt row is
+    // hidden entirely (symmetric — this node also sends no receipts).
+    in property <bool> receipts-on: true;
     property <bool> is-target: root.scroll-request == root.index;
     changed is-target => {
         if (self.is-target) {
@@ -606,6 +609,39 @@ export component ChatRow inherits Rectangle {
                         emoji-picked(emoji) => {
                             root.toggle-reaction(emoji);
                             react-pop.close();
+                        }
+                    }
+                }
+            }
+        }
+        // read receipts (Lesebestätigung): a small row in the BOTTOM-RIGHT
+        // corner — one dot per member except the author, green once they read
+        // it (in read_by), yellow until then. It rides the content flow (grows
+        // the card, never overlaps, unlike the top-right action buttons) and
+        // hides entirely when the local read-receipts switch is off, on legacy
+        // rows without an id, on system lines, and on tombstones.
+        if root.receipts-on && root.line.receipts.length > 0 && !root.line.system && root.line.id != "" && root.line.deleted-by == "": HorizontalLayout {
+            height: 14px;
+            padding-top: 3px;
+            spacing: 3px;
+            alignment: end;
+            for rc in root.line.receipts: Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                // green = read, yellow/amber = not yet (the presence-dot idiom)
+                background: rc.read ? Theme.good : Theme.warn;
+                dot-ta := TouchArea {
+                    // the member name goes through the window-topmost HintTip
+                    // overlay (never clipped, grabs no input, so no strobe)
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            HintTip.label = rc.name;
+                            HintTip.ax = self.absolute-position.x;
+                            HintTip.ay = self.absolute-position.y + self.height + 6px;
+                        } else if (HintTip.ax == self.absolute-position.x
+                            && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                            HintTip.label = "";
                         }
                     }
                 }

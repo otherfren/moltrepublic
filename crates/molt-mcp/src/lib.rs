@@ -275,6 +275,24 @@ fn opt_id_arg(args: &Value, key: &str) -> Result<Option<MessageId>, String> {
     }
 }
 
+/// A required array of chat-message ids (each 32-char lowercase hex). An
+/// empty array is allowed (the engine treats it as a no-op); a non-array, or
+/// any element of the wrong type/shape, is an error.
+fn ids_arg(args: &Value, key: &str) -> Result<Vec<MessageId>, String> {
+    let arr = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing array argument `{key}` (message ids from read_state)"))?;
+    arr.iter()
+        .map(|v| match v {
+            Value::String(s) => s.parse().map_err(|e| format!("argument `{key}`: {e}")),
+            other => Err(format!(
+                "argument `{key}` must be an array of string message ids, got element {other}"
+            )),
+        })
+        .collect()
+}
+
 /// The wire schema of the `channel` argument — one shape shared by
 /// `chat_send` and `read_state`, mirroring [`ChannelRef`]'s tagged form.
 fn channel_schema(description: &str) -> Value {
@@ -404,6 +422,10 @@ fn settings_arg(args: &Value) -> SessionSettings {
         s3_keep_copies: port("s3_keep_copies", d.s3_keep_copies),
         sound_message: text("sound_message", d.sound_message),
         sound_vote: text("sound_vote", d.sound_vote),
+        read_receipts: args
+            .get("read_receipts")
+            .and_then(Value::as_bool)
+            .unwrap_or(d.read_receipts),
         mcp_port: port("mcp_port", d.mcp_port),
         mcp_allow: text("mcp_allow", d.mcp_allow),
         mcp_token: text("mcp_token", d.mcp_token),
@@ -490,6 +512,25 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::ReactChat {
                 id: id_arg(args, "id")?,
                 emoji: str_arg(args, "emoji")?,
+            }),
+        },
+        ToolDef {
+            name: "mark_read",
+            command: "mark_read",
+            description: "Confirm this member has read chat messages (read receipts), addressed by their stable ids (the 32-char lowercase hex `id`s from read_state). Records the local member's receipt and broadcasts it so peers can show a green dot; a message you authored, already-read, or unknown id is ignored, and while this node's read receipts are disabled it is a silent no-op. Honest: only call it for messages actually seen.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "message ids to mark read (each 32-char lowercase hex, from read_state)"
+                    }
+                },
+                "required": ["ids"]
+            }),
+            build: |args| Ok(Command::MarkRead {
+                ids: ids_arg(args, "ids")?,
             }),
         },
         ToolDef {
@@ -735,6 +776,19 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "set_read_receipts",
+            command: "set_read_receipts",
+            description: "Turn this node's chat read receipts on or off (a local privacy switch, persisted to config.toml — never a governance vote). While off, this node sends no read confirmations of its own AND hides other members' receipts from its chat view (symmetric).",
+            schema: || json!({
+                "type": "object",
+                "properties": { "enabled": { "type": "boolean" } },
+                "required": ["enabled"]
+            }),
+            build: |args| Ok(Command::SetReadReceipts {
+                enabled: bool_arg(args, "enabled")?,
+            }),
+        },
+        ToolDef {
             name: "save_settings",
             command: "save_settings",
             description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields.",
@@ -752,6 +806,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_keep_copies": { "type": "integer" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string", "description": "client IP allowlist: \"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
                     "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },

@@ -179,6 +179,7 @@ fn main() -> anyhow::Result<()> {
             s3_keep_copies: config.storage.s3_keep_copies,
             sound_message: config.storage.sound_message.clone(),
             sound_vote: config.storage.sound_vote.clone(),
+            read_receipts: config.storage.read_receipts,
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),

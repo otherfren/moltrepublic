@@ -86,6 +86,17 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Flip this node's read-receipts preference (a hot local pref — no
+    /// restart). Silent persist to `config.toml`, then re-emit the session so
+    /// the GUI reflects the new state (and, symmetrically, hides/shows others'
+    /// receipts).
+    pub(crate) fn cmd_set_read_receipts(&mut self, enabled: bool) -> Result<Reply, MoltError> {
+        self.session.settings.read_receipts = enabled;
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_save_settings(
         &mut self,
         settings: SessionSettings,

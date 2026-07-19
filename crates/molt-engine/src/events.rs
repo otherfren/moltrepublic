@@ -211,6 +211,10 @@ impl State {
                 };
                 msg.body.clear();
                 msg.reactions.clear();
+                // a tombstone carries no read receipts either (the read/delete
+                // pair commutes: a receipt arriving after the delete is
+                // dropped by the ChatRead arm's tombstone guard)
+                msg.read_by.clear();
                 // deleting the message drops a file share with it
                 msg.file = None;
                 msg.deleted_by = Some(by.clone());
@@ -218,6 +222,24 @@ impl State {
             WorkspaceEvent::FileRemoved { index, id, .. } => {
                 if let Some(file) = self.chat_target(id, *index).and_then(|m| m.file.as_mut()) {
                     file.available = false;
+                }
+            }
+            WorkspaceEvent::ChatRead { ids, by } => {
+                // read receipts address purely by stable id (post-chat-bus).
+                // An unknown id is ignored here — the wire arm parks it until
+                // the message arrives, then drains it back through here.
+                for id in ids {
+                    let Some(msg) = self.chat_target(&Some(*id), 0) else {
+                        continue;
+                    };
+                    // never on a tombstone (delete clears read_by → commute),
+                    // and the author never receipts their own message
+                    if msg.deleted_by.is_some() || &msg.from == by {
+                        continue;
+                    }
+                    // monotonic idempotent insert — at-least-once redelivery
+                    // is a harmless no-op
+                    msg.read_by.insert(by.clone());
                 }
             }
             WorkspaceEvent::Proposed {
@@ -551,6 +573,7 @@ mod tests {
                 channel: molt_core::ChannelRef::Group,
                 kind: molt_core::ChatKind::User,
                 reactions: Default::default(),
+                read_by: Default::default(),
                 deleted_by: None,
                 file: None,
             }
@@ -1038,6 +1061,7 @@ mod tests {
             channel: molt_core::ChannelRef::Group,
             kind: molt_core::ChatKind::User,
             reactions: Default::default(),
+            read_by: Default::default(),
             deleted_by: None,
             file: None,
         };

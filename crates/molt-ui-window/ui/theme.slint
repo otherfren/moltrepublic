@@ -23,6 +23,13 @@ export struct ReactionItem {
     mine: bool,
 }
 
+// One per-member read receipt on a chat message (Lesebestätigung): a dot per
+// member EXCEPT the author — green once `read`, yellow until then.
+export struct ReceiptItem {
+    name: string, // the member this dot represents (hover shows it)
+    read: bool, // true = they have confirmed reading (green); false = not yet (yellow)
+}
+
 // One line in a surface's log: for chat, `lead` is the sender and `text` the
 // body; for gated surfaces `lead` is empty and `text` is the proposal summary.
 export struct LogLine {
@@ -40,6 +47,7 @@ export struct LogLine {
     alt: bool, // author-block zebra stripe (flips when the author changes)
     mine-emoji: string, // the local member's reaction ("" = none yet)
     reactions: [ReactionItem],
+    receipts: [ReceiptItem], // per-member read receipts (every member but the author); shown only when the local read-receipts switch is on
     has-file: bool, // the message carries a shared file's metadata
     file-name: string,
     file-meta: string, // rendered "1.2 MiB · PDF · 2026-07-01"
@@ -645,6 +653,8 @@ export global Strings {
     in property <string> s3-test-tip;
     in property <string> s3-ok;
     in property <string> set-s3-active;
+    in property <string> field-read-receipts;
+    in property <string> set-read-receipts;
     in property <string> set-s3-every;
     in property <string> set-s3-unit-min;
     in property <string> set-s3-keep;

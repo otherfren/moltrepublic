@@ -872,6 +872,7 @@ impl State {
                 channel,
             } => self.cmd_chat(body, quote, channel),
             Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
+            Command::MarkRead { ids } => self.cmd_mark_read(ids),
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
@@ -1002,6 +1003,7 @@ impl State {
             Command::SelectView { surface, view } => self.cmd_select_view(surface, view),
             Command::SetLanguage { lang } => self.cmd_set_language(lang),
             Command::SetTheme { theme } => self.cmd_set_theme(theme),
+            Command::SetReadReceipts { enabled } => self.cmd_set_read_receipts(enabled),
             Command::SaveSettings { settings } => self.cmd_save_settings(settings),
             Command::ReloadSettings {
                 settings,

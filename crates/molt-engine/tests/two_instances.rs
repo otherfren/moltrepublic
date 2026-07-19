@@ -1009,8 +1009,43 @@ async fn reactions_and_deletes_converge_across_two_instances() {
         "the founder's reaction is on the member's message: {chat:?}"
     );
 
+    // --- the founder marks the MEMBER's message read; the read receipt
+    // crosses the wire (crosses_wire + the outbox feed gate) addressed by the
+    // stable id, and the founder's own state shows the green-dot member ---
+    a.execute(Command::MarkRead {
+        ids: vec![common::test_msg_id(2)],
+    })
+    .await
+    .expect("founder marks read");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let got = member_sink.messages();
+        if got.iter().any(|(from, env)| {
+            from == "founder-a"
+                && matches!(
+                    &env.body,
+                    WorkspaceEvent::ChatRead { ids, by }
+                        if ids.contains(&common::test_msg_id(2)) && by == "founder-a"
+                )
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founder's read receipt never crossed the mesh; got {:?}",
+            got.iter().map(|(_, e)| &e.body).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let chat = common::read_chat(&a).await;
+    assert_eq!(
+        chat[1]["read_by"],
+        serde_json::json!(["founder-a"]),
+        "the founder's read receipt is on the member's message: {chat:?}"
+    );
+
     // --- the member deletes its OWN message; the founder honors it and
-    // shows the tombstone ---
+    // shows the tombstone (dropping reactions AND read receipts with it) ---
     member_feed.push(EventEnvelope {
         seq: 3,
         ts: 1_751_000_003,
@@ -1033,6 +1068,11 @@ async fn reactions_and_deletes_converge_across_two_instances() {
             assert!(
                 chat[1].get("reactions").is_none(),
                 "reactions drop with the message: {:?}",
+                chat[1]
+            );
+            assert!(
+                chat[1].get("read_by").is_none(),
+                "read receipts drop with the message: {:?}",
                 chat[1]
             );
             break;

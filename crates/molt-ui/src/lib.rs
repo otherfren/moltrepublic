@@ -1951,6 +1951,7 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),
         sound_vote: sound_name(ui.get_cfg_sound_vote_index()),
+        read_receipts: ui.get_cfg_read_receipts(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
         s3_access_key: ui.get_cfg_s3_access().to_string(),
@@ -2273,6 +2274,7 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
     ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
     ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
+    ui.set_cfg_read_receipts(s.read_receipts);
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
@@ -2744,6 +2746,12 @@ struct LogLineData {
     alt: bool,
     mine_emoji: String,
     reactions: Vec<ReactionData>,
+    /// Per-member read receipts (every member except the author): a green dot
+    /// once they have read the message, yellow until then. Empty for legacy /
+    /// system rows and for own-authored… no — includes every non-author, so
+    /// the author sees who has read their message. Display is gated on the
+    /// local read-receipts switch in the .slint (symmetric hide).
+    receipts: Vec<ReceiptData>,
     has_file: bool,
     file_name: String,
     file_meta: String,
@@ -2758,6 +2766,12 @@ struct ReactionData {
     emoji: String,
     count: i32,
     mine: bool,
+}
+struct ReceiptData {
+    /// The member this dot represents.
+    name: String,
+    /// Whether they have confirmed reading (green) or not yet (yellow).
+    read: bool,
 }
 struct ProposalRowData {
     id: i32,
@@ -2821,7 +2835,7 @@ async fn push_surfaces(
     // session; the time filter itself is engine-side (`ReadState { view }`,
     // co-equality) — when another surface is selected the chat read stays
     // on the default General view
-    let (active_ws, lang, chat_view) = match wallet.execute(Command::ReadSession).await {
+    let (active_ws, lang, chat_view, mark_read_active) = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(s)) => (
             s.active_workspace.clone(),
             i32::from(s.language == "de"),
@@ -2830,8 +2844,12 @@ async fn push_surfaces(
             } else {
                 Surface::Chat.default_view().to_string()
             },
+            // only auto-confirm reads when the chat surface is on screen AND
+            // this node's read receipts are enabled (off = reveal nothing, so
+            // do not even issue the no-op'd command)
+            s.surface == Surface::Chat && s.settings.read_receipts,
         ),
-        _ => (String::new(), 0, Surface::Chat.default_view().to_string()),
+        _ => (String::new(), 0, Surface::Chat.default_view().to_string(), false),
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
@@ -2931,6 +2949,30 @@ async fn push_surfaces(
             .await
         {
             snaps.push((sf, snap));
+        }
+    }
+    // D2 read-receipts trigger: while the chat surface is the one on screen,
+    // confirm the loaded messages of the selected channel as read — every
+    // message not mine, live, human, with a real id, and not already read by
+    // me. One batched MarkRead; the engine no-ops it when read receipts are
+    // disabled locally or nothing is fresh, so firing on every chat refresh is
+    // safe and idempotent (a repeat filters to empty → no re-broadcast).
+    if mark_read_active {
+        if let Some((_, chat_snap)) = snaps.iter().find(|(sf, _)| *sf == Surface::Chat) {
+            let fresh: Vec<molt_core::MessageId> = chat_messages(chat_snap)
+                .into_iter()
+                .filter(|m| {
+                    !m.id.is_nil()
+                        && m.kind.is_user()
+                        && m.deleted_by.is_none()
+                        && m.from != member
+                        && !m.read_by.contains(&member)
+                })
+                .map(|m| m.id)
+                .collect();
+            if !fresh.is_empty() {
+                let _ = wallet.execute(Command::MarkRead { ids: fresh }).await;
+            }
         }
     }
     // the sidebar's Archive gate rides the SAME channel-filtered chat read
@@ -3067,6 +3109,7 @@ async fn push_surfaces(
         known,
         first_seen,
         quotes,
+        roster: members.iter().map(|m| m.name.clone()).collect(),
     };
     let surfaces: Vec<SurfaceData> = snaps
         .iter()
@@ -3166,6 +3209,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                             mine: r.mine,
                         })
                         .collect();
+                    let receipts: Vec<ReceiptItem> = l
+                        .receipts
+                        .iter()
+                        .map(|r| ReceiptItem {
+                            name: r.name.as_str().into(),
+                            read: r.read,
+                        })
+                        .collect();
                     LogLine {
                         id: l.id.clone().into(),
                         lead: l.lead.clone().into(),
@@ -3181,6 +3232,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         alt: l.alt,
                         mine_emoji: l.mine_emoji.clone().into(),
                         reactions: ModelRc::new(VecModel::from(reactions)),
+                        receipts: ModelRc::new(VecModel::from(receipts)),
                         has_file: l.has_file,
                         file_name: l.file_name.clone().into(),
                         file_meta: l.file_meta.clone().into(),
@@ -3445,6 +3497,9 @@ struct ChatViewCtx {
     known: HashMap<u64, KnownProposal>,
     first_seen: HashMap<u64, u64>,
     quotes: HashMap<String, QuoteSrc>,
+    /// The full member roster (names) — the universe of read-receipt dots
+    /// per message (every member except the author).
+    roster: Vec<String>,
 }
 
 /// The typed chat messages of a snapshot (chat surface only).
@@ -3470,9 +3525,10 @@ fn surface_data(
         // the retention window ("delete chat after N days") is ENGINE
         // semantics now — the read already arrives filtered, identically
         // for the GUI and an MCP agent (co-equality)
+        let roster = chat_ctx.map(|c| c.roster.as_slice()).unwrap_or(&[]);
         let pairs: Vec<(u64, LogLineData)> = msgs
             .iter()
-            .map(|m| (m.ts, chat_line(lang, m, me)))
+            .map(|m| (m.ts, chat_line(lang, m, me, roster)))
             .collect();
         let system = match chat_ctx.map(|c| &c.selected) {
             Some(ChannelRef::Patch { id }) => {
@@ -3502,6 +3558,7 @@ fn surface_data(
                 alt: false,
                 mine_emoji: String::new(),
                 reactions: Vec::new(),
+                receipts: Vec::new(),
                 has_file: false,
                 file_name: String::new(),
                 file_meta: String::new(),
@@ -3631,8 +3688,26 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
 /// teaser) happens later in [`annotate_chat_log`]: the row index can only
 /// be known once system lines are merged in, and the teaser may resolve
 /// against a message outside the displayed (filtered) log.
-fn chat_line(lang: i32, m: &ChatMessage, me: &str) -> LogLineData {
+fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String]) -> LogLineData {
     let mut mine_emoji = String::new();
+    // read receipts: one dot per member EXCEPT the author — green once they
+    // have read it (in `read_by`), yellow until then. The local member reads
+    // by looking (the channel-open trigger records it), so it shows green.
+    // Only real, live, human messages carry receipts; the .slint hides the
+    // whole row when the local read-receipts switch is off (symmetric).
+    let receipts: Vec<ReceiptData> = if m.id.is_nil() || !m.kind.is_user() || m.deleted_by.is_some()
+    {
+        Vec::new()
+    } else {
+        roster
+            .iter()
+            .filter(|name| name.as_str() != m.from)
+            .map(|name| ReceiptData {
+                name: name.clone(),
+                read: name == me || m.read_by.contains(name),
+            })
+            .collect()
+    };
     // the BTreeMap iterates sorted by emoji, so the pill order is
     // deterministic across re-renders
     let reactions: Vec<ReactionData> = m
@@ -3701,6 +3776,7 @@ fn chat_line(lang: i32, m: &ChatMessage, me: &str) -> LogLineData {
         alt: false, // author-block zebra, filled in by annotate_chat_log
         mine_emoji,
         reactions,
+        receipts,
         has_file,
         proposal_id: None,
         file_name,
@@ -4183,6 +4259,7 @@ fn system_line_data(text: String) -> LogLineData {
         alt: false,
         mine_emoji: String::new(),
         reactions: Vec::new(),
+        receipts: Vec::new(),
         has_file: false,
         file_name: String::new(),
         file_meta: String::new(),
@@ -4994,6 +5071,8 @@ lexicon! {
     field_s3_bucket: "Bucket", "Bucket";
     set_s3_test: "Test connection", "Verbindung testen";
     set_s3_active: "active", "aktiv";
+    field_read_receipts: "Read receipts", "Lesebestätigungen";
+    set_read_receipts: "Send read receipts", "Lesebestätigungen senden";
     set_s3_every: "every", "alle";
     set_s3_unit_min: "min", "Minuten";
     set_s3_keep: "save up to", "behalte bis zu";
@@ -5171,6 +5250,7 @@ mod tests {
             alt: false,
             mine_emoji: String::new(),
             reactions: Vec::new(),
+            receipts: Vec::new(),
             has_file: false,
             file_name: String::new(),
             file_meta: String::new(),
@@ -5255,10 +5335,10 @@ mod tests {
     #[test]
     fn a_system_kind_message_maps_onto_the_quiet_line_flag() {
         let user = ChatMessage::text(MessageId([1; 16]), "petra", "gm", 100);
-        assert!(!chat_line(0, &user, "me").system);
+        assert!(!chat_line(0, &user, "me", &[]).system);
         let notice = ChatMessage::text(MessageId([2; 16]), "petra", "🔑 back", 101)
             .with_kind(molt_core::ChatKind::System);
-        assert!(chat_line(0, &notice, "me").system);
+        assert!(chat_line(0, &notice, "me", &[]).system);
     }
 
     /// The recovery flow rides the transient session notice (the engine's

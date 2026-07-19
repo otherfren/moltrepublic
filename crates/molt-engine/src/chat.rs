@@ -406,6 +406,41 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Confirm the local member has read these chat messages (read receipts).
+    /// Co-equal: the GUI issues it on channel open, an MCP agent explicitly.
+    /// While read receipts are disabled locally the node reveals nothing (a
+    /// silent no-op). Otherwise it filters to ids this node can honestly
+    /// receipt — known, live, `User`-kind, authored by someone else, and not
+    /// already read by the local member — and records ONE batched `ChatRead`.
+    /// A repeat (same channel reopened) filters to empty and never
+    /// re-broadcasts; unknown / own / deleted ids are skipped.
+    pub(crate) fn cmd_mark_read(&mut self, ids: Vec<MessageId>) -> Result<Reply, MoltError> {
+        if !self.session.settings.read_receipts {
+            return Ok(Reply::Ack);
+        }
+        let me = self.member();
+        let mut fresh: Vec<MessageId> = Vec::new();
+        for id in ids {
+            if fresh.contains(&id) {
+                continue; // a duplicate id in the batch
+            }
+            if let Ok((_, msg)) = self.chat_by_id(&id) {
+                if msg.deleted_by.is_none()
+                    && msg.kind == molt_core::ChatKind::User
+                    && msg.from != me
+                    && !msg.read_by.contains(&me)
+                {
+                    fresh.push(id);
+                }
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(Reply::Ack); // nothing new to confirm
+        }
+        self.record_read(fresh, me);
+        Ok(Reply::Ack)
+    }
+
     /// Wipe one of YOUR OWN messages for everyone; only the deletion notice
     /// remains. Only the author may delete (the P5 "no moderation" posture):
     /// peers enforce exactly this on the wire (`wire_delete` drops a foreign
@@ -451,6 +486,24 @@ impl State {
         );
         self.record(env);
         self.emit(Event::Reacted { id, emoji, by });
+    }
+
+    /// Build, record and emit one batched `ChatRead` event. Shared by the
+    /// local command (`by` = the local member → self-authored, crosses the
+    /// wire) and the wire arm (`by` = the authenticated peer → recorded and
+    /// applied locally, never re-broadcast: the outbox feeds only
+    /// self-authored events). The caller has already filtered to receiptable
+    /// ids.
+    pub(crate) fn record_read(&mut self, ids: Vec<MessageId>, by: MemberId) {
+        let env = self.make_env(
+            by.clone(),
+            WorkspaceEvent::ChatRead {
+                ids: ids.clone(),
+                by: by.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(Event::Read { ids, by });
     }
 
     /// Build, record and emit one `ChatDeleted` event.
@@ -571,6 +624,153 @@ mod tests {
             st.chat[0].reactions.is_empty(),
             "the second click un-reacts: {:?}",
             st.chat[0].reactions
+        );
+    }
+
+    // ---- read receipts (Lesebestätigung) ---------------------------------
+
+    /// Apply a read receipt straight through the applier (the recorded path).
+    fn land_read(st: &mut crate::State, seq: u64, ids: Vec<MessageId>, by: &str) {
+        st.apply(&EventEnvelope {
+            seq,
+            ts: 200 + seq,
+            by: by.to_string(),
+            body: WorkspaceEvent::ChatRead {
+                ids,
+                by: by.to_string(),
+            },
+        });
+    }
+
+    /// Deliver an envelope over the authenticated wire path (the P5 receive
+    /// arm). `from` must be a real roster peer (demo: peer-1 / peer-2).
+    fn deliver(st: &mut crate::State, from: &str, seq: u64, body: WorkspaceEvent) {
+        st.cmd_net_delivered(
+            from.to_string(),
+            EventEnvelope {
+                seq,
+                ts: 200 + seq,
+                by: from.to_string(),
+                body,
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+    }
+
+    fn read_by(st: &crate::State, id: &MessageId) -> Vec<String> {
+        st.chat_by_id(id)
+            .expect("message present")
+            .1
+            .read_by
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// The send filter: marking read records the local member exactly once
+    /// (monotonic), never receipts an OWN or UNKNOWN message, and a repeat
+    /// (channel reopened) adds nothing.
+    #[test]
+    fn mark_read_records_me_once_and_skips_own_and_unknown() {
+        let mut st = plain_state();
+        let peer = MessageId([21u8; 16]);
+        land_chat(&mut st, 1, peer, "peer-1", "read me");
+        let mine = MessageId([22u8; 16]);
+        land_chat(&mut st, 2, mine, "me", "my own");
+
+        st.cmd_mark_read(vec![peer, mine, MessageId([99u8; 16])])
+            .expect("mark read");
+        assert_eq!(read_by(&st, &peer), vec!["me".to_string()]);
+        assert!(
+            read_by(&st, &mine).is_empty(),
+            "an own message is never self-receipted"
+        );
+
+        st.cmd_mark_read(vec![peer]).expect("mark read again");
+        assert_eq!(read_by(&st, &peer), vec!["me".to_string()], "idempotent");
+    }
+
+    /// The local privacy switch: while read receipts are off this node
+    /// records and sends nothing.
+    #[test]
+    fn mark_read_is_a_noop_while_disabled() {
+        let mut st = plain_state();
+        st.session.settings.read_receipts = false;
+        let peer = MessageId([23u8; 16]);
+        land_chat(&mut st, 1, peer, "peer-1", "read me");
+        st.cmd_mark_read(vec![peer]).expect("mark read");
+        assert!(read_by(&st, &peer).is_empty(), "disabled: no receipt");
+    }
+
+    /// The applier: a peer receipt inserts them (idempotent), the author
+    /// never receipts their own message, a receipt never lands on a
+    /// tombstone, and deleting the message clears the receipts with it.
+    #[test]
+    fn read_by_converges_commutes_with_delete_and_ignores_the_author() {
+        let mut st = plain_state();
+        let m = MessageId([24u8; 16]);
+        land_chat(&mut st, 1, m, "peer-1", "the message");
+
+        // the author's own receipt is ignored
+        land_read(&mut st, 2, vec![m], "peer-1");
+        assert!(read_by(&st, &m).is_empty());
+
+        // a distinct member reads it — idempotent on redelivery
+        land_read(&mut st, 3, vec![m], "peer-2");
+        land_read(&mut st, 4, vec![m], "peer-2");
+        assert_eq!(read_by(&st, &m), vec!["peer-2".to_string()]);
+
+        // deleting the message (by its author) clears the receipts
+        let index = st.chat_by_id(&m).expect("msg").0;
+        st.apply(&EventEnvelope {
+            seq: 5,
+            ts: 205,
+            by: "peer-1".to_string(),
+            body: WorkspaceEvent::ChatDeleted {
+                index,
+                id: Some(m),
+                by: "peer-1".to_string(),
+            },
+        });
+        assert!(read_by(&st, &m).is_empty(), "a tombstone carries no receipts");
+
+        // a receipt arriving AFTER the delete is dropped (commute)
+        land_read(&mut st, 6, vec![m], "peer-2");
+        assert!(read_by(&st, &m).is_empty());
+    }
+
+    /// Over the authenticated wire: a receipt binds to the LINK identity and
+    /// converges; one that outruns its message is parked and drains when the
+    /// message lands.
+    #[test]
+    fn a_wire_receipt_binds_to_the_link_and_parks_until_its_message_lands() {
+        let mut st = plain_state();
+        let m = MessageId([25u8; 16]);
+
+        // the receipt outruns the message: parked, nothing applied yet
+        deliver(
+            &mut st,
+            "peer-2",
+            1,
+            WorkspaceEvent::ChatRead {
+                ids: vec![m],
+                by: "peer-2".to_string(),
+            },
+        );
+        assert!(st.chat_by_id(&m).is_err(), "the message has not arrived");
+
+        // the message lands over the wire → the parked receipt drains
+        deliver(
+            &mut st,
+            "peer-1",
+            2,
+            WorkspaceEvent::Chat(ChatMessage::text(m, "peer-1", "hi", 202)),
+        );
+        assert_eq!(
+            read_by(&st, &m),
+            vec!["peer-2".to_string()],
+            "the parked receipt applied on arrival, bound to the link identity"
         );
     }
 }

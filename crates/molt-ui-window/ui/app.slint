@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
+import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -898,6 +898,10 @@ export component AppWindow inherits Window {
     // alert sounds (0 none, 1 bell, 2 chime, 3 pop)
     in-out property <int> cfg-sound-message-index: 0;
     in-out property <int> cfg-sound-vote-index: 0;
+    // send (and show) per-message chat read receipts — a local privacy
+    // switch, seeded from the applied session so the chat's receipt rows
+    // track it live (the settings checkbox binds to it, save persists it).
+    in-out property <bool> cfg-read-receipts: true;
     // preview the picked alert once ("bell" | "chime" | "pop")
     callback test-sound(string);
     // backup retention: keep at most this many copies per workspace
@@ -3522,6 +3526,9 @@ export component AppWindow inherits Window {
                                         for l[i] in s.log: ChatRow {
                                                 line: l;
                                                 index: i;
+                                                // the local read-receipts switch gates the
+                                                // per-member dot row (symmetric hide)
+                                                receipts-on: root.cfg-read-receipts;
                                                 // replies indent behind their quote;
                                                 // neighboring reply groups of
                                                 // different targets alternate depth
@@ -5437,6 +5444,24 @@ export component AppWindow inherits Window {
                                     test-sound(s) => {
                                         root.test-sound(s);
                                     }
+                                }
+                            }
+                            // chat privacy: send/show per-message read receipts
+                            // (local switch; symmetric — off hides others' too)
+                            HorizontalLayout {
+                                vertical-stretch: 0;
+                                spacing: 18px;
+                                alignment: start;
+                                Text {
+                                    text: Strings.field-read-receipts;
+                                    color: Theme.text;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                AppCheck {
+                                    label: Strings.set-read-receipts;
+                                    checked <=> root.cfg-read-receipts;
+                                    y: (parent.height - self.height) / 2;
                                 }
                             }
                         }
