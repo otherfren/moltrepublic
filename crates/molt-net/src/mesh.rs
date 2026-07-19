@@ -201,18 +201,50 @@ pub async fn bootstrap_over_mls<T: Transport>(
         }
     });
 
-    // decrypt incoming announcements — the sender is MLS-authenticated
+    // decrypt incoming announcements — the sender is MLS-authenticated. A
+    // ciphertext that cannot become an announcement is dropped, but LOUDLY:
+    // a silent drop here starves the bootstrap into its timeout with no trace.
     let dec_mls = mls.clone();
     let dec = tokio::spawn(async move {
         while let Some(ct) = in_ct.recv().await {
-            let got = dec_mls.lock().ok().and_then(|mut m| match m.decrypt(&ct) {
-                Ok(MlsIncoming::Application { from, plaintext }) => {
-                    serde_json::from_slice::<MeshAnnounce>(&plaintext)
-                        .ok()
-                        .map(|a| (from, a))
+            let decrypted = match dec_mls.lock() {
+                Ok(mut m) => m.decrypt(&ct),
+                Err(_) => {
+                    tracing::warn!("mesh bootstrap: mls lock poisoned — announcement dropped");
+                    continue;
                 }
-                _ => None,
-            });
+            };
+            let got = match decrypted {
+                Ok(MlsIncoming::Application { from, plaintext }) => {
+                    match serde_json::from_slice::<MeshAnnounce>(&plaintext) {
+                        Ok(a) => Some((from, a)),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "mesh bootstrap: announcement did not parse — dropped"
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok(other) => {
+                    let kind = match other {
+                        MlsIncoming::Application { .. } => "application",
+                        MlsIncoming::Commit => "commit",
+                        MlsIncoming::Proposal => "proposal",
+                        MlsIncoming::FutureEpoch => "future-epoch",
+                    };
+                    tracing::warn!(kind, "mesh bootstrap: non-application MLS message — dropped");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "mesh bootstrap: announcement failed to decrypt — dropped"
+                    );
+                    None
+                }
+            };
             if let Some(pair) = got {
                 if ann_in_tx.send(pair).await.is_err() {
                     break;

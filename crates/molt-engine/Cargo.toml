@@ -32,6 +32,9 @@ image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# make WARN/DEBUG from the engine + net visible in the ignored live-server
+# tests (a silent tracing::warn is how the 2026-07-19 mesh stall hid)
+tracing-subscriber.workspace = true
 # dev-only cycle (cargo allows it): the cross-frontend integration test
 # proves the MCP tool layer builds the SAME filtered reads the engine path
 # serves — co-equality end to end

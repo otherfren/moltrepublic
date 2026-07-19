@@ -54,6 +54,26 @@ struct SmpState {
     recv: HashMap<Vec<u8>, NewQueue>,
     /// The sender key each queue we send to was secured with, by sender id.
     send_keys: HashMap<Vec<u8>, SigningKey>,
+    /// The seed every per-queue sender key is derived from
+    /// ([`derive_sender_key`]). Minted at transport creation, exported with
+    /// the creds, adopted on import — so a reopened transport re-derives the
+    /// SAME key a queue was secured with, regardless of when the creds were
+    /// persisted (the 2026-07-19 restart fix). `None` only when the RNG
+    /// failed at creation: sends then fail honestly instead of falling back
+    /// to a predictable (attacker-pre-SKEYable) constant seed.
+    sender_seed: Option<[u8; 32]>,
+}
+
+/// Derive the deterministic sender key for one queue:
+/// `Ed25519(HMAC-SHA256(key = seed, msg = "molt-smp-sender-v1" ‖ sender_id))`.
+fn derive_sender_key(seed: &[u8; 32], sender_id: &[u8]) -> SigningKey {
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(seed)
+        .expect("hmac accepts any key length");
+    mac.update(b"molt-smp-sender-v1");
+    mac.update(sender_id);
+    let out: [u8; 32] = mac.finalize().into_bytes().into();
+    SigningKey::from_bytes(&out)
 }
 
 impl SmpTransport {
@@ -66,16 +86,31 @@ impl SmpTransport {
     /// Like [`new`](SmpTransport::new) but routes every connection through
     /// `dialer` — e.g. a SOCKS5h Tor proxy (concept §4).
     pub fn with_dialer(server: SmpServer, dialer: Dialer) -> SmpTransport {
+        // mint the sender seed once per transport incarnation; on an RNG
+        // failure it stays None (first send fails with `NetError::Crypto`) —
+        // NEVER a constant fallback, which would let anyone pre-`SKEY` the
+        // queues this node is about to secure
+        let mut seed = [0u8; 32];
+        let sender_seed = getrandom::getrandom(&mut seed).ok().map(|()| seed);
         SmpTransport {
             server,
             dialer,
-            state: Arc::new(Mutex::new(SmpState::default())),
+            state: Arc::new(Mutex::new(SmpState {
+                sender_seed,
+                ..SmpState::default()
+            })),
             pool: ConnPool::new(),
         }
     }
 
     fn recv_queue(&self, id: &[u8]) -> Option<NewQueue> {
         self.state.lock().ok()?.recv.get(id).cloned()
+    }
+
+    /// The transport's sender seed (tests pin the export/import round-trip).
+    #[cfg(test)]
+    fn sender_seed(&self) -> Option<[u8; 32]> {
+        self.state.lock().ok().and_then(|s| s.sender_seed)
     }
 }
 
@@ -91,8 +126,22 @@ struct PersistedQueue {
 
 /// The serializable form of a transport's whole credential set (`SmpState`):
 /// the queues we can receive on, and the sender keys we send peer queues with.
+///
+/// **Additive V2**: `sender_seed` sits at the END so a pre-seed (V1) reader —
+/// bincode v1 `deserialize` tolerates trailing bytes, pinned by
+/// `a_v2_export_stays_readable_for_a_v1_reader` — still reads the blob, and
+/// [`SmpTransport::adopt_creds`] falls back to the V1 layout for old blobs.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedCreds {
+    recv: Vec<PersistedQueue>,
+    send_keys: Vec<(Vec<u8>, [u8; 32])>,
+    sender_seed: Option<[u8; 32]>,
+}
+
+/// The pre-seed (V1) creds layout, kept as a decode fallback so a
+/// `transport.state` written before the sender-seed fix still opens.
+#[derive(serde::Deserialize)]
+struct PersistedCredsV1 {
     recv: Vec<PersistedQueue>,
     send_keys: Vec<(Vec<u8>, [u8; 32])>,
 }
@@ -117,18 +166,33 @@ impl SmpTransport {
             .iter()
             .map(|(id, k)| (id.clone(), k.to_bytes()))
             .collect();
-        bincode::serialize(&PersistedCreds { recv, send_keys }).ok()
+        bincode::serialize(&PersistedCreds {
+            recv,
+            send_keys,
+            sender_seed: s.sender_seed,
+        })
+        .ok()
     }
 
     /// Re-adopt a persisted credential set into this (fresh) transport.
+    /// V2 blobs also carry the sender seed (adopted, replacing the fresh
+    /// one); a V1 blob (no seed — its V2 decode fails at EOF) adopts
+    /// recv + send_keys and keeps whatever seed the transport already has.
     fn adopt_creds(&self, bytes: &[u8]) {
-        let Ok(creds) = bincode::deserialize::<PersistedCreds>(bytes) else {
-            return;
+        let (recv, send_keys, seed) = match bincode::deserialize::<PersistedCreds>(bytes) {
+            Ok(c) => (c.recv, c.send_keys, c.sender_seed),
+            Err(_) => match bincode::deserialize::<PersistedCredsV1>(bytes) {
+                Ok(c) => (c.recv, c.send_keys, None),
+                Err(_) => return,
+            },
         };
         let Ok(mut s) = self.state.lock() else {
             return;
         };
-        for q in creds.recv {
+        if let Some(seed) = seed {
+            s.sender_seed = Some(seed);
+        }
+        for q in recv {
             s.recv.insert(
                 q.recipient_id.clone(),
                 NewQueue {
@@ -140,7 +204,7 @@ impl SmpTransport {
                 },
             );
         }
-        for (id, k) in creds.send_keys {
+        for (id, k) in send_keys {
             s.send_keys.insert(id, SigningKey::from_bytes(&k));
         }
     }
@@ -326,17 +390,49 @@ impl Transport for SmpTransport {
                     let key = match cached {
                         Some(k) => k,
                         None => {
-                            // secure the queue as sender the first time
-                            // (server-side, so later sends reuse the key even
-                            // from a reconnected connection)
-                            let k = c.secure_as_sender(&sender_id).await?;
-                            if let Ok(mut s) = state.lock() {
-                                s.send_keys.insert(sender_id.clone(), k.clone());
+                            // no cached key: derive this queue's sender key
+                            // from the persisted seed (deterministic — a
+                            // reopened transport re-derives the SAME key it
+                            // secured the queue with) and (re-)SKEY with it
+                            let seed =
+                                state.lock().ok().and_then(|s| s.sender_seed).ok_or_else(|| {
+                                    NetError::Crypto(
+                                        "no sender seed (rng failed at transport creation)".into(),
+                                    )
+                                })?;
+                            let k = derive_sender_key(&seed, &sender_id);
+                            match c.secure_as_sender(&sender_id, &k).await {
+                                Ok(()) => {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.send_keys.insert(sender_id.clone(), k.clone());
+                                    }
+                                }
+                                Err(e) => {
+                                    // the server may already hold exactly this
+                                    // key (a re-SKEY after reopen, which some
+                                    // servers reject) — the SEND verdict below
+                                    // is authoritative, so try the signed send
+                                    // anyway; a genuinely foreign key then
+                                    // fails the send honestly (backoff →
+                                    // degraded), and the key is cached ONLY
+                                    // after a successful send
+                                    tracing::warn!(
+                                        error = %e,
+                                        "SKEY rejected — attempting the signed SEND \
+                                         with the derived sender key"
+                                    );
+                                }
                             }
                             k
                         }
                     };
-                    c.send_to(&sender_id, &key, block.as_slice()).await
+                    let sent = c.send_to(&sender_id, &key, block.as_slice()).await;
+                    if sent.is_ok() {
+                        if let Ok(mut s) = state.lock() {
+                            s.send_keys.entry(sender_id.clone()).or_insert_with(|| key.clone());
+                        }
+                    }
+                    sent
                 })
             })
             .await
@@ -407,6 +503,138 @@ impl Transport for SmpTransport {
 
     fn import_creds(&self, creds: &[u8]) {
         self.adopt_creds(creds);
+    }
+}
+
+#[cfg(test)]
+mod creds_tests {
+    use super::*;
+
+    const FP: &str = "f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=";
+
+    fn transport() -> SmpTransport {
+        SmpTransport::new(SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server"))
+    }
+
+    /// D2: the sender key is a pure function of (seed, queue id) — the same
+    /// seed re-derives the same key after a restart; a different queue or a
+    /// different seed derives a different key.
+    #[test]
+    fn sender_key_derivation_is_deterministic_and_queue_bound() {
+        let seed = [7u8; 32];
+        let a = derive_sender_key(&seed, b"queue-a");
+        let again = derive_sender_key(&seed, b"queue-a");
+        let other_queue = derive_sender_key(&seed, b"queue-b");
+        let other_seed = derive_sender_key(&[8u8; 32], b"queue-a");
+        assert_eq!(a.to_bytes(), again.to_bytes(), "same seed + id → same key");
+        assert_ne!(a.to_bytes(), other_queue.to_bytes(), "queue-bound");
+        assert_ne!(a.to_bytes(), other_seed.to_bytes(), "seed-bound");
+    }
+
+    /// D4/D5: export → import carries the sender seed, so a reopened
+    /// transport derives the SAME sender key for the same queue — even when
+    /// the export happened BEFORE any send (the mesh-up persist moment that
+    /// broke the 2026-07-19 incident nodes).
+    #[test]
+    fn creds_v2_round_trips_the_sender_seed() {
+        let t1 = transport();
+        let bytes = t1.export_creds().expect("export");
+        let t2 = transport();
+        assert_ne!(
+            t1.sender_seed().expect("t1 seed"),
+            t2.sender_seed().expect("t2 fresh seed"),
+            "fresh transports mint distinct seeds"
+        );
+        t2.import_creds(&bytes);
+        let s1 = t1.sender_seed().expect("t1 seed");
+        let s2 = t2.sender_seed().expect("t2 adopted seed");
+        assert_eq!(s1, s2, "the import adopts the exported seed");
+        assert_eq!(
+            derive_sender_key(&s1, b"some-queue").to_bytes(),
+            derive_sender_key(&s2, b"some-queue").to_bytes(),
+            "both incarnations derive the same per-queue sender key"
+        );
+    }
+
+    /// A byte-exact mirror of the PRE-seed creds layout (recv + send_keys
+    /// only) — what every deployed reader before this fix wrote and read.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct V1Creds {
+        recv: Vec<V1Queue>,
+        send_keys: Vec<(Vec<u8>, [u8; 32])>,
+    }
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct V1Queue {
+        recipient_id: Vec<u8>,
+        sender_id: Vec<u8>,
+        auth_sk: [u8; 32],
+        dh_secret: [u8; 32],
+        server_dh: [u8; 32],
+    }
+
+    fn v1_blob() -> Vec<u8> {
+        bincode::serialize(&V1Creds {
+            recv: vec![V1Queue {
+                recipient_id: vec![1, 2],
+                sender_id: vec![3, 4],
+                auth_sk: [5u8; 32],
+                dh_secret: [6u8; 32],
+                server_dh: [7u8; 32],
+            }],
+            send_keys: vec![(vec![3, 4], [9u8; 32])],
+        })
+        .expect("v1 blob")
+    }
+
+    /// D4: a pre-fix `transport.state` (V1, no seed) still imports — recv +
+    /// send_keys are adopted and the transport KEEPS its own fresh seed.
+    #[test]
+    fn import_falls_back_to_the_v1_creds_format() {
+        let t = transport();
+        let own = t.sender_seed().expect("fresh seed");
+        t.import_creds(&v1_blob());
+        assert_eq!(
+            t.sender_seed().expect("seed kept"),
+            own,
+            "a V1 import must never discard the transport's seed"
+        );
+        assert!(t.recv_queue(&[1, 2]).is_some(), "V1 recv cred adopted");
+        let re = t.export_creds().expect("re-export");
+        let creds: PersistedCreds = bincode::deserialize(&re).expect("decode own export");
+        assert_eq!(creds.send_keys, vec![(vec![3, 4], [9u8; 32])], "V1 send key adopted");
+    }
+
+    /// D4's load-bearing assumption, pinned: bincode v1 `deserialize`
+    /// tolerates trailing bytes, so an OLD (V1) reader still reads a V2
+    /// export — recv + send_keys land, the trailing seed is ignored.
+    #[test]
+    fn a_v2_export_stays_readable_for_a_v1_reader() {
+        let t = transport();
+        t.import_creds(&v1_blob()); // give it a queue + a send key to carry
+        let v2 = t.export_creds().expect("export");
+        let v1: V1Creds =
+            bincode::deserialize(&v2).expect("a V1 reader must still decode a V2 blob");
+        assert_eq!(v1.recv.len(), 1);
+        assert_eq!(v1.recv[0].recipient_id, vec![1, 2]);
+        assert_eq!(v1.send_keys, vec![(vec![3, 4], [9u8; 32])]);
+    }
+
+    /// D5: importing a V2 blob that carries a seed OVERWRITES the fresh one
+    /// (the reopen path must re-derive the previous incarnation's keys), and
+    /// a later V1 import cannot roll that adoption back.
+    #[test]
+    fn a_v1_import_after_a_v2_import_keeps_the_adopted_seed() {
+        let t1 = transport();
+        let t2 = transport();
+        t2.import_creds(&t1.export_creds().expect("v2 export"));
+        let adopted = t2.sender_seed().expect("adopted");
+        assert_eq!(adopted, t1.sender_seed().expect("t1 seed"));
+        t2.import_creds(&v1_blob());
+        assert_eq!(
+            t2.sender_seed().expect("still adopted"),
+            adopted,
+            "a V1 import (no seed) must not clobber an adopted seed"
+        );
     }
 }
 

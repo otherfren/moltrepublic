@@ -157,13 +157,24 @@ async fn engine_join(w: &WalletHandle, link: &str, member: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "founds a 3-node republic over the real smp.konkin.io and restarts it"]
 async fn restart_matrix_all_six_directions_deliver_after_mixed_restarts() {
+    // surface the engine's/net's tracing (WARNs carry the failure reasons of
+    // off-actor tasks — without this they vanish); RUST_LOG overrides
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "molt_engine=debug,molt_net=debug".into()),
+        )
+        .with_test_writer()
+        .try_init();
     let tmp = tempfile::tempdir().expect("tmp");
     let root_a = tmp.path().join("founder");
     let root_b = tmp.path().join("member-b");
     let root_c = tmp.path().join("member-c");
 
     // --- found the 2-of-3 republic over real SMP -------------------------
-    let (a, _rx) = molt_engine::__spawn_manual_founding_over_smp(
+    // production parity: founder AND joiners run the post-founding mesh
+    // bootstrap (the incident's nodes ran spawn_with_config, bootstrap on)
+    let (a, _rx) = molt_engine::__spawn_manual_founding_over_smp_bootstrap(
         molt_core::GroupConfig::demo(),
         session_for(&root_a),
     );
@@ -198,8 +209,8 @@ async fn restart_matrix_all_six_directions_deliver_after_mixed_restarts() {
         }
     };
 
-    let b = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session_for(&root_b));
-    let c = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session_for(&root_c));
+    let b = molt_engine::__spawn_with_storage_bootstrap(molt_core::GroupConfig::demo(), session_for(&root_b));
+    let c = molt_engine::__spawn_with_storage_bootstrap(molt_core::GroupConfig::demo(), session_for(&root_c));
     let b_join = engine_join(&b, &links[0], "member-b");
     let c_join = engine_join(&c, &links[1], "member-c");
     // joins run concurrently; the founder proposes once both seats are filled

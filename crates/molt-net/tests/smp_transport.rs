@@ -73,3 +73,44 @@ async fn subscription_survives_idle_past_the_deadline(url: &str) {
 async fn subscription_survives_idle_ed25519() {
     subscription_survives_idle_past_the_deadline(KONKIN).await;
 }
+
+/// The 2026-07-19 restart fix, pinned against the real server's SKEY
+/// semantics: T1 creates + subscribes a queue and exports its creds BEFORE
+/// any send (the mesh-up persist moment — no send key exists yet, only the
+/// seed). T2 (a "reopened" node) imports them and sends — its FIRST send
+/// SKEYs the queue with the seed-derived key. T3 (a second reopen, same
+/// creds) sends again — the server either accepts the idempotent same-key
+/// re-SKEY or rejects it, in which case the D3 fallback (SEND anyway, the
+/// server's verdict is authoritative) must still deliver. Both blocks must
+/// arrive on T1's subscription. Before the fix T3's fresh random key drew
+/// `SKEY rejected: ERR AUTH` and the leg died forever.
+#[tokio::test]
+#[ignore = "live network"]
+async fn skey_rederivation_after_reopen_keeps_sending() {
+    let s = SmpServer::parse(KONKIN).expect("parse");
+    let t1 = SmpTransport::new(s.clone());
+    let pair = t1.create_queue().await.expect("create_queue");
+    let mut rx = t1.subscribe(&pair.rcv).await.expect("subscribe");
+    // the mesh-up moment: creds exported before ANY send happened
+    let creds = t1.export_creds().expect("creds export");
+
+    // first incarnation of the sender: derives + SKEYs, then sends
+    let t2 = SmpTransport::new(s.clone());
+    t2.import_creds(&creds);
+    t2.send(&pair.snd, block(21)).await.expect("first-incarnation send");
+
+    // second incarnation, SAME creds (a restart): must re-derive the SAME
+    // key and keep sending — re-SKEY idempotence or the SEND fallback
+    let t3 = SmpTransport::new(s.clone());
+    t3.import_creds(&creds);
+    t3.send(&pair.snd, block(22)).await.expect("post-reopen send");
+
+    for tag in [21u8, 22u8] {
+        let d = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("delivery within 10s")
+            .expect("delivery");
+        assert_eq!(d.block.as_slice()[10], tag, "block {tag} delivered");
+    }
+    println!("OK: both incarnations sent with the same derived sender key");
+}

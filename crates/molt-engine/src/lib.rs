@@ -256,6 +256,32 @@ pub fn __spawn_manual_founding_over_smp(
     (handle, rx)
 }
 
+/// Like [`__spawn_manual_founding_over_smp`], but the founder ALSO runs the
+/// post-founding **mesh bootstrap** — the production configuration
+/// (`spawn_with_config` founds with the bootstrap on). The multi-node
+/// restart-over-SMP test needs the real direct mesh, not just the sealed
+/// founding.
+#[doc(hidden)]
+pub fn __spawn_manual_founding_over_smp_bootstrap(
+    config: GroupConfig,
+    session: SessionView,
+) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, true, None, false, None);
+    (handle, rx)
+}
+
+/// Storage-backed engine with the post-founding **mesh bootstrap** ON — the
+/// production joiner configuration (`spawn_with_config` sets the same flag),
+/// as a seam for multi-instance tests whose joiners must assemble a real
+/// direct mesh after `JoinStart`.
+#[doc(hidden)]
+pub fn __spawn_with_storage_bootstrap(config: GroupConfig, session: SessionView) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, None, false, false, true, None, false, None)
+}
+
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
 /// every settings change to that file (format-preserving, atomic) and watches
 /// it for external edits, which are validated and mirrored into the shared
