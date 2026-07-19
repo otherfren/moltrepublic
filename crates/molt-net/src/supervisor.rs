@@ -629,8 +629,7 @@ where
         loop {
             match transport.send(&peer.snd, block.clone()).await {
                 Ok(()) => {
-                    let snd_tag = hex::encode(&peer.snd.id.0[..peer.snd.id.0.len().min(4)]);
-                    tracing::debug!(peer = %peer.member, queue = %snd_tag, "block sent");
+                    tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.snd.id.0), "block sent");
                     if attempt > 0 {
                         // the backoff exit: sends to this member work again
                         sink.send_ok(&peer.member).await;
@@ -699,6 +698,17 @@ fn count_skipped() -> u64 {
     SKIPPED_OUTBOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
+/// Count one discarded (undecodable) inbound MLS message, returning the new
+/// total. Process-wide, like [`count_skipped`] — diagnostics only.
+fn count_discarded() -> u64 {
+    DISCARDED_INBOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// A short hex tag of a queue id for log correlation (never the full id).
+pub(crate) fn queue_tag(id: &[u8]) -> String {
+    hex::encode(&id[..id.len().min(4)])
+}
+
 /// Await the next node-wide epoch advance; pends forever on the plaintext
 /// path (no MLS channel) or once the watch sender is gone.
 async fn epoch_changed(rx: &mut Option<watch::Receiver<u64>>) {
@@ -743,10 +753,7 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     epoch_buffer.push((id, bytes, held)); // still ahead
                 }
                 MlsDecode::Discard => {
-                    let n = DISCARDED_INBOUND
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1;
-                    tracing::warn!(peer = %peer.member, total = n, "held MLS message did not decode after the epoch advance — dropped");
+                    tracing::warn!(peer = %peer.member, total = count_discarded(), "held MLS message did not decode after the epoch advance — dropped");
                     ack_all(held);
                 }
             }
@@ -814,9 +821,9 @@ async fn recv_watchdog_task<T, S, K>(
                 }
             },
         };
-        tracing::debug!(peer = %peer.member, queue = %hex::encode(&peer.rcv.id.0[..peer.rcv.id.0.len().min(4)]), "inbound subscription live");
+        tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.rcv.id.0), "inbound subscription live");
         sink.link_up(&peer.member).await;
-        attempt = 0;
+        let lived = tokio::time::Instant::now();
         match recv_task(
             peer.clone(),
             rx,
@@ -832,6 +839,14 @@ async fn recv_watchdog_task<T, S, K>(
                 tracing::warn!(peer = %peer.member, "subscription ended — resubscribing");
                 sink.link_down(&peer.member, "subscription ended — resubscribing").await;
             }
+        }
+        // Reset the escalation only after a LONG-LIVED incarnation: a queue
+        // whose subscription is accepted but ended immediately (e.g. a
+        // server END war on a contended queue) must keep escalating toward
+        // retry_cap_ms, or the loop redials at base rate forever and flaps
+        // link_up/link_down at the engine.
+        if lived.elapsed() >= Duration::from_millis(cfg.retry_cap_ms) {
+            attempt = 0;
         }
         let backoff = backoff_ms(&cfg, attempt, &mut rng);
         tokio::time::sleep(Duration::from_millis(backoff)).await;
@@ -1002,8 +1017,7 @@ where
                     // of redelivered blocks land here too — routine weather,
                     // but a STREAM of these on a quiet mesh is the signature
                     // of a desynced ratchet.
-                    let n = DISCARDED_INBOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    tracing::warn!(peer = %peer.member, total = n, "inbound MLS message did not decode (replay/proposal/garbage) — dropped");
+                    tracing::warn!(peer = %peer.member, total = count_discarded(), "inbound MLS message did not decode (replay/proposal/garbage) — dropped");
                     ack_all(acks);
                 }
             }

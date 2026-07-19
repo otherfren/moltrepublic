@@ -380,13 +380,16 @@ impl Transport for SmpTransport {
                 let state = state.clone();
                 let block = block.clone();
                 Box::pin(async move {
-                    // re-read the securing key inside the op so a reconnect
-                    // retry (after a broken connection) never re-`SKEY`s a queue
-                    // already secured on an earlier attempt.
-                    let cached = state
-                        .lock()
-                        .ok()
-                        .and_then(|s| s.send_keys.get(&sender_id).cloned());
+                    // ONE lock: re-read the securing key (so a reconnect
+                    // retry after a broken connection never re-`SKEY`s a
+                    // queue secured on an earlier attempt) and the seed.
+                    let (cached, seed) = match state.lock() {
+                        Ok(s) => (s.send_keys.get(&sender_id).cloned(), s.sender_seed),
+                        Err(_) => (None, None),
+                    };
+                    // whether the derived key must still be proven by a
+                    // successful SEND before it may be cached (D3 fallback)
+                    let mut cache_on_success = false;
                     let key = match cached {
                         Some(k) => k,
                         None => {
@@ -394,12 +397,11 @@ impl Transport for SmpTransport {
                             // from the persisted seed (deterministic — a
                             // reopened transport re-derives the SAME key it
                             // secured the queue with) and (re-)SKEY with it
-                            let seed =
-                                state.lock().ok().and_then(|s| s.sender_seed).ok_or_else(|| {
-                                    NetError::Crypto(
-                                        "no sender seed (rng failed at transport creation)".into(),
-                                    )
-                                })?;
+                            let seed = seed.ok_or_else(|| {
+                                NetError::Crypto(
+                                    "no sender seed (rng failed at transport creation)".into(),
+                                )
+                            })?;
                             let k = derive_sender_key(&seed, &sender_id);
                             match c.secure_as_sender(&sender_id, &k).await {
                                 Ok(()) => {
@@ -421,15 +423,16 @@ impl Transport for SmpTransport {
                                         "SKEY rejected — attempting the signed SEND \
                                          with the derived sender key"
                                     );
+                                    cache_on_success = true;
                                 }
                             }
                             k
                         }
                     };
                     let sent = c.send_to(&sender_id, &key, block.as_slice()).await;
-                    if sent.is_ok() {
+                    if sent.is_ok() && cache_on_success {
                         if let Ok(mut s) = state.lock() {
-                            s.send_keys.entry(sender_id.clone()).or_insert_with(|| key.clone());
+                            s.send_keys.insert(sender_id.clone(), key.clone());
                         }
                     }
                     sent
@@ -448,7 +451,7 @@ impl Transport for SmpTransport {
         let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
-        let rcv_tag = hex::encode(&queue.recipient_id[..queue.recipient_id.len().min(4)]);
+        let rcv_tag = crate::supervisor::queue_tag(&queue.recipient_id);
         tokio::spawn(async move {
             loop {
                 match conn.recv_next(&queue).await {

@@ -754,9 +754,14 @@ impl State {
         );
         // honest open: every mesh leg starts "connecting" (amber) until its
         // watchdog confirms the subscription with a link_up — from here on,
-        // `Ok` really means every inbound leg is live (Stage B)
+        // `Ok` means every INBOUND leg is live (outbound trouble surfaces on
+        // the first send attempt via NetSendFailed; SMP has no passive
+        // outbound probe). A stuck-send flag survives a same-workspace mesh
+        // REBUILD (extension) for members still in the mesh — clearing it
+        // would launder a genuinely dead outbound leg back to green; only a
+        // successful send (NetSendOk) clears it.
         self.net_link_down.clear();
-        self.net_send_stuck.clear();
+        self.net_send_stuck.retain(|m, _| peer_names.contains(m));
         for p in &peer_names {
             self.net_link_down.insert(p.clone(), "connecting".to_string());
         }
