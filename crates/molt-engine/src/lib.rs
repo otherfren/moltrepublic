@@ -773,6 +773,13 @@ impl State {
         self.emit(Event::SessionChanged { scope });
     }
 
+    /// Subscribe to the actor's event stream — unit tests observe which
+    /// commands actually push a session (e.g. the presence push contract).
+    #[cfg(test)]
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<Event> {
+        self.ev_tx.subscribe()
+    }
+
     pub(crate) fn threshold(&self) -> usize {
         self.replica
             .as_ref()

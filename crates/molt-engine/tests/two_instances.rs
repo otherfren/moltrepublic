@@ -2362,6 +2362,61 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     assert_eq!(s.active_workspace, ws.id);
     assert_eq!(ws.agenda, "survive total loss");
     assert_eq!(ws.members.len(), 2, "the full roster came back from the chain");
+
+    // PRESENCE HONESTY: recovery is NOT a full-roster live seal. The peers the
+    // re-established mesh actually reached (here the coordinator, over the fresh
+    // per-pair link) and the returning seat itself show a real sighting.
+    let pill = |ws: &molt_core::WorkspaceInfo, name: &str| -> molt_core::MemberInfo {
+        ws.members.iter().find(|m| m.name == name).expect("member pill").clone()
+    };
+    let founder = pill(ws, "founder-a");
+    assert_ne!(
+        founder.last_seen,
+        molt_core::MemberInfo::NEVER,
+        "the coordinator re-meshed with us — a real sighting stamps it"
+    );
+    assert_eq!(founder.state, 0, "the re-meshed coordinator is online");
+    assert_eq!(pill(ws, "member-b").state, 0, "the returning seat itself is online");
+
+    // ...and the negative: a recovery that re-establishes NO live mesh (option
+    // A — state restored, no live links) has nobody to stamp but the returning
+    // seat. Every survivor comes back honestly NEVER-seen, never a fabricated
+    // "seen just now". A fresh device recovers the SAME seat from the SAME
+    // verified outcome but with an empty mesh.
+    let session_d = SessionView {
+        workspaces: Vec::new(),
+        settings: SessionSettings {
+            workspace_dir: tmp.path().join("rejoiner-d").display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let d = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session_d);
+    d.execute(Command::RecoverStart {
+        link: material.link.clone(),
+        phrase: b_phrase.clone(),
+    })
+    .await
+    .expect("recover start (option A)");
+    d.execute(Command::NetRecoverSealed {
+        member: outcome.member.clone(),
+        chain: serde_json::to_string(&outcome.chain).expect("chain json"),
+        mls: hex::encode(&outcome.mls_snapshot),
+        mesh: Vec::new(), // option A: no live links re-established
+        generation: Some(1),
+    })
+    .await
+    .expect("recover sealed (option A)");
+    let sd = read_session(&d).await;
+    let wd = sd.workspaces.iter().find(|w| w.name == "Guild").expect("recovered ws (D)");
+    let founder_d = pill(wd, "founder-a");
+    assert_eq!(
+        founder_d.last_seen,
+        molt_core::MemberInfo::NEVER,
+        "no mesh re-established → the survivor is honestly never-seen, not 'just now'"
+    );
+    assert_eq!(founder_d.state, 2, "a never-seen survivor's pill is offline");
+    assert_eq!(pill(wd, "member-b").state, 0, "the returning seat itself is still online");
 }
 
 /// **The re-mint failover (decision A1, 2026-07-11): a COMPLETE second

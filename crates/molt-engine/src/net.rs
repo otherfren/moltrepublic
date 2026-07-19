@@ -1590,11 +1590,15 @@ impl State {
     }
 
     /// Record a real sighting on the active workspace entry's pill. The
-    /// stamp is always advanced (aging + the activity trio read it), but a
-    /// full session push fires ONLY when the pill STATE changes — a peer
-    /// already online re-stamping every second must not re-broadcast the
-    /// whole session for a label that renders identically (the 30 s ticker
-    /// and the next state-change push carry the refreshed stamp).
+    /// stamp is always advanced (aging + the activity trio read it), and a
+    /// full session push fires when the pill STATE changes OR when the
+    /// advanced stamp crosses a label-minute boundary. A peer already online
+    /// re-stamping every second within the same displayed minute renders an
+    /// identical "N min ago" label and is not re-broadcast, but once the
+    /// label would change the fresh stamp IS pushed — otherwise the pushed
+    /// stamp freezes and the displayed age drifts upward against a still-green
+    /// pill (mirrors render the age from the pushed stamp against their own
+    /// clock, the `last_sync_min` pattern).
     fn stamp_member_pill(&mut self, member: &MemberId, now: u64) {
         let active = self.session.active_workspace.clone();
         let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
@@ -1605,36 +1609,42 @@ impl State {
         };
         let state = molt_core::presence_state(now, now);
         let state_changed = m.state != state;
+        // the "N min ago" label renders at minute granularity: a re-stamp that
+        // lands in a new minute bucket is what a mirror would draw differently
+        let label_advanced = m.last_seen / 60 != now / 60;
         m.state = state;
         m.last_seen = now;
-        if state_changed {
+        if state_changed || label_advanced {
             self.emit_session(SessionScope::Full);
         }
     }
 
-    /// Re-derive every pill state of the active entry from its stamp
-    /// (self always online, send-failure pins win); emits only when a
-    /// state actually changed.
+    /// Re-derive every pill state — of EVERY known workspace entry, not just
+    /// the active one — from each member's stamp, so a switched-away workspace
+    /// ages instead of freezing its pills at whatever they were on close.
+    /// Self-online and send-failure pins are scoped to the ACTIVE workspace
+    /// (the node runs exactly one mesh); a non-active entry ages purely from
+    /// stamps. Emits only when a state actually changed.
     fn refresh_member_pills(&mut self) {
         let now = self.presence_now();
         let me = self.member();
         let active = self.session.active_workspace.clone();
         let unreachable = &self.net_unreachable;
-        let Some(entry) = self.session.workspaces.iter_mut().find(|w| w.id == active) else {
-            return;
-        };
         let mut changed = false;
-        for m in &mut entry.members {
-            let state = if m.name == me {
-                0
-            } else if unreachable.contains(&m.name) {
-                2
-            } else {
-                molt_core::presence_state(now, m.last_seen)
-            };
-            if m.state != state {
-                m.state = state;
-                changed = true;
+        for entry in &mut self.session.workspaces {
+            let is_active = entry.id == active;
+            for m in &mut entry.members {
+                let state = if is_active && m.name == me {
+                    0
+                } else if is_active && unreachable.contains(&m.name) {
+                    2
+                } else {
+                    molt_core::presence_state(now, m.last_seen)
+                };
+                if m.state != state {
+                    m.state = state;
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -2097,6 +2107,92 @@ mod tests {
         let s = st.status();
         // only ada (the local member) is active anywhere
         assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 1, 1));
+    }
+
+    /// A silent workspace entry the operator has switched AWAY from must age
+    /// its pills too — the presence ticker cannot freeze a closed workspace's
+    /// members at "online" forever. Self-online and send-failure pins are
+    /// scoped to the ACTIVE workspace; a switched-away one ages purely from
+    /// each member's real stamp.
+    #[test]
+    fn a_switched_away_workspace_ages_out_instead_of_freezing_online() {
+        let mut st = presence_fixture(); // active "w-presence" (ada/bob/cid)
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        // a second workspace we last looked at when everyone was online
+        // (fresh stamps), then switched away from and never touched again
+        let closed_roster = vec!["ada".to_string(), "bob".to_string()];
+        st.session.workspaces.push(molt_core::WorkspaceInfo {
+            id: "w-closed".to_string(),
+            name: "Closed".to_string(),
+            detail: "1-of-2".to_string(),
+            synced: false,
+            state: 2,
+            last_sync_min: 0,
+            sync_queue: 0,
+            s3: false,
+            size_kib: 0,
+            last_backup_min: molt_core::WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
+            seed: String::new(),
+            net: "none".to_string(),
+            encrypted: false,
+            members: molt_core::roster_members(&closed_roster, T, |_| T),
+            agenda: String::new(),
+        });
+        // 31 minutes of total silence pass everywhere
+        st.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        // the ACTIVE entry ages honestly (bob offline, ada self-online)
+        assert_eq!(pill(&st, "bob").state, 2, "the active workspace's silent peer ages offline");
+        assert_eq!(pill(&st, "ada").state, 0, "the active workspace keeps self online");
+        // the CLOSED entry must age from its stamps, not freeze at online
+        let closed = st
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == "w-closed")
+            .expect("closed entry");
+        let closed_pill = |name: &str| {
+            closed.members.iter().find(|m| m.name == name).expect("closed pill").state
+        };
+        assert_eq!(closed_pill("bob"), 2, "a switched-away peer ages offline, not frozen online");
+        assert_eq!(
+            closed_pill("ada"),
+            2,
+            "self-online applies only to the ACTIVE workspace; a closed one ages self too"
+        );
+    }
+
+    /// The pushed presence stamp must not freeze between state changes. A
+    /// re-stamp that renders an identical "N min ago" label (same displayed
+    /// minute) is not re-broadcast, but one that crosses a label-minute
+    /// boundary IS — otherwise a continuously-seen peer's pushed age drifts
+    /// upward against a still-green pill.
+    #[test]
+    fn a_restamp_crossing_a_label_minute_re_pushes_the_fresh_stamp() {
+        let mut st = presence_fixture();
+        // align to a label-minute boundary so the buckets are obvious
+        let base = (T / 60) * 60;
+        st.clock_override = Some(base);
+        // first sighting flips NEVER -> online: a state change, so it pushes
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("first sighting");
+        // observe only pushes from here on
+        let mut ev = st.subscribe_events();
+        // a re-stamp still inside the same displayed minute renders identically
+        st.clock_override = Some(base + 59);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("re-stamp, same minute");
+        assert!(
+            ev.try_recv().is_err(),
+            "a re-stamp inside the same label-minute must not re-broadcast the session"
+        );
+        // a re-stamp crossing into the next displayed minute changes the label
+        st.clock_override = Some(base + 60);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("re-stamp, next minute");
+        assert!(
+            matches!(ev.try_recv(), Ok(crate::Event::SessionChanged { .. })),
+            "crossing a label-minute must push the refreshed stamp"
+        );
     }
 
     /// A send-failure pins the member unreachable (state 2) WITHOUT
