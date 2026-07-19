@@ -1378,10 +1378,24 @@ impl State {
         // the (finished) rejoin task can't touch the recovered state
         self.recover_generation += 1;
         self.recover_ctx = None;
-        // the recovery re-key just ran over the live mesh — a real
-        // sighting for the members that welcomed us back
+        // recovery is NOT a full-roster live seal (unlike founding/join): only
+        // the returning seat itself and the peers the re-established mesh
+        // actually reached (`net_seed.1`, each an MLS-authenticated announce —
+        // which captures the welcomer whenever it re-meshed with us) exchanged
+        // real traffic. Everyone else is unheard: NEVER-seen, exactly like the
+        // restore path — never a fabricated "seen just now". An empty mesh
+        // (option A: state restored, no live links) leaves only the seat.
         let now = self.presence_now();
-        let members = roster_members(&sealed.roster, now, |_| now);
+        let me = member.clone();
+        let seen: std::collections::BTreeSet<MemberId> =
+            net_seed.1.iter().map(|l| l.member.clone()).collect();
+        let members = roster_members(&sealed.roster, now, |m| {
+            if m == me || seen.contains(m) {
+                now
+            } else {
+                MemberInfo::NEVER
+            }
+        });
         self.push_workspace_entry(
             &id,
             &sealed.name,
