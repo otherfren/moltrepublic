@@ -2746,11 +2746,11 @@ struct LogLineData {
     alt: bool,
     mine_emoji: String,
     reactions: Vec<ReactionData>,
-    /// Per-member read receipts (every member except the author): a green dot
-    /// once they have read the message, yellow until then. Empty for legacy /
-    /// system rows and for own-authored… no — includes every non-author, so
-    /// the author sees who has read their message. Display is gated on the
-    /// local read-receipts switch in the .slint (symmetric hide).
+    /// Read receipts, shown ONLY on the local member's OWN messages (the
+    /// sender wants to know it arrived): one dot per other member, green once
+    /// they have read it, yellow until then. Empty on incoming messages,
+    /// legacy/system rows, and tombstones. Display is additionally gated on
+    /// the local read-receipts switch in the .slint (symmetric hide).
     receipts: Vec<ReceiptData>,
     has_file: bool,
     file_name: String,
@@ -3690,12 +3690,16 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
 /// against a message outside the displayed (filtered) log.
 fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String]) -> LogLineData {
     let mut mine_emoji = String::new();
-    // read receipts: one dot per member EXCEPT the author — green once they
-    // have read it (in `read_by`), yellow until then. The local member reads
-    // by looking (the channel-open trigger records it), so it shows green.
-    // Only real, live, human messages carry receipts; the .slint hides the
-    // whole row when the local read-receipts switch is off (symmetric).
-    let receipts: Vec<ReceiptData> = if m.id.is_nil() || !m.kind.is_user() || m.deleted_by.is_some()
+    // read receipts are for the SENDER: they appear only on YOUR OWN messages,
+    // so you see who has read what you sent — never a row on incoming messages
+    // (as the receiver you don't need to know you read it). One dot per OTHER
+    // member, green once they have read it (in `read_by`), yellow until then.
+    // Only real, live, human own-messages carry them; the .slint additionally
+    // hides the row when the local read-receipts switch is off (symmetric).
+    let receipts: Vec<ReceiptData> = if m.from != me
+        || m.id.is_nil()
+        || !m.kind.is_user()
+        || m.deleted_by.is_some()
     {
         Vec::new()
     } else {
@@ -3704,7 +3708,7 @@ fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String]) -> LogLine
             .filter(|name| name.as_str() != m.from)
             .map(|name| ReceiptData {
                 name: name.clone(),
-                read: name == me || m.read_by.contains(name),
+                read: m.read_by.contains(name),
             })
             .collect()
     };
@@ -5339,6 +5343,31 @@ mod tests {
         let notice = ChatMessage::text(MessageId([2; 16]), "petra", "🔑 back", 101)
             .with_kind(molt_core::ChatKind::System);
         assert!(chat_line(0, &notice, "me", &[]).system);
+    }
+
+    /// Read receipts show ONLY on the local member's own messages (the sender
+    /// wants delivery confirmation) — one dot per OTHER member, green once in
+    /// read_by; an incoming message carries no receipt row at all.
+    #[test]
+    fn read_receipts_render_only_on_own_messages() {
+        let roster = vec!["me".to_string(), "ada".to_string(), "bo".to_string()];
+
+        // my own message: a dot per OTHER member, ada green (read), bo yellow
+        let mut mine = ChatMessage::text(MessageId([3; 16]), "me", "hi", 100);
+        mine.read_by.insert("ada".to_string());
+        let r = chat_line(0, &mine, "me", &roster).receipts;
+        assert_eq!(r.len(), 2, "one dot per other member");
+        assert_eq!(r.iter().find(|x| x.name == "ada").map(|x| x.read), Some(true));
+        assert_eq!(r.iter().find(|x| x.name == "bo").map(|x| x.read), Some(false));
+        assert!(r.iter().all(|x| x.name != "me"), "the author gets no self-dot");
+
+        // an incoming message (not mine): NO receipt row
+        let mut theirs = ChatMessage::text(MessageId([4; 16]), "ada", "yo", 101);
+        theirs.read_by.insert("me".to_string());
+        assert!(
+            chat_line(0, &theirs, "me", &roster).receipts.is_empty(),
+            "a received message shows no receipts"
+        );
     }
 
     /// The recovery flow rides the transient session notice (the engine's
