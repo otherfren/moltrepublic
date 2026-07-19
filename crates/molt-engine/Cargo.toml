@@ -32,6 +32,9 @@ image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# test-util only: paused-clock tests (the join accept-deadline elapses
+# instantly on an idle runtime instead of waiting out the real 90 s)
+tokio = { workspace = true, features = ["test-util"] }
 # dev-only cycle (cargo allows it): the cross-frontend integration test
 # proves the MCP tool layer builds the SAME filtered reads the engine path
 # serves — co-equality end to end

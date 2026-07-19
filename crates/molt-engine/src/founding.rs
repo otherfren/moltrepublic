@@ -1371,11 +1371,42 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .map_err(|e| e.to_string())?;
 
     // await the proposed constitution on our reply queue; the founder's
-    // JoinAccepted ack arrives first and gives the wizard early feedback
+    // JoinAccepted ack arrives first and gives the wizard early feedback.
+    // UNTIL that ack arrives, the wait has a hard deadline: a spent link
+    // used against a FINISHED/cancelled ritual is dropped silently on the
+    // founder side (stale generation), and an offline founder answers
+    // nothing — without the deadline the joiner hangs in "Contacting the
+    // inviter…" forever. AFTER the ack the wait is unbounded again: the
+    // charter deliberation is a human step and may take as long as it
+    // takes (and the wizard's × can cancel any time).
+    const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    let accept_deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
+    let mut accepted = false;
     let mut reasm = molt_net::Reassembler::new();
     let proposal_json = loop {
-        match next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await? {
+        let msg = if accepted {
+            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
+        } else {
+            match tokio::time::timeout_at(
+                accept_deadline,
+                next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm),
+            )
+            .await
+            {
+                Ok(msg) => msg?,
+                Err(_) => {
+                    return Err(
+                        "the inviter did not answer — the link may already be used \
+                         up, the founding may be over, or the founder is offline; \
+                         ask the founder for a fresh link and try again"
+                            .to_string(),
+                    );
+                }
+            }
+        };
+        match msg {
             invite::RitualMsg::JoinAccepted { .. } => {
+                accepted = true;
                 if let Some(r) = ratify.as_ref() {
                     let _ = r.accepted.try_send(());
                 }
