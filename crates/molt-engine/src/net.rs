@@ -46,6 +46,17 @@ use crate::{Envelope, State};
 /// `State::spawn_mesh_extension`).
 const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 
+/// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
+/// peer whose inbound subscription is live (`SUB` accepted, not in
+/// `net_link_down`) but from which **nothing** has been heard since its
+/// mesh-up for longer than this reads as a live-but-deaf queue — the SMP
+/// server idle-expired it while `SUB`/`SEND` still answer `OK`, so it is
+/// silently non-delivering. Reported as `Degraded`, never a false `Ok`.
+/// Generous (well above the keepalive period, `MESH_KEEPALIVE_SECS`) so a
+/// merely-quiet-but-alive peer — which keepalive keeps stamping — never
+/// flaps; a truly dead leg trips it after ~two missed keepalives.
+pub(crate) const MESH_DEAF_SECS: u64 = 600;
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -769,6 +780,11 @@ impl State {
         // successful send (NetSendOk) clears it.
         self.net_link_down.clear();
         self.net_send_stuck.retain(|m, _| peer_names.contains(m));
+        // drop mesh-up stamps for members no longer in the mesh so a departed
+        // peer can never be flagged deaf (Stage 1); a continuing peer's stale
+        // stamp is harmless — it is masked by the `connecting` link-down below
+        // until its fresh subscription re-stamps it on `NetLinkUp`.
+        self.mesh_up.retain(|m, _| peer_names.contains(m));
         for p in &peer_names {
             self.net_link_down.insert(p.clone(), "connecting".to_string());
         }
@@ -1651,6 +1667,9 @@ impl State {
             self.net_unreachable.remove(&member);
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
+            // the leg just proved liveness — clears any live-but-deaf flag
+            // the self-heal cross-check had raised for this peer (Stage 1).
+            self.recompute_net_health();
         }
         Ok(Reply::Ack)
     }
@@ -1679,7 +1698,10 @@ impl State {
     }
 
     /// The watchdog confirmed a member's inbound leg (subscription live):
-    /// clear its degraded state (Stage B).
+    /// clear its degraded state (Stage B) and stamp its **mesh-up** time so
+    /// the self-heal cross-check can tell a genuinely-delivering leg from a
+    /// live-but-deaf one (`recompute_net_health`, Stage 1). Each fresh
+    /// (re-)subscription restarts that peer's `MESH_DEAF_SECS` grace.
     pub(crate) fn cmd_net_link_up(
         &mut self,
         member: MemberId,
@@ -1687,6 +1709,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
             self.net_link_down.remove(&member);
+            self.mesh_up.insert(member, self.presence_now());
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -1721,16 +1744,56 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Re-derive `session.net_health` from the two runtime leg maps.
-    /// `Down` is the open/config path's fail-closed verdict and is NEVER
-    /// overridden here; otherwise empty maps mean an honest `Ok` (every
-    /// mesh leg confirmed) and anything else `Degraded` with each troubled
-    /// peer and its reason. Emits only on an actual change.
+    /// This member's REAL last-seen stamp in the active workspace, or
+    /// [`molt_core::MemberInfo::NEVER`] (= 0) if we've never heard from it
+    /// (or it isn't in the active roster). Used by the self-heal liveness
+    /// cross-check — a stamp older than a leg's mesh-up means nothing has
+    /// been delivered on that leg since it came live.
+    pub(crate) fn member_last_seen(&self, member: &MemberId) -> u64 {
+        self.session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace)
+            .and_then(|w| w.members.iter().find(|m| &m.name == member))
+            .map_or(molt_core::MemberInfo::NEVER, |m| m.last_seen)
+    }
+
+    /// Peers whose inbound subscription is live (`NetLinkUp` stamped a
+    /// mesh-up, and the leg is NOT in `net_link_down`) yet from which
+    /// nothing has been delivered for longer than [`MESH_DEAF_SECS`]
+    /// (`last_seen < mesh_up`): the live-but-deaf legs the SMP idle-expiry
+    /// bug produces (Stage 1). Returned sorted for a stable reason string.
+    fn deaf_legs(&self) -> Vec<MemberId> {
+        let now = self.presence_now();
+        self.mesh_up
+            .iter()
+            .filter(|(m, up)| {
+                !self.net_link_down.contains_key(*m)
+                    && now.saturating_sub(**up) > MESH_DEAF_SECS
+                    && self.member_last_seen(m) < **up
+            })
+            .map(|(m, _)| m.clone())
+            .collect()
+    }
+
+    /// Re-derive `session.net_health` from the runtime leg maps plus the
+    /// self-heal liveness cross-check. `Down` is the open/config path's
+    /// fail-closed verdict and is NEVER overridden here; otherwise a
+    /// `Degraded` names every troubled peer: an inbound leg the watchdog
+    /// reported down, an outbox whose sends keep failing, OR a leg that is
+    /// subscribed-`OK` but has delivered nothing since mesh-up
+    /// ([`Self::deaf_legs`]) — the silent-deaf failure that used to read as
+    /// a false `Ok`. Only an honest all-clear is `Ok`. Emits only on an
+    /// actual change.
     pub(crate) fn recompute_net_health(&mut self) {
         if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
             return;
         }
-        let health = if self.net_link_down.is_empty() && self.net_send_stuck.is_empty() {
+        let deaf = self.deaf_legs();
+        let health = if self.net_link_down.is_empty()
+            && self.net_send_stuck.is_empty()
+            && deaf.is_empty()
+        {
             molt_core::NetHealth::Ok
         } else {
             let parts: Vec<String> = self
@@ -1738,6 +1801,7 @@ impl State {
                 .iter()
                 .map(|(m, r)| format!("link to {m}: {r}"))
                 .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
+                .chain(deaf.iter().map(|m| format!("no inbound from {m} since reconnect")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -1753,9 +1817,13 @@ impl State {
     /// [`crate::PRESENCE_TICK_MS`]): re-age every pill from its stamp so
     /// a silent member drifts online → stale → offline. The stamps only
     /// ever move on real traffic; reads additionally re-derive live, so
-    /// the tick exists for the PUSHED session pills.
+    /// the tick exists for the PUSHED session pills. It also re-evaluates
+    /// `net_health`: a live-but-deaf leg (Stage 1) fires no event of its
+    /// own, so this periodic beat is what lets its silence cross
+    /// [`MESH_DEAF_SECS`] into an honest `Degraded`.
     pub(crate) fn cmd_net_presence_tick(&mut self) -> Result<Reply, MoltError> {
         self.refresh_member_pills();
+        self.recompute_net_health();
         Ok(Reply::Ack)
     }
 
@@ -2293,6 +2361,111 @@ mod tests {
             st.net_link_down.is_empty() && st.net_send_stuck.is_empty(),
             "the close/switch boundary clears the link state"
         );
+    }
+
+    // --- Stage 1 self-heal: honest health for a live-but-deaf leg ----------
+
+    /// A peer whose inbound subscription is live but that has delivered
+    /// NOTHING since mesh-up must stop reading as a false `Ok` — after
+    /// `MESH_DEAF_SECS` it surfaces as `Degraded` naming the peer. This is
+    /// exactly the silent deafness the SMP idle-expiry bug produces (`SUB`
+    /// and `SEND` both answer `OK`, yet the queue delivers nothing).
+    #[test]
+    fn a_live_but_silent_leg_goes_degraded_after_the_deaf_window() {
+        let mut st = presence_fixture();
+        // bob's leg comes live at T; nothing is ever heard from it
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a fresh live leg is healthy — the grace window has not elapsed"
+        );
+        // the deaf window elapses; the periodic presence tick re-evaluates
+        // health (a silently-deaf leg fires no event of its own)
+        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob"), "names the deaf peer: {reason}");
+            }
+            other => panic!("expected Degraded for the deaf leg, got {other:?}"),
+        }
+    }
+
+    /// A leg that keeps being heard from stays `Ok`: a sighting after
+    /// mesh-up advances `last_seen` past it, so the deaf cross-check never
+    /// fires — only genuinely silent legs trip it.
+    #[test]
+    fn a_leg_heard_from_since_mesh_up_stays_ok() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
+        // halfway through the window bob is heard from
+        st.clock_override = Some(T + super::MESH_DEAF_SECS / 2);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        // past the window: last_seen >= mesh_up, so bob is not deaf
+        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a peer heard from since mesh-up is healthy"
+        );
+    }
+
+    /// A deaf leg clears the moment an authenticated frame finally lands:
+    /// `peer_seen` advances `last_seen` past mesh-up and re-derives health.
+    #[test]
+    fn a_deaf_leg_clears_when_a_frame_finally_lands() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        assert!(
+            matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
+            "the leg is deaf before any frame lands"
+        );
+        // a frame from bob finally arrives
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a landed frame clears the deaf flag"
+        );
+    }
+
+    /// A leg the resubscribe watchdog already reports `down` is not ALSO
+    /// double-counted as deaf — the cross-check only judges *live*
+    /// subscriptions, so the reason is the watchdog's, once.
+    #[test]
+    fn a_watchdog_down_leg_is_not_double_flagged_as_deaf() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up stamped
+        st.cmd_net_link_down("bob".to_string(), "subscription ended".to_string(), None)
+            .expect("ack");
+        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("subscription ended"), "the down reason wins: {reason}");
+                assert!(
+                    !reason.contains("since reconnect"),
+                    "a down leg is not also flagged deaf: {reason}"
+                );
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    /// The mesh-up map is active-workspace scope: the close/switch boundary
+    /// clears it so a stale stamp never makes the next workspace's peer look
+    /// deaf.
+    #[test]
+    fn mesh_up_does_not_leak_past_a_workspace_reset() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert!(!st.mesh_up.is_empty());
+        st.reset_workspace_state();
+        assert!(st.mesh_up.is_empty(), "the boundary clears mesh-up stamps");
     }
 
     /// A send-failure pin is scoped to the workspace: closing/resetting the

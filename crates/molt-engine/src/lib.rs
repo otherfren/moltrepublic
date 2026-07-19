@@ -543,6 +543,16 @@ pub(crate) struct State {
     /// Outbound legs whose sends keep failing (member → reason) — set by
     /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
     pub(crate) net_send_stuck: std::collections::BTreeMap<MemberId, String>,
+    /// Per-peer **mesh-up** timestamp (`member → presence_now of when this
+    /// peer's inbound subscription last went live this incarnation`), stamped
+    /// by `NetLinkUp`. The self-heal liveness cross-check
+    /// (`recompute_net_health`): a leg whose subscription is live but from
+    /// which NOTHING has been heard (`MemberInfo.last_seen < mesh_up`) for
+    /// longer than [`crate::net::MESH_DEAF_SECS`] is a live-but-deaf queue
+    /// (the server idle-expired it while `SUB`/`SEND` still return `OK`) →
+    /// honest `Degraded`, not a false `Ok`. Runtime-only, active-workspace
+    /// scope — [`State::reset_workspace_state`] clears it.
+    pub(crate) mesh_up: std::collections::BTreeMap<MemberId, u64>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -751,6 +761,7 @@ impl State {
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
+            mesh_up: std::collections::BTreeMap::new(),
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),

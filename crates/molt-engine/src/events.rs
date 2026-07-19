@@ -512,6 +512,7 @@ impl State {
         self.net_unreachable.clear();
         self.net_link_down.clear();
         self.net_send_stuck.clear();
+        self.mesh_up.clear();
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)
