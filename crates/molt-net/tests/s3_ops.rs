@@ -154,6 +154,54 @@ async fn put_object_maps_403_to_the_credentials_class_never_success() {
     assert!(hint.contains("access key"), "hint names the credentials: {hint}");
 }
 
+/// A 403 whose S3 error body says `RequestTimeTooSkewed` must not be blamed
+/// on the credentials — the honest cause (a skewed local clock) is in the
+/// `<Code>`, and the hint has to reflect it.
+#[tokio::test]
+async fn put_object_403_reports_the_s3_code_not_only_credentials() {
+    let xml = "<?xml version=\"1.0\"?><Error><Code>RequestTimeTooSkewed</Code>\
+               <Message>The difference between the request time and the current time is too large.</Message></Error>";
+    let mut response =
+        format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n", xml.len()).into_bytes();
+    response.extend_from_slice(xml.as_bytes());
+    let (endpoint, _seen) = raw_stub(response).await;
+    let err = client_for(&endpoint)
+        .put_object("molt/x", b"data")
+        .await
+        .expect_err("403 is an error");
+    let S3Error::Http { status: 403, hint } = err else {
+        panic!("expected http 403, got {err:?}");
+    };
+    let low = hint.to_ascii_lowercase();
+    assert!(
+        low.contains("clock") || low.contains("skew") || low.contains("time"),
+        "the skew cause must surface, not just credentials: {hint}"
+    );
+    assert!(
+        !hint.contains("access key"),
+        "a clock-skew 403 must not blame the credentials: {hint}"
+    );
+}
+
+/// A different S3 `<Code>` (here `SignatureDoesNotMatch`) is folded into the
+/// credentials hint so the operator sees which check failed.
+#[tokio::test]
+async fn put_object_403_folds_the_s3_code_into_the_hint() {
+    let xml = "<Error><Code>SignatureDoesNotMatch</Code></Error>";
+    let mut response =
+        format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n", xml.len()).into_bytes();
+    response.extend_from_slice(xml.as_bytes());
+    let (endpoint, _seen) = raw_stub(response).await;
+    let err = client_for(&endpoint)
+        .put_object("molt/x", b"data")
+        .await
+        .expect_err("403 is an error");
+    let S3Error::Http { status: 403, hint } = err else {
+        panic!("expected http 403, got {err:?}");
+    };
+    assert!(hint.contains("SignatureDoesNotMatch"), "the code is surfaced: {hint}");
+}
+
 #[tokio::test]
 async fn put_object_maps_5xx_to_an_honest_http_error() {
     let (endpoint, _seen) = stub_server(503).await;

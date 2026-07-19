@@ -64,7 +64,7 @@ impl S3Client {
             }
             let resp = self.request("GET", &path, &query, &[]).await?;
             if !(200..=299).contains(&resp.status) {
-                return Err(self.status_error(resp.status));
+                return Err(self.status_error(resp.status, &resp.body));
             }
             let body = std::str::from_utf8(&resp.body)
                 .map_err(|_| S3Error::Protocol("listing response is not UTF-8".to_string()))?;
