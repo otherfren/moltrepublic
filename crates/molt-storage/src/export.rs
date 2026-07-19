@@ -45,7 +45,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::StorageError;
 
@@ -64,6 +64,8 @@ pub const EXPORT_ARGON2_M_KIB: u32 = 64 * 1024;
 pub const EXPORT_ARGON2_T: u32 = 3;
 /// Argon2id lanes (p_cost).
 pub const EXPORT_ARGON2_P: u32 = 1;
+/// Length of the mandatory per-blob header salt (design §3.7).
+pub const EXPORT_SALT_LEN: usize = 32;
 
 // Import-side caps — a malicious header must not DoS the reader (§3.4).
 const IMPORT_ARGON2_M_KIB_MAX: u32 = 1024 * 1024; // 1 GiB
@@ -162,6 +164,17 @@ pub struct ExportHeader {
     pub cipher: String,
     /// Plaintext bytes per chunk.
     pub chunk_bytes: u32,
+    /// A fresh 32-byte random salt (64 hex), **mandatory in both key modes**.
+    /// It lands in `header_bytes`, so it binds
+    /// `k_stream = HKDF(k_root, "molt-export-stream-v1", header_bytes)`
+    /// uniquely per export — and thus every chunk's AEAD key. Two retained
+    /// backups of the same workspace therefore get distinct stream keys, so a
+    /// chunk of one never authenticates at the same position of another
+    /// (cross-blob splice, design §3.7). `#[serde(default)]` so the version
+    /// gate still refuses a *newer* blob with `NewerVersion` before this
+    /// field's presence is required.
+    #[serde(default)]
+    pub export_salt: String,
 }
 
 /// The `kdf` table of a passphrase-mode header.
@@ -180,7 +193,13 @@ pub struct ExportKdf {
 }
 
 /// The authenticated metadata at the head of the payload (design §3.5).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Carries raw seat-capability secrets (`workspace_key`, `seed`) as hex
+/// strings, so its heap is **wiped on drop** ([`Drop`]) and its [`Debug`]
+/// **redacts** them — neither may reach a log line or linger in freed memory.
+/// The fields stay `String` (not `Zeroizing<String>`) to keep the
+/// `Serialize`/`Deserialize` derives and the public API unchanged.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExportMeta {
     /// Unix seconds the export was taken.
     pub created: u64,
@@ -200,6 +219,32 @@ pub struct ExportMeta {
     pub files: u64,
 }
 
+// Redact the seat-capability secrets from any `{:?}` — only their presence,
+// never their value, may surface (mirrors `ImportStaging`'s redaction).
+impl std::fmt::Debug for ExportMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportMeta")
+            .field("created", &self.created)
+            .field("exporter", &self.exporter)
+            .field("at_rest", &self.at_rest)
+            .field("workspace_key", &"<redacted>")
+            .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+            .field("files", &self.files)
+            .finish()
+    }
+}
+
+// Wipe the raw workspace key + seed entropy (hex) when the meta is dropped —
+// every other copy of this material is `Zeroizing`; these were not.
+impl Drop for ExportMeta {
+    fn drop(&mut self) {
+        self.workspace_key.zeroize();
+        if let Some(seed) = self.seed.as_mut() {
+            seed.zeroize();
+        }
+    }
+}
+
 /// One decrypted file entry of the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportEntry {
@@ -212,7 +257,6 @@ pub struct ExportEntry {
 
 /// A fully decrypted and verified export blob (storage-layer view; the
 /// engine-side import of story 13 stages, chain-verifies and materializes it).
-#[derive(Debug)]
 pub struct ExportArchive {
     /// The plaintext header (already authenticated via the stream key).
     pub header: ExportHeader,
@@ -220,6 +264,25 @@ pub struct ExportArchive {
     pub meta: ExportMeta,
     /// The file entries, in payload order (lexicographic by path).
     pub entries: Vec<ExportEntry>,
+}
+
+// Manual `Debug`: delegate to `ExportMeta`'s redaction and summarize entries
+// by `(path, len)` rather than dumping every file's bytes into a log line.
+impl std::fmt::Debug for ExportArchive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportArchive")
+            .field("header", &self.header)
+            .field("meta", &self.meta)
+            .field(
+                "entries",
+                &self
+                    .entries
+                    .iter()
+                    .map(|e| (e.path.as_str(), e.data.len()))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +372,11 @@ pub(crate) fn export_dir_chunked(
         }
         ExportKey::Workspace => None,
     };
+    // the mandatory per-blob salt (both key modes) — fresh OS entropy so two
+    // backups of the same workspace never share a stream key (design §3.7)
+    let mut salt = [0u8; EXPORT_SALT_LEN];
+    getrandom::getrandom(&mut salt)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
     let header = ExportHeader {
         format: "molt-export-v1".to_string(),
         version: EXPORT_VERSION,
@@ -320,6 +388,7 @@ pub(crate) fn export_dir_chunked(
         kdf,
         cipher: "xchacha20poly1305".to_string(),
         chunk_bytes,
+        export_salt: hex::encode(salt),
     };
     let header_bytes = serde_json::to_vec(&header)
         .map_err(|e| StorageError::Corrupt(format!("encoding export header: {e}")))?;
@@ -356,8 +425,11 @@ pub(crate) fn export_dir_chunked(
         seed: seed.as_ref().map(|s| hex::encode(s.as_slice())),
         files: u64::try_from(files.len()).unwrap_or(0),
     };
-    let meta_bytes = serde_json::to_vec(&meta)
-        .map_err(|e| StorageError::Corrupt(format!("encoding export meta: {e}")))?;
+    // the serialized meta carries the raw key + seed hex — wipe it on drop
+    let meta_bytes = Zeroizing::new(
+        serde_json::to_vec(&meta)
+            .map_err(|e| StorageError::Corrupt(format!("encoding export meta: {e}")))?,
+    );
 
     let mut w = ChunkWriter::new(out, &k_stream, id, usize_of(chunk_bytes));
     let meta_len = u32::try_from(meta_bytes.len())
@@ -537,7 +609,9 @@ struct ChunkWriter<'a> {
     cipher: XChaCha20Poly1305,
     id: [u8; 32],
     chunk_bytes: usize,
-    buf: Vec<u8>,
+    /// Plaintext staging buffer — holds the meta (raw key + seed hex) and file
+    /// bytes, so it is wiped on drop.
+    buf: Zeroizing<Vec<u8>>,
     index: u64,
     written: u64,
 }
@@ -549,7 +623,7 @@ impl<'a> ChunkWriter<'a> {
             cipher: XChaCha20Poly1305::new(key.into()),
             id,
             chunk_bytes,
-            buf: Vec::new(),
+            buf: Zeroizing::new(Vec::new()),
             index: 0,
             written: 0,
         }
@@ -559,7 +633,8 @@ impl<'a> ChunkWriter<'a> {
         self.buf.extend_from_slice(data);
         while self.buf.len() >= self.chunk_bytes {
             let rest = self.buf.split_off(self.chunk_bytes);
-            let full = std::mem::replace(&mut self.buf, rest);
+            // the emitted chunk holds plaintext too — wipe it on drop
+            let full = Zeroizing::new(std::mem::replace(&mut *self.buf, rest));
             self.emit(&full, false)?;
         }
         Ok(())
@@ -587,7 +662,7 @@ impl<'a> ChunkWriter<'a> {
     /// Seal the trailing plaintext as the final chunk (empty when the payload
     /// is an exact multiple of the chunk size — the flag still travels).
     fn finish(mut self) -> Result<u64, StorageError> {
-        let tail = std::mem::take(&mut self.buf);
+        let tail = Zeroizing::new(std::mem::take(&mut *self.buf));
         self.emit(&tail, true)?;
         self.out.flush()?;
         Ok(self.written)
@@ -642,6 +717,21 @@ pub(crate) fn read_header(
     }
     if header.chunk_bytes == 0 || header.chunk_bytes > IMPORT_CHUNK_BYTES_MAX {
         return Err(StorageError::BadFile("implausible export chunk size".to_string()));
+    }
+    // MANDATORY per-blob salt (design §3.7): required in BOTH key modes.
+    // Checked AFTER the version gate so a newer blob is refused with
+    // `NewerVersion` first; a v1 blob lacking it (serde-defaults to "") or
+    // carrying a malformed one is rejected here. The salt is bound purely
+    // through `header_bytes` → `k_stream`; it needs no separate decode beyond
+    // this well-formedness gate.
+    if hex::decode(&header.export_salt)
+        .ok()
+        .filter(|s| s.len() == EXPORT_SALT_LEN)
+        .is_none()
+    {
+        return Err(StorageError::BadFile(
+            "export header missing its per-blob salt".to_string(),
+        ));
     }
     Ok((header, header_bytes))
 }
@@ -715,7 +805,9 @@ pub fn read_export(
             "truncated export (missing final chunk)".to_string(),
         ));
     }
-    let mut plaintext: Vec<u8> = Vec::new();
+    // decrypted payload holds the meta (raw key + seed hex) and file bytes —
+    // wipe it on drop
+    let mut plaintext: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     let mut offset = 0usize;
     let mut index = 0u64;
     while offset < rest.len() {
@@ -738,13 +830,16 @@ pub fn read_export(
         offset += ct_len;
         let last = offset == rest.len();
         let aad = export_aad(&id, index, last);
-        let pt = cipher
-            .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: &aad })
-            .map_err(|_| {
-                StorageError::Crypto(
-                    "wrong passphrase or damaged blob (chunk authentication failed)".to_string(),
-                )
-            })?;
+        let pt = Zeroizing::new(
+            cipher
+                .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: &aad })
+                .map_err(|_| {
+                    StorageError::Crypto(
+                        "wrong passphrase or damaged blob (chunk authentication failed)"
+                            .to_string(),
+                    )
+                })?,
+        );
         if !last && pt.len() != usize_of(header.chunk_bytes) {
             return Err(StorageError::Corrupt(
                 "short non-final export chunk (spliced blob?)".to_string(),
@@ -1129,7 +1224,8 @@ mod tests {
             "workspace_id": "00".repeat(32), "key_mode": "passphrase",
             "kdf": { "algo": "argon2id", "m_kib": 2 * 1024 * 1024, "t": 1, "p": 1,
                      "salt": "11".repeat(32) },
-            "cipher": "xchacha20poly1305", "chunk_bytes": 4096
+            "cipher": "xchacha20poly1305", "chunk_bytes": 4096,
+            "export_salt": "22".repeat(32)
         }));
         let err = read_export(&mut big.as_slice(), &secret).expect_err("m_kib cap");
         assert!(err.to_string().contains("import caps"), "{err}");
@@ -1165,6 +1261,117 @@ mod tests {
         assert!(err.to_string().contains("does not derive"), "{err}");
     }
 
+    /// Cross-blob splice resistance (design §3.7): two `workspace`-mode
+    /// exports of the SAME content must NOT share a stream key. A per-blob
+    /// random `export_salt` in the header binds
+    /// `k_stream = HKDF(k_root, .., header_bytes)` per export; without it,
+    /// chunk `i` of one retained backup authenticates at position `i` of
+    /// another, letting an untrusted store splice two points in time into one
+    /// "authenticated" archive.
+    #[test]
+    fn workspace_mode_is_per_blob_salted_against_cross_blob_splice() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, seed) = make_ws(tmp.path());
+        let id_hex = crate::read_manifest(&dir).expect("manifest").workspace.id;
+        let key = crate::derive_workspace_key(&seed, &id_hex);
+
+        let export = |chunk: u32| {
+            let mut b = Vec::new();
+            export_dir_chunked(&root, &dir, &ExportKey::Workspace, chunk, &mut b).expect("export");
+            b
+        };
+        // small chunks → guaranteed multi-chunk, identical content ⇒ aligned
+        let blob_a = export(256);
+        let blob_b = export(256);
+
+        // the plaintext headers themselves must differ per export (the salt
+        // lives there) → the stream key differs per blob
+        let (_, hb_a) = read_header(&mut blob_a.as_slice()).expect("hdr a");
+        let (_, hb_b) = read_header(&mut blob_b.as_slice()).expect("hdr b");
+        assert_ne!(hb_a, hb_b, "each workspace-mode export carries a fresh header salt");
+
+        // both still decrypt independently
+        read_export(&mut blob_a.as_slice(), &ExportSecret::WorkspaceKey(key)).expect("a decrypts");
+        read_export(&mut blob_b.as_slice(), &ExportSecret::WorkspaceKey(key)).expect("b decrypts");
+
+        // locate chunk regions (nonce(24) | ct_len(4) | ct) in each blob
+        let regions = |blob: &[u8]| -> Vec<(usize, usize)> {
+            let hl = usize_of(u32::from_le_bytes(blob[15..19].try_into().expect("4-byte slice")));
+            let mut off = 15 + 4 + hl;
+            let mut r = Vec::new();
+            while off < blob.len() {
+                let ct_len = usize_of(u32::from_le_bytes(
+                    blob[off + 24..off + 28].try_into().expect("4-byte slice"),
+                ));
+                let end = off + 24 + 4 + ct_len;
+                r.push((off, end));
+                off = end;
+            }
+            r
+        };
+        let ra = regions(&blob_a);
+        let rb = regions(&blob_b);
+        assert!(ra.len() >= 3 && ra.len() == rb.len(), "aligned multi-chunk fixtures");
+
+        // splice chunk index 1 (a middle, non-final chunk) from A into B at
+        // the SAME index — the AAD position matches, so only a per-blob key
+        // difference can reject it
+        let i = 1;
+        let (sa, ea) = ra[i];
+        let (sb, eb) = rb[i];
+        assert_eq!(ea - sa, eb - sb, "identical content ⇒ identical chunk sizes");
+        let mut spliced = blob_b.clone();
+        spliced.splice(sb..eb, blob_a[sa..ea].iter().copied());
+        assert_eq!(spliced.len(), blob_b.len(), "in-place chunk swap");
+        assert!(
+            read_export(&mut spliced.as_slice(), &ExportSecret::WorkspaceKey(key)).is_err(),
+            "a chunk spliced from another retained backup must FAIL authentication"
+        );
+    }
+
+    /// The mandatory-salt gate (design §3.7): a v1 blob lacking `export_salt`
+    /// is cleanly refused — but the version gate still runs FIRST, so a newer
+    /// blob lacking it is refused as `NewerVersion`, not for the salt.
+    #[test]
+    fn header_requires_export_salt_but_after_the_version_gate() {
+        let forge = |header: &serde_json::Value| -> Vec<u8> {
+            let hb = serde_json::to_vec(header).expect("json");
+            let mut b = EXPORT_MAGIC.to_vec();
+            b.extend_from_slice(&u32::try_from(hb.len()).expect("len").to_le_bytes());
+            b.extend_from_slice(&hb);
+            b.extend_from_slice(&[0u8; 64]); // never reached
+            b
+        };
+        let key = ExportSecret::WorkspaceKey([0u8; 32]);
+        // v1, workspace mode, NO export_salt → clean BadFile at read_header
+        let no_salt = forge(&serde_json::json!({
+            "format": "molt-export-v1", "version": 1,
+            "workspace_id": "00".repeat(32), "key_mode": "workspace",
+            "cipher": "xchacha20poly1305", "chunk_bytes": 4096
+        }));
+        let err = read_export(&mut no_salt.as_slice(), &key).expect_err("missing salt");
+        assert!(err.to_string().contains("per-blob salt"), "{err}");
+        // a malformed salt (not 32-byte hex) is refused the same way
+        let bad_salt = forge(&serde_json::json!({
+            "format": "molt-export-v1", "version": 1,
+            "workspace_id": "00".repeat(32), "key_mode": "workspace",
+            "cipher": "xchacha20poly1305", "chunk_bytes": 4096,
+            "export_salt": "nothex"
+        }));
+        let err = read_export(&mut bad_salt.as_slice(), &key).expect_err("bad salt");
+        assert!(err.to_string().contains("per-blob salt"), "{err}");
+        // v2 without a salt → the version gate wins (NewerVersion, not salt)
+        let v2 = forge(&serde_json::json!({
+            "format": "molt-export-v1", "version": 2,
+            "workspace_id": "00".repeat(32), "key_mode": "workspace",
+            "cipher": "xchacha20poly1305", "chunk_bytes": 4096
+        }));
+        match read_export(&mut v2.as_slice(), &key) {
+            Err(StorageError::NewerVersion(2)) => {}
+            other => panic!("expected NewerVersion(2), got {other:?}", other = other.err()),
+        }
+    }
+
     /// Key-hierarchy pin, read side: a forged blob whose authenticated meta
     /// carries a seed that does not derive its workspace key is rejected —
     /// and so are traversal entry paths.
@@ -1181,6 +1388,7 @@ mod tests {
                 kdf: None,
                 cipher: "xchacha20poly1305".to_string(),
                 chunk_bytes: 4096,
+                export_salt: "44".repeat(32),
             };
             let hb = serde_json::to_vec(&header).expect("json");
             let id = crate::id_bytes(&id_hex).expect("id");
