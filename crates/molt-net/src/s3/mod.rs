@@ -203,6 +203,29 @@ pub fn infer_region(host: &str) -> String {
     }
 }
 
+/// Extract the S3 `<Code>` from an error response body. S3 error codes are
+/// short PascalCase tokens (`AccessDenied`, `RequestTimeTooSkewed`, …); the
+/// alphanumeric guard both keeps the hint tidy and stops a hostile body from
+/// smuggling a huge or control-laden string into an operator-facing message.
+fn s3_error_code(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let start = text.find("<Code>")? + "<Code>".len();
+    let end = start + text[start..].find("</Code>")?;
+    let code = text[start..end].trim();
+    if code.is_empty() || code.len() > 64 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(code.to_string())
+}
+
+/// Fold an S3 `<Code>` into a base hint when one was recovered.
+fn with_code(base: &str, code: Option<&str>) -> String {
+    match code {
+        Some(c) => format!("{base} ({c})"),
+        None => base.to_string(),
+    }
+}
+
 /// The full client configuration for one S3 target.
 #[derive(Debug, Clone)]
 pub struct S3Config {
@@ -273,7 +296,7 @@ impl S3Client {
         let resp = self.request("HEAD", &path, &[], &[]).await?;
         match resp.status {
             200..=299 => Ok(()),
-            s => Err(self.status_error(s)),
+            s => Err(self.status_error(s, &resp.body)),
         }
     }
 
@@ -292,12 +315,49 @@ impl S3Client {
     /// the body's real SHA-256 — the backup uploader (mock_todo story 12).
     /// Success means the store confirmed the write (2xx); every failure
     /// carries its honest class, and the caller must treat anything but
-    /// `Ok(())` as "the backup is NOT in the bucket".
+    /// `Ok(())` as "the backup is NOT in the bucket". The body is *streamed*
+    /// (like [`S3Client::get_object`]): it is written in bounded slices, each
+    /// with its own idle deadline, so a realistically-sized blob does not ride
+    /// one whole-exchange cap it would deterministically blow through over a
+    /// slow (Tor) circuit.
     pub async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), S3Error> {
-        let resp = self.request("PUT", &self.object_path(key), &[], body).await?;
+        let path = self.object_path(key);
+        let payload_hash = if body.is_empty() {
+            sigv4::EMPTY_PAYLOAD_SHA256.to_string()
+        } else {
+            hex::encode(Sha256::digest(body))
+        };
+        let (path_and_query, wire_headers) = self.sign_wire("PUT", &path, &[], &payload_hash)?;
+        let stream = self.dial().await?;
+        let resp = match self.config.endpoint.scheme {
+            S3Scheme::Https => {
+                let mut tls = self.tls_handshake(stream).await?;
+                http::roundtrip_upload(
+                    &mut tls,
+                    "PUT",
+                    &path_and_query,
+                    &wire_headers,
+                    body,
+                    http::UPLOAD_IDLE_TIMEOUT,
+                )
+                .await?
+            }
+            S3Scheme::Http => {
+                let mut tcp = stream;
+                http::roundtrip_upload(
+                    &mut tcp,
+                    "PUT",
+                    &path_and_query,
+                    &wire_headers,
+                    body,
+                    http::UPLOAD_IDLE_TIMEOUT,
+                )
+                .await?
+            }
+        };
         match resp.status {
             200..=299 => Ok(()),
-            s => Err(self.status_error(s)),
+            s => Err(self.status_error(s, &resp.body)),
         }
     }
 
@@ -311,14 +371,29 @@ impl S3Client {
             .await?;
         match resp.status {
             200..=299 => Ok(()),
-            s => Err(self.status_error(s)),
+            s => Err(self.status_error(s, &resp.body)),
         }
     }
 
     /// The honest interpretation of a non-success HTTP status against the
     /// bucket — shared by every bucket-level operation (probe, listing) so
-    /// the settings verdict and the table status never drift apart.
-    pub(crate) fn status_error(&self, status: u16) -> S3Error {
+    /// the settings verdict and the table status never drift apart. `body` is
+    /// the (already size-capped) response body for the ops that have it in
+    /// hand; its S3 `<Code>` is folded into the hint so a 403 caused by a
+    /// skewed clock (`RequestTimeTooSkewed`) or a signing mistake
+    /// (`SignatureDoesNotMatch`) is not blindly blamed on the credentials. A
+    /// HEAD probe carries no body — pass `&[]` and the generic hint stands.
+    pub(crate) fn status_error(&self, status: u16, body: &[u8]) -> S3Error {
+        let code = s3_error_code(body);
+        // clock skew is an S3 403 whose real cause is the local clock, not the
+        // credentials — surface it whatever the status
+        if code.as_deref() == Some("RequestTimeTooSkewed") {
+            return S3Error::Http {
+                status,
+                hint: "the local clock is too far from the server's — fix the system time"
+                    .to_string(),
+            };
+        }
         match status {
             301 | 307 | 308 => S3Error::Http {
                 status,
@@ -326,11 +401,14 @@ impl S3Client {
             },
             400 => S3Error::Http {
                 status: 400,
-                hint: "bad request — often a region mismatch for this endpoint".to_string(),
+                hint: with_code(
+                    "bad request — often a region mismatch for this endpoint",
+                    code.as_deref(),
+                ),
             },
             401 | 403 => S3Error::Http {
                 status,
-                hint: "access denied — check access key and secret".to_string(),
+                hint: with_code("access denied — check access key and secret", code.as_deref()),
             },
             404 => S3Error::Http {
                 status: 404,
@@ -338,7 +416,7 @@ impl S3Client {
             },
             s => S3Error::Http {
                 status: s,
-                hint: "unexpected status".to_string(),
+                hint: with_code("unexpected status", code.as_deref()),
             },
         }
     }
@@ -407,6 +485,7 @@ impl S3Client {
                     &wire_headers,
                     out,
                     max_bytes,
+                    http::DownloadBounds::PRODUCTION,
                     progress,
                 )
                 .await?
@@ -419,6 +498,7 @@ impl S3Client {
                     &wire_headers,
                     out,
                     max_bytes,
+                    http::DownloadBounds::PRODUCTION,
                     progress,
                 )
                 .await?
@@ -432,7 +512,9 @@ impl S3Client {
                 status: 404,
                 hint: format!("object `{key}` not found"),
             }),
-            s => Err(self.status_error(s)),
+            // the download path drains and discards the error body, so no
+            // `<Code>` is in hand here — the generic hint stands
+            s => Err(self.status_error(s, &[])),
         }
     }
 

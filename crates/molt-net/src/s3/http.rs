@@ -10,7 +10,7 @@
 //! read-to-EOF (close-delimited) — enough for HEAD probes today and the
 //! ListObjects/GET/PUT operations the backup stories add later.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
@@ -18,12 +18,24 @@ use tokio::time::timeout;
 use super::S3Error;
 
 /// Deadline for one whole HTTP exchange once the connection is up (the dial
-/// and TLS handshakes carry their own deadlines).
+/// and TLS handshakes carry their own deadlines). Covers head + a *small*
+/// body: the streaming upload/download paths do NOT ride this — a large blob
+/// would deterministically time out (see [`roundtrip_upload`]).
 const HTTP_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Hard cap on response head + body — a probe/list answer is tiny; anything
 /// larger is a misbehaving server, not data we want to buffer.
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+
+/// Idle deadline for one body-write slice on the streaming upload path: each
+/// bounded `write_all` must make progress within this window. A large backup
+/// blob then rides the SUM of per-slice windows, never a single
+/// whole-exchange cap it would blow through over a slow (Tor) circuit.
+pub const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Body-write slice size for the streaming upload: small enough that each
+/// slice drains well within [`UPLOAD_IDLE_TIMEOUT`] on any real circuit.
+const UPLOAD_CHUNK: usize = 64 * 1024;
 
 /// A parsed HTTP response.
 #[derive(Debug)]
@@ -98,6 +110,16 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 
     // --- response: read until provably complete or EOF, then parse ---
     let head_only = method == "HEAD";
+    read_full_response(stream, head_only).await
+}
+
+/// Read one whole HTTP response (head + framed/close-delimited body) into
+/// memory and parse it. Shared by the buffered [`roundtrip`] and the response
+/// tail of [`roundtrip_upload`]; the caller bounds it in time.
+async fn read_full_response<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    head_only: bool,
+) -> Result<HttpResponse, S3Error> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -130,35 +152,127 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     parse_response(&buf, head_only)
 }
 
+/// `write_all` a slice under an idle deadline: it must make progress within
+/// `idle` or the write is treated as stalled. Bounded slices give the upload
+/// path a per-write floor instead of one cap over the whole (size-dependent)
+/// exchange.
+async fn write_all_idle<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    data: &[u8],
+    idle: Duration,
+    what: &str,
+) -> Result<(), S3Error> {
+    timeout(idle, stream.write_all(data))
+        .await
+        .map_err(|_| S3Error::Protocol(format!("{what} timed out")))?
+        .map_err(|e| S3Error::Protocol(format!("{what}: {e}")))
+}
+
+/// Send one request with a (possibly large) `body` and read the response —
+/// the object *upload* path (`PUT`). Unlike [`roundtrip`], the body is
+/// written in bounded slices, each under its own `write_idle` deadline, so a
+/// realistically-sized backup blob rides the sum of per-slice windows rather
+/// than one whole-exchange cap it would blow through over a slow circuit. The
+/// small head + response tail keep a single whole-exchange cap. A stalled
+/// peer (no progress within `write_idle`) still fails, promptly.
+pub async fn roundtrip_upload<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    method: &str,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    write_idle: Duration,
+) -> Result<HttpResponse, S3Error> {
+    // --- request head ---
+    let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !body.is_empty() {
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    write_all_idle(stream, req.as_bytes(), write_idle, "http write").await?;
+
+    // --- body in bounded, individually idle-bounded slices ---
+    for slice in body.chunks(UPLOAD_CHUNK) {
+        write_all_idle(stream, slice, write_idle, "http write body").await?;
+    }
+    timeout(write_idle, stream.flush())
+        .await
+        .map_err(|_| S3Error::Protocol("http flush timed out".to_string()))?
+        .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))?;
+
+    // --- response: small head + body, one whole-exchange cap ---
+    timeout(HTTP_EXCHANGE_TIMEOUT, read_full_response(stream, false))
+        .await
+        .map_err(|_| S3Error::Protocol("http exchange timed out".to_string()))?
+}
+
 /// Cap on a streamed download's response HEAD (status + headers).
 const MAX_DOWNLOAD_HEAD: usize = 64 * 1024;
 
-/// Idle deadline for a streamed download: each read must make progress
-/// within this window (a whole-exchange deadline would break large
-/// objects over slow circuits; a stalled peer must still not hang us).
-const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time bounds for a streamed download. An idle timeout alone lets a server
+/// dribble one byte per (idle − ε) forever; the overall floor derived from
+/// [`DownloadBounds::overall`] caps the total so a byte-at-a-time peer cannot
+/// hold the restore task effectively unbounded.
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadBounds {
+    /// Each read/write must make progress within this window.
+    pub idle: Duration,
+    /// Slack before the minimum-throughput floor starts to apply.
+    pub grace: Duration,
+    /// Minimum sustained bytes/second after the grace period (a value of 0
+    /// disables the floor).
+    pub min_throughput_bps: u64,
+}
+
+impl DownloadBounds {
+    /// Production bounds: a 30 s idle window (large objects over a slow Tor
+    /// circuit are fine), a 30 s grace, and a 1 KiB/s throughput floor.
+    pub const PRODUCTION: DownloadBounds = DownloadBounds {
+        idle: Duration::from_secs(30),
+        grace: Duration::from_secs(30),
+        min_throughput_bps: 1024,
+    };
+
+    /// The overall deadline for moving up to `max_bytes`: `grace` plus the
+    /// time the throughput floor would allow for `max_bytes`. `min_throughput`
+    /// of 0 means "no floor" (an effectively unbounded deadline).
+    fn overall(&self, max_bytes: u64) -> Duration {
+        if self.min_throughput_bps == 0 {
+            return Duration::from_secs(u64::MAX);
+        }
+        self.grace + Duration::from_millis(max_bytes.saturating_mul(1000) / self.min_throughput_bps)
+    }
+}
 
 /// Send one `GET` and **stream** a 2xx body into `out` (the object
 /// download path — bodies larger than [`MAX_RESPONSE`] never sit in
 /// memory). Returns `(status, bytes streamed)`; for a non-2xx status the
-/// (small, buffered) error body is discarded and `(status, 0)` returned so
-/// the caller maps it to its honest class. A 2xx body must be framed by
+/// (small, buffered) error body is drained and discarded and `(status, 0)`
+/// returned — never letting the drain mask the honest status with a timeout —
+/// so the caller maps it to its honest class. A 2xx body must be framed by
 /// `Content-Length` (S3 always does; chunked/close-delimited downloads are
 /// refused — truncation would be undetectable), a declared length beyond
 /// `max_bytes` is refused before a byte is written, and EOF before the
-/// declared length is a hard error.
+/// declared length is a hard error. `bounds` gives both an idle window (each
+/// read makes progress) and an overall minimum-throughput floor (a dribbling
+/// server cannot hold us unbounded).
 pub async fn roundtrip_download<S, W>(
     stream: &mut S,
     path_and_query: &str,
     headers: &[(String, String)],
     out: &mut W,
     max_bytes: u64,
+    bounds: DownloadBounds,
     progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
 ) -> Result<(u16, u64), S3Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
 {
+    let idle = bounds.idle;
     // --- request (no body) ---
     let mut req = format!("GET {path_and_query} HTTP/1.1\r\n");
     for (k, v) in headers {
@@ -175,9 +289,16 @@ where
             .await
             .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))
     };
-    timeout(DOWNLOAD_IDLE_TIMEOUT, write)
+    timeout(idle, write)
         .await
         .map_err(|_| S3Error::Protocol("http write timed out".to_string()))??;
+
+    // the whole receive — head, then body or error drain — is bounded both by
+    // the per-read idle window AND by an overall minimum-throughput floor, so a
+    // server dribbling even the response HEAD (under the 64 KiB cap, just under
+    // the idle window) cannot hold the restore task effectively unbounded
+    let started = Instant::now();
+    let overall = bounds.overall(max_bytes);
 
     // --- head: read until \r\n\r\n ---
     let mut buf = Vec::new();
@@ -189,7 +310,13 @@ where
         if buf.len() > MAX_DOWNLOAD_HEAD {
             return Err(S3Error::Protocol("http response head exceeds 64 KiB".to_string()));
         }
-        let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
+        if started.elapsed() > overall {
+            return Err(S3Error::Protocol(format!(
+                "http response head too slow — below the {} B/s floor",
+                bounds.min_throughput_bps
+            )));
+        }
+        let n = timeout(idle, stream.read(&mut chunk))
             .await
             .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
             .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
@@ -202,21 +329,8 @@ where
     };
 
     if !(200..=299).contains(&status) {
-        // error bodies are small; drain them bounded and discard
-        let mut drained = buf.len();
-        loop {
-            let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
-                .await
-                .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
-                .unwrap_or(0);
-            if n == 0 {
-                return Ok((status, 0));
-            }
-            drained += n;
-            if drained > MAX_RESPONSE {
-                return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
-            }
-        }
+        return drain_error_body(stream, status, &buf, body_start, &resp_headers, idle, started, overall)
+            .await;
     }
 
     // --- 2xx body: Content-Length-framed streaming ---
@@ -249,7 +363,13 @@ where
         progress(written, Some(total));
     }
     while written < total {
-        let n = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut chunk))
+        if started.elapsed() > overall {
+            return Err(S3Error::Protocol(format!(
+                "download too slow — below the {} B/s floor ({written} of {total} bytes)",
+                bounds.min_throughput_bps
+            )));
+        }
+        let n = timeout(idle, stream.read(&mut chunk))
             .await
             .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
             .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
@@ -270,6 +390,59 @@ where
         .await
         .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
     Ok((status, written))
+}
+
+/// Drain (and discard) a non-2xx error body, then return `(status, 0)`. The
+/// honest HTTP status is the answer here — draining is only politeness before
+/// the connection closes — so nothing masks it: a keep-alive server that
+/// ignores `Connection: close` is stopped as soon as `Content-Length` / the
+/// chunked terminator says the body is complete, and an idle timeout, read
+/// error, or the overall floor all resolve to `(status, 0)` rather than a
+/// [`S3Error::Protocol`] that would hide the real status.
+#[allow(clippy::too_many_arguments)]
+async fn drain_error_body<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    status: u16,
+    buf: &[u8],
+    body_start: usize,
+    resp_headers: &[(String, String)],
+    idle: Duration,
+    started: Instant,
+    overall: Duration,
+) -> Result<(u16, u64), S3Error> {
+    let mut chunk = [0u8; 8192];
+    let mut have = buf.len() - body_start; // body bytes already read with the head
+    // Content-Length-framed: read exactly the declared body, no more — a
+    // keep-alive server must not stall us past the last body byte
+    if let Some(len) = content_length(resp_headers) {
+        while have < len && have <= MAX_RESPONSE && started.elapsed() <= overall {
+            match timeout(idle, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break, // EOF/error/idle: status wins
+                Ok(Ok(n)) => have += n,
+            }
+        }
+        return Ok((status, 0));
+    }
+    // chunked: read until the terminator parses (dechunk succeeds)
+    if is_chunked(resp_headers) {
+        let mut acc = buf[body_start..].to_vec();
+        while dechunk(&acc).is_err() && acc.len() <= MAX_RESPONSE && started.elapsed() <= overall {
+            match timeout(idle, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => acc.extend_from_slice(&chunk[..n]),
+            }
+        }
+        return Ok((status, 0));
+    }
+    // close-delimited: read to EOF, bounded by MAX_RESPONSE and the floor
+    let mut drained = buf.len();
+    while drained <= MAX_RESPONSE && started.elapsed() <= overall {
+        match timeout(idle, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => drained += n,
+        }
+    }
+    Ok((status, 0))
 }
 
 /// The index just past the head's `\r\n\r\n`, once fully received.
