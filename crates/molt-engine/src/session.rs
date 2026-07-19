@@ -146,8 +146,17 @@ impl State {
             || old.s3_access_key != new.s3_access_key
             || old.s3_secret_key != new.s3_secret_key
             || old.s3_bucket != new.s3_bucket;
-        if changed && !(self.session.s3_list.is_empty() && self.session.backup_orphans.is_empty())
-        {
+        if !changed {
+            return;
+        }
+        // the "Test connection" verdict described the OLD endpoint — a
+        // changed target is unprobed until the next Test, so the UI must not
+        // keep claiming the new endpoint is reachable ("ok") or unreachable.
+        self.session.s3_test = String::new();
+        // the orphan rows + listing verdict also described the OLD bucket;
+        // an in-flight listing against it must not land either (the gen bump
+        // drops it).
+        if !(self.session.s3_list.is_empty() && self.session.backup_orphans.is_empty()) {
             self.s3_list_gen += 1;
             self.session.s3_list = String::new();
             self.session.backup_orphans.clear();
@@ -895,6 +904,17 @@ impl State {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
         }
+        // a backup in flight is reading the very device-sealed key material
+        // this command deletes: sealing mid-upload can leave a confirmed but
+        // unrestorable blob (and retention would prune the good copies).
+        // Refuse until the upload settles — mirrors `cmd_backup_now`.
+        if self.backup_inflight.contains(&id) {
+            return Err(MoltError::WorkspaceBusy(
+                "a backup of this workspace is in flight — encrypt once it \
+                 completes"
+                    .to_string(),
+            ));
+        }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "the recovery phrase is required to encrypt — it is verified \
@@ -947,6 +967,15 @@ impl State {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
         }
+        // symmetric with encrypt: a backup in flight is mid-read of this
+        // dir's key material — decrypting under it would race the re-seal.
+        if self.backup_inflight.contains(&id) {
+            return Err(MoltError::WorkspaceBusy(
+                "a backup of this workspace is in flight — decrypt once it \
+                 completes"
+                    .to_string(),
+            ));
+        }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "a recovery phrase is required to decrypt".to_string(),
@@ -991,6 +1020,10 @@ impl State {
             ws.seed = seed;
             ws.members = members;
             ws.agenda = agenda;
+            // the sealed-at-rest skip status ("sealed — backup skipped") no
+            // longer describes anything: this workspace can back up again
+            // (mirrors cmd_set_workspace_backup's reset).
+            ws.backup_error = String::new();
         }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -1217,6 +1250,9 @@ impl State {
             }
         }
         self.session.workspaces.retain(|w| w.id != id);
+        // drop the in-memory last-backup stamp: a later restore that reuses
+        // this id must not inherit a stale age from the deleted workspace
+        self.backup_last_done.remove(&id);
         if self.session.active_workspace == id {
             self.session.active_workspace = String::new();
         }

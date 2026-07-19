@@ -150,3 +150,58 @@ async fn empty_fields_fall_back_to_the_saved_settings() {
     }
     panic!("s3_test never settled");
 }
+
+/// Review finding (MEDIUM): a probe verdict describes ONE endpoint. When the
+/// backup target changes, a stale "ok" must not survive to claim the new,
+/// unprobed endpoint is reachable.
+#[tokio::test]
+async fn a_changed_backup_target_clears_the_stale_probe_verdict() {
+    let (endpoint, _seen) = stub_server(200).await;
+    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    // configure the target and probe it → "ok"
+    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+        panic!("read session failed");
+    };
+    let mut settings = sv.settings.clone();
+    settings.s3_endpoint = endpoint;
+    settings.s3_access_key = "AKIAEXAMPLE".to_string();
+    settings.s3_secret_key = "secret-example".to_string();
+    settings.s3_bucket = "molt-bucket".to_string();
+    w.execute(Command::SaveSettings { settings: settings.clone() })
+        .await
+        .expect("settings saved");
+    w.execute(Command::NetTestS3 {
+        endpoint: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        bucket: String::new(),
+    })
+    .await
+    .expect("probe");
+    let mut probed = false;
+    for _ in 0..150 {
+        let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+            panic!("read session failed");
+        };
+        if sv.s3_test == "ok" {
+            probed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(probed, "the probe settled ok");
+
+    // change the bucket → the "ok" verdict is now stale and must be cleared
+    let mut changed = settings.clone();
+    changed.s3_bucket = "other-bucket".to_string();
+    w.execute(Command::SaveSettings { settings: changed })
+        .await
+        .expect("second save");
+    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+        panic!("read session failed");
+    };
+    assert_eq!(
+        sv.s3_test, "",
+        "a changed backup target drops the stale reachable verdict"
+    );
+}

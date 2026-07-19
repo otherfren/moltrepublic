@@ -523,6 +523,54 @@ async fn tampered_blob_and_forged_chain_restore_nothing() {
     assert_no_staging_residue(&dest_root);
 }
 
+/// Review finding (HIGH): a restore-REPLACE aimed at the currently OPEN
+/// workspace must be refused. The collision/replace path (design §4.3) is
+/// for CLOSED dirs; replacing an OPEN one would `fs::rename` the live
+/// directory into `.trash` from under its own running writer — ENOENT
+/// writes, a dangling `self.active`, a duplicate id dir. It must never
+/// touch the live dir.
+#[tokio::test]
+async fn restore_replace_onto_the_open_workspace_is_refused_and_never_trashes_it() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let src_root = tmp.path().join("src");
+    let (src, id, _phrase) = founded_source(&src_root, SessionSettings::default()).await;
+    let blob = tmp.path().join("self.molt.enc");
+    let pass = "correct horse battery";
+    export_blob(&src, &id, &blob, pass).await;
+
+    // the workspace is still OPEN on this same engine — replace=true of its
+    // own id must be refused, not trash the live dir
+    let sv = run_restore(&src, "file", &blob.display().to_string(), pass, true).await;
+    assert_eq!(
+        sv.restore.run.outcome, 2,
+        "restore-replace onto the open workspace is refused: {:?}",
+        sv.restore.run.log
+    );
+    assert!(
+        sv.restore
+            .run
+            .log
+            .iter()
+            .any(|l| l.to_lowercase().contains("close")),
+        "the refusal tells the user to close it first: {:?}",
+        sv.restore.run.log
+    );
+    // the live directory survived — never moved to .trash
+    assert!(
+        molt_storage::find_workspace_dir(&src_root, &id).is_some(),
+        "the open workspace directory is intact"
+    );
+    let trash = src_root.join(".trash");
+    assert!(
+        !trash.exists() || trash.read_dir().expect("trash").count() == 0,
+        "the live dir was NOT trashed"
+    );
+    assert_no_staging_residue(&src_root);
+    // still open and usable
+    let sv = session(&src).await;
+    assert_eq!(sv.active_workspace, id, "the workspace stays open");
+}
+
 /// §8.4.2 failure honesty: a download that dies mid-stream fails the
 /// restore with the true reason — no dir, no staging residue.
 #[tokio::test]

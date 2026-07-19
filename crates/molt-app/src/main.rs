@@ -110,17 +110,37 @@ fn main() -> anyhow::Result<()> {
             w.net =
                 molt_core::effective_net_label(config.transport.anonymity.network.as_str())
                     .to_string();
-            if let Some(phrase) = molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id) {
-                w.seed = phrase;
-            }
-            if let Some(genesis) = molt_storage::peek_genesis(&workspace_dir, &e.dir, &w.id) {
-                if let molt_core::WorkspaceEvent::Founded { roster, agenda, .. } = genesis.body {
-                    // a closed workspace has no presence knowledge — every
-                    // member is honestly never-seen until traffic stamps it
-                    w.members = molt_core::roster_members(&roster, 0, |_| {
-                        molt_core::MemberInfo::NEVER
-                    });
-                    w.agenda = agenda;
+            // the at-rest-sealed marker ("phrase") means "no device-sealed
+            // key material on disk". ONLY an unsealed entry may surface those
+            // details (the recovery phrase, the genesis roster/charter) — a
+            // sealed marker must never hand them to the panel. A sealed
+            // marker found next to still-present key material is a
+            // half-unsealed dir: an inconsistency to flag and repair
+            // (decrypt), not a clean encrypted=true that quietly leaks.
+            if w.encrypted {
+                if e.dir.join(&e.manifest.crypto.key_file).exists() {
+                    tracing::warn!(
+                        id = %w.id,
+                        dir = %e.dir.display(),
+                        "workspace marked sealed-at-rest but its device-sealed key \
+                         material is still present — half-unsealed; decrypt to repair"
+                    );
+                }
+            } else {
+                if let Some(phrase) = molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id)
+                {
+                    w.seed = phrase;
+                }
+                if let Some(genesis) = molt_storage::peek_genesis(&workspace_dir, &e.dir, &w.id) {
+                    if let molt_core::WorkspaceEvent::Founded { roster, agenda, .. } = genesis.body {
+                        // a closed workspace has no presence knowledge —
+                        // every member is honestly never-seen until traffic
+                        // stamps it
+                        w.members = molt_core::roster_members(&roster, 0, |_| {
+                            molt_core::MemberInfo::NEVER
+                        });
+                        w.agenda = agenda;
+                    }
                 }
             }
             w
