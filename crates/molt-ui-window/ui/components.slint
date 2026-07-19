@@ -96,7 +96,9 @@ export component AppButton inherits Rectangle {
             font-size: Theme.fs-body + 2px;
             vertical-alignment: center;
         }
-        Text {
+        // icon-only buttons drop the label element entirely — even an empty
+        // Text skews the centered icon by its residual layout slot
+        if root.label != "": Text {
             text: root.label;
             color: root.primary ? Theme.accent-ink : Theme.text;
             font-size: Theme.fs-body;

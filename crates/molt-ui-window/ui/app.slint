@@ -2322,6 +2322,9 @@ export component AppWindow inherits Window {
                         }
                         Rectangle {
                             horizontal-stretch: 1;
+                            // the republic's name must never be crowded out
+                            // by the fixed columns (mirrored in the rows)
+                            min-width: 140px;
                             nh-ta := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
@@ -2347,7 +2350,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle {
-                            width: 160px;
+                            width: 110px;
                             sh-ta := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
@@ -2377,7 +2380,7 @@ export component AppWindow inherits Window {
                             color: Theme.faint;
                             font-size: Theme.fs-cap;
                             font-weight: 700;
-                            width: 150px;
+                            width: 120px;
                             vertical-alignment: center;
                         }
                         Text {
@@ -2385,7 +2388,7 @@ export component AppWindow inherits Window {
                             color: Theme.faint;
                             font-size: Theme.fs-cap;
                             font-weight: 700;
-                            width: 100px;
+                            width: 85px;
                             vertical-alignment: center;
                         }
                         Rectangle {
@@ -2442,8 +2445,10 @@ export component AppWindow inherits Window {
                                         spacing: 2px;
                                         horizontal-stretch: 1;
                                         // elide, or a long name widens this row's
-                                        // name column and the buttons misalign
-                                        min-width: 0;
+                                        // name column and the buttons misalign —
+                                        // but never collapse below the header's
+                                        // guaranteed name width
+                                        min-width: 140px;
                                         Text {
                                             text: w.name;
                                             color: Theme.text;
@@ -2461,7 +2466,7 @@ export component AppWindow inherits Window {
                                     Text {
                                         // fixed column, aligned under the
                                         // "Last sync" header
-                                        width: 160px;
+                                        width: 110px;
                                         text: w.status;
                                         color: w.state == 0 ? Theme.good : (w.state == 2 ? Theme.dim : Theme.warn);
                                         font-size: Theme.fs-cap;
@@ -2476,7 +2481,7 @@ export component AppWindow inherits Window {
                                     // first row's tip vanished under the
                                     // clipped table header.
                                     HorizontalLayout {
-                                        width: 150px;
+                                        width: 120px;
                                         spacing: 6px;
                                         AppButton {
                                             width: 26px;
@@ -2507,7 +2512,7 @@ export component AppWindow inherits Window {
                                     // manifest): encrypted = keys removed,
                                     // inactive until decrypted
                                     Text {
-                                        width: 100px;
+                                        width: 85px;
                                         text: w.encrypted ? Strings.ow-enc : Strings.ow-unenc;
                                         color: w.encrypted ? Theme.warn : Theme.good;
                                         font-size: Theme.fs-cap;
