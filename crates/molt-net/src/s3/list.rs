@@ -500,7 +500,7 @@ mod tests {
             assert!(
                 matches!(parse_list_page(&body), Err(S3Error::Protocol(_))),
                 "a literal control byte {:#x} in a key must be rejected",
-                raw as u32
+                u32::from(raw)
             );
         }
         // a literal control byte in the continuation token is rejected too

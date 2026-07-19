@@ -315,9 +315,46 @@ impl S3Client {
     /// the body's real SHA-256 — the backup uploader (mock_todo story 12).
     /// Success means the store confirmed the write (2xx); every failure
     /// carries its honest class, and the caller must treat anything but
-    /// `Ok(())` as "the backup is NOT in the bucket".
+    /// `Ok(())` as "the backup is NOT in the bucket". The body is *streamed*
+    /// (like [`S3Client::get_object`]): it is written in bounded slices, each
+    /// with its own idle deadline, so a realistically-sized blob does not ride
+    /// one whole-exchange cap it would deterministically blow through over a
+    /// slow (Tor) circuit.
     pub async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), S3Error> {
-        let resp = self.request("PUT", &self.object_path(key), &[], body).await?;
+        let path = self.object_path(key);
+        let payload_hash = if body.is_empty() {
+            sigv4::EMPTY_PAYLOAD_SHA256.to_string()
+        } else {
+            hex::encode(Sha256::digest(body))
+        };
+        let (path_and_query, wire_headers) = self.sign_wire("PUT", &path, &[], &payload_hash)?;
+        let stream = self.dial().await?;
+        let resp = match self.config.endpoint.scheme {
+            S3Scheme::Https => {
+                let mut tls = self.tls_handshake(stream).await?;
+                http::roundtrip_upload(
+                    &mut tls,
+                    "PUT",
+                    &path_and_query,
+                    &wire_headers,
+                    body,
+                    http::UPLOAD_IDLE_TIMEOUT,
+                )
+                .await?
+            }
+            S3Scheme::Http => {
+                let mut tcp = stream;
+                http::roundtrip_upload(
+                    &mut tcp,
+                    "PUT",
+                    &path_and_query,
+                    &wire_headers,
+                    body,
+                    http::UPLOAD_IDLE_TIMEOUT,
+                )
+                .await?
+            }
+        };
         match resp.status {
             200..=299 => Ok(()),
             s => Err(self.status_error(s, &resp.body)),
@@ -448,6 +485,7 @@ impl S3Client {
                     &wire_headers,
                     out,
                     max_bytes,
+                    http::DownloadBounds::PRODUCTION,
                     progress,
                 )
                 .await?
@@ -460,6 +498,7 @@ impl S3Client {
                     &wire_headers,
                     out,
                     max_bytes,
+                    http::DownloadBounds::PRODUCTION,
                     progress,
                 )
                 .await?
