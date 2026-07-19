@@ -1180,6 +1180,19 @@ impl State {
         let reused = self.join_transport.lock().ok().and_then(|mut s| s.take());
         if self.persist && !mesh.is_empty() {
             if let (Some(blob), Some(transport)) = (mls_blob, reused) {
+                // hard-kill safety (2026-07-19): the bootstrap queues' receive
+                // credentials exist only in this transport's memory — merge
+                // them into transport.state NOW, not only on clean close (live
+                // merge; materialize_workspace already wrote mls + mesh
+                // synchronously)
+                if let (Some(active), Some(creds)) = (
+                    self.active.as_ref(),
+                    molt_net::Transport::export_creds(&transport),
+                ) {
+                    active
+                        .handle
+                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone());
+                }
                 if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
                     self.teardown_net();
                     self.net = Some(net);
@@ -1438,6 +1451,18 @@ impl State {
         let reused = self.recover_transport.lock().ok().and_then(|mut s| s.take());
         if self.persist && !mesh.is_empty() {
             if let (Some(blob), Some(transport)) = (mls_blob, reused) {
+                // hard-kill safety (2026-07-19): the fresh mesh queues'
+                // receive credentials exist only in this transport's memory —
+                // merge them into transport.state NOW, not only on clean
+                // close (live merge; the join-tail twin above does the same)
+                if let (Some(active), Some(creds)) = (
+                    self.active.as_ref(),
+                    molt_net::Transport::export_creds(&transport),
+                ) {
+                    active
+                        .handle
+                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone());
+                }
                 if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
                     self.teardown_net();
                     self.net = Some(net);

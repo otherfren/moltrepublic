@@ -594,29 +594,74 @@ impl State {
         let dialer = self.resolve_dialer().ok();
         let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
             (Some(mls), Some(creds), Some(dialer)) if !transport_state.mesh.is_empty() => {
-                crate::founding::reopen_transport(&transport_state.mesh, creds, dialer.clone())
-                    .and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
+                // the reopen seam (tests): a transport on the still-running
+                // loopback hub replaces the fresh-SmpTransport build — same
+                // import contract
+                let transport = if let Some(seam) = self.reopen_seam.clone() {
+                    molt_net::Transport::import_creds(&seam, creds);
+                    Some(seam)
+                } else {
+                    crate::founding::reopen_transport(&transport_state.mesh, creds, dialer.clone())
+                };
+                transport.and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
             }
             _ => None,
         };
+        let resumed_real = resumed.is_some();
         if let Some(net) = resumed {
             self.net = Some(net);
         } else {
             self.ensure_demo_net();
         }
         self.session.screen = Screen::Main;
-        // the honest DETACHED state (backup_restore_design.md §4.4): an
-        // imported workspace carries a verified chain but deliberately NO
-        // live crypto — no MLS snapshot, no mesh links, no queue creds
-        // (never exported, §3.3). Reading works; the mesh does not come up;
-        // membership comes back via the recovery ritual, and the notice
-        // says exactly that instead of pretending a healthy mesh.
-        self.session.notice = if self.persist
+        // the honest OFFLINE state (2026-07-19 incident): a workspace whose
+        // transport.state carries real-mesh evidence (MLS/creds/links) but
+        // whose mesh did NOT resume must never look healthy — net_health
+        // goes Down with the exact gap, and the persistent "detached"
+        // notice is set. A dialer failure keeps its own fail-closed Down
+        // reason from resolve_dialer (the workspace is not detached —
+        // fixing the setting + reopening resumes).
+        let offline = if resumed_real || !self.persist || dialer.is_none() {
+            None
+        } else if transport_state.mls.is_some()
+            || transport_state.smp_queues.is_some()
+            || !transport_state.mesh.is_empty()
+        {
+            Some(if transport_state.smp_queues.is_none() {
+                "offline: no queue credentials on disk — the mesh cannot resume on \
+                 this seat (hard shutdown before the mesh came up, or a pre-fix \
+                 build); local reads/writes work, nothing reaches the peers; rejoin \
+                 via a recovery link"
+            } else if transport_state.mls.is_none() {
+                "offline: no MLS group snapshot on disk — the mesh cannot resume; \
+                 rejoin via a recovery link"
+            } else if transport_state.mesh.is_empty() {
+                "offline: no mesh links on disk — the mesh cannot resume; rejoin \
+                 via a recovery link"
+            } else {
+                "offline: resuming the persisted mesh failed — local reads/writes \
+                 work, nothing reaches the peers"
+            })
+        } else {
+            None
+        };
+        self.session.notice = if let Some(reason) = offline {
+            self.session.net_health = molt_core::NetHealth::Down {
+                reason: reason.to_string(),
+            };
+            "detached".to_string()
+        } else if self.persist
             && self.chain_head.is_some()
             && transport_state.mls.is_none()
             && transport_state.mesh.is_empty()
             && transport_state.smp_queues.is_none()
         {
+            // the honest DETACHED state (backup_restore_design.md §4.4): an
+            // imported workspace carries a verified chain but deliberately NO
+            // live crypto — no MLS snapshot, no mesh links, no queue creds
+            // (never exported, §3.3). Reading works; the mesh does not come
+            // up; membership comes back via the recovery ritual, and the
+            // notice says exactly that instead of pretending a healthy mesh.
             "detached".to_string()
         } else {
             String::new()

@@ -211,11 +211,17 @@ persist*: on close, the engine writes the advanced MLS snapshot + the transport'
 serialized queue credentials (`Transport::export_creds`) into `transport.state`
 (`persist_crypto_blocking` — a read-modify-write that preserves the delivery
 cursors); on reopen, `reopen_transport` re-adopts the creds into a fresh
-`SmpTransport` and `cmd_open_workspace` rebuilds the real mesh. Only a CLEAN
-close persists — a hard crash resumes from the last-persisted ratchet, so a few
-in-flight messages may be replay-rejected by the peer (MLS's per-message
-`reuse_guard` prevents the worse nonce-reuse). Per-drain MLS persist (full
-crash-safety) is the remaining hardening.
+`SmpTransport` and `cmd_open_workspace` rebuilds the real mesh. Since the
+2026-07-19 hardening the queue creds + MLS snapshot are ALSO merged live at
+every mesh-up (founder mesh-ready, join-sealed, recover-sealed,
+mesh-extension — the live `persist_mesh_crypto_blocking`, never the sealing
+close-persist), so a hard kill after the mesh came up is survivable: reopen
+resumes from the last-persisted ratchet, and a few in-flight messages may be
+replay-rejected by the peer (MLS's per-message `reuse_guard` prevents the
+worse nonce-reuse). A workspace with mesh evidence on disk that cannot
+resume opens HONESTLY offline (`notice = "detached"`, `net_health = Down`),
+never silently transport-less. Per-drain MLS persist (full crash-safety) and
+the reconnect/resubscribe supervisor (Stage B) are the remaining hardenings.
 
 ## Build, test, run
 

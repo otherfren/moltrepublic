@@ -223,9 +223,10 @@ pub trait Transport: Send + Sync + Clone + 'static {
     /// Serialize this transport's queue **credentials** — the recipient keys of
     /// queues we created (to re-`subscribe`) and the sender keys we secured peer
     /// queues with (to keep sending without a rejected re-`SKEY`) — so a reopened
-    /// node re-adopts the SAME queues. `None` for transports whose queues carry
-    /// no persistable credential (the loopback hub, whose queues live only in the
-    /// in-memory shared hub and cannot outlive the process).
+    /// node re-adopts the SAME queues. `None` when this endpoint created no
+    /// queues yet. The loopback transport exports its created queue ids (its
+    /// analogue of receive credentials) — valid only while the in-process hub
+    /// lives, so a NEW process still cannot resume a loopback mesh.
     fn export_creds(&self) -> Option<Vec<u8>> {
         None
     }

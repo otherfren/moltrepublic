@@ -401,7 +401,7 @@ impl State {
                     invite_wrap.clone(),
                     *seat_u32,
                     generation,
-                    cmd_tx.clone(),
+                    cmd_tx.downgrade(),
                 );
                 let material = InviteMaterial {
                     seat: *seat_u32,
@@ -481,8 +481,13 @@ fn spawn_founder_recv(
     wrap: WrapKey,
     seat: u32,
     generation: u64,
-    cmd_tx: mpsc::Sender<Envelope>,
+    cmd_tx: mpsc::WeakSender<Envelope>,
 ) {
+    // WEAK sender, upgraded per message (the ticker rule): this recv loop
+    // outlives the ritual — it blocks on the star queue for as long as the
+    // transport lives, so a strong sender would keep a dropped engine's
+    // actor (and its writer thread + workspace flock) alive forever. The
+    // hard-kill tests drop the handle and wait for exactly that release.
     tokio::spawn(async move {
         let Ok(mut rx) = transport.subscribe(&rcv).await else {
             return;
@@ -541,7 +546,10 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
-            if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
+            let Some(tx) = cmd_tx.upgrade() else {
+                return; // engine stopped — so do we
+            };
+            if tx.send(Envelope { cmd, reply }).await.is_err() {
                 return;
             }
         }
@@ -578,8 +586,11 @@ pub(crate) fn spawn_coordinator_recv(
     rcv: RcvQueue,
     wrap: WrapKey,
     generation: u64,
-    cmd_tx: mpsc::Sender<Envelope>,
+    cmd_tx: mpsc::WeakSender<Envelope>,
 ) {
+    // WEAK sender, upgraded per message — same rule as spawn_founder_recv:
+    // this loop lives as long as the transport, and must never keep a
+    // dropped engine's actor (writer thread, workspace flock) alive.
     tokio::spawn(async move {
         let Ok(mut rx) = transport.subscribe(&rcv).await else {
             return;
@@ -606,7 +617,10 @@ pub(crate) fn spawn_coordinator_recv(
                 _ => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
-            if cmd_tx.send(Envelope { cmd, reply }).await.is_err() {
+            let Some(tx) = cmd_tx.upgrade() else {
+                return; // engine stopped — so do we
+            };
+            if tx.send(Envelope { cmd, reply }).await.is_err() {
                 return;
             }
         }
@@ -660,7 +674,7 @@ fn spawn_smp_provisioning(
                 invite_wrap.clone(),
                 seat,
                 generation,
-                cmd_tx.clone(),
+                cmd_tx.downgrade(),
             );
             // the real, joinable link: now that the queue exists, it carries
             // the full transport handover. Report it so the founder's session
@@ -1710,21 +1724,28 @@ mod ritual_ops {
             }
             self.founder_mesh_in = None;
             let peers = mesh.len();
+            // reuse the ritual transport for the runtime supervisor AND export
+            // its queue credentials: the receive keys of the star+mesh queues
+            // live only in this transport's memory. Persisting them NOW — not
+            // only on clean close — is what makes a hard kill after this point
+            // survivable (2026-07-19 incident).
+            let transport = self.runtime_transport.take();
             if let Some(active) = &self.active {
-                // merge the founder's post-bootstrap MLS + assembled mesh into
-                // transport.state (a LIVE merge: the writer owns the file, and
-                // plain cursor saves carry only the cursor maps — this is the
-                // one path that writes the crypto/mesh fields mid-session)
+                let creds = transport.as_ref().and_then(|t| t.export_creds());
+                // merge the founder's post-bootstrap MLS + assembled mesh +
+                // queue creds into transport.state (a LIVE merge: the writer
+                // owns the file, and plain cursor saves carry only the cursor
+                // maps)
                 active.handle.persist_mesh_crypto_blocking(
                     Some(mls_snapshot.clone()),
-                    None,
+                    creds,
                     mesh.clone(),
                 );
             }
             // stand the runtime supervisor up over the direct mesh, reusing the
             // ritual transport (the loopback hub / the founder's SMP server), so
             // the founder can chat peer-to-peer the moment the mesh is assembled
-            if let Some(transport) = self.runtime_transport.take() {
+            if let Some(transport) = transport {
                 if let Some(net) = self.build_real_net(transport, &mesh, &mls_snapshot) {
                     self.teardown_net();
                     self.net = Some(net);

@@ -1729,6 +1729,7 @@ fn spawn_demo_peer(
         // a peer node lives on the demo seam by definition: its own
         // `ensure_demo_net` must keep (not tear down) the injected mesh
         true,
+        None,
     );
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown

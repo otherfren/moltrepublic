@@ -142,7 +142,7 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None, false, None);
     (handle, rx)
 }
 
@@ -158,7 +158,7 @@ pub fn __spawn_manual_founding_bootstrap(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None, false, None);
     (handle, rx)
 }
 
@@ -181,7 +181,7 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
     let (rtx, rrx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let handle = spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx), false,
+        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx), false, None,
     );
     (handle, rx, rrx)
 }
@@ -196,7 +196,37 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
 pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, false, None, true,
+        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, false, None, true, None,
+    )
+}
+
+/// Storage-backed engine that resumes a persisted mesh over the GIVEN
+/// transport instead of a fresh `SmpTransport` — the loopback reopen seam
+/// for the hard-kill tests (their hub survives in the test process, like a
+/// real SMP server would). The product never uses it: the real reopen path
+/// builds `reopen_transport` from the persisted mesh + creds.
+#[doc(hidden)]
+pub fn __spawn_with_reopen_transport(
+    config: GroupConfig,
+    session: SessionView,
+    transport: founding::RitualTransport,
+) -> WalletHandle {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    spawn_actor(
+        config,
+        session,
+        cmd_tx,
+        cmd_rx,
+        None,
+        true,
+        None,
+        None,
+        false,
+        false,
+        false,
+        None,
+        false,
+        Some(transport),
     )
 }
 
@@ -207,7 +237,7 @@ pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHan
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None, false, None)
 }
 
 /// Like [`__spawn_manual_founding`], but the founding runs over the **real
@@ -222,7 +252,7 @@ pub fn __spawn_manual_founding_over_smp(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None, false);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None, false, None);
     (handle, rx)
 }
 
@@ -260,6 +290,7 @@ pub fn spawn_with_config(
         // the production engine: the demo-mesh test seam stays OFF — no
         // context ever spawns simulated peers here
         false,
+        None,
     );
     Ok((handle, store))
 }
@@ -271,7 +302,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None, false)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None, false, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -289,6 +320,7 @@ fn spawn_actor(
     ritual_bootstrap: bool,
     recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
     demo_mesh: bool,
+    reopen_seam: Option<founding::RitualTransport>,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
@@ -299,6 +331,7 @@ fn spawn_actor(
     state.ritual_bootstrap = ritual_bootstrap;
     state.recovery_material_sink = recovery_material_sink;
     state.demo_mesh = demo_mesh;
+    state.reopen_seam = reopen_seam;
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
@@ -559,6 +592,12 @@ pub(crate) struct State {
     /// a production engine spawns no fake peers, in no context; the flag in
     /// the prefs stays parsed but inert.
     pub(crate) demo_mesh: bool,
+    /// Reopen **test seam only** ([`__spawn_with_reopen_transport`]): resume a
+    /// persisted mesh over THIS transport instead of building a fresh
+    /// `SmpTransport` from the mesh links. Lets the loopback tests drive a
+    /// literal hard-kill + reopen of a full engine (their hub survives in the
+    /// test, like a real SMP server would). The product never sets it.
+    pub(crate) reopen_seam: Option<founding::RitualTransport>,
     /// Opt-in: after sealing, the founder runs the post-founding **mesh
     /// bootstrap** over the star (exchanges [`molt_net::mesh::MeshAnnounce`]s
     /// with the members, assembles the direct mesh, persists it). Off by
@@ -696,6 +735,7 @@ impl State {
             ritual_over_smp: false,
             ritual_sim: false,
             demo_mesh: false,
+            reopen_seam: None,
             ritual_bootstrap: false,
             founder_mesh_in: None,
             runtime_transport: None,

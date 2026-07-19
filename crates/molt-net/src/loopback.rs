@@ -14,7 +14,7 @@
 //! *interleaving* still depends on the tokio scheduler, which is exactly
 //! the nondeterminism the convergence tests are meant to survive.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -120,7 +120,10 @@ impl LoopbackHub {
 
     /// A transport endpoint on this hub.
     pub fn transport(&self) -> LoopbackTransport {
-        LoopbackTransport { hub: self.clone() }
+        LoopbackTransport {
+            hub: self.clone(),
+            created: Arc::new(Mutex::new(BTreeSet::new())),
+        }
     }
 
     /// Create a queue without an async context (mesh builders run inside
@@ -253,11 +256,46 @@ impl LoopbackHub {
 #[derive(Clone)]
 pub struct LoopbackTransport {
     hub: LoopbackHub,
+    /// Queue ids this endpoint created (= receives on): the loopback
+    /// analogue of SMP's receive credentials. Shared across clones (like
+    /// `SmpTransport`'s state Arc) so ritual/runtime clones export ONE
+    /// credential set. Only meaningful while the hub lives — a new PROCESS
+    /// cannot resume a loopback mesh; a fresh engine on the same hub
+    /// (the tests' reopen seam) can.
+    created: Arc<Mutex<BTreeSet<Vec<u8>>>>,
 }
 
 impl Transport for LoopbackTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
-        self.hub.create_queue_blocking()
+        let pair = self.hub.create_queue_blocking()?;
+        if let Ok(mut created) = self.created.lock() {
+            created.insert(pair.rcv.id.0.clone());
+        }
+        Ok(pair)
+    }
+
+    fn export_creds(&self) -> Option<Vec<u8>> {
+        let ids: Vec<String> = self.created.lock().ok()?.iter().map(hex::encode).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        serde_json::to_vec(&ids).ok()
+    }
+
+    fn import_creds(&self, creds: &[u8]) {
+        // bookkeeping only — the hub is permissive (any endpoint may
+        // subscribe), so adopting the ids keeps a re-export after reopen
+        // faithful
+        let Ok(ids) = serde_json::from_slice::<Vec<String>>(creds) else {
+            return;
+        };
+        if let Ok(mut c) = self.created.lock() {
+            for id in ids {
+                if let Ok(b) = hex::decode(id) {
+                    c.insert(b);
+                }
+            }
+        }
     }
 
     async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {

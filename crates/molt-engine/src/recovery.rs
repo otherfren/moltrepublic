@@ -218,7 +218,7 @@ pub(crate) fn spawn_recovery_provisioning(
             q.rcv.clone(),
             wrap.clone(),
             generation,
-            cmd_tx.clone(),
+            cmd_tx.downgrade(),
         );
         let link = RecoveryInvite {
             republic,
