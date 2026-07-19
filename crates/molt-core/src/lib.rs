@@ -1822,9 +1822,17 @@ pub struct ProposalRecord {
     /// 0 = not declined). Additive — an older snapshot reads as 0.
     #[serde(default)]
     pub declined_at: u64,
-    /// Who declined it ("" = not declined).
+    /// Who declined it ("" = not declined). On a threshold rejection this
+    /// is the TIPPING decliner (the one whose voice made approval
+    /// impossible); the full set is [`Self::decliners`].
     #[serde(default)]
     pub declined_by: MemberId,
+    /// Every member who declined so far, in arrival order (deduplicated —
+    /// one voice per member). A decline is not a veto: the proposal turns
+    /// Rejected only once `decliners.len() > n − m` (approval can no longer
+    /// reach the threshold). Additive — an older snapshot reads as empty.
+    #[serde(default)]
+    pub decliners: Vec<MemberId>,
 }
 
 /// Exactly what the engine actor holds for one workspace — the snapshot
@@ -3754,7 +3762,17 @@ pub enum Event {
         /// The surface that changed.
         surface: Surface,
     },
-    /// A proposal was declined / rejected.
+    /// One member declined a proposal that is STILL pending (their decline
+    /// is a voice against, not a veto — the threshold stays reachable).
+    /// Terminal rejection is [`Event::Rejected`].
+    Declined {
+        /// The proposal id.
+        id: ProposalId,
+        /// Who declined.
+        by: MemberId,
+    },
+    /// A proposal was rejected for good: enough members declined that
+    /// approval can no longer reach the threshold (declines > n − m).
     Rejected {
         /// The proposal id.
         id: ProposalId,
@@ -3809,6 +3827,10 @@ pub enum MoltError {
          a chain-governed republic"
     )]
     AlreadyApproved(ProposalId),
+    /// A repeated `Decline` by the same member — one voice per member; the
+    /// proposal rejects only when enough DISTINCT members decline.
+    #[error("proposal {0:?} already carries this member's decline")]
+    AlreadyDeclined(ProposalId),
     /// A write into the discussion channel of a decided vote (the
     /// discussion stays readable, linked from the vote's card — but the
     /// deliberation ended with the vote).

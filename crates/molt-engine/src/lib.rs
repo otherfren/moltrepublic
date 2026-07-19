@@ -2594,6 +2594,7 @@ mod tests {
             state: molt_core::ProposalState::Proposed,
             declined_at: 0,
             declined_by: String::new(),
+            decliners: Vec::new(),
         };
         assert_eq!(
             proposals::change_summary(

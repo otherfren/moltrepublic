@@ -240,11 +240,14 @@ async fn enforcement_survives_close_and_reopen() {
         ..SessionView::default()
     };
     let w = molt_engine::__spawn_sim_founding(GroupConfig::demo(), session, true);
+    // 2-of-2: ONE decline makes the threshold unreachable, so this node's
+    // own decline legitimately rejects (a decline is a voice, not a veto —
+    // in 2-of-3 it would leave the vote pending for the third member)
     w.execute(Command::CreateStart {
         name: "Readonly".to_string(),
         member: "petra".to_string(),
         threshold: 2,
-        members: 3,
+        members: 2,
     })
     .await
     .expect("create start");

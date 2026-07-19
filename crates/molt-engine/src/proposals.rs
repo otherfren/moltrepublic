@@ -307,6 +307,7 @@ impl State {
     }
 
     pub(crate) fn cmd_decline(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+        let me = self.member();
         {
             let p = self
                 .proposals
@@ -315,17 +316,33 @@ impl State {
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
+            if p.decliners.contains(&me) {
+                return Err(MoltError::AlreadyDeclined(proposal));
+            }
         }
-        let me = self.member();
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Declined {
                 id: proposal,
-                by: me,
+                by: me.clone(),
             },
         );
         self.record(env);
-        self.emit(Event::Rejected { id: proposal });
+        // terminal only when the applier says so (declines > n − m — approval
+        // can no longer reach the threshold); otherwise this is ONE voice
+        // against, mirrored to the peers like any vote
+        if self
+            .proposals
+            .get(&proposal.0)
+            .is_some_and(|p| p.state == ProposalState::Rejected)
+        {
+            self.emit(Event::Rejected { id: proposal });
+        } else {
+            self.emit(Event::Declined {
+                id: proposal,
+                by: me,
+            });
+        }
         Ok(Reply::Ack)
     }
 
@@ -441,8 +458,15 @@ impl State {
                 })
                 .collect()
         };
-        // a rejected proposal names its decliner: that roster row shows the
-        // veto instead of an open/approved stance
+        // every recorded decline shows on its roster row — on a PENDING
+        // proposal too (a decline is a visible voice against, not a silent
+        // wait); the terminal Rejected keeps naming its tipping decliner
+        // via declined_by/declined_at below
+        for v in &mut votes {
+            if p.decliners.contains(&v.member) {
+                v.vote = VoteState::Declined;
+            }
+        }
         if p.state == ProposalState::Rejected && !p.declined_by.is_empty() {
             for v in &mut votes {
                 if v.member == p.declined_by {

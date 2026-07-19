@@ -334,6 +334,10 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::FileRemoved { .. }
             | WorkspaceEvent::Proposed { .. }
             | WorkspaceEvent::Approved { .. }
+            // a decline is a vote too: without it on the wire the decliner's
+            // replicas would show Rejected while everyone else keeps the
+            // proposal pending forever — votes must converge like approvals
+            | WorkspaceEvent::Declined { .. }
             | WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }

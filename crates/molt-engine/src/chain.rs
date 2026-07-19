@@ -1598,6 +1598,7 @@ impl State {
                 state: ProposalState::Proposed,
                 declined_at: 0,
                 declined_by: String::new(),
+                decliners: Vec::new(),
             }
         });
         inserted

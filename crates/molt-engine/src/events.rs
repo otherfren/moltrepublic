@@ -234,6 +234,7 @@ impl State {
                         state: ProposalState::Proposed,
                         declined_at: 0,
                         declined_by: MemberId::new(),
+                        decliners: Vec::new(),
                     },
                 );
                 self.next_id = self.next_id.max(id.0 + 1);
@@ -252,13 +253,28 @@ impl State {
                 }
             }
             WorkspaceEvent::Declined { id, by } => {
+                // a decline is ONE member's voice, not a veto: the proposal
+                // turns Rejected only when approval can no longer reach the
+                // threshold (declines > n − m). A pre-ritual context (no
+                // replica) keeps the single-operator semantics — my own
+                // decline is the exit, one decline rejects. Deduplicated per
+                // member: a redelivered/repeated decline is one voice.
+                let veto_room = self
+                    .replica
+                    .as_ref()
+                    .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
+                    .unwrap_or(0);
                 if let Some(p) = self.proposals.get_mut(&id.0) {
-                    if p.state == ProposalState::Proposed {
-                        p.state = ProposalState::Rejected;
-                        // envelope data only (replay determinism): when and
-                        // by whom — the Declined read view renders both
-                        p.declined_at = env.ts;
-                        p.declined_by = by.clone();
+                    if p.state == ProposalState::Proposed && !p.decliners.contains(by) {
+                        p.decliners.push(by.clone());
+                        if p.decliners.len() > veto_room {
+                            p.state = ProposalState::Rejected;
+                            // envelope data only (replay determinism): when
+                            // and by whom (the TIPPING decliner) — the
+                            // Declined read view renders both
+                            p.declined_at = env.ts;
+                            p.declined_by = by.clone();
+                        }
                     }
                 }
             }
@@ -621,6 +637,89 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// A decline is one member's voice, not a veto: in a 2-of-3 republic ONE
+    /// decline leaves the threshold reachable (two other members can still
+    /// approve), so the proposal stays pending; only when approval becomes
+    /// impossible (declines > n − m) does it turn Rejected. A repeated
+    /// decline by the same member stays one voice (at-least-once delivery).
+    #[test]
+    fn a_single_decline_in_two_of_three_is_not_a_veto() {
+        let mut st = plain_state();
+        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+            seq,
+            ts: 100 + seq,
+            by: by.to_string(),
+            body,
+        };
+        st.apply(&e(
+            1,
+            "petra",
+            WorkspaceEvent::Founded {
+                name: "Trio".to_string(),
+                rule_m: 2,
+                rule_n: 3,
+                member: "petra".to_string(),
+                roster: vec!["petra".to_string(), "walter".to_string(), "ida".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
+                republic_id: String::new(),
+                agenda: String::new(),
+            },
+        ));
+        st.apply(&e(
+            2,
+            "petra",
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: molt_core::Surface::Organization,
+                payload: json!({"op":"set_image"}),
+            },
+        ));
+        // one decline: the threshold (2) is still reachable via petra + ida
+        st.apply(&e(
+            3,
+            "walter",
+            WorkspaceEvent::Declined {
+                id: ProposalId(1),
+                by: "walter".to_string(),
+            },
+        ));
+        assert_eq!(
+            st.dump().proposals[&1].state,
+            molt_core::ProposalState::Proposed,
+            "one decline in 2-of-3 must not reject"
+        );
+        // the same member declining again stays ONE voice
+        st.apply(&e(
+            4,
+            "walter",
+            WorkspaceEvent::Declined {
+                id: ProposalId(1),
+                by: "walter".to_string(),
+            },
+        ));
+        assert_eq!(
+            st.dump().proposals[&1].state,
+            molt_core::ProposalState::Proposed,
+            "a repeated decline is not a second voice"
+        );
+        // the second DISTINCT decline makes approval impossible → rejected
+        st.apply(&e(
+            5,
+            "ida",
+            WorkspaceEvent::Declined {
+                id: ProposalId(1),
+                by: "ida".to_string(),
+            },
+        ));
+        let d = st.dump();
+        assert_eq!(d.proposals[&1].state, molt_core::ProposalState::Rejected);
+        assert_eq!(
+            d.proposals[&1].declined_by, "ida",
+            "the tipping decliner is the recorded one"
+        );
     }
 
     /// The keystone: replaying the same envelope stream twice produces the
