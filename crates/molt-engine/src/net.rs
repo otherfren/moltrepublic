@@ -57,6 +57,18 @@ const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 /// flaps; a truly dead leg trips it after ~two missed keepalives.
 pub(crate) const MESH_DEAF_SECS: u64 = 600;
 
+/// Mesh keepalive interval (Stage 2, `documents/mesh_selfheal.md`): the
+/// engine sends an idle-only MLS liveness ping to a mesh peer whose leg has
+/// gone this long without any real outbound traffic, keeping the peer's
+/// inbound queue warm on the server (and stamping the peer's `last_seen` on
+/// receipt, feeding Stage 1). Chosen well under the deaf window
+/// ([`MESH_DEAF_SECS`]) so a quiet-but-alive peer is proven live twice over
+/// before it could ever trip deaf, and conservatively under plausible SMP
+/// idle-expiry windows (which are unknown for public servers). The
+/// `NetMeshKeepaliveTick` ticker beats twice per interval so the effective
+/// cadence never drifts far past this.
+pub(crate) const MESH_KEEPALIVE_SECS: u64 = 240;
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -1827,6 +1839,85 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Whether a mesh keepalive round is due: the idle gate (Stage 2). A
+    /// round fires only when nothing real has crossed to the mesh for
+    /// [`MESH_KEEPALIVE_SECS`] (`last_mesh_out` is stamped in
+    /// [`crate::State::record`]), so an actively-chatting mesh emits nothing
+    /// extra. Split out so the gate is unit-testable without a live mesh.
+    pub(crate) fn keepalive_due(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_mesh_out) >= MESH_KEEPALIVE_SECS
+    }
+
+    /// The mesh-keepalive ticker (mesh self-heal Stage 2): if the mesh has
+    /// been idle for [`MESH_KEEPALIVE_SECS`], send a tiny MLS-encrypted
+    /// liveness ping onto EACH mesh peer's inbound queue — keeping that queue
+    /// warm on the server so it never silently idle-expires, and (because the
+    /// ping is authenticated inbound traffic) stamping the peer's `last_seen`
+    /// on receipt to feed the Stage 1 deaf-leg cross-check. The ping is a
+    /// transport-level frame, never a `WorkspaceEvent`: it touches neither the
+    /// event log nor the chain. Best-effort, off the actor; my pings keep the
+    /// peers' inbound queues warm, and reciprocally theirs keep mine warm.
+    pub(crate) fn cmd_net_mesh_keepalive_tick(&mut self) -> Result<Reply, MoltError> {
+        let now = self.presence_now();
+        if !self.keepalive_due(now) {
+            return Ok(Reply::Ack);
+        }
+        let (transport, group, peers) = {
+            let Some(net) = self.net.as_ref() else {
+                return Ok(Reply::Ack);
+            };
+            if !net.is_real() {
+                return Ok(Reply::Ack);
+            }
+            let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+                return Ok(Reply::Ack);
+            };
+            let peers: Vec<PeerLink> = net.mesh().iter().filter_map(PeerLink::from_mesh).collect();
+            (transport, group, peers)
+        };
+        if peers.is_empty() {
+            return Ok(Reply::Ack);
+        }
+        for peer in peers {
+            let transport = transport.clone();
+            let group = group.clone();
+            tokio::spawn(async move {
+                // one ratchet advance per ping, on the SHARED group (same Arc
+                // the supervisor uses — locked in sequence)
+                let Some(ct) = group
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.encrypt(molt_net::MESH_KEEPALIVE_TAG).ok())
+                else {
+                    tracing::debug!(member = %peer.member, "encrypting the mesh keepalive failed");
+                    return;
+                };
+                // a fresh random id per ping: the receiver's reassembler dedups
+                // by message id, so a reused id would be dropped before it could
+                // stamp liveness (and a random 16 bytes never collides with the
+                // outbox's derived ids)
+                let mut idb = [0u8; 16];
+                if getrandom::getrandom(&mut idb).is_err() {
+                    return;
+                }
+                if let Err(e) = supervisor::send_framed(
+                    &transport,
+                    &peer.snd,
+                    &peer.wrap_out,
+                    molt_net::MsgId(idb),
+                    &ct,
+                )
+                .await
+                {
+                    tracing::debug!(member = %peer.member, error = %e, "mesh keepalive send failed");
+                }
+            });
+        }
+        // count this round as mesh traffic so the gate paces to the interval
+        self.last_mesh_out = now;
+        Ok(Reply::Ack)
+    }
+
     /// Record a real sighting on the active workspace entry's pill. The
     /// stamp is always advanced (aging + the activity trio read it), and a
     /// full session push fires when the pill STATE changes OR when the
@@ -2454,6 +2545,30 @@ mod tests {
             }
             other => panic!("expected Degraded, got {other:?}"),
         }
+    }
+
+    /// Stage 2 idle gate: a keepalive round is due only after
+    /// `MESH_KEEPALIVE_SECS` of no real mesh output; recent output (stamped
+    /// into `last_mesh_out` by `record`) suppresses it, so an actively
+    /// chatting mesh sends zero extra frames.
+    #[test]
+    fn the_keepalive_idle_gate_fires_only_after_the_interval() {
+        let mut st = presence_fixture();
+        // fresh: last_mesh_out is 0, so a keepalive is due immediately (the
+        // mesh has never sent — its queues need warming from the start)
+        assert!(st.keepalive_due(st.presence_now()), "an idle mesh is due");
+        // a real outbound just crossed the wire
+        st.last_mesh_out = T;
+        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS - 1);
+        assert!(
+            !st.keepalive_due(st.presence_now()),
+            "recent real output suppresses the ping"
+        );
+        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS);
+        assert!(
+            st.keepalive_due(st.presence_now()),
+            "past the interval a keepalive is due again"
+        );
     }
 
     /// The mesh-up map is active-workspace scope: the close/switch boundary

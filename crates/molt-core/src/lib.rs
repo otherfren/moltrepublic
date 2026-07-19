@@ -2363,6 +2363,12 @@ pub enum Command {
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.
     NetPresenceTick,
+    /// Low-rate mesh keepalive (engine-internal ticker, mesh self-heal
+    /// Stage 2): send an idle-only, MLS-encrypted liveness ping to each mesh
+    /// peer whose leg has seen no recent traffic, so the server never
+    /// idle-expires the queue — and the ping doubles as the Stage 1 liveness
+    /// signal. An actively-chatting mesh sends none.
+    NetMeshKeepaliveTick,
     /// Sending to a member's queue keeps failing; the outbox is backing
     /// off and retrying (engine-internal transport health).
     NetSendFailed {

@@ -72,6 +72,11 @@ const EVENT_QUEUE: usize = 512;
 /// minutes-scale thresholds ([`molt_core::MemberInfo::ONLINE_SECS`] /
 /// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
 const PRESENCE_TICK_MS: u64 = 30_000;
+/// Period of the mesh-keepalive ticker (mesh self-heal Stage 2): half the
+/// keepalive interval ([`crate::net::MESH_KEEPALIVE_SECS`]) so an idle leg is
+/// re-evaluated twice per interval and its effective keepalive cadence never
+/// drifts far past the interval. Only idle legs actually emit a ping.
+const NET_MESH_KEEPALIVE_TICK_MS: u64 = crate::net::MESH_KEEPALIVE_SECS * 1000 / 2;
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {
@@ -361,6 +366,10 @@ fn spawn_actor(
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
+    // the mesh-keepalive ticker keeps idle mesh queues warm on the server so
+    // they never silently idle-expire (mesh self-heal Stage 2); it only pings
+    // legs with no recent traffic, so an active mesh sends nothing extra
+    state.spawn_ticker_every(Command::NetMeshKeepaliveTick, NET_MESH_KEEPALIVE_TICK_MS);
     // the backup ticker lives as long as the actor: its synchronous decide
     // pass spawns real upload tasks for due workspaces (backup.rs; story 12)
     state.spawn_ticker_every(Command::BackupTick, backup::BACKUP_TICK_MS);
@@ -553,6 +562,12 @@ pub(crate) struct State {
     /// honest `Degraded`, not a false `Ok`. Runtime-only, active-workspace
     /// scope — [`State::reset_workspace_state`] clears it.
     pub(crate) mesh_up: std::collections::BTreeMap<MemberId, u64>,
+    /// `presence_now` of the last wire-crossing frame the engine emitted to a
+    /// real mesh (stamped in [`State::record`]). The mesh-keepalive idle gate
+    /// (Stage 2): a keepalive round fires only when nothing real has gone out
+    /// for [`crate::net::MESH_KEEPALIVE_SECS`], so an actively-chatting mesh
+    /// sends zero extra frames. Runtime-only; reset with the workspace.
+    pub(crate) last_mesh_out: u64,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -762,6 +777,7 @@ impl State {
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
             mesh_up: std::collections::BTreeMap::new(),
+            last_mesh_out: 0,
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -1006,6 +1022,7 @@ impl State {
                 self.cmd_net_send_ok(member, generation)
             }
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
+            Command::NetMeshKeepaliveTick => self.cmd_net_mesh_keepalive_tick(),
 
             // session.rs
             Command::ReadSession => Ok(Reply::Session(Box::new(self.session.clone()))),

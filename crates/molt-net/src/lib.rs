@@ -66,6 +66,16 @@ pub use supervisor::{
 };
 pub use wrap::{WrapKey, CHUNK_PLAIN_LEN};
 
+/// The plaintext of a **mesh keepalive** — a transport-level MLS liveness
+/// ping that is NOT a `WorkspaceEvent` (never logged or chained, per
+/// `documents/mesh_selfheal.md` Stage 2). The engine encrypts these bytes
+/// with the live group and sends the ciphertext onto an idle peer's queue to
+/// keep it warm on the server; the receiver's `MlsChannel::decode`
+/// recognizes this exact plaintext, stamps the peer's presence (`peer_seen`)
+/// and delivers nothing. The leading NUL keeps it from ever colliding with a
+/// JSON-encoded `EventEnvelope`.
+pub const MESH_KEEPALIVE_TAG: &[u8] = b"\x00molt-mesh-keepalive-v1";
+
 /// Everything that can go wrong between a queue and the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {

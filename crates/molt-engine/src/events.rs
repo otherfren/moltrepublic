@@ -78,6 +78,19 @@ impl State {
         if let Some(net) = &self.net {
             net.publish(&env);
         }
+        // mesh keepalive idle gate (Stage 2): OUR OWN wire-crossing frame to a
+        // REAL mesh keeps every peer's inbound queue warm (the outbox only
+        // sends events we authored — `NetRuntime::wants`), so no keepalive is
+        // due for a while. A *received* peer event (`env.by != me`) is also
+        // recorded here but warms nothing outbound, so it must NOT suppress the
+        // ping. Stamped before the `active` borrow below so the mutation is
+        // conflict-free.
+        if self.net.as_ref().is_some_and(|n| n.is_real())
+            && crate::net::crosses_wire(&env.body)
+            && env.by == self.member()
+        {
+            self.last_mesh_out = self.presence_now();
+        }
         let Some(active) = &self.active else {
             return;
         };
@@ -513,6 +526,7 @@ impl State {
         self.net_link_down.clear();
         self.net_send_stuck.clear();
         self.mesh_up.clear();
+        self.last_mesh_out = 0;
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)

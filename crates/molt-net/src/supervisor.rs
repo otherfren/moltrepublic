@@ -124,6 +124,14 @@ impl MlsChannel {
         };
         match m.decrypt(wire) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
+                // a transport-level keepalive ping (mesh self-heal Stage 2):
+                // authenticated inbound traffic that carries no event — it
+                // stamps the peer's presence but delivers nothing. Checked
+                // BEFORE the envelope parse; its NUL-prefixed tag can never be
+                // valid `EventEnvelope` JSON.
+                if plaintext == crate::MESH_KEEPALIVE_TAG {
+                    return MlsDecode::Keepalive;
+                }
                 match serde_json::from_slice::<EventEnvelope>(&plaintext) {
                     Ok(env) => MlsDecode::Deliver(from, Box::new(env)),
                     Err(_) => MlsDecode::Discard,
@@ -148,6 +156,10 @@ impl MlsChannel {
 enum MlsDecode {
     /// An authenticated application envelope — deliver and ack.
     Deliver(MemberId, Box<EventEnvelope>),
+    /// A transport-level keepalive ping (mesh self-heal Stage 2):
+    /// authenticated presence with no payload — stamp `peer_seen`, deliver
+    /// nothing, ack.
+    Keepalive,
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     EpochAdvanced,
     /// Encrypted at an epoch this node has not reached — hold it (acks
@@ -745,6 +757,13 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     }
                     ack_all(held);
                 }
+                MlsDecode::Keepalive => {
+                    // a keepalive that had been held for its epoch: still
+                    // authenticated presence — stamp it, deliver nothing
+                    progressed = true;
+                    sink.peer_seen(&peer.member).await;
+                    ack_all(held);
+                }
                 MlsDecode::EpochAdvanced => {
                     progressed = true;
                     ack_all(held);
@@ -979,6 +998,15 @@ where
                         tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
                         return RecvEnd::EngineGone;
                     }
+                    ack_all(acks);
+                }
+                MlsDecode::Keepalive => {
+                    // authenticated liveness ping (mesh self-heal Stage 2):
+                    // stamps presence exactly like a delivered envelope, but
+                    // carries no event — so it keeps this leg's `last_seen`
+                    // fresh (feeding the Stage 1 deaf-leg cross-check) without
+                    // touching the log.
+                    sink.peer_seen(&peer.member).await;
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
@@ -1225,6 +1253,53 @@ mod tests {
             rcv_wrap: String::new(),
         };
         assert!(PeerLink::from_mesh(&bad).is_none());
+    }
+
+    /// Mesh self-heal Stage 2: a keepalive ping decodes to `Keepalive`
+    /// (authenticated presence, no payload — the recv loop stamps `peer_seen`
+    /// and delivers nothing), while a real envelope still decodes to
+    /// `Deliver` authenticated to its sender. Both ride the same MLS group.
+    #[test]
+    fn a_keepalive_frame_classifies_as_keepalive_and_an_envelope_still_delivers() {
+        use ed25519_dalek::SigningKey;
+        let sk = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut founder = MlsMember::new(&sk(1), "founder").expect("founder");
+        let bob = MlsMember::new(&sk(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let recv = MlsChannel::new(bob);
+
+        // a keepalive ping: classifies as a liveness ping, not an envelope
+        let ka = founder.encrypt(crate::MESH_KEEPALIVE_TAG).expect("encrypt keepalive");
+        assert!(
+            matches!(recv.decode(&ka), MlsDecode::Keepalive),
+            "the keepalive tag classifies as a liveness ping"
+        );
+
+        // a real envelope still delivers, authenticated to its sender
+        let env = EventEnvelope {
+            seq: 1,
+            ts: 1,
+            by: "founder".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([1u8; 16]),
+                "founder",
+                "hi",
+                1,
+            )),
+        };
+        let ct = founder
+            .encrypt(&serde_json::to_vec(&env).expect("json"))
+            .expect("encrypt envelope");
+        assert!(
+            matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
+            "a real envelope still classifies as Deliver"
+        );
     }
 
     /// P4: the prebuild hook dials N servers bounded by a semaphore of 4 — never
