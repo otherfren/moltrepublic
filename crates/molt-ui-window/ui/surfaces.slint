@@ -146,15 +146,19 @@ component TagChip inherits Rectangle {
     border-width: root.muted ? 1px : 0px;
     border-color: Theme.line;
     width: row.preferred-width + 12px;
-    height: row.preferred-height + 5px;
+    height: 20px;
+    // full-height row + centered texts: an offset row sized off the text's
+    // preferred height sat the label visibly at the chip's bottom edge
     row := HorizontalLayout {
         x: 6px;
-        y: 2.5px;
+        y: 0;
+        height: parent.height;
         spacing: 4px;
         if root.glyph != "": Text {
             text: root.glyph;
             font-family: "Twemoji Mozilla";
             font-size: 11px;
+            height: 100%;
             vertical-alignment: center;
         }
         Text {
@@ -162,6 +166,7 @@ component TagChip inherits Rectangle {
             color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : Theme.accent);
             font-size: 11px;
             font-weight: root.muted ? 400 : 600;
+            height: 100%;
             vertical-alignment: center;
         }
     }
@@ -556,9 +561,26 @@ export component MemoryPane inherits VerticalLayout {
     // raw-markdown edit mode (the ✏️ toggle); every document switch drops
     // back to the pretty preview and discards the mock buffer
     property <bool> editing: false;
+    // which docs are open as content TABS (fixed per-doc slots — pure
+    // .slint mock arrays are static, same technique as the deadN flags);
+    // the tab strip lists them in tree order. The charter starts open.
+    property <bool> tabbed0: true;
+    property <bool> tabbed1: false;
+    property <bool> tabbed2: false;
+    property <bool> tabbed3: false;
+    property <bool> tabbed4: false;
+    property <bool> tabbed5: false;
+    property <bool> tabbed6: false;
+    property <bool> tabbed7: false;
+    property <bool> tabbed8: false;
+    // the navigator's MARKED row: set by tree clicks, deliberately NOT
+    // moved by tab switches or ⬅️/➡️ browsing — 🎯 arms exactly while the
+    // active tab and the marked row diverge, and clicking it re-aligns
+    property <int> nav-marked: 0;
     // the open document (single source for breadcrumb, body and links)
     property <BrainDoc> cur: root.docs[root.sel];
-    property <bool> cur-alive: root.alive(root.sel);
+    // shown = the active tab exists AND is still open as a tab
+    property <bool> cur-alive: root.alive(root.sel) && root.tabbed(root.sel);
 
     // the navigator's display order of doc indices — ⬅️/➡️ walk it
     property <[int]> nav-order: [1, 2, 3, 4, 0, 5, 6, 7, 8];
@@ -605,10 +627,80 @@ export component MemoryPane inherits VerticalLayout {
         if (root.alive(root.at(root.pos-of(d) + 8 * delta))) { return root.at(root.pos-of(d) + 8 * delta); }
         return d;
     }
-    // select a document (every route also leaves raw-edit mode)
+    // whether doc `d` is open as a content tab
+    pure function tabbed(d: int) -> bool {
+        if (d == 0) { return root.tabbed0; }
+        if (d == 1) { return root.tabbed1; }
+        if (d == 2) { return root.tabbed2; }
+        if (d == 3) { return root.tabbed3; }
+        if (d == 4) { return root.tabbed4; }
+        if (d == 5) { return root.tabbed5; }
+        if (d == 6) { return root.tabbed6; }
+        if (d == 7) { return root.tabbed7; }
+        if (d == 8) { return root.tabbed8; }
+        return false;
+    }
+    function set-tab(d: int, on: bool) {
+        if (d == 0) { root.tabbed0 = on; }
+        if (d == 1) { root.tabbed1 = on; }
+        if (d == 2) { root.tabbed2 = on; }
+        if (d == 3) { root.tabbed3 = on; }
+        if (d == 4) { root.tabbed4 = on; }
+        if (d == 5) { root.tabbed5 = on; }
+        if (d == 6) { root.tabbed6 = on; }
+        if (d == 7) { root.tabbed7 = on; }
+        if (d == 8) { root.tabbed8 = on; }
+    }
+    // the tab label = the tree row's file name
+    pure function doc-name(d: int) -> string {
+        if (d == 0) { return "charter.md"; }
+        if (d == 1) { return "2026-06-14-relay.md"; }
+        if (d == 2) { return "2026-07-02-treasury.md"; }
+        if (d == 3) { return "onboarding-guide.md"; }
+        if (d == 4) { return "node-recovery.md"; }
+        if (d == 5) { return "glossary.md"; }
+        if (d == 6) { return "untitled-1.md"; }
+        if (d == 7) { return "untitled-2.md"; }
+        if (d == 8) { return "untitled-3.md"; }
+        return "";
+    }
+    // focus a document (every route also leaves raw-edit mode)
     function goto(d: int) {
         root.editing = false;
         root.sel = d;
+    }
+    // navigator route: mark the row, open (or refocus) its tab
+    function open-doc(d: int) {
+        root.nav-marked = d;
+        root.set-tab(d, true);
+        root.goto(d);
+    }
+    // ⬅️/➡️ browsing route: open as a tab and focus, but leave the
+    // navigator mark where it is (that is what arms 🎯)
+    function browse-to(d: int) {
+        root.set-tab(d, true);
+        root.goto(d);
+    }
+    // close a tab; when it was the active one, focus the nearest other
+    // open tab (tree order) — none left = the honest empty state
+    function close-tab(d: int) {
+        root.set-tab(d, false);
+        if (root.sel == d) {
+            root.goto(root.next-tab(d));
+        }
+    }
+    // the nearest OTHER open+alive tab in tree order (wrapping); `d`
+    // itself when none is left
+    pure function next-tab(d: int) -> int {
+        if (root.alive(root.at(root.pos-of(d) + 1)) && root.tabbed(root.at(root.pos-of(d) + 1))) { return root.at(root.pos-of(d) + 1); }
+        if (root.alive(root.at(root.pos-of(d) + 2)) && root.tabbed(root.at(root.pos-of(d) + 2))) { return root.at(root.pos-of(d) + 2); }
+        if (root.alive(root.at(root.pos-of(d) + 3)) && root.tabbed(root.at(root.pos-of(d) + 3))) { return root.at(root.pos-of(d) + 3); }
+        if (root.alive(root.at(root.pos-of(d) + 4)) && root.tabbed(root.at(root.pos-of(d) + 4))) { return root.at(root.pos-of(d) + 4); }
+        if (root.alive(root.at(root.pos-of(d) + 5)) && root.tabbed(root.at(root.pos-of(d) + 5))) { return root.at(root.pos-of(d) + 5); }
+        if (root.alive(root.at(root.pos-of(d) + 6)) && root.tabbed(root.at(root.pos-of(d) + 6))) { return root.at(root.pos-of(d) + 6); }
+        if (root.alive(root.at(root.pos-of(d) + 7)) && root.tabbed(root.at(root.pos-of(d) + 7))) { return root.at(root.pos-of(d) + 7); }
+        if (root.alive(root.at(root.pos-of(d) + 8)) && root.tabbed(root.at(root.pos-of(d) + 8))) { return root.at(root.pos-of(d) + 8); }
+        return d;
     }
     // hide doc `d` from the mock tree
     function kill(d: int) {
@@ -622,13 +714,14 @@ export component MemoryPane inherits VerticalLayout {
         if (d == 7) { root.dead7 = true; }
         if (d == 8) { root.dead8 = true; }
     }
-    // unfold the tree path of the open document (the 🎯 button); the
-    // selected row already carries the accent rim, so unfolding its
-    // folder is what "focus it in the navigator" needs
+    // 🎯: re-align the navigator with the ACTIVE tab — unfold its tree
+    // path and move the mark onto it. Armed only while tab and mark
+    // diverge (tab switches / ⬅️➡️ browsing leave the mark behind).
     function reveal() {
         if (root.sel == 1 || root.sel == 2) { root.open-decisions = true; }
         if (root.sel == 3) { root.open-quests = true; }
         if (root.sel == 4) { root.open-runbooks = true; }
+        root.nav-marked = root.sel;
     }
 
     // sample data — design mock only, never engine state. Indices into
@@ -762,16 +855,19 @@ export component MemoryPane inherits VerticalLayout {
                             enabled: root.made-files < 3;
                             clicked => {
                                 root.made-files += 1;
-                                root.goto(5 + root.made-files);
+                                root.open-doc(5 + root.made-files);
                             }
                         }
                         ToolBtn {
                             glyph: "🗑️";
                             name: Strings.mem-tb-delete;
-                            enabled: root.cur-alive;
+                            // deletion acts on the navigator's MARKED row
+                            // (the tab strip has its own × per tab)
+                            enabled: root.alive(root.nav-marked);
                             clicked => {
-                                root.kill(root.sel);
-                                root.goto(root.step(root.sel, 1));
+                                root.close-tab(root.nav-marked);
+                                root.kill(root.nav-marked);
+                                root.nav-marked = root.step(root.nav-marked, 1);
                             }
                         }
                         Rectangle {
@@ -812,17 +908,17 @@ export component MemoryPane inherits VerticalLayout {
                         if root.open-decisions && !root.dead1: BrainFileRow {
                             name: "2026-06-14-relay.md";
                             nested: true;
-                            selected: root.sel == 1;
+                            selected: root.nav-marked == 1;
                             pick => {
-                                root.goto(1);
+                                root.open-doc(1);
                             }
                         }
                         if root.open-decisions && !root.dead2: BrainFileRow {
                             name: "2026-07-02-treasury.md";
                             nested: true;
-                            selected: root.sel == 2;
+                            selected: root.nav-marked == 2;
                             pick => {
-                                root.goto(2);
+                                root.open-doc(2);
                             }
                         }
                         BrainFolderRow {
@@ -832,9 +928,9 @@ export component MemoryPane inherits VerticalLayout {
                         if root.open-quests && !root.dead3: BrainFileRow {
                             name: "onboarding-guide.md";
                             nested: true;
-                            selected: root.sel == 3;
+                            selected: root.nav-marked == 3;
                             pick => {
-                                root.goto(3);
+                                root.open-doc(3);
                             }
                         }
                         BrainFolderRow {
@@ -844,9 +940,9 @@ export component MemoryPane inherits VerticalLayout {
                         if root.open-runbooks && !root.dead4: BrainFileRow {
                             name: "node-recovery.md";
                             nested: true;
-                            selected: root.sel == 4;
+                            selected: root.nav-marked == 4;
                             pick => {
-                                root.goto(4);
+                                root.open-doc(4);
                             }
                         }
                         // folders created in the mock — empty for now:
@@ -881,38 +977,38 @@ export component MemoryPane inherits VerticalLayout {
                         }
                         if !root.dead0: BrainFileRow {
                             name: "charter.md";
-                            selected: root.sel == 0;
+                            selected: root.nav-marked == 0;
                             pick => {
-                                root.goto(0);
+                                root.open-doc(0);
                             }
                         }
                         if !root.dead5: BrainFileRow {
                             name: "glossary.md";
-                            selected: root.sel == 5;
+                            selected: root.nav-marked == 5;
                             pick => {
-                                root.goto(5);
+                                root.open-doc(5);
                             }
                         }
                         // the mock's created files (one per 📝 click)
                         if root.alive(6): BrainFileRow {
                             name: "untitled-1.md";
-                            selected: root.sel == 6;
+                            selected: root.nav-marked == 6;
                             pick => {
-                                root.goto(6);
+                                root.open-doc(6);
                             }
                         }
                         if root.alive(7): BrainFileRow {
                             name: "untitled-2.md";
-                            selected: root.sel == 7;
+                            selected: root.nav-marked == 7;
                             pick => {
-                                root.goto(7);
+                                root.open-doc(7);
                             }
                         }
                         if root.alive(8): BrainFileRow {
                             name: "untitled-3.md";
-                            selected: root.sel == 8;
+                            selected: root.nav-marked == 8;
                             pick => {
-                                root.goto(8);
+                                root.open-doc(8);
                             }
                         }
                     }
@@ -963,14 +1059,92 @@ export component MemoryPane inherits VerticalLayout {
                 border-color: Theme.line;
                 clip: true;
                 VerticalLayout {
+                    // ---- the open documents as TABS: several .md files
+                    // can be open at once; clicking focuses, × closes.
+                    // Listed in tree order (the mock's fixed per-doc
+                    // slots), the active tab carries the accent. ----
+                    Rectangle {
+                        height: 32px;
+                        background: Theme.panel-2;
+                        HorizontalLayout {
+                            padding-left: 5px;
+                            padding-right: 5px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 3px;
+                            alignment: start;
+                            for p in 9: HorizontalLayout {
+                                if root.tabbed(root.at(p)) && root.alive(root.at(p)): tab := Rectangle {
+                                    property <int> d: root.at(p);
+                                    property <bool> active: root.sel == self.d;
+                                    width: tabrow.preferred-width + 14px;
+                                    border-radius: Theme.win95 ? 0px : 5px;
+                                    background: tab.active ? Theme.panel
+                                        : (tab-ta.has-hover ? Theme.raised : transparent);
+                                    border-width: tab.active ? Theme.border-w : 0px;
+                                    border-color: Theme.accent;
+                                    tab-ta := TouchArea {
+                                        clicked => {
+                                            root.goto(tab.d);
+                                        }
+                                    }
+                                    tabrow := HorizontalLayout {
+                                        x: 7px;
+                                        spacing: 5px;
+                                        Text {
+                                            text: root.doc-name(tab.d);
+                                            color: tab.active ? Theme.text : Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            font-weight: tab.active ? 600 : 400;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle {
+                                            width: 14px;
+                                            Text {
+                                                text: "×";
+                                                color: close-ta.has-hover ? Theme.bad : Theme.faint;
+                                                font-size: Theme.fs-body;
+                                                width: 100%;
+                                                height: 100%;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            close-ta := TouchArea {
+                                                clicked => {
+                                                    root.close-tab(tab.d);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            x: 0;
+                            y: parent.height - Theme.border-w;
+                            width: parent.width;
+                            height: Theme.border-w;
+                            background: Theme.line;
+                        }
+                    }
                     ToolStrip {
-                        // 🎯 — reveal the open document in the navigator
+                        // ⬅️/➡️ — sequential browse through the documents
+                        // in tree order (opens them as tabs); deliberately
+                        // leaves the navigator mark behind, which arms 🎯
                         ToolBtn {
-                            glyph: "🎯";
-                            name: Strings.mem-tb-locate;
+                            glyph: "⬅️";
+                            name: Strings.mem-tb-prev;
                             enabled: root.cur-alive;
                             clicked => {
-                                root.reveal();
+                                root.browse-to(root.step(root.sel, -1));
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "➡️";
+                            name: Strings.mem-tb-next;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.browse-to(root.step(root.sel, 1));
                             }
                         }
                         Rectangle {
@@ -984,34 +1158,27 @@ export component MemoryPane inherits VerticalLayout {
                             vertical-alignment: center;
                             overflow: elide;
                         }
-                        // ⬅️/➡️ — single-click sequential walk through the
-                        // documents, in tree order, skipping deleted ones
-                        ToolBtn {
-                            glyph: "⬅️";
-                            name: Strings.mem-tb-prev;
-                            enabled: root.cur-alive;
-                            clicked => {
-                                root.goto(root.step(root.sel, -1));
-                            }
-                        }
-                        ToolBtn {
-                            glyph: "➡️";
-                            name: Strings.mem-tb-next;
-                            enabled: root.cur-alive;
-                            clicked => {
-                                root.goto(root.step(root.sel, 1));
-                            }
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        // ✏️/👁️ — pretty preview ⇄ raw .md source
+                        // ✏️/👁️ — pretty preview ⇄ raw .md source, right
+                        // beside the title
                         ToolBtn {
                             glyph: root.editing ? "👁️" : "✏️";
                             name: root.editing ? Strings.mem-tb-preview : Strings.mem-tb-edit;
                             enabled: root.cur-alive;
                             clicked => {
                                 root.editing = !root.editing;
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        // 🎯 — re-align the navigator with the active tab;
+                        // armed only while they diverge
+                        ToolBtn {
+                            glyph: "🎯";
+                            name: Strings.mem-tb-locate;
+                            enabled: root.cur-alive && root.nav-marked != root.sel;
+                            clicked => {
+                                root.reveal();
                             }
                         }
                         // 🔗 — copy a molt:// URI for chat / cross-notes
