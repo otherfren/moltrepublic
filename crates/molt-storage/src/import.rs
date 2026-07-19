@@ -105,11 +105,23 @@ pub fn import_stage(
     let archive = export::read_export(&mut &blob[..], &export_secret)?;
 
     // entry-path allowlist (subsumes traversal, which read_export already
-    // rejects): keys/ and transport.state can never ride a blob into a dir
+    // rejects): keys/ and transport.state can never ride a blob into a dir.
+    // Duplicate paths are a hard reject in the same pass: every validation
+    // below uses the FIRST match of a path while the write loop lets the
+    // LAST write win, so a forged blob pairing a benign twin (which passes
+    // verification) with a malicious one (which is what materializes) at the
+    // same path must never be accepted.
+    let mut seen = std::collections::BTreeSet::new();
     for entry in &archive.entries {
         if !allowed_entry(&entry.path) {
             return Err(StorageError::Corrupt(format!(
                 "blob carries a file outside the import allowlist: `{}`",
+                entry.path
+            )));
+        }
+        if !seen.insert(entry.path.as_str()) {
+            return Err(StorageError::Corrupt(format!(
+                "blob carries a duplicate entry path: `{}`",
                 entry.path
             )));
         }
@@ -400,28 +412,28 @@ impl ImportStaging {
         let id = crate::id_bytes(&id_hex)?;
 
         // collision policy (P2): refuse by default — the existing dir may
-        // be AHEAD of the backup; an explicit replace trashes it first
-        // (recoverable 30 days), never an in-place merge
+        // be AHEAD of the backup; an explicit replace trashes it (recoverable
+        // 30 days), never an in-place merge. We only DECIDE here; the
+        // destructive trash is deferred until the replacement is fully staged
+        // (below), so a failure mid-commit can never leave the id with ZERO
+        // visible dirs (old already trashed, new not yet materialized).
         let existing = crate::find_workspace_dir(root, &id_hex);
         let final_dir = root.join(crate::workspace_dirname(
             &self.manifest.workspace.name,
             &id_hex,
         ));
-        match existing {
-            Some(dir) => {
-                if !replace {
-                    return Err(StorageError::Exists(dir));
-                }
-                crate::trash_workspace(root, &dir)?;
+        if let Some(dir) = &existing {
+            if !replace {
+                return Err(StorageError::Exists(dir.clone()));
             }
-            None => {
-                if final_dir.exists() {
-                    // same directory name without a matching manifest id —
-                    // foreign content we must not clobber
-                    return Err(StorageError::Exists(final_dir));
-                }
-            }
+        } else if final_dir.exists() {
+            // same directory name without a matching manifest id — foreign
+            // content we must not clobber
+            return Err(StorageError::Exists(final_dir));
         }
+
+        // --- stage every write into the (still invisible) staging dir BEFORE
+        //     anything destructive touches the pre-existing workspace ---
 
         // prefs travel (§3.2), but `last_backup` is THIS-node bookkeeping —
         // stamped only when the RUNNING node confirms an upload. The source
@@ -454,7 +466,22 @@ impl ImportStaging {
             }
         }
 
-        fs::rename(&self.dir, &final_dir)?;
+        // --- the destructive swap, ordered so the id is never left with zero
+        //     visible dirs: trash the pre-existing dir only now that the
+        //     replacement is fully staged, and roll that trash BACK if the
+        //     final rename still fails (ENOSPC, a foreign dir occupying the
+        //     target name, …) so the old workspace stays visible ---
+        let rescued = match &existing {
+            Some(dir) => Some((dir.clone(), crate::trash_workspace(root, dir)?)),
+            None => None,
+        };
+        if let Err(e) = fs::rename(&self.dir, &final_dir) {
+            if let Some((original, trashed)) = rescued {
+                // best-effort: return the id's only workspace to visibility
+                let _ = fs::rename(&trashed, &original);
+            }
+            return Err(e.into());
+        }
         // make the rename durable (same rule as create_workspace)
         if let Ok(d) = fs::File::open(root) {
             let _ = d.sync_all();
@@ -496,13 +523,10 @@ mod tests {
 
     const PASS: &str = "correct horse battery";
 
-    /// A populated workspace under `root` (chain.state included) — the
-    /// export fixture. Returns `(root, ws_dir, seed, id)`.
-    fn make_ws(tmp: &Path) -> (PathBuf, PathBuf, Vec<u8>, String) {
-        let root = tmp.join("src-root");
-        let seed =
-            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
-        let genesis = EventEnvelope {
+    /// The `Founded` genesis every fixture workspace is built from (member
+    /// `mithra`, so the same seed always derives the same workspace id).
+    fn founded_genesis() -> EventEnvelope {
+        EventEnvelope {
             seq: 1,
             ts: 42,
             by: "mithra".to_string(),
@@ -517,8 +541,16 @@ mod tests {
                 republic_id: String::new(),
                 agenda: String::new(),
             },
-        };
-        let ws = crate::create_workspace(&root, &seed, &genesis).expect("create");
+        }
+    }
+
+    /// A populated workspace under `root` (chain.state included) — the
+    /// export fixture. Returns `(root, ws_dir, seed, id)`.
+    fn make_ws(tmp: &Path) -> (PathBuf, PathBuf, Vec<u8>, String) {
+        let root = tmp.join("src-root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
         ws.write_chain(None, &[]).expect("chain.state");
         let id = ws.manifest.workspace.id.clone();
         let dir = ws.dir().to_path_buf();
@@ -698,5 +730,171 @@ mod tests {
             std::fs::read_dir(&dest_root).expect("dir").next().is_none(),
             "no staging residue"
         );
+    }
+
+    /// §4.1 replace must NEVER leave the id with zero visible workspaces. If
+    /// the commit fails *after* the pre-existing dir was trashed (here: the
+    /// final rename fails because a foreign dir occupies the target name),
+    /// the trash is rolled back and the old workspace stays openable.
+    #[test]
+    fn replace_rolls_back_the_trash_when_the_final_rename_fails() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, seed, id) = make_ws(tmp.path());
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+
+        // dest_root already holds the SAME workspace (same seed → same id),
+        // but its dir was renamed on disk to a NON-canonical name, so the
+        // import's final_dir (derived from the manifest name) differs from it
+        let existing = crate::create_workspace(&dest_root, &seed, &founded_genesis())
+            .expect("existing ws");
+        existing.write_chain(None, &[]).expect("chain.state");
+        let existing_dir = existing.dir().to_path_buf();
+        drop(existing);
+        let renamed = dest_root.join("renamed-existing");
+        std::fs::rename(&existing_dir, &renamed).expect("rename existing aside");
+        assert_eq!(
+            crate::find_workspace_dir(&dest_root, &id),
+            Some(renamed.clone()),
+            "the existing workspace is found by id under its new name"
+        );
+
+        // occupy the canonical final_dir with foreign, NON-EMPTY content (no
+        // manifest → not the existing-by-id dir) so the final rename fails
+        let final_dir = dest_root.join(crate::workspace_dirname("Chess Club", &id));
+        std::fs::create_dir_all(&final_dir).expect("final dir");
+        std::fs::write(final_dir.join("junk"), b"foreign").expect("junk");
+
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let err = staging
+            .commit(&dest_root, true, None)
+            .expect_err("the final rename into an occupied dir must fail");
+        assert!(matches!(err, StorageError::Io(_)), "rename failure: {err}");
+
+        // the id is NOT lost: the old workspace was rolled back out of trash
+        // and is still visible and openable
+        assert_eq!(
+            crate::find_workspace_dir(&dest_root, &id),
+            Some(renamed.clone()),
+            "the old workspace is rolled back and visible"
+        );
+        let (opened, _loaded) = crate::open_workspace(&renamed).expect("old ws still opens");
+        assert_eq!(opened.manifest.workspace.id, id);
+    }
+
+    /// A forged blob carrying two entries at the SAME path is a hard reject:
+    /// validation uses the FIRST match while the write loop lets the LAST
+    /// write win, so a benign twin could otherwise smuggle a malicious file
+    /// onto disk. Nothing stages.
+    #[test]
+    fn duplicate_entry_paths_are_rejected() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+
+        let (blob, phrase) = forge_workspace_blob(&[
+            ("manifest.toml", b"benign"),
+            ("manifest.toml", b"malicious"),
+        ]);
+        let err = import_stage(&dest_root, &blob, &phrase).expect_err("duplicate path");
+        assert!(
+            err.to_string().contains("duplicate entry path"),
+            "honest duplicate-path reject: {err}"
+        );
+        assert!(
+            std::fs::read_dir(&dest_root).expect("dir").next().is_none(),
+            "no staging residue"
+        );
+
+        // control: a single entry clears the duplicate gate (it then fails
+        // later, at the manifest parse — proving the reject above is the
+        // duplicate check, not a blanket refusal of every forged blob)
+        let (ok_blob, ok_phrase) = forge_workspace_blob(&[("manifest.toml", b"benign")]);
+        let err = import_stage(&dest_root, &ok_blob, &ok_phrase)
+            .expect_err("garbage manifest still fails");
+        assert!(
+            !err.to_string().contains("duplicate entry path"),
+            "a single entry must clear the duplicate gate: {err}"
+        );
+    }
+
+    /// Forge a decryptable `molt-export-v1` blob (workspace key mode) whose
+    /// payload carries exactly `entries` — shapes the honest exporter never
+    /// emits (here: duplicate entry paths). `import_stage` re-derives the
+    /// workspace key from the returned phrase + the header id, so the blob
+    /// decrypts; the entries need only be format-valid, not semantically real
+    /// (the duplicate reject fires before any manifest/genesis parse). One
+    /// final chunk.
+    fn forge_workspace_blob(entries: &[(&str, &[u8])]) -> (Vec<u8>, String) {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+        let phrase = crate::generate_seed_phrase().expect("gen");
+        let entropy = crate::seed_entropy(&phrase).expect("entropy");
+        let id_hex = "ab".repeat(32);
+        let id = crate::id_bytes(&id_hex).expect("id");
+        let ws_key = crate::derive_workspace_key(&entropy, &id_hex);
+
+        let header = crate::export::ExportHeader {
+            format: "molt-export-v1".to_string(),
+            version: 1,
+            workspace_id: id_hex.clone(),
+            key_mode: "workspace".to_string(),
+            kdf: None,
+            cipher: "xchacha20poly1305".to_string(),
+            chunk_bytes: 4096,
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("header json");
+
+        // meta: `files` must match the entry count, `seed=null` sidesteps the
+        // hierarchy pin, `workspace_key` must be valid 32-byte hex
+        let meta = serde_json::json!({
+            "created": 7,
+            "exporter": "test",
+            "at_rest": "device",
+            "workspace_key": hex::encode(ws_key),
+            "seed": serde_json::Value::Null,
+            "files": entries.len(),
+        });
+        let meta_bytes = serde_json::to_vec(&meta).expect("meta json");
+
+        let mut payload = u32::try_from(meta_bytes.len())
+            .expect("meta len")
+            .to_le_bytes()
+            .to_vec();
+        payload.extend_from_slice(&meta_bytes);
+        for (path, data) in entries {
+            payload.extend_from_slice(&u16::try_from(path.len()).expect("path len").to_le_bytes());
+            payload.extend_from_slice(path.as_bytes());
+            payload.extend_from_slice(&u64::try_from(data.len()).expect("data len").to_le_bytes());
+            payload.extend_from_slice(data);
+        }
+
+        // workspace-mode key schedule (mirrors export.rs's frozen HKDF tags)
+        let k_root = crate::hkdf32(&ws_key, "molt-export-backup-v1", &id);
+        let k_stream = crate::hkdf32(&k_root, "molt-export-stream-v1", &header_bytes);
+        let cipher = XChaCha20Poly1305::new((&k_stream).into());
+
+        // a single final chunk: aad = magic ‖ id ‖ index(0) ‖ final(1)
+        let mut aad = [0u8; 56];
+        aad[..15].copy_from_slice(b"molt-export-v1\0");
+        aad[15..47].copy_from_slice(&id);
+        aad[55] = 1;
+        let nonce = [0u8; 24];
+        let ct = cipher
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: &payload, aad: &aad })
+            .expect("encrypt");
+
+        let mut blob = b"molt-export-v1\0".to_vec();
+        blob.extend_from_slice(
+            &u32::try_from(header_bytes.len()).expect("header len").to_le_bytes(),
+        );
+        blob.extend_from_slice(&header_bytes);
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&u32::try_from(ct.len()).expect("ct len").to_le_bytes());
+        blob.extend_from_slice(&ct);
+        (blob, phrase)
     }
 }
