@@ -955,8 +955,16 @@ export component AppWindow inherits Window {
     // text; the bubble is gone < 3 s after it appeared, always. ----
     property <string> toast-text;
     property <bool> toast-open: false;
+    // tone of the bubble's dot: errors show RED, everything else green
+    property <bool> toast-bad: false;
     public function show-toast(msg: string) {
         root.toast-text = msg;
+        root.toast-bad = false;
+        root.toast-open = true;
+    }
+    public function show-toast-error(msg: string) {
+        root.toast-text = msg;
+        root.toast-bad = true;
         root.toast-open = true;
     }
     function hide-toast() {
@@ -3558,7 +3566,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 file-clicked => {
                                                     if (!l.file-available) {
-                                                        root.show-toast(Strings.mv-file-gone);
+                                                        root.show-toast-error(Strings.mv-file-gone);
                                                     } else if (l.id != "") {
                                                         // opens the save dialog;
                                                         // the outcome toasts via
@@ -6823,15 +6831,15 @@ export component AppWindow inherits Window {
                     root.hide-toast();
                 }
             }
-            // success dot, then the message — all in palette colours so the
-            // toast follows the active theme
+            // tone dot (green = ok, red = error), then the message — all in
+            // palette colours so the toast follows the active theme
             Rectangle {
                 width: 8px;
                 height: 8px;
                 border-radius: 4px;
                 x: 14px;
                 y: (parent.height - self.height) / 2;
-                background: Theme.good;
+                background: root.toast-bad ? Theme.bad : Theme.good;
             }
             toast-label := Text {
                 x: 28px;

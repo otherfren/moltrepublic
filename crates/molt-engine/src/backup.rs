@@ -40,6 +40,17 @@ impl State {
         // due: a confirmed upload stamps ~0 minutes and without this the UI
         // would show "gerade eben" forever until a restart (review finding).
         let mut changed = self.reage_backup_labels();
+        // the GLOBAL "Automatic S3 backup" switch is a MASTER gate: off =
+        // this ticker decides nothing, regardless of per-workspace prefs
+        // (unchecking the settings box must actually stop the automation —
+        // 2026-07-19 report; the per-workspace pref picks WHICH republics
+        // back up while the switch is on)
+        if !self.session.settings.s3_backup {
+            if changed {
+                self.emit_session(SessionScope::Full);
+            }
+            return Ok(Reply::Ack);
+        }
         // candidates: the per-workspace pref (mirrored in the entry) is on
         let candidates: Vec<WorkspaceId> = self
             .session

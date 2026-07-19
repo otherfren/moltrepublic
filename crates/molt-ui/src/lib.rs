@@ -395,7 +395,7 @@ pub fn run_app(
                         let msg = format!("⚠ {e}");
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                ui.invoke_show_toast(msg.into());
+                                ui.invoke_show_toast_error(msg.into());
                             }
                         });
                     }
@@ -927,7 +927,7 @@ pub fn run_app(
                 Ok(ch) => ch,
                 Err(e) => {
                     if let Some(ui) = weak.upgrade() {
-                        ui.invoke_show_toast(format!("⚠ {e}").into());
+                        ui.invoke_show_toast_error(format!("⚠ {e}").into());
                     }
                     return;
                 }
@@ -1026,7 +1026,7 @@ pub fn run_app(
                     let msg = format!("⚠ {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast(msg.into());
+                            ui.invoke_show_toast_error(msg.into());
                         }
                     });
                 }
@@ -1058,7 +1058,7 @@ pub fn run_app(
                     let msg = format!("⚠ {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast(msg.into());
+                            ui.invoke_show_toast_error(msg.into());
                         }
                     });
                 }
@@ -1175,7 +1175,7 @@ pub fn run_app(
                             let msg = format!("\u{26a0} {path}: {other:?}");
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
-                                    ui.invoke_show_toast(msg.into());
+                                    ui.invoke_show_toast_error(msg.into());
                                 }
                             });
                             return;
@@ -1191,7 +1191,7 @@ pub fn run_app(
                         let msg = format!("\u{26a0} {e}");
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                ui.invoke_show_toast(msg.into());
+                                ui.invoke_show_toast_error(msg.into());
                             }
                         });
                     }
@@ -1299,7 +1299,7 @@ pub fn run_app(
                 }
                 None => {
                     let s = ui.global::<Strings>();
-                    ui.invoke_show_toast(s.get_pc_img_missing());
+                    ui.invoke_show_toast_error(s.get_pc_img_missing());
                 }
             }
         });
@@ -1322,7 +1322,7 @@ pub fn run_app(
                 Ok(b) if !b.is_empty() => b,
                 _ => {
                     let s = ui.global::<Strings>();
-                    ui.invoke_show_toast(s.get_pc_img_missing());
+                    ui.invoke_show_toast_error(s.get_pc_img_missing());
                     return;
                 }
             };
@@ -1342,13 +1342,18 @@ pub fn run_app(
                 })
                 .await;
                 let msg = match write {
-                    Ok(Ok(path)) => format!("{saved_prefix} {}", path.display()),
-                    Ok(Err(e)) => format!("⚠ {e}"),
-                    Err(e) => format!("⚠ {e}"),
+                    Ok(Ok(path)) => (format!("{saved_prefix} {}", path.display()), true),
+                    Ok(Err(e)) => (format!("⚠ {e}"), false),
+                    Err(e) => (format!("⚠ {e}"), false),
                 };
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.invoke_show_toast(msg.into());
+                        let (msg, ok) = msg;
+                        if ok {
+                            ui.invoke_show_toast(msg.into());
+                        } else {
+                            ui.invoke_show_toast_error(msg.into());
+                        }
                     }
                 });
             });
@@ -1470,7 +1475,7 @@ pub fn run_app(
                                     );
                                 }
                                 molt_core::TransferPhase::Failed { reason } => {
-                                    ui.invoke_show_toast(
+                                    ui.invoke_show_toast_error(
                                         format!("{} {reason}", st.get_toast_dl_failed()).into(),
                                     );
                                 }
@@ -1975,7 +1980,7 @@ fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd:
             let msg = format!("⚠ {e}");
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.invoke_show_toast(msg.into());
+                    ui.invoke_show_toast_error(msg.into());
                 }
             });
         }
@@ -2211,11 +2216,11 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
         let s = ui.global::<Strings>();
         if sv.notice == "detached" {
             // §4.4: knowledge restored, membership not — say exactly that
-            ui.invoke_show_toast(s.get_toast_detached());
+            ui.invoke_show_toast_error(s.get_toast_detached());
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
-            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_failed()).into());
+            ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
-            ui.invoke_show_toast(format!("{} {err}", s.get_toast_backup_prune()).into());
+            ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
         }
     }
     // persistent restart warning: which changed keys only apply on restart

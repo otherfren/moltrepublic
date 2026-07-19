@@ -135,6 +135,9 @@ async fn founded_engine(
         workspaces: Vec::new(),
         settings: SessionSettings {
             workspace_dir: root.display().to_string(),
+            // the GLOBAL auto-backup master switch: on for the harness —
+            // the per-workspace pref only takes effect underneath it
+            s3_backup: true,
             s3_endpoint: endpoint.to_string(),
             s3_access_key: "AKIAEXAMPLE".to_string(),
             s3_secret_key: "secret-example".to_string(),
@@ -189,6 +192,46 @@ async fn poll_session(
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
     panic!("{what} did not happen in time");
+}
+
+/// The settings' GLOBAL "Automatic S3 backup" checkbox is a MASTER gate:
+/// with it off, the ticker spawns nothing — even for a workspace whose
+/// per-workspace pref is on. Unchecking the box must actually stop the
+/// automation (2026-07-19 report); the per-workspace pref chooses WHICH
+/// republics back up while the global switch is on.
+#[tokio::test]
+async fn global_toggle_off_stops_the_ticker_despite_the_workspace_pref() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable per-workspace pref");
+
+    // flip the GLOBAL switch off (what the settings checkbox saves)
+    let mut settings = session(&w).await.settings.clone();
+    settings.s3_backup = false;
+    w.execute(Command::SaveSettings { settings }).await.expect("save");
+
+    // ticks decide NOTHING now: no upload request reaches the server and
+    // no stamp appears, despite valid config + per-workspace pref
+    w.execute(Command::BackupTick).await.expect("tick 1");
+    w.execute(Command::BackupTick).await.expect("tick 2");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        log.lock().expect("log").is_empty(),
+        "the global switch off must stop every automatic upload"
+    );
+    let sv = session(&w).await;
+    assert_eq!(
+        entry(&sv, &id).last_backup_min,
+        WorkspaceInfo::NEVER,
+        "no stamp without an upload"
+    );
 }
 
 /// §8.3.1 + §8.3.2: enabling NEVER stamps; a tick runs a real upload whose
