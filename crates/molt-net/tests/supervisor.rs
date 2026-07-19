@@ -27,11 +27,18 @@ use tokio::sync::watch;
 struct TestSink {
     delivered: Arc<Mutex<Vec<(MemberId, EventEnvelope)>>>,
     send_failures: Arc<Mutex<u32>>,
+    /// Stage-B health signals in arrival order: `up:<m>` / `down:<m>:<reason>`.
+    link_events: Arc<Mutex<Vec<String>>>,
+    send_oks: Arc<Mutex<u32>>,
 }
 
 impl TestSink {
     fn delivered(&self) -> Vec<(MemberId, EventEnvelope)> {
         self.delivered.lock().expect("sink lock").clone()
+    }
+
+    fn link_events(&self) -> Vec<String> {
+        self.link_events.lock().expect("sink lock").clone()
     }
 }
 
@@ -48,6 +55,21 @@ impl EngineSink for TestSink {
 
     async fn send_failed(&self, _member: &MemberId, _reason: &str) {
         *self.send_failures.lock().expect("sink lock") += 1;
+    }
+
+    async fn link_up(&self, member: &MemberId) {
+        self.link_events.lock().expect("sink lock").push(format!("up:{member}"));
+    }
+
+    async fn link_down(&self, member: &MemberId, reason: &str) {
+        self.link_events
+            .lock()
+            .expect("sink lock")
+            .push(format!("down:{member}:{reason}"));
+    }
+
+    async fn send_ok(&self, _member: &MemberId) {
+        *self.send_oks.lock().expect("sink lock") += 1;
     }
 }
 
@@ -241,4 +263,60 @@ async fn restart_resumes_from_cursors_without_duplicates() {
     let delivered = nodes[1].sink.delivered();
     assert_eq!(delivered.len(), 2, "no duplicates after the restart");
     assert_exactly_once_in_order("ben", &delivered, &["ada"], 2);
+}
+
+/// Stage B: a severed subscription (the loopback analogue of a died SMP
+/// recv loop) must resubscribe by ITSELF and resume delivery — and the sink
+/// must have seen the leg go down and come back up, in that order (the
+/// honest-health signals the engine turns into Degraded/Ok).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_severed_subscription_resubscribes_and_resumes_delivery() {
+    let hub = LoopbackHub::calm();
+    let nodes = mesh(&hub, &["ada", "ben"], 11).await;
+    // baseline: delivery works
+    post(&nodes[0], 1, "before the cut");
+    await_deliveries(&nodes[1].sink, 1, 10).await;
+    // sever every live subscription; unacked blocks stay pending on the hub
+    hub.sever_subscriptions();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // the peer keeps sending — the watchdog must resubscribe and deliver
+    post(&nodes[0], 2, "after the cut");
+    await_deliveries(&nodes[1].sink, 2, 10).await;
+    // ben saw ada's leg die and come back, in that order
+    let events = nodes[1].sink.link_events();
+    let down = events
+        .iter()
+        .position(|e| e.starts_with("down:ada"))
+        .unwrap_or_else(|| panic!("no link_down for ada in {events:?}"));
+    let up = events
+        .iter()
+        .rposition(|e| e == "up:ada")
+        .unwrap_or_else(|| panic!("no link_up for ada in {events:?}"));
+    assert!(up > down, "link_up must follow the link_down: {events:?}");
+}
+
+/// Stage B: a send that finally goes through after backing off fires the
+/// sink's `send_ok` — the signal that clears the stuck-send flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_healed_send_after_backoff_fires_send_ok() {
+    let hub = LoopbackHub::calm();
+    let nodes = mesh(&hub, &["ada", "ben"], 7).await;
+    hub.set_partitioned(true);
+    post(&nodes[0], 1, "queued behind the partition");
+    // wait until the outbox reported the failure (it is now backing off)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while *nodes[0].sink.send_failures.lock().expect("lock") == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "no send_failed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    hub.set_partitioned(false);
+    await_deliveries(&nodes[1].sink, 1, 10).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while *nodes[0].sink.send_oks.lock().expect("lock") == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the healed send never fired send_ok"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

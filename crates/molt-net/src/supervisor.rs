@@ -214,6 +214,28 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         member: &MemberId,
         reason: &str,
     ) -> impl std::future::Future<Output = ()> + Send;
+    /// The inbound leg from `member` is live (subscription established).
+    /// Default no-op so existing sinks keep compiling (Stage B, additive).
+    fn link_up(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
+        async {}
+    }
+    /// The inbound leg from `member` ended/failed; the resubscribe watchdog
+    /// is backing off and retrying. Default no-op (Stage B, additive).
+    fn link_down(
+        &self,
+        member: &MemberId,
+        reason: &str,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, reason);
+        async {}
+    }
+    /// A previously failing send to `member` went through again — the
+    /// backoff exit signal. Default no-op (Stage B, additive).
+    fn send_ok(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
+        async {}
+    }
 }
 
 /// One fully wired peer connection: their inbound queue's send address and
@@ -392,25 +414,38 @@ where
             })
             .await
         };
-        for (peer, sub) in cfg.peers.iter().zip(subscribed) {
-            match sub {
-                Some(Ok(rx)) => {
-                    children.spawn(recv_task(
-                        peer.clone(),
-                        rx,
-                        store.clone(),
-                        sink.clone(),
-                        state.clone(),
-                        mls.clone(),
-                    ));
-                }
+        for (i, (peer, sub)) in cfg.peers.iter().zip(subscribed).enumerate() {
+            // the prebuild's first subscribe seeds the watchdog; a failed
+            // first subscribe is NOT fatal any more — the watchdog redials
+            // with capped backoff until the engine goes away (Stage B)
+            let first = match sub {
+                Some(Ok(rx)) => Some(rx),
                 Some(Err(e)) => {
-                    tracing::error!(peer = %peer.member, error = %e, "subscribing inbound queue failed");
+                    tracing::error!(peer = %peer.member, error = %e, "subscribing inbound queue failed — the watchdog will retry");
+                    sink.link_down(&peer.member, &e.to_string()).await;
+                    None
                 }
                 None => {
                     tracing::error!(peer = %peer.member, "prebuild subscribe task did not complete");
+                    sink.link_down(&peer.member, "prebuild subscribe did not complete").await;
+                    None
                 }
-            }
+            };
+            let seed = cfg
+                .seed
+                .wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(1 + u64::try_from(i).unwrap_or_default()))
+                | 1;
+            children.spawn(recv_watchdog_task(
+                transport.clone(),
+                cfg.clone(),
+                peer.clone(),
+                store.clone(),
+                sink.clone(),
+                state.clone(),
+                mls.clone(),
+                first,
+                seed,
+            ));
         }
         stopped.notified().await;
         // dropping the JoinSet aborts every child task
@@ -551,7 +586,7 @@ where
     let (payload, id) = match mls {
         Some(ch) => {
             let Some(ct) = ch.ciphertext_for(env.seq, &env) else {
-                tracing::error!("MLS-encrypting an envelope failed — skipping it");
+                tracing::error!(total_skipped = count_skipped(), "MLS-encrypting an envelope failed — skipping it");
                 return Err(());
             };
             (ct, msg_id(&cfg.member, &peer.member, env.seq))
@@ -559,7 +594,7 @@ where
         None => {
             let frame = WireFrame { v: 1, seq: wire_seq, env };
             let Ok(payload) = serde_json::to_vec(&frame) else {
-                tracing::error!("encoding a wire frame failed — skipping the envelope");
+                tracing::error!(total_skipped = count_skipped(), "encoding a wire frame failed — skipping the envelope");
                 return Err(());
             };
             (payload, msg_id(&cfg.member, &peer.member, wire_seq))
@@ -568,7 +603,7 @@ where
     let chunks = match chunk_message(id, &payload) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, "chunking failed — skipping the envelope");
+            tracing::error!(error = %e, total_skipped = count_skipped(), "chunking failed — skipping the envelope");
             return Err(());
         }
     };
@@ -586,14 +621,20 @@ where
                 // abort the whole message: already-sent blocks are junk
                 // the receiver's partial eviction cleans up; the wire seq
                 // stays unconsumed
-                tracing::error!(error = %e, "wrapping failed — skipping the envelope");
+                tracing::error!(error = %e, total_skipped = count_skipped(), "wrapping failed — skipping the envelope");
                 return Err(());
             }
         };
         let mut attempt: u32 = 0;
         loop {
             match transport.send(&peer.snd, block.clone()).await {
-                Ok(()) => break,
+                Ok(()) => {
+                    if attempt > 0 {
+                        // the backoff exit: sends to this member work again
+                        sink.send_ok(&peer.member).await;
+                    }
+                    break;
+                }
                 Err(e) => {
                     if attempt == 0 {
                         sink.send_failed(&peer.member, &e.to_string()).await;
@@ -643,6 +684,19 @@ async fn advance_outbound<S: StateStore>(
 /// with the reassembler's own partial cap).
 const CHUNK_ACK_MAX: usize = 64;
 
+/// Running count of inbound MLS messages that did not decode (node-wide,
+/// diagnostics only — never persisted).
+static DISCARDED_INBOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Running count of outbound envelopes skipped for local reasons
+/// (encode/chunk/wrap failures; node-wide, diagnostics only).
+static SKIPPED_OUTBOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count one locally-skipped outbound envelope, returning the new total.
+fn count_skipped() -> u64 {
+    SKIPPED_OUTBOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// Await the next node-wide epoch advance; pends forever on the plaintext
 /// path (no MLS channel) or once the watch sender is gone.
 async fn epoch_changed(rx: &mut Option<watch::Receiver<u64>>) {
@@ -686,7 +740,13 @@ async fn drain_epoch_buffer<K: EngineSink>(
                 MlsDecode::FutureEpoch => {
                     epoch_buffer.push((id, bytes, held)); // still ahead
                 }
-                MlsDecode::Discard => ack_all(held),
+                MlsDecode::Discard => {
+                    let n = DISCARDED_INBOUND
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    tracing::warn!(peer = %peer.member, total = n, "held MLS message did not decode after the epoch advance — dropped");
+                    ack_all(held);
+                }
             }
         }
     }
@@ -699,6 +759,82 @@ async fn drain_epoch_buffer<K: EngineSink>(
 /// are dropped unfired, so the transport redelivers it later (by which time
 /// the commit has usually landed).
 const EPOCH_BUFFER_MAX: usize = 64;
+
+/// Why a [`recv_task`] incarnation ended — the watchdog's branch signal.
+enum RecvEnd {
+    /// The engine sink refused a delivery (actor gone): stop for good.
+    EngineGone,
+    /// The delivery stream ended (the transport's recv loop died, e.g. a
+    /// dropped SMP connection): resubscribe.
+    StreamEnded,
+}
+
+/// The per-peer **resubscribe watchdog** (Stage B): run [`recv_task`] over
+/// a subscription, and when the stream ends — a died SMP recv loop used to
+/// leave the seat deaf for the whole session — report `link_down`, redial
+/// `subscribe` with capped jittered backoff, report `link_up`, repeat.
+/// Ends only when the engine is gone. Reassembler/reorder/epoch buffers are
+/// fresh per incarnation (delivery cursors live in the shared `state`;
+/// anything held un-acked redelivers on the new subscription). An SMP
+/// `subscribe` dials its own fresh connection, so the watchdog re-dials
+/// implicitly.
+#[allow(clippy::too_many_arguments)]
+async fn recv_watchdog_task<T, S, K>(
+    transport: T,
+    cfg: NetConfig,
+    peer: PeerLink,
+    store: S,
+    sink: K,
+    state: Arc<Mutex<TransportState>>,
+    mls: Option<MlsChannel>,
+    first: Option<tokio::sync::mpsc::Receiver<crate::Delivery>>,
+    seed: u64,
+) where
+    T: Transport,
+    S: StateStore,
+    K: EngineSink,
+{
+    let mut rng = seed;
+    let mut attempt: u32 = 0;
+    let mut next = first;
+    loop {
+        let rx = match next.take() {
+            Some(rx) => rx,
+            None => match transport.subscribe(&peer.rcv).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    tracing::warn!(peer = %peer.member, error = %e, "resubscribe failed — backing off");
+                    sink.link_down(&peer.member, &e.to_string()).await;
+                    let backoff = backoff_ms(&cfg, attempt, &mut rng);
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    attempt = attempt.saturating_add(1);
+                    continue;
+                }
+            },
+        };
+        sink.link_up(&peer.member).await;
+        attempt = 0;
+        match recv_task(
+            peer.clone(),
+            rx,
+            store.clone(),
+            sink.clone(),
+            state.clone(),
+            mls.clone(),
+        )
+        .await
+        {
+            RecvEnd::EngineGone => return,
+            RecvEnd::StreamEnded => {
+                tracing::warn!(peer = %peer.member, "subscription ended — resubscribing");
+                sink.link_down(&peer.member, "subscription ended — resubscribing").await;
+            }
+        }
+        let backoff = backoff_ms(&cfg, attempt, &mut rng);
+        tokio::time::sleep(Duration::from_millis(backoff)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
 
 /// The per-peer receive loop: unwrap → reassemble → parse → per-sender
 /// in-order delivery, ack after the engine accepted.
@@ -718,7 +854,8 @@ async fn recv_task<S, K>(
     sink: K,
     state: Arc<Mutex<TransportState>>,
     mls: Option<MlsChannel>,
-) where
+) -> RecvEnd
+where
     S: StateStore,
     K: EngineSink,
 {
@@ -749,14 +886,15 @@ async fn recv_task<S, K>(
             _ = epoch_changed(&mut epoch_rx), if !epoch_buffer.is_empty() => {
                 if let Some(ch) = &mls {
                     if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
-                        return; // engine gone
+                        return RecvEnd::EngineGone;
                     }
                 }
                 continue;
             }
             d = rx.recv() => match d {
                 Some(d) => d,
-                None => break,
+                // the delivery stream ended — the transport's recv loop died
+                None => return RecvEnd::StreamEnded,
             },
         };
         let plain = match unwrap_block(&peer.wrap_in, &delivery.block) {
@@ -821,14 +959,14 @@ async fn recv_task<S, K>(
                     sink.peer_seen(&peer.member).await;
                     if sink.deliver(&from, *env).await.is_err() {
                         tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
-                        return;
+                        return RecvEnd::EngineGone;
                     }
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
                     ack_all(acks);
                     if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
-                        return; // engine gone
+                        return RecvEnd::EngineGone;
                     }
                 }
                 MlsDecode::FutureEpoch => {
@@ -855,7 +993,16 @@ async fn recv_task<S, K>(
                         epoch_buffer.push((id.0, complete, acks));
                     }
                 }
-                MlsDecode::Discard => ack_all(acks), // replay / proposal / undecryptable
+                MlsDecode::Discard => {
+                    // loud, with a running count: a silently-dropped inbound
+                    // message is how a dead leg hides (Stage B §3.3). Replays
+                    // of redelivered blocks land here too — routine weather,
+                    // but a STREAM of these on a quiet mesh is the signature
+                    // of a desynced ratchet.
+                    let n = DISCARDED_INBOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    tracing::warn!(peer = %peer.member, total = n, "inbound MLS message did not decode (replay/proposal/garbage) — dropped");
+                    ack_all(acks);
+                }
             }
             continue;
         }
@@ -901,11 +1048,11 @@ async fn recv_task<S, K>(
         while let Some((env, acks)) = reorder.remove(&(cursor + 1)) {
             if sink.deliver(&peer.member, env).await.is_err() {
                 tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
-                return;
+                return RecvEnd::EngineGone;
             }
             cursor += 1;
             let snapshot = {
-                let Ok(mut s) = state.lock() else { return };
+                let Ok(mut s) = state.lock() else { return RecvEnd::EngineGone };
                 s.inbound.insert(peer.member.clone(), cursor);
                 s.clone()
             };

@@ -265,6 +265,34 @@ impl EngineSink for CmdSink {
             })
             .await;
     }
+
+    async fn link_up(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetLinkUp {
+                member: member.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn link_down(&self, member: &MemberId, reason: &str) {
+        let _ = self
+            .execute(Command::NetLinkDown {
+                member: member.clone(),
+                reason: reason.to_string(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn send_ok(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetSendOk {
+                member: member.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
 }
 
 /// The log-backed outbox source of a persisted workspace: reads pending
@@ -724,6 +752,15 @@ impl State {
             wakeup_rx,
             Some(MlsChannel::from_shared(mls_arc.clone())),
         );
+        // honest open: every mesh leg starts "connecting" (amber) until its
+        // watchdog confirms the subscription with a link_up — from here on,
+        // `Ok` really means every inbound leg is live (Stage B)
+        self.net_link_down.clear();
+        self.net_send_stuck.clear();
+        for p in &peer_names {
+            self.net_link_down.insert(p.clone(), "connecting".to_string());
+        }
+        self.recompute_net_health();
         Some(NetRuntime {
             feed: NetFeed::Real,
             wakeup,
@@ -1565,9 +1602,12 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Transport trouble: pin the member's pill unreachable. The last-seen
-    /// stamp stays untouched — it records real sightings only; the pin
-    /// holds through aging ticks until the next sighting clears it.
+    /// Transport trouble: pin the member's pill unreachable AND flag the
+    /// outbound leg stuck (Stage B: the endless-backoff outbox — e.g. the
+    /// 2026-07-19 `SKEY ERR AUTH` loop — becomes a visible `Degraded`, not
+    /// one stderr line). The last-seen stamp stays untouched — it records
+    /// real sightings only; the presence pin lifts on the next sighting,
+    /// the stuck flag only on a successful send (`NetSendOk`).
     pub(crate) fn cmd_net_send_failed(
         &mut self,
         member: MemberId,
@@ -1578,9 +1618,82 @@ impl State {
             return Ok(Reply::Ack);
         }
         tracing::warn!(%member, %reason, "sends to a member keep failing — outbox is backing off");
+        self.net_send_stuck.insert(member.clone(), reason);
         self.net_unreachable.insert(member);
         self.refresh_member_pills();
+        self.recompute_net_health();
         Ok(Reply::Ack)
+    }
+
+    /// The watchdog confirmed a member's inbound leg (subscription live):
+    /// clear its degraded state (Stage B).
+    pub(crate) fn cmd_net_link_up(
+        &mut self,
+        member: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            self.net_link_down.remove(&member);
+            self.recompute_net_health();
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// A member's inbound leg died (subscription ended/failed); the
+    /// watchdog is re-subscribing — surface it honestly (Stage B).
+    pub(crate) fn cmd_net_link_down(
+        &mut self,
+        member: MemberId,
+        reason: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            self.net_link_down.insert(member, reason);
+            self.recompute_net_health();
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// A previously backing-off send went through: clear the stuck flag
+    /// (Stage B).
+    pub(crate) fn cmd_net_send_ok(
+        &mut self,
+        member: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            self.net_send_stuck.remove(&member);
+            self.recompute_net_health();
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Re-derive `session.net_health` from the two runtime leg maps.
+    /// `Down` is the open/config path's fail-closed verdict and is NEVER
+    /// overridden here; otherwise empty maps mean an honest `Ok` (every
+    /// mesh leg confirmed) and anything else `Degraded` with each troubled
+    /// peer and its reason. Emits only on an actual change.
+    pub(crate) fn recompute_net_health(&mut self) {
+        if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
+            return;
+        }
+        let health = if self.net_link_down.is_empty() && self.net_send_stuck.is_empty() {
+            molt_core::NetHealth::Ok
+        } else {
+            let parts: Vec<String> = self
+                .net_link_down
+                .iter()
+                .map(|(m, r)| format!("link to {m}: {r}"))
+                .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
+                .collect();
+            molt_core::NetHealth::Degraded {
+                reason: parts.join("; "),
+            }
+        };
+        if self.session.net_health != health {
+            self.session.net_health = health;
+            self.emit_session(SessionScope::Full);
+        }
     }
 
     /// The presence ticker (spawned with the actor, period
@@ -2057,6 +2170,76 @@ mod tests {
         assert_eq!(ada.presence, 0, "the Members table shows self online");
         let s = st.status();
         assert_eq!(s.active_1h, 1, "self always counts active");
+    }
+
+    /// Stage B honest health: the supervisor's link/send signals drive
+    /// `session.net_health` Ok → Degraded (reason naming every troubled
+    /// peer) → Ok, and only when BOTH legs are clear again.
+    #[test]
+    fn link_and_send_signals_drive_ok_degraded_ok() {
+        let mut st = presence_fixture();
+        assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+        st.cmd_net_link_down("bob".to_string(), "subscription ended".to_string(), None)
+            .expect("ack");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob"), "names the peer: {reason}");
+                assert!(reason.contains("subscription ended"), "carries the cause: {reason}");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+        // a stuck outbox on ANOTHER peer joins the reason
+        st.cmd_net_send_failed("cid".to_string(), "SKEY rejected: ERR AUTH".to_string(), None)
+            .expect("ack");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob") && reason.contains("cid"), "{reason}");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+        // heal one leg: still degraded (the other is stuck)
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert!(
+            matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
+            "cid's outbox is still stuck"
+        );
+        // heal the second: honest Ok again
+        st.cmd_net_send_ok("cid".to_string(), None).expect("ack");
+        assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+    }
+
+    /// `Down` is the open/config path's verdict (fail-closed dialer,
+    /// detached reopen) — runtime link signals must never lift it.
+    #[test]
+    fn a_down_verdict_is_never_lifted_by_link_signals() {
+        let mut st = presence_fixture();
+        st.session.net_health = molt_core::NetHealth::Down {
+            reason: "resume failed — workspace opened detached".to_string(),
+        };
+        st.cmd_net_link_down("bob".to_string(), "x".to_string(), None).expect("ack");
+        assert!(matches!(st.session.net_health, molt_core::NetHealth::Down { .. }));
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.cmd_net_send_ok("bob".to_string(), None).expect("ack");
+        assert!(
+            matches!(st.session.net_health, molt_core::NetHealth::Down { .. }),
+            "link signals must never lift a Down verdict"
+        );
+    }
+
+    /// Link/send-stuck state is scoped to the workspace: the close/switch
+    /// boundary clears it (like the send-failure presence pins), so the
+    /// next workspace never inherits a Degraded pill.
+    #[test]
+    fn link_state_does_not_leak_past_a_workspace_reset() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_down("bob".to_string(), "gone".to_string(), None).expect("ack");
+        st.cmd_net_send_failed("cid".to_string(), "gone".to_string(), None).expect("ack");
+        assert!(!st.net_link_down.is_empty() && !st.net_send_stuck.is_empty());
+        st.reset_workspace_state();
+        assert!(
+            st.net_link_down.is_empty() && st.net_send_stuck.is_empty(),
+            "the close/switch boundary clears the link state"
+        );
     }
 
     /// A send-failure pin is scoped to the workspace: closing/resetting the

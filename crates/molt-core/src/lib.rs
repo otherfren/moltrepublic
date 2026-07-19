@@ -2338,6 +2338,37 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A member's inbound subscription is live (engine-internal transport
+    /// health; the resubscribe watchdog confirms the leg, clearing its
+    /// degraded state).
+    NetLinkUp {
+        /// The member whose leg came up.
+        member: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A member's inbound subscription ended or failed; the watchdog is
+    /// backing off and re-subscribing (engine-internal transport health —
+    /// surfaces as `NetHealth::Degraded`).
+    NetLinkDown {
+        /// The member whose leg died.
+        member: MemberId,
+        /// The transport's reason, for the health tooltip.
+        reason: String,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A previously backing-off send to a member went through again
+    /// (engine-internal transport health; clears the stuck-send state).
+    NetSendOk {
+        /// The member whose sends work again.
+        member: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Put an object forward for threshold approval on a gated surface.
     Propose {
         /// Target surface (must be gated; `Chat` is rejected).

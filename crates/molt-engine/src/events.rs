@@ -488,6 +488,8 @@ impl State {
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.net_unreachable.clear();
+        self.net_link_down.clear();
+        self.net_send_stuck.clear();
         self.replica = None;
         self.identity_sk = None;
         self.chain.clear();

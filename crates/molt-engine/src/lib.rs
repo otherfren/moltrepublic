@@ -537,6 +537,12 @@ pub(crate) struct State {
     /// active-workspace scope — [`State::reset_workspace_state`] clears it
     /// at the close/switch boundary so a pin never leaks into the next.
     pub(crate) net_unreachable: std::collections::HashSet<MemberId>,
+    /// Inbound legs currently down (member → reason), reported by the
+    /// resubscribe watchdog — drives `NetHealth::Degraded` (Stage B).
+    pub(crate) net_link_down: std::collections::BTreeMap<MemberId, String>,
+    /// Outbound legs whose sends keep failing (member → reason) — set by
+    /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
+    pub(crate) net_send_stuck: std::collections::BTreeMap<MemberId, String>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -743,6 +749,8 @@ impl State {
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
+            net_link_down: std::collections::BTreeMap::new(),
+            net_send_stuck: std::collections::BTreeMap::new(),
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -974,6 +982,17 @@ impl State {
                 reason,
                 generation,
             } => self.cmd_net_send_failed(member, reason, generation),
+            Command::NetLinkUp { member, generation } => {
+                self.cmd_net_link_up(member, generation)
+            }
+            Command::NetLinkDown {
+                member,
+                reason,
+                generation,
+            } => self.cmd_net_link_down(member, reason, generation),
+            Command::NetSendOk { member, generation } => {
+                self.cmd_net_send_ok(member, generation)
+            }
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
 
             // session.rs
