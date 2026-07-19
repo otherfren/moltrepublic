@@ -629,6 +629,8 @@ where
         loop {
             match transport.send(&peer.snd, block.clone()).await {
                 Ok(()) => {
+                    let snd_tag = hex::encode(&peer.snd.id.0[..peer.snd.id.0.len().min(4)]);
+                    tracing::debug!(peer = %peer.member, queue = %snd_tag, "block sent");
                     if attempt > 0 {
                         // the backoff exit: sends to this member work again
                         sink.send_ok(&peer.member).await;
@@ -812,6 +814,7 @@ async fn recv_watchdog_task<T, S, K>(
                 }
             },
         };
+        tracing::debug!(peer = %peer.member, queue = %hex::encode(&peer.rcv.id.0[..peer.rcv.id.0.len().min(4)]), "inbound subscription live");
         sink.link_up(&peer.member).await;
         attempt = 0;
         match recv_task(

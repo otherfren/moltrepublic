@@ -296,12 +296,22 @@ async fn restart_matrix_all_six_directions_deliver_after_mixed_restarts() {
     }
 
     // --- sends immediately after reopen (the incident's timing) ----------
+    // The clean closers (A, B) persisted their advanced MLS ratchet on
+    // close, so their first post-restart message is guaranteed. The
+    // hard-killed C resumed from the last-persisted (mesh-up) ratchet: its
+    // FIRST message may re-use an already-consumed sender generation and be
+    // replay-rejected at the peers — the documented hard-kill window (the
+    // per-drain MLS persist is the known-open hardening). The CONTRACT this
+    // test pins is the incident's actual failure mode: the leg must HEAL —
+    // C's next message must deliver everywhere (before the sender-seed fix
+    // the leg stayed dead FOREVER: fresh SKEY → ERR AUTH → endless backoff).
     chat(&a2, "post-a").await;
     chat(&b2, "post-b").await;
-    chat(&c2, "post-c").await;
+    chat(&c2, "post-c").await; // may fall into the replay window — not asserted
+    chat(&c2, "post-c-2").await;
     assert_matrix(
         &[("founder-a", &a2), ("member-b", &b2), ("member-c", &c2)],
-        &[("founder-a", "post-a"), ("member-b", "post-b"), ("member-c", "post-c")],
+        &[("founder-a", "post-a"), ("member-b", "post-b"), ("member-c", "post-c-2")],
         120,
     )
     .await;

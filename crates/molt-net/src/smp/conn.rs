@@ -326,12 +326,21 @@ impl SmpConn {
                 };
                 return Ok(body);
             }
-            // OK (or "END"/"ERR") — keep waiting for a pushed MSG
+            // OK — keep waiting for a pushed MSG
             if command.starts_with(b"ERR") {
                 return Err(NetError::Crypto(format!(
                     "server error during subscribe: {}",
                     String::from_utf8_lossy(&command[..command.len().min(32)])
                 )));
+            }
+            // END: the server ended THIS connection's subscription (e.g. a
+            // newer SUB elsewhere took the queue over). Swallowing it (the
+            // pre-Stage-B behavior) left a ZOMBIE loop waiting forever on a
+            // subscription the server no longer serves — a silently deaf
+            // leg. Ending the stream lets the resubscribe watchdog take it
+            // from here.
+            if command.starts_with(b"END") {
+                return Err(NetError::Closed);
             }
         }
     }

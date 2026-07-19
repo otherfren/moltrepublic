@@ -448,10 +448,12 @@ impl Transport for SmpTransport {
         let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
+        let rcv_tag = hex::encode(&queue.recipient_id[..queue.recipient_id.len().min(4)]);
         tokio::spawn(async move {
             loop {
                 match conn.recv_next(&queue).await {
                     Ok(body) => {
+                        tracing::debug!(queue = %rcv_tag, len = body.len(), "SMP message received");
                         // the delivered body is our fixed-size block plus
                         // the server's row padding — take exactly one block
                         let Some(slice) = body.get(..PADDED_BLOCK_LEN) else {
@@ -469,7 +471,7 @@ impl Transport for SmpTransport {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(error = %e, "SMP subscription ended");
+                        tracing::debug!(queue = %rcv_tag, error = %e, "SMP subscription ended");
                         return;
                     }
                 }
