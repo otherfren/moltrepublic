@@ -845,6 +845,7 @@ mod tests {
             kdf: None,
             cipher: "xchacha20poly1305".to_string(),
             chunk_bytes: 4096,
+            export_salt: "cd".repeat(32),
         };
         let header_bytes = serde_json::to_vec(&header).expect("header json");
 
