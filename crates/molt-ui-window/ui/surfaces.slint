@@ -14,7 +14,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings } from "theme.slint";
+import { Theme, Strings, HintTip } from "theme.slint";
 import { AppButton, AppField, AppArea, ScrollHint, DotLabel } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -36,34 +36,20 @@ export component MockBadge inherits Rectangle {
         font-size: Theme.fs-cap;
         font-weight: 700;
     }
+    // the hint goes through the window-topmost HintTip overlay (renders
+    // above everything, never clipped, and — unlike a PopupWindow — grabs
+    // no input, so the hover cannot strobe)
     ta := TouchArea {
         changed has-hover => {
             if (self.has-hover) {
-                tip.show();
-            } else {
-                tip.close();
-            }
-        }
-    }
-    // a PopupWindow, not an in-tree HoverTip: the badge also sits in the
-    // app's top bar, where an in-tree bubble would be painted over by the
-    // content below — a popup renders above everything and never clips
-    tip := PopupWindow {
-        x: 0;
-        y: parent.height + 6px;
-        close-policy: PopupClosePolicy.no-auto-close;
-        Rectangle {
-            background: Theme.text;
-            border-radius: 5px;
-            width: tt.preferred-width + 16px;
-            height: 23px;
-            tt := Text {
-                x: 8px;
-                height: 100%;
-                text: Strings.mock-tip;
-                color: Theme.bg;
-                font-size: Theme.fs-cap;
-                vertical-alignment: center;
+                HintTip.label = Strings.mock-tip;
+                HintTip.ax = root.absolute-position.x;
+                HintTip.ay = root.absolute-position.y + root.height + 6px;
+            } else if (HintTip.ax == root.absolute-position.x
+                && HintTip.ay == root.absolute-position.y + root.height + 6px) {
+                // only clear our own hint — hovering straight onto another
+                // control may already have replaced it
+                HintTip.label = "";
             }
         }
     }
@@ -325,39 +311,27 @@ component ToolBtn inherits Rectangle {
         }
     }
     // the TouchArea stays enabled either way — a disabled button still
-    // owes its hover the honest "not yet" hint; only clicked() gates
+    // owes its hover the honest "not yet" hint; only clicked() gates.
+    // The hint renders through the window-topmost HintTip overlay (never
+    // clipped, grabs no input — a PopupWindow here strobed the hover).
     ta := TouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
         changed has-hover => {
             if (self.has-hover) {
-                tip.show();
-            } else {
-                tip.close();
+                HintTip.label = root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
+                HintTip.ax = root.absolute-position.x;
+                HintTip.ay = root.absolute-position.y + root.height + 6px;
+            } else if (HintTip.ax == root.absolute-position.x
+                && HintTip.ay == root.absolute-position.y + root.height + 6px) {
+                // only clear our own hint — hovering straight onto another
+                // button may already have replaced it
+                HintTip.label = "";
             }
         }
         clicked => {
-            tip.close();
+            HintTip.label = "";
             if (root.enabled) {
                 root.clicked();
-            }
-        }
-    }
-    tip := PopupWindow {
-        x: 0;
-        y: parent.height + 6px;
-        close-policy: PopupClosePolicy.no-auto-close;
-        Rectangle {
-            background: Theme.text;
-            border-radius: 5px;
-            width: tt.preferred-width + 16px;
-            height: 23px;
-            tt := Text {
-                x: 8px;
-                height: 100%;
-                text: root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
-                color: Theme.bg;
-                font-size: Theme.fs-cap;
-                vertical-alignment: center;
             }
         }
     }
@@ -966,16 +940,16 @@ export component MemoryPane inherits VerticalLayout {
                 }
                 sta := TouchArea {
                     mouse-cursor: MouseCursor.col-resize;
-                    property <length> press-w;
-                    pointer-event(ev) => {
-                        if (ev.kind == PointerEventKind.down) {
-                            self.press-w = srow.nav-w;
-                        }
-                    }
                     moved => {
-                        // clamp in pixel space (same bounds as nav-w), then
-                        // store the fraction so resizes keep the proportion
-                        root.split = srow.clamp-nav(self.press-w + (self.mouse-x - self.pressed-x)) / max(srow.avail, 1px);
+                        // mouse-x and pressed-x are both in THIS element's
+                        // current frame, so their difference is exactly how
+                        // far the press point drifted from the pointer —
+                        // adding it to the current width re-centers the
+                        // grip under the pointer and converges in one step.
+                        // (A width frozen at press time double-corrects:
+                        // every event undershoots by the already-applied
+                        // delta and the splitter oscillates.)
+                        root.split = srow.clamp-nav(srow.nav-w + (self.mouse-x - self.pressed-x)) / max(srow.avail, 1px);
                     }
                 }
             }

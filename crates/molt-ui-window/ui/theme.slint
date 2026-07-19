@@ -226,6 +226,18 @@ export struct Palette {
     accent-bad: color,
 }
 
+// Window-topmost hover-hint channel: a hovered control writes its label and
+// its absolute (window) anchor here; the app root renders ONE overlay bubble
+// from it, above everything and outside any clipped panel. This replaces
+// PopupWindow tooltips — an open popup grabs the pointer, so a hover-driven
+// popup closes itself the instant it opens and the control strobes.
+export global HintTip {
+    in-out property <string> label;
+    // anchor in window coordinates (from the control's absolute-position)
+    in-out property <length> ax;
+    in-out property <length> ay;
+}
+
 export global Palettes {
     // Classic — clean Office-style layout in the moltrepublic.ai brand orange
     // (#e65515): off-white surfaces, charcoal text, a teal-green "good" that

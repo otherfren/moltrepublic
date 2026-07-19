@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
+import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -6732,6 +6732,33 @@ export component AppWindow inherits Window {
             color: Theme.warn;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
+        }
+    }
+
+    // =================================================================
+    // HintTip overlay: THE tooltip bubble for controls that write the
+    // HintTip global (wiki toolbar buttons, the mock badge). Drawn last
+    // at the window root — above everything, outside every clipped
+    // panel — and without a TouchArea, so it never grabs the pointer
+    // (the PopupWindow tooltips it replaces strobed the hover).
+    // =================================================================
+    // main-screen only: every HintTip writer lives there, and a view
+    // switch can unmount a hovered control without a hover-out event —
+    // the guard keeps such an orphaned hint off other screens
+    if HintTip.label != "" && root.screen == AppScreen.main: Rectangle {
+        x: max(4px, min(HintTip.ax, root.width - self.width - 4px));
+        y: HintTip.ay;
+        width: hint-tt.preferred-width + 16px;
+        height: 23px;
+        background: Theme.text;
+        border-radius: 5px;
+        hint-tt := Text {
+            x: 8px;
+            height: 100%;
+            text: HintTip.label;
+            color: Theme.bg;
+            font-size: Theme.fs-cap;
+            vertical-alignment: center;
         }
     }
 
