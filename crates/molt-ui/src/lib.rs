@@ -4384,7 +4384,7 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "send" => "Senden",
         "receive" => "Empfangen",
         "settings" => "Einstellungen",
-        // Status, Brain, Board — shared or product terms
+        // Status, Multisig-Wiki, Board — shared or product terms
         _ => en,
     }
     .to_string()
@@ -5065,16 +5065,24 @@ lexicon! {
     // UX drafts — the sample data stays .slint-side, only chrome localizes
     mock_badge: "DESIGN MOCK", "DESIGN-MOCK";
     mock_tip: "A design draft with sample data — nothing here is stored, sent, or real.", "Ein Design-Entwurf mit Beispieldaten — nichts hier wird gespeichert, gesendet oder ist echt.";
-    mem_title_brain: "Shared brain", "Gemeinsames Gedächtnis";
+    mem_title_brain: "Multisig-Wiki", "Multisig-Wiki";
     mem_tb_new_file: "New file", "Neue Datei";
     mem_tb_new_folder: "New folder", "Neuer Ordner";
+    mem_tb_delete: "Delete", "Löschen";
     mem_tb_collapse: "Collapse all", "Alles einklappen";
-    mem_tb_edit: "Edit", "Bearbeiten";
-    mem_tb_history: "History", "Verlauf";
+    mem_tb_open_all: "Expand all", "Alles ausklappen";
+    mem_tb_edit: "Edit as Markdown", "Als Markdown bearbeiten";
+    mem_tb_preview: "Preview", "Vorschau";
     mem_tb_link: "Copy link", "Link kopieren";
+    mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
+    mem_tb_prev: "Previous document", "Vorheriges Dokument";
+    mem_tb_next: "Next document", "Nächstes Dokument";
+    mem_toast_link: "Link copied — paste it in chat or another note", "Link kopiert — in Chat oder eine andere Notiz einfügen";
+    mem_empty_folder: "empty", "leer";
+    mem_empty: "Nothing here yet — create a new file.", "Noch nichts hier — lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
-    mem_hint_archive: "Retired from the brain — still readable, no longer linked.", "Aus dem Gedächtnis zurückgezogen — weiter lesbar, nicht mehr verknüpft.";
+    mem_hint_archive: "Retired from the wiki — still readable, no longer linked.", "Aus dem Wiki zurückgezogen — weiter lesbar, nicht mehr verknüpft.";
     qb_title_board: "Quest board", "Quest-Board";
     qb_hint_board: "Tasks put forward, claimed and completed. Putting one forward and reporting it done are gated proposals.", "Aufgaben — ausgeschrieben, übernommen, erledigt. Ausschreiben und Erledigt-Melden sind geschützte Vorschläge.";
     qb_col_open: "Open", "Offen";

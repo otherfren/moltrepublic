@@ -4,9 +4,10 @@
 // (quest board), Vault (sealed secrets) and Wallet (Monero multisig).
 //
 // These panes are badged UX drafts to iterate on look & feel — every dataset
-// below is .slint-side sample data, never engine state, and every action that
-// would change shared state renders DISABLED (with the "not yet" tooltip, the
-// same idiom as the greyed network options). The REAL threshold governance
+// below is .slint-side sample data, never engine state. Actions either work
+// as pure view-state mocks (the Multisig-Wiki's create/delete/edit/link) or
+// render DISABLED (with the "not yet" tooltip, the same idiom as the greyed
+// network options). The REAL threshold governance
 // for these surfaces (pending proposals / applied log / propose) stays in
 // app.slint and routes to the "proposals" (resp. wallet "status") sub-views.
 //
@@ -14,7 +15,7 @@
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
 import { Theme, Strings } from "theme.slint";
-import { AppButton, AppField, AppArea, ScrollHint, HoverTip, DotLabel } from "components.slint";
+import { AppButton, AppField, AppArea, ScrollHint, DotLabel } from "components.slint";
 
 // ---------------------------------------------------------------------------
 // shared chrome
@@ -35,12 +36,36 @@ export component MockBadge inherits Rectangle {
         font-size: Theme.fs-cap;
         font-weight: 700;
     }
-    ta := TouchArea { }
-    HoverTip {
-        label: Strings.mock-tip;
-        shown: ta.has-hover;
+    ta := TouchArea {
+        changed has-hover => {
+            if (self.has-hover) {
+                tip.show();
+            } else {
+                tip.close();
+            }
+        }
+    }
+    // a PopupWindow, not an in-tree HoverTip: the badge also sits in the
+    // app's top bar, where an in-tree bubble would be painted over by the
+    // content below — a popup renders above everything and never clips
+    tip := PopupWindow {
         x: 0;
         y: parent.height + 6px;
+        close-policy: PopupClosePolicy.no-auto-close;
+        Rectangle {
+            background: Theme.text;
+            border-radius: 5px;
+            width: tt.preferred-width + 16px;
+            height: 23px;
+            tt := Text {
+                x: 8px;
+                height: 100%;
+                text: Strings.mock-tip;
+                color: Theme.bg;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
     }
 }
 
@@ -215,7 +240,7 @@ component GlyphCaption inherits HorizontalLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Memory — the shared brain
+// Memory — the Multisig-Wiki (the shared brain)
 // ---------------------------------------------------------------------------
 
 // A retired note in the Archive sub-view's list.
@@ -233,8 +258,9 @@ struct BrainBlock {
     text: string,
 }
 
-// One .md file of the shared-brain tree, with its pseudo-rendered content
-// and the cross-links that make the tree a brain rather than a folder.
+// One .md file of the wiki tree, with its pseudo-rendered content, its
+// markdown source (the ✏️ raw-edit mode) and the cross-links that make
+// the tree a wiki rather than a folder.
 struct BrainDoc {
     path: string,
     author: string,
@@ -242,6 +268,7 @@ struct BrainDoc {
     when: string,
     blocks: [BrainBlock],
     links: [string],
+    raw: string,
 }
 
 // The slim toolbar strip on top of the navigator / content panes.
@@ -268,8 +295,10 @@ component ToolStrip inherits Rectangle {
 
 // A compact square toolbar button: Twemoji glyph, named tooltip below.
 // Disabled by default — the pane idiom: an action that would change shared
-// state renders greyed with the honest "not yet" suffix; pure view-state
-// actions (collapse) pass `enabled: true` and really work.
+// state renders greyed with the honest "not yet" suffix; wired actions
+// pass `enabled: true` and really work. The tooltip is a PopupWindow, not
+// an in-tree bubble: popups render above and outside the panel's clipped
+// bounds, so a hint near a panel edge is never cut off.
 component ToolBtn inherits Rectangle {
     in property <string> glyph;
     in property <string> name;
@@ -295,18 +324,42 @@ component ToolBtn inherits Rectangle {
             opacity: root.enabled ? 1.0 : 0.4;
         }
     }
+    // the TouchArea stays enabled either way — a disabled button still
+    // owes its hover the honest "not yet" hint; only clicked() gates
     ta := TouchArea {
-        enabled: root.enabled;
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        changed has-hover => {
+            if (self.has-hover) {
+                tip.show();
+            } else {
+                tip.close();
+            }
+        }
         clicked => {
-            root.clicked();
+            tip.close();
+            if (root.enabled) {
+                root.clicked();
+            }
         }
     }
-    HoverTip {
-        label: root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
-        shown: ta.has-hover;
+    tip := PopupWindow {
         x: 0;
         y: parent.height + 6px;
+        close-policy: PopupClosePolicy.no-auto-close;
+        Rectangle {
+            background: Theme.text;
+            border-radius: 5px;
+            width: tt.preferred-width + 16px;
+            height: 23px;
+            tt := Text {
+                x: 8px;
+                height: 100%;
+                text: root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
+                color: Theme.bg;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
     }
 }
 
@@ -496,22 +549,121 @@ component BrainBlockView inherits VerticalLayout {
 
 export component MemoryPane inherits VerticalLayout {
     in property <string> view;
+    // the 🔗 button's URI travels up to the app root — the real clipboard
+    // write and the toast live there, the pane stays a pure view
+    callback copy-link(string /* uri */);
     spacing: 8px;
 
-    // brain-view state — pure view state (selection, folds, splitter),
-    // kept on the pane root so it survives sub-view switches
+    // wiki-view state — pure view state (selection, folds, splitter, the
+    // mock's create/delete flags), kept on the pane root so it survives
+    // sub-view switches
     property <int> sel: 0;
     property <float> split: 0.32;
     property <bool> open-decisions: true;
     property <bool> open-quests: true;
     property <bool> open-runbooks: true;
+    property <bool> open-newa: true;
+    property <bool> open-newb: true;
+    // mock create/delete — view state only, the design-mock stand-in for
+    // the future gated wiki changes: docs 6-8 are pre-seeded "untitled"
+    // pages revealed one per New-file click (the button greys out when
+    // the seeds run dry), deadN hides a deleted row.
+    property <int> made-files: 0;
+    property <int> made-folders: 0;
+    property <bool> dead0: false;
+    property <bool> dead1: false;
+    property <bool> dead2: false;
+    property <bool> dead3: false;
+    property <bool> dead4: false;
+    property <bool> dead5: false;
+    property <bool> dead6: false;
+    property <bool> dead7: false;
+    property <bool> dead8: false;
+    // raw-markdown edit mode (the ✏️ toggle); every document switch drops
+    // back to the pretty preview and discards the mock buffer
+    property <bool> editing: false;
     // the open document (single source for breadcrumb, body and links)
     property <BrainDoc> cur: root.docs[root.sel];
+    property <bool> cur-alive: root.alive(root.sel);
+
+    // the navigator's display order of doc indices — ⬅️/➡️ walk it
+    property <[int]> nav-order: [1, 2, 3, 4, 0, 5, 6, 7, 8];
+
+    // whether doc `d` currently exists in the mock tree
+    pure function alive(d: int) -> bool {
+        if (d == 0) { return !root.dead0; }
+        if (d == 1) { return !root.dead1; }
+        if (d == 2) { return !root.dead2; }
+        if (d == 3) { return !root.dead3; }
+        if (d == 4) { return !root.dead4; }
+        if (d == 5) { return !root.dead5; }
+        if (d == 6) { return root.made-files >= 1 && !root.dead6; }
+        if (d == 7) { return root.made-files >= 2 && !root.dead7; }
+        if (d == 8) { return root.made-files >= 3 && !root.dead8; }
+        return false;
+    }
+    // doc index at (wrapped) tree position p
+    pure function at(p: int) -> int {
+        return root.nav-order[Math.mod(p + 18, 9)];
+    }
+    // tree position of doc d (inverse of `at`)
+    pure function pos-of(d: int) -> int {
+        if (d == 1) { return 0; }
+        if (d == 2) { return 1; }
+        if (d == 3) { return 2; }
+        if (d == 4) { return 3; }
+        if (d == 0) { return 4; }
+        if (d == 5) { return 5; }
+        if (d == 6) { return 6; }
+        if (d == 7) { return 7; }
+        return 8;
+    }
+    // the first existing document in direction `delta` (±1) in tree
+    // order, wrapping; falls back to `d` when nothing else is left
+    pure function step(d: int, delta: int) -> int {
+        if (root.alive(root.at(root.pos-of(d) + 1 * delta))) { return root.at(root.pos-of(d) + 1 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 2 * delta))) { return root.at(root.pos-of(d) + 2 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 3 * delta))) { return root.at(root.pos-of(d) + 3 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 4 * delta))) { return root.at(root.pos-of(d) + 4 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 5 * delta))) { return root.at(root.pos-of(d) + 5 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 6 * delta))) { return root.at(root.pos-of(d) + 6 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 7 * delta))) { return root.at(root.pos-of(d) + 7 * delta); }
+        if (root.alive(root.at(root.pos-of(d) + 8 * delta))) { return root.at(root.pos-of(d) + 8 * delta); }
+        return d;
+    }
+    // select a document (every route also leaves raw-edit mode)
+    function goto(d: int) {
+        root.editing = false;
+        root.sel = d;
+    }
+    // hide doc `d` from the mock tree
+    function kill(d: int) {
+        if (d == 0) { root.dead0 = true; }
+        if (d == 1) { root.dead1 = true; }
+        if (d == 2) { root.dead2 = true; }
+        if (d == 3) { root.dead3 = true; }
+        if (d == 4) { root.dead4 = true; }
+        if (d == 5) { root.dead5 = true; }
+        if (d == 6) { root.dead6 = true; }
+        if (d == 7) { root.dead7 = true; }
+        if (d == 8) { root.dead8 = true; }
+    }
+    // unfold the tree path of the open document (the 🎯 button); the
+    // selected row already carries the accent rim, so unfolding its
+    // folder is what "focus it in the navigator" needs
+    function reveal() {
+        if (root.sel == 1 || root.sel == 2) { root.open-decisions = true; }
+        if (root.sel == 3) { root.open-quests = true; }
+        if (root.sel == 4) { root.open-runbooks = true; }
+    }
 
     // sample data — design mock only, never engine state. Indices into
-    // `docs` are the tree rows' hand-written `sel` values below.
+    // `docs` are the tree rows' hand-written doc numbers below; `raw` is
+    // the same document as markdown source for the ✏️ edit mode.
     property <[BrainDoc]> docs: [
-        { path: "charter.md", author: "petra", ver: "v12", when: "3 d", links: ["decisions/2026-07-02-treasury.md", "glossary.md"], blocks: [
+        { path: "charter.md", author: "petra", ver: "v12", when: "3 d", links: ["decisions/2026-07-02-treasury.md", "glossary.md"],
+            raw: "# Charter\n\nWhat we agreed to at the founding — the purpose, the rule, and the habits that keep four people one republic.\n\n## Purpose\n\nPool funds, share knowledge and act as one signer where a single person would be a single point of failure.\n\n## Consensus\n\n- Every gated change needs 3 of 4 signatures — no exceptions, not even for the founder.\n- Proposals live in chat until sealed; only sealed changes are canon.\n\n## Habits\n\n- Quarterly recovery drill (see runbooks/node-recovery.md).\n- Decisions get a dated file under decisions/ — if it is not written down, it was not decided.",
+            blocks: [
             { kind: 0, text: "Charter" },
             { kind: 2, text: "What we agreed to at the founding — the purpose, the rule, and the habits that keep four people one republic." },
             { kind: 1, text: "Purpose" },
@@ -522,7 +674,9 @@ export component MemoryPane inherits VerticalLayout {
             { kind: 1, text: "Habits" },
             { kind: 3, text: "Quarterly recovery drill (see runbooks/node-recovery.md)." },
             { kind: 3, text: "Decisions get a dated file under decisions/ — if it is not written down, it was not decided." }] },
-        { path: "decisions/2026-06-14-relay.md", author: "walter", ver: "v4", when: "1 m", links: ["runbooks/node-recovery.md"], blocks: [
+        { path: "decisions/2026-06-14-relay.md", author: "walter", ver: "v4", when: "1 m", links: ["runbooks/node-recovery.md"],
+            raw: "# Decision: paid SMP relay\n\nFree relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate.\n\n## Options weighed\n\n- Stay on public relays — free, but no uptime promise.\n- Self-host — full control, but one member becomes ops.\n- Rent + cert-pin — chosen: predictable, and no single admin.\n\n```\nrelay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault\n```\n\nRevisit when the second-relay quest lands.",
+            blocks: [
             { kind: 0, text: "Decision: paid SMP relay" },
             { kind: 2, text: "Free relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate." },
             { kind: 1, text: "Options weighed" },
@@ -531,32 +685,55 @@ export component MemoryPane inherits VerticalLayout {
             { kind: 3, text: "Rent + cert-pin — chosen: predictable, and no single admin." },
             { kind: 4, text: "relay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault" },
             { kind: 2, text: "Revisit when the second-relay quest lands." }] },
-        { path: "decisions/2026-07-02-treasury.md", author: "mara", ver: "v3", when: "2 w", links: ["charter.md"], blocks: [
+        { path: "decisions/2026-07-02-treasury.md", author: "mara", ver: "v3", when: "2 w", links: ["charter.md"],
+            raw: "# Decision: treasury policy\n\nRules for spending from the shared wallet, sealed 3-of-4 on 2026-07-02.\n\n- Transfers above 5 XMR need a written purpose in the proposal text.\n- Recurring costs (relay, domain) are pre-approved up to 3 XMR per quarter.\n- Quest rewards are paid out only after the claim is marked done.",
+            blocks: [
             { kind: 0, text: "Decision: treasury policy" },
             { kind: 2, text: "Rules for spending from the shared wallet, sealed 3-of-4 on 2026-07-02." },
             { kind: 3, text: "Transfers above 5 XMR need a written purpose in the proposal text." },
             { kind: 3, text: "Recurring costs (relay, domain) are pre-approved up to 3 XMR per quarter." },
             { kind: 3, text: "Quest rewards are paid out only after the claim is marked done." }] },
-        { path: "quests/onboarding-guide.md", author: "petra", ver: "v9", when: "5 d", links: ["glossary.md", "runbooks/node-recovery.md"], blocks: [
+        { path: "quests/onboarding-guide.md", author: "petra", ver: "v9", when: "5 d", links: ["glossary.md", "runbooks/node-recovery.md"],
+            raw: "# Onboarding guide\n\nThe path from invite link to first signed proposal, for the next member.\n\n- Read charter.md first — it is short on purpose.\n- Work through the MLS & SMP reading list, messaging layer first.\n- Run the recovery drill once with a buddy before you hold real shares.",
+            blocks: [
             { kind: 0, text: "Onboarding guide" },
             { kind: 2, text: "The path from invite link to first signed proposal, for the next member." },
             { kind: 3, text: "Read charter.md first — it is short on purpose." },
             { kind: 3, text: "Work through the MLS & SMP reading list, messaging layer first." },
             { kind: 3, text: "Run the recovery drill once with a buddy before you hold real shares." }] },
-        { path: "runbooks/node-recovery.md", author: "walter", ver: "v6", when: "1 w", links: ["charter.md"], blocks: [
+        { path: "runbooks/node-recovery.md", author: "walter", ver: "v6", when: "1 w", links: ["charter.md"],
+            raw: "# Node recovery\n\nTotal-loss restore, tested at every quarterly drill. Budget an hour.\n\n- Restore from your seed phrase — it derives every key you had.\n- Re-adopt the queue credentials from the last clean-close backup.\n- Verify the chain before your first send; a red check means stop.\n\n```\ndrill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)\n```",
+            blocks: [
             { kind: 0, text: "Node recovery" },
             { kind: 2, text: "Total-loss restore, tested at every quarterly drill. Budget an hour." },
             { kind: 3, text: "Restore from your seed phrase — it derives every key you had." },
             { kind: 3, text: "Re-adopt the queue credentials from the last clean-close backup." },
             { kind: 3, text: "Verify the chain before your first send; a red check means stop." },
             { kind: 4, text: "drill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)" }] },
-        { path: "glossary.md", author: "mara", ver: "v17", when: "1 d", links: ["charter.md"], blocks: [
+        { path: "glossary.md", author: "mara", ver: "v17", when: "1 d", links: ["charter.md"],
+            raw: "# Glossary\n\nThe words we keep using, pinned down once.\n\n- Ritual — the founding ceremony that seals the roster; nothing touches disk before the seal.\n- Seal — the moment a proposal reaches the threshold and becomes canon.\n- Threshold — our 3-of-4 rule: three signatures make a change real.\n- Patch — one gated change on the chain, like a commit.",
+            blocks: [
             { kind: 0, text: "Glossary" },
             { kind: 2, text: "The words we keep using, pinned down once." },
             { kind: 3, text: "Ritual — the founding ceremony that seals the roster; nothing touches disk before the seal." },
             { kind: 3, text: "Seal — the moment a proposal reaches the threshold and becomes canon." },
             { kind: 3, text: "Threshold — our 3-of-4 rule: three signatures make a change real." },
             { kind: 3, text: "Patch — one gated change on the chain, like a commit." }] },
+        { path: "untitled-1.md", author: "petra", ver: "v1", when: "now", links: [],
+            raw: "# Untitled 1\n\nA fresh page. Use Edit to replace this draft.",
+            blocks: [
+            { kind: 0, text: "Untitled 1" },
+            { kind: 2, text: "A fresh page. Use Edit to replace this draft." }] },
+        { path: "untitled-2.md", author: "petra", ver: "v1", when: "now", links: [],
+            raw: "# Untitled 2\n\nA fresh page. Use Edit to replace this draft.",
+            blocks: [
+            { kind: 0, text: "Untitled 2" },
+            { kind: 2, text: "A fresh page. Use Edit to replace this draft." }] },
+        { path: "untitled-3.md", author: "petra", ver: "v1", when: "now", links: [],
+            raw: "# Untitled 3\n\nA fresh page. Use Edit to replace this draft.",
+            blocks: [
+            { kind: 0, text: "Untitled 3" },
+            { kind: 2, text: "A fresh page. Use Edit to replace this draft." }] },
     ];
     property <[MockNote]> archived: [
         { title: "Old relay migration plan", author: "walter", ver: "v4", when: "Mar 2026" },
@@ -567,26 +744,27 @@ export component MemoryPane inherits VerticalLayout {
     if root.view == "brain": VerticalLayout {
         spacing: 8px;
         vertical-stretch: 1;
-        PaneHeader {
-            glyph: "🧠";
-            title: Strings.mem-title-brain;
-        }
-        // the two-pane split: file navigator | draggable splitter | content.
-        // The navigator width is a stored FRACTION of the row, so a window
-        // resize keeps the proportion; both sides keep a hard minimum.
+        // no PaneHeader here: the Multisig-Wiki title (with the mock
+        // badge) sits in the app's top bar, left of the republic name —
+        // the full pane height belongs to navigator + document.
+        // The two-pane split: file navigator | draggable splitter |
+        // content. The navigator width is a stored FRACTION of the row,
+        // so a window resize keeps the proportion; both sides keep a
+        // hard minimum.
         srow := HorizontalLayout {
             vertical-stretch: 1;
             spacing: 0px;
             property <length> avail: self.width - 8px;
-            // ONE clamp for layout and drag: navigator ≥ 170px, content
-            // ≥ 300px (below their sum the navigator floor wins — the
-            // window is far below any usable width there anyway)
+            // ONE clamp for layout and drag: navigator ≥ 180px (the
+            // five-button toolbar's floor), content ≥ 300px (below their
+            // sum the navigator floor wins — the window is far below any
+            // usable width there anyway)
             pure function clamp-nav(w: length) -> length {
-                return max(170px, min(self.avail - 300px, w));
+                return max(180px, min(self.avail - 300px, w));
             }
             property <length> nav-w: self.clamp-nav(root.split * self.avail);
 
-            // ---- navigator: browse the shared-brain tree ----
+            // ---- navigator: browse the wiki tree ----
             Rectangle {
                 width: srow.nav-w;
                 background: Theme.panel;
@@ -597,12 +775,30 @@ export component MemoryPane inherits VerticalLayout {
                 VerticalLayout {
                     ToolStrip {
                         ToolBtn {
-                            glyph: "📝";
-                            name: Strings.mem-tb-new-file;
-                        }
-                        ToolBtn {
                             glyph: "📁";
                             name: Strings.mem-tb-new-folder;
+                            enabled: root.made-folders < 2;
+                            clicked => {
+                                root.made-folders += 1;
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "📝";
+                            name: Strings.mem-tb-new-file;
+                            enabled: root.made-files < 3;
+                            clicked => {
+                                root.made-files += 1;
+                                root.goto(5 + root.made-files);
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "🗑️";
+                            name: Strings.mem-tb-delete;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.kill(root.sel);
+                                root.goto(root.step(root.sel, 1));
+                            }
                         }
                         Rectangle {
                             horizontal-stretch: 1;
@@ -615,6 +811,20 @@ export component MemoryPane inherits VerticalLayout {
                                 root.open-decisions = false;
                                 root.open-quests = false;
                                 root.open-runbooks = false;
+                                root.open-newa = false;
+                                root.open-newb = false;
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "🔽";
+                            name: Strings.mem-tb-open-all;
+                            enabled: true;
+                            clicked => {
+                                root.open-decisions = true;
+                                root.open-quests = true;
+                                root.open-runbooks = true;
+                                root.open-newa = true;
+                                root.open-newb = true;
                             }
                         }
                     }
@@ -625,58 +835,110 @@ export component MemoryPane inherits VerticalLayout {
                             name: "decisions";
                             open <=> root.open-decisions;
                         }
-                        if root.open-decisions: BrainFileRow {
+                        if root.open-decisions && !root.dead1: BrainFileRow {
                             name: "2026-06-14-relay.md";
                             nested: true;
                             selected: root.sel == 1;
                             pick => {
-                                root.sel = 1;
+                                root.goto(1);
                             }
                         }
-                        if root.open-decisions: BrainFileRow {
+                        if root.open-decisions && !root.dead2: BrainFileRow {
                             name: "2026-07-02-treasury.md";
                             nested: true;
                             selected: root.sel == 2;
                             pick => {
-                                root.sel = 2;
+                                root.goto(2);
                             }
                         }
                         BrainFolderRow {
                             name: "quests";
                             open <=> root.open-quests;
                         }
-                        if root.open-quests: BrainFileRow {
+                        if root.open-quests && !root.dead3: BrainFileRow {
                             name: "onboarding-guide.md";
                             nested: true;
                             selected: root.sel == 3;
                             pick => {
-                                root.sel = 3;
+                                root.goto(3);
                             }
                         }
                         BrainFolderRow {
                             name: "runbooks";
                             open <=> root.open-runbooks;
                         }
-                        if root.open-runbooks: BrainFileRow {
+                        if root.open-runbooks && !root.dead4: BrainFileRow {
                             name: "node-recovery.md";
                             nested: true;
                             selected: root.sel == 4;
                             pick => {
-                                root.sel = 4;
+                                root.goto(4);
                             }
                         }
-                        BrainFileRow {
+                        // folders created in the mock — empty for now:
+                        // creating INTO a folder is not part of this draft
+                        if root.made-folders >= 1: BrainFolderRow {
+                            name: "new-folder-1";
+                            open <=> root.open-newa;
+                        }
+                        if root.made-folders >= 1 && root.open-newa: HorizontalLayout {
+                            padding-left: 24px;
+                            height: 20px;
+                            Text {
+                                text: Strings.mem-empty-folder;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.made-folders >= 2: BrainFolderRow {
+                            name: "new-folder-2";
+                            open <=> root.open-newb;
+                        }
+                        if root.made-folders >= 2 && root.open-newb: HorizontalLayout {
+                            padding-left: 24px;
+                            height: 20px;
+                            Text {
+                                text: Strings.mem-empty-folder;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if !root.dead0: BrainFileRow {
                             name: "charter.md";
                             selected: root.sel == 0;
                             pick => {
-                                root.sel = 0;
+                                root.goto(0);
                             }
                         }
-                        BrainFileRow {
+                        if !root.dead5: BrainFileRow {
                             name: "glossary.md";
                             selected: root.sel == 5;
                             pick => {
-                                root.sel = 5;
+                                root.goto(5);
+                            }
+                        }
+                        // the mock's created files (one per 📝 click)
+                        if root.alive(6): BrainFileRow {
+                            name: "untitled-1.md";
+                            selected: root.sel == 6;
+                            pick => {
+                                root.goto(6);
+                            }
+                        }
+                        if root.alive(7): BrainFileRow {
+                            name: "untitled-2.md";
+                            selected: root.sel == 7;
+                            pick => {
+                                root.goto(7);
+                            }
+                        }
+                        if root.alive(8): BrainFileRow {
+                            name: "untitled-3.md";
+                            selected: root.sel == 8;
+                            pick => {
+                                root.goto(8);
                             }
                         }
                     }
@@ -728,32 +990,67 @@ export component MemoryPane inherits VerticalLayout {
                 clip: true;
                 VerticalLayout {
                     ToolStrip {
+                        // 🎯 — reveal the open document in the navigator
+                        ToolBtn {
+                            glyph: "🎯";
+                            name: Strings.mem-tb-locate;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.reveal();
+                            }
+                        }
                         Rectangle {
                             width: 4px;
                         }
                         // the open file's path is the strip's breadcrumb
                         Text {
-                            text: root.cur.path;
+                            text: root.cur-alive ? root.cur.path : "";
                             color: Theme.faint;
                             font-size: Theme.fs-cap;
                             vertical-alignment: center;
                             overflow: elide;
+                        }
+                        // ⬅️/➡️ — single-click sequential walk through the
+                        // documents, in tree order, skipping deleted ones
+                        ToolBtn {
+                            glyph: "⬅️";
+                            name: Strings.mem-tb-prev;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.goto(root.step(root.sel, -1));
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "➡️";
+                            name: Strings.mem-tb-next;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.goto(root.step(root.sel, 1));
+                            }
+                        }
+                        Rectangle {
                             horizontal-stretch: 1;
                         }
+                        // ✏️/👁️ — pretty preview ⇄ raw .md source
                         ToolBtn {
-                            glyph: "✏️";
-                            name: Strings.mem-tb-edit;
+                            glyph: root.editing ? "👁️" : "✏️";
+                            name: root.editing ? Strings.mem-tb-preview : Strings.mem-tb-edit;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.editing = !root.editing;
+                            }
                         }
-                        ToolBtn {
-                            glyph: "🕘";
-                            name: Strings.mem-tb-history;
-                        }
+                        // 🔗 — copy a molt:// URI for chat / cross-notes
                         ToolBtn {
                             glyph: "🔗";
                             name: Strings.mem-tb-link;
+                            enabled: root.cur-alive;
+                            clicked => {
+                                root.copy-link("molt://memory/" + root.cur.path);
+                            }
                         }
                     }
-                    ScrollBody {
+                    if root.cur-alive && !root.editing: ScrollBody {
                         pad: 16px;
                         gap: 8px;
                         // author · version · age — the note-footer idiom
@@ -765,7 +1062,7 @@ export component MemoryPane inherits VerticalLayout {
                         for b in root.cur.blocks: BrainBlockView {
                             b: b;
                         }
-                        // cross-links — what makes the tree a brain. One
+                        // cross-links — what makes the tree a wiki. One
                         // chip per line: paths are long and the chips
                         // neither wrap nor elide, so a row would clip at
                         // the content pane's minimum width.
@@ -789,6 +1086,30 @@ export component MemoryPane inherits VerticalLayout {
                                     label: l;
                                 }
                             }
+                        }
+                    }
+                    // raw-markdown mode: the same document as editable .md
+                    // source. Mock: the buffer is view-local — toggling
+                    // back discards it, nothing is stored or sent.
+                    if root.cur-alive && root.editing: Rectangle {
+                        vertical-stretch: 1;
+                        AppArea {
+                            x: 8px;
+                            y: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height - 16px;
+                            text: root.cur.raw;
+                        }
+                    }
+                    // everything deleted — the mock's honest empty state
+                    if !root.cur-alive: VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: Strings.mem-empty;
+                            color: Theme.faint;
+                            font-size: Theme.fs-body;
+                            horizontal-alignment: center;
                         }
                     }
                 }

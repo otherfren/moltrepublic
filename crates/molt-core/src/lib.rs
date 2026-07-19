@@ -120,7 +120,7 @@ impl Surface {
             // it is select_view's wire vocabulary)
             Surface::Chat => &[("today", "General"), ("archive", "Archive")],
             Surface::Memory => &[
-                ("brain", "Brain"),
+                ("brain", "Multisig-Wiki"),
                 ("proposals", "Proposals"),
                 ("accepted", "Accepted"),
                 ("denied", "Denied"),
