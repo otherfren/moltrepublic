@@ -1585,6 +1585,11 @@ impl State {
             .run
             .log
             .push("✗ you declined the charter".to_string());
+        // terminal for the whole ritual, not just this join: a declined seat
+        // can never seal, so the founder must re-mint — say so here too
+        self.session.join.run.log.push(
+            "✗ the ritual is over — this republic must be founded anew".to_string(),
+        );
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

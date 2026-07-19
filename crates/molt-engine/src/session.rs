@@ -176,7 +176,13 @@ impl State {
     /// handshake **off the actor** — the outcome returns as
     /// [`molt_core::Command::NetTestResult`] so the actor never blocks on the
     /// network.
-    pub(crate) fn cmd_net_test_server(&mut self, url: String) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_net_test_server(
+        &mut self,
+        url: String,
+        anonymity: String,
+        tor_mode: String,
+        tor_port: u16,
+    ) -> Result<Reply, MoltError> {
         let url = if url.trim().is_empty() {
             if self.session.settings.smp_server == "custom" {
                 self.session.settings.smp_url.clone()
@@ -199,7 +205,22 @@ impl State {
         // uses the same routing the app will, and an onion-only target under a
         // Direct dialer reports "requires Tor" instead of leaking a clearnet
         // dial. A misconfigured Tor setting is itself the test failure.
-        let dialer = match self.dialer_for() {
+        // Draft overrides (the settings form's live values) win over the
+        // saved config, field-by-field — empty/0 falls back to saved, so a
+        // bare MCP `test_smp_server` still probes the configured transport.
+        let s = &self.session.settings;
+        let anonymity = if anonymity.trim().is_empty() {
+            s.anonymity.clone()
+        } else {
+            anonymity.trim().to_string()
+        };
+        let tor_mode = if tor_mode.trim().is_empty() {
+            s.tor_mode.clone()
+        } else {
+            tor_mode.trim().to_string()
+        };
+        let tor_port = if tor_port == 0 { s.tor_port } else { tor_port };
+        let dialer = match molt_net::smp::tls::Dialer::resolve(&anonymity, &tor_mode, tor_port) {
             Ok(dialer) => dialer,
             Err(e) => {
                 self.session.smp_test = format!("error: {e}");

@@ -1945,6 +1945,19 @@ mod ritual_ops {
             self.session.create.run.log.push(format!(
                 "✗ {who} declined the charter · cancel and re-mint to change it"
             ));
+            // a declined seat can never turn sealed, so this founding is over
+            // for good: mark the run FAILED so the GUI leaves the waiting
+            // posture (abort re-arms, the lobby says so) instead of idling
+            // on a ritual that cannot complete. The ritual itself is kept —
+            // other members may still be mid-flight — until cancel tears it
+            // down; outcome 2 already blocks maybe_finalize.
+            if self.session.create.run.outcome == 0 {
+                self.session.create.run.outcome = 2;
+                self.session.create.run.log.push(
+                    "✗ the ritual is over — this republic must be founded anew (close and re-mint)"
+                        .to_string(),
+                );
+            }
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }

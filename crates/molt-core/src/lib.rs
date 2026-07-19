@@ -2791,6 +2791,18 @@ pub enum Command {
         /// the currently-configured server (public default or custom URL).
         #[serde(default)]
         url: String,
+        /// Draft anonymity network to probe with (`none` | `tor` | `nym`).
+        /// Empty uses the saved setting. The settings form passes its live
+        /// draft so the probe reflects what the user is about to save.
+        #[serde(default)]
+        anonymity: String,
+        /// Draft tor mode (`local` | `embedded` | `whonix`); empty uses the
+        /// saved setting. Only consulted when the effective network is tor.
+        #[serde(default)]
+        tor_mode: String,
+        /// Draft tor SOCKS port; 0 uses the saved setting.
+        #[serde(default)]
+        tor_port: u16,
     },
     /// The outcome of a [`Command::NetTestServer`] handshake, reported back
     /// from the off-actor probe task (engine-internal, never an MCP tool).

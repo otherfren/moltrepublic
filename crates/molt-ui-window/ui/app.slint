@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard
+    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard, Spinner
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -133,6 +133,8 @@ component AnonNetworkGroup inherits DetailGroup {
     in-out property <int> tor-port;
     in property <[bool]> tor-modes-enabled;
     title: Strings.field-network;
+    // form panel: content hugs the top, the panel takes its content height
+    pack: true;
     AppDropdown {
         width: 200px;
         model: ["tor", "none"];
@@ -178,6 +180,8 @@ component SmpServerGroup inherits DetailGroup {
     in property <string> smp-test;
     callback test();
     title: Strings.field-smp-server;
+    // form panel: content hugs the top, the panel takes its content height
+    pack: true;
     // wrap room for the URL field, the test verdict and the hint when
     // the wide pane seats this panel beside the network one
     min-width: 340px;
@@ -535,6 +539,9 @@ export component AppWindow inherits Window {
     in property <[string]> rw-log;
     in property <[string]> cw-log;
     in property <[string]> jw-log;
+    // per-line ✓/✗ tones for the three run logs (see cw-log-tone)
+    in property <[int]> rw-log-tone;
+    in property <[int]> jw-log-tone;
     callback copy-log(string);
     // (theme changes are routed via the Theme.picked global callback, bound in Rust)
 
@@ -703,6 +710,14 @@ export component AppWindow inherits Window {
     in property <int> cw-sealed;   // how many rows are green
     in property <int> cw-total;    // total rows (n)
     in property <bool> cw-can-propose; // every seat joined → deliberation unlocked
+    // a seat declined the charter: the failure banner switches from the
+    // network wording to "the founding is over" (mirrored from seat state 3)
+    in property <bool> cw-declined;
+    // per-line tone of the ritual log (0 = neutral, 1 = good, 2 = bad) —
+    // computed in Rust from the ✓/✗ prefix, so terminal lines stand out
+    in property <[int]> cw-log-tone;
+    // the one charter length limit, engine and UI alike (AGENDA_MAX)
+    property <int> cw-agenda-max: 4096;
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -1772,6 +1787,22 @@ export component AppWindow inherits Window {
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
                             }
+                            // one click to the place that changes it —
+                            // especially when the panel is warning that no
+                            // anonymization layer is configured
+                            HorizontalLayout {
+                                alignment: start;
+                                AppButton {
+                                    height: 28px;
+                                    pad: 10px;
+                                    label: Strings.cw-open-net-settings;
+                                    clicked => {
+                                        root.settings-return = AppScreen.create;
+                                        root.set-tab = 3;
+                                        root.navigate(AppScreen.settings);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1811,6 +1842,59 @@ export component AppWindow inherits Window {
                         copy-requested => {
                             root.copy-text(root.cw-seed);
                             root.show-toast(Strings.toast-copied);
+                        }
+                    }
+
+                    // the founding failed: say so loudly, right where the
+                    // user is looking — the log line alone is too quiet for
+                    // "nothing will ever appear here". A declined charter
+                    // means the ritual is over for good; anything else is a
+                    // network-shaped failure and links to the settings.
+                    if root.cw-outcome == 2: Rectangle {
+                        background: Theme.bad.transparentize(0.92);
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.bad;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            Text {
+                                text: root.cw-declined
+                                    ? "⚠ \{Strings.cw-declined-title}"
+                                    : "⚠ \{Strings.cw-failed-title}";
+                                color: Theme.bad;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: root.cw-declined ? Strings.cw-declined-hint : Strings.cw-failed-hint;
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            // the engine's actual failure reason (the last
+                            // ritual-log line carries it)
+                            if root.cw-log.length > 0: Text {
+                                text: root.cw-log[root.cw-log.length - 1];
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-family: "monospace";
+                                wrap: word-wrap;
+                            }
+                            if !root.cw-declined: HorizontalLayout {
+                                alignment: start;
+                                AppButton {
+                                    height: 28px;
+                                    pad: 10px;
+                                    label: Strings.cw-open-net-settings;
+                                    clicked => {
+                                        root.settings-return = AppScreen.create;
+                                        root.set-tab = 3;
+                                        root.navigate(AppScreen.settings);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1925,6 +2009,22 @@ export component AppWindow inherits Window {
                                                         root.show-toast(Strings.toast-copied);
                                                     }
                                                 }
+                                                // no link yet: the queue is being
+                                                // provisioned on the SMP server —
+                                                // show that work, never a blank row
+                                                if seat.state == 0 && seat.detail == "" && root.cw-outcome == 0: HorizontalLayout {
+                                                    spacing: 8px;
+                                                    padding-right: 6px;
+                                                    Spinner {
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: Strings.cw-provisioning;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1934,6 +2034,91 @@ export component AppWindow inherits Window {
                                     view-h: seatfl.height;
                                     content-h: seatfl.viewport-height;
                                     scroll-y: seatfl.viewport-y;
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- deliberation: the next step, right under the
+                    // members — its own panel, accent-framed so it reads as
+                    // "input needed now". It never stretches; the log below
+                    // takes the leftover height. ----
+                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                        background: Theme.panel;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.accent;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            Text {
+                                text: Strings.cw-charter-step;
+                                color: Theme.accent;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            // the name was fixed when the ritual started —
+                            // shown read-only, never re-editable here
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "\{Strings.cw-charter-name-label}:";
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-body;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.cw-name;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                            // the charter itself: a scrolling textarea with
+                            // the ONE limit the engine enforces (4096 chars)
+                            AppArea {
+                                height: 110px;
+                                text <=> root.cw-agenda;
+                                placeholder: Strings.cw-charter-agenda-ph;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: Strings.cw-charter-hint;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                    preferred-width: 0px;
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: end;
+                                    spacing: 6px;
+                                    Text {
+                                        text: "\{root.cw-agenda.character-count} / \{root.cw-agenda-max}";
+                                        color: root.cw-agenda.character-count > root.cw-agenda-max ? Theme.bad : Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        horizontal-alignment: right;
+                                    }
+                                    AppButton {
+                                        height: 34px;
+                                        primary: true;
+                                        label: Strings.cw-propose;
+                                        // arms only once a charter is written
+                                        // (and within the shared limit)
+                                        enabled: root.cw-name != ""
+                                            && root.cw-agenda != ""
+                                            && root.cw-agenda.character-count <= root.cw-agenda-max;
+                                        clicked => {
+                                            root.cw-proposed = true;
+                                            root.create-propose(root.cw-name, root.cw-agenda);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1976,12 +2161,20 @@ export component AppWindow inherits Window {
                                     height: 100%;
                                     viewport-width: self.width;
                                     viewport-height: loglist.preferred-height;
+                                    // pinned to the bottom: the newest line is
+                                    // always in view (like the RunView log)
+                                    viewport-y: min(0px, self.height - self.viewport-height);
                                     loglist := VerticalLayout {
                                         spacing: 2px;
                                         alignment: start;
-                                        for line in root.cw-log: Text {
+                                        for line[i] in root.cw-log: Text {
                                             text: line;
-                                            color: Theme.dim;
+                                            // terminal ✓/✗ lines stand out of
+                                            // the gray flow (tones from Rust)
+                                            color: i < root.cw-log-tone.length
+                                                ? (root.cw-log-tone[i] == 2 ? Theme.bad
+                                                    : root.cw-log-tone[i] == 1 ? Theme.good : Theme.dim)
+                                                : Theme.dim;
                                             font-size: Theme.fs-cap;
                                             font-family: "monospace";
                                             wrap: no-wrap;
@@ -1999,44 +2192,10 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- deliberation: propose the final name + charter ----
-                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: VerticalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: Strings.cw-charter-title;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            font-weight: 700;
-                        }
-                        AppField {
-                            text <=> root.cw-name;
-                            placeholder: Strings.cw-charter-name-ph;
-                        }
-                        AppField {
-                            text <=> root.cw-agenda;
-                            placeholder: Strings.cw-charter-agenda-ph;
-                        }
-                        Text {
-                            text: Strings.cw-charter-hint;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                    }
-
                     HorizontalLayout {
+                        spacing: 10px;
                         Rectangle {
                             horizontal-stretch: 1;
-                        }
-                        if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: AppButton {
-                            height: 38px;
-                            primary: true;
-                            label: Strings.cw-propose;
-                            enabled: root.cw-name != "";
-                            clicked => {
-                                root.cw-proposed = true;
-                                root.create-propose(root.cw-name, root.cw-agenda);
-                            }
                         }
                         AppButton {
                             height: 38px;
@@ -2821,10 +2980,16 @@ export component AppWindow inherits Window {
                         ph3: Strings.jw-ph3;
                         failed-label: Strings.jw-failed;
                         log: root.jw-log;
+                        tones: root.jw-log-tone;
                         back-shown: false;
                         // the engine enters the republic on its own once the
-                        // founder seals — there is no finish button to press
-                        finish-enabled: false;
+                        // founder seals — so the only button here is the way
+                        // OUT after a failure/decline (labelled, never blank)
+                        finish-label: root.jw-outcome == 2 ? Strings.jw-back-to-start : "";
+                        finish-enabled: root.jw-outcome == 2;
+                        finish => {
+                            root.join-cancel();
+                        }
                         copy-log-clicked => {
                             root.copy-log("join");
                             root.show-toast(Strings.toast-copied);
@@ -3141,6 +3306,7 @@ export component AppWindow inherits Window {
                     ph3: Strings.rw-ph3;
                     failed-label: Strings.rw-failed;
                     log: root.rw-log;
+                    tones: root.rw-log-tone;
                     back-enabled: root.rw-outcome == 2;
                     finish-enabled: root.rw-outcome == 1;
                     finish-label: Strings.rw-finish;
@@ -5625,21 +5791,31 @@ export component AppWindow inherits Window {
                                 // of floating at preferred size in the empty
                                 // pane; surplus splits evenly, except near
                                 // the 620px threshold where SMP's 340px
-                                // min-width pins it and anon takes the rest
-                                AnonNetworkGroup {
+                                // min-width pins it and anon takes the rest.
+                                // Each panel sits in its own top-aligned
+                                // column so it is exactly as tall as its
+                                // content — the row's surplus height stays
+                                // blank instead of inflating a panel.
+                                VerticalLayout {
                                     horizontal-stretch: 1;
-                                    network-index <=> root.cfg-network-index;
-                                    tor-mode-index <=> root.cfg-tor-mode-index;
-                                    tor-port <=> root.cfg-tor-port;
-                                    tor-modes-enabled: root.tor-mode-enabled;
+                                    alignment: start;
+                                    AnonNetworkGroup {
+                                        network-index <=> root.cfg-network-index;
+                                        tor-mode-index <=> root.cfg-tor-mode-index;
+                                        tor-port <=> root.cfg-tor-port;
+                                        tor-modes-enabled: root.tor-mode-enabled;
+                                    }
                                 }
-                                SmpServerGroup {
+                                VerticalLayout {
                                     horizontal-stretch: 1;
-                                    smp-custom <=> root.cfg-smp-custom;
-                                    smp-url <=> root.cfg-smp-url;
-                                    smp-test: root.cfg-smp-test;
-                                    test => {
-                                        root.test-smp-server();
+                                    alignment: start;
+                                    SmpServerGroup {
+                                        smp-custom <=> root.cfg-smp-custom;
+                                        smp-url <=> root.cfg-smp-url;
+                                        smp-test: root.cfg-smp-test;
+                                        test => {
+                                            root.test-smp-server();
+                                        }
                                     }
                                 }
                             }

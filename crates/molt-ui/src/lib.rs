@@ -273,7 +273,10 @@ pub fn run_app(
     {
         // Test the SMP server currently in the draft (not the saved one), so
         // the user can validate a custom URL before saving. Public mode tests
-        // the bundled default. The result streams back into `cfg-smp-test`.
+        // the bundled default. The transport draft rides along for the same
+        // reason: a user who just flipped tor→none expects the probe to go
+        // direct, not through the still-saved tor config. The result streams
+        // back into `cfg-smp-test`.
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
@@ -286,7 +289,18 @@ pub fn run_app(
             } else {
                 molt_config::default_public_smp()
             };
-            issue(&rt, &w, &ui.as_weak(), Command::NetTestServer { url });
+            let draft = read_settings_draft(&ui);
+            issue(
+                &rt,
+                &w,
+                &ui.as_weak(),
+                Command::NetTestServer {
+                    url,
+                    anonymity: draft.anonymity,
+                    tor_mode: draft.tor_mode,
+                    tor_port: draft.tor_port,
+                },
+            );
         });
     }
     {
@@ -422,12 +436,25 @@ pub fn run_app(
     // run (restore / founding / join) in flight, keep the window and raise
     // the quit-confirm modal instead of closing outright (the in-app × is
     // disabled during a run; the WM button must not be a silent bypass).
+    // Likewise, quitting from the settings screen with unsaved draft edits
+    // raises the save/discard/stay modal instead of silently dropping them.
     {
         let weak = ui.as_weak();
+        let last = last_settings.clone();
         ui.window().on_close_requested(move || {
             if let Some(ui) = weak.upgrade() {
                 if ui.get_screen() == AppScreen::Main || ui.get_run_active() {
                     ui.set_confirm_quit_open(true);
+                    return slint::CloseRequestResponse::KeepWindowShown;
+                }
+                let dirty = ui.get_screen() == AppScreen::Settings
+                    && last
+                        .lock()
+                        .ok()
+                        .and_then(|l| l.clone())
+                        .is_some_and(|s| s != read_settings_draft(&ui));
+                if dirty {
+                    ui.set_confirm_leave_open(true);
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
             }
@@ -2282,6 +2309,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_progress(f32::from(sv.restore.run.progress_pct) / 100.0);
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
     sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
+    ui.set_rw_log_tone(log_tones(&sv.restore.run.log));
 
     // founding ritual; the run header is composed here so an MCP-started
     // founding shows real values even with an empty local form
@@ -2297,6 +2325,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         .into(),
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
+    ui.set_cw_log_tone(log_tones(&sv.create.run.log));
+    // a declined seat switches the failure banner to "the founding is over"
+    ui.set_cw_declined(sv.create.seats.iter().any(|s| s.state == 3));
     // the ritual member list: founder (always sealed) plus one row per seat
     let mut seats: Vec<RitualSeat> = vec![RitualSeat {
         member: sv.create.member.as_str().into(),
@@ -2349,6 +2380,22 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
+    ui.set_jw_log_tone(log_tones(&sv.join.run.log));
+}
+
+/// Per-line tone of a run log (0 neutral, 1 good, 2 bad) from the ✓/✗
+/// prefix convention every engine log line follows — lets the Slint side
+/// highlight terminal lines without string surgery it cannot do.
+fn log_tones(log: &[String]) -> ModelRc<i32> {
+    ModelRc::new(VecModel::from(
+        log.iter()
+            .map(|l| match l.chars().next() {
+                Some('✓') => 1,
+                Some('✗') => 2,
+                _ => 0,
+            })
+            .collect::<Vec<i32>>(),
+    ))
 }
 
 /// Plain, `Send` snapshot of all surfaces, built off the UI thread.
@@ -4687,7 +4734,7 @@ lexicon! {
     smp_untested: "not tested yet", "noch nicht getestet";
     smp_testing: "testing…", "teste…";
     smp_ok: "reachable ✓", "erreichbar ✓";
-    smp_hint: "The founding ritual and group messages route over this SMP server. The public default needs no server of your own; a custom URL looks like smp://<fingerprint>@host.", "Das Gründungsritual und Gruppennachrichten laufen über diesen SMP-Server. Der öffentliche Standard braucht keinen eigenen Server; eine eigene URL sieht aus wie smp://<fingerprint>@host.";
+    smp_hint: "Ritual and group messages route over this server; the public default needs no setup.", "Ritual und Gruppennachrichten laufen über diesen Server; der öffentliche Standard braucht keine Einrichtung.";
     field_threshold: "Threshold (m)", "Schwelle (m)";
     field_members: "Members (n)", "Mitglieder (n)";
     field_language: "Language", "Sprache";
@@ -4726,13 +4773,22 @@ lexicon! {
     cw_sealed_word: "sealed", "versiegelt";
     cw_sim_badge: "SIMULATION", "SIMULATION";
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
+    cw_provisioning: "Preparing the invite link on the SMP server…", "Invite-Link wird auf dem SMP-Server vorbereitet…";
+    cw_failed_title: "The founding cannot continue", "Die Gründung kann nicht fortgesetzt werden";
+    cw_failed_hint: "The SMP server could not be reached, so no invite links exist. Check the network settings (anonymity / Tor) and your internet connection, then close this ritual and begin it again.", "Der SMP-Server war nicht erreichbar, es gibt daher keine Invite-Links. Prüfe die Netzwerk-Einstellungen (Anonymisierung / Tor) und die Internetverbindung; schließe dieses Ritual und beginne es danach neu.";
+    cw_open_net_settings: "Open network settings", "Netzwerk-Einstellungen öffnen";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members over SMP arrive with T3.", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder über SMP kommen mit T3.";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
+    cw_charter_step: "Next step: agree on the charter — your input is needed", "Nächster Schritt: Einigt euch auf die Satzung — deine Eingabe ist gefragt";
+    cw_charter_name_label: "Republic name", "Name der Republik";
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
     cw_charter_agenda_ph: "Agenda / charter — what this republic is for", "Agenda / Satzung — wofür diese Republik steht";
-    cw_charter_hint: "Every member has joined. Propose the final name and a charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage den endgültigen Namen und eine Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
+    cw_charter_hint: "Every member has joined. Propose the charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage die Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
+    cw_declined_title: "The founding is over", "Die Gründung ist beendet";
+    cw_declined_hint: "A member declined the charter. This ritual cannot continue — close it and found the republic anew.", "Ein Mitglied hat die Satzung abgelehnt. Dieses Ritual kann nicht fortgesetzt werden — schließe es und gründe die Republik neu.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
+    jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
     jw_ratify_hint: "The founder proposed this name and charter. Confirm to add your signature and join; the workspace opens once every member has ratified.", "Der Gründer hat diesen Namen und diese Satzung vorgeschlagen. Bestätige, um deine Signatur beizusteuern und beizutreten; der Workspace geht auf, sobald jedes Mitglied ratifiziert hat.";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";

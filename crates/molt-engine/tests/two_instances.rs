@@ -427,9 +427,21 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
                 "the founder's log records the decline: {:?}",
                 s.create.run.log
             );
+            // a declined seat can never seal, so the run is over: the engine
+            // marks it FAILED (outcome 2) — the GUI's abort button re-arms and
+            // the lobby shows the terminal state instead of waiting forever
+            assert_eq!(
+                s.create.run.outcome, 2,
+                "a decline ends the founding as failed"
+            );
+            assert!(
+                s.create.run.log.iter().any(|l| l.contains("founded anew")),
+                "the log states the ritual is over for good: {:?}",
+                s.create.run.log
+            );
             break;
         }
-        assert_eq!(s.create.run.outcome, 0, "nothing seals when a member declines");
+        assert_ne!(s.create.run.outcome, 1, "nothing seals when a member declines");
         assert!(
             tokio::time::Instant::now() < deadline,
             "the founder was never told about the decline; log: {:?}",

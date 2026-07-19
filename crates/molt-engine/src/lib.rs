@@ -1047,7 +1047,12 @@ impl State {
                 ticket,
                 generation,
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
-            Command::NetTestServer { url } => self.cmd_net_test_server(url),
+            Command::NetTestServer {
+                url,
+                anonymity,
+                tor_mode,
+                tor_port,
+            } => self.cmd_net_test_server(url, anonymity, tor_mode, tor_port),
             Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::NetTestS3 {
                 endpoint,

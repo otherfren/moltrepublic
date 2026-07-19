@@ -769,16 +769,28 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "test_smp_server",
             command: "net_test_server",
-            description: "Test connectivity to an SMP messaging server (a live TLS handshake, the settings panel's Test button). The result lands in session.smp_test (\"ok\" or \"error: …\"). Pass an explicit url, or omit it to test the configured server.",
+            description: "Test connectivity to an SMP messaging server (a live TLS handshake, the settings panel's Test button). The result lands in session.smp_test (\"ok\" or \"error: …\"). Pass an explicit url, or omit it to test the configured server. Pass anonymity/tor_mode/tor_port to probe with draft transport settings; omit them to probe with the saved ones.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "smp://<fingerprint>@host to test; omit to test the configured server" }
+                    "url": { "type": "string", "description": "smp://<fingerprint>@host to test; omit to test the configured server" },
+                    "anonymity": { "type": "string", "description": "draft anonymity network (none | tor | nym); omit to use the saved setting" },
+                    "tor_mode": { "type": "string", "description": "draft tor mode (local | embedded | whonix); omit to use the saved setting" },
+                    "tor_port": { "type": "integer", "description": "draft tor SOCKS port; omit/0 to use the saved setting" }
                 }
             }),
-            build: |args| Ok(Command::NetTestServer {
-                url: args.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
-            }),
+            build: |args| {
+                let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                Ok(Command::NetTestServer {
+                    url: s("url"),
+                    anonymity: s("anonymity"),
+                    tor_mode: s("tor_mode"),
+                    tor_port: u16::try_from(
+                        args.get("tor_port").and_then(Value::as_u64).unwrap_or(0),
+                    )
+                    .unwrap_or(0),
+                })
+            },
         },
         ToolDef {
             name: "net_test_s3",

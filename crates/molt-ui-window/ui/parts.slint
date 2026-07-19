@@ -814,13 +814,50 @@ export component MemberPill inherits Rectangle {
 
 // A small captioned group box for the Open screen's details panel: caption on
 // top, content below, so status lines and their actions read as one theme.
+// A small indeterminate spinner: a faint ring with one accent dot orbiting
+// it (driven by animation-tick, so it spins as long as it is visible). Used
+// wherever the engine is doing off-screen network work the user must see
+// as "in progress" rather than a silently empty panel.
+export component Spinner inherits Rectangle {
+    in property <length> size: 14px;
+    in property <color> tone: Theme.accent;
+    width: root.size;
+    height: root.size;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: Theme.line;
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        transform-rotation: Math.mod(animation-tick() / 1200ms, 1.0) * 360deg;
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            width: 4px;
+            height: 4px;
+            border-radius: 2px;
+            background: root.tone;
+        }
+    }
+}
+
 export component DetailGroup inherits Rectangle {
     in property <string> title;
+    // pack: content hugs the top instead of spreading over the panel's
+    // height — for form panels that may be granted more height than their
+    // content needs (settings → network pair). Default keeps the historic
+    // stretch for list-bearing groups.
+    in property <bool> pack: false;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
     border-color: Theme.line;
     background: Theme.panel-2;
     VerticalLayout {
+        alignment: root.pack ? LayoutAlignment.start : LayoutAlignment.stretch;
         padding: 10px;
         spacing: 7px;
         Text {
@@ -1426,6 +1463,9 @@ export component RunView inherits VerticalLayout {
     in property <string> ph3;
     in property <string> failed-label;
     in property <[string]> log;
+    // per-line tone (0 neutral, 1 good, 2 bad), computed Rust-side from the
+    // ✓/✗ prefix; an empty model keeps every line neutral
+    in property <[int]> tones;
     // the founding hides the log on success to make room for its result
     in property <bool> show-log: true;
     // the founding cannot fail, so it hides the (never armed) back button
@@ -1524,9 +1564,13 @@ export component RunView inherits VerticalLayout {
                     loglines := VerticalLayout {
                         spacing: 3px;
                         alignment: start;
-                        for line in root.log: Text {
+                        for line[i] in root.log: Text {
                             text: line;
-                            color: Theme.dim;
+                            // terminal ✓/✗ lines stand out of the gray flow
+                            color: i < root.tones.length
+                                ? (root.tones[i] == 2 ? Theme.bad
+                                    : root.tones[i] == 1 ? Theme.good : Theme.dim)
+                                : Theme.dim;
                             font-size: Theme.fs-cap;
                             overflow: elide;
                         }
@@ -1556,7 +1600,9 @@ export component RunView inherits VerticalLayout {
         Rectangle {
             horizontal-stretch: 1;
         }
-        AppButton {
+        // no label = no button: a caller without a finish action must not
+        // render an empty, permanently-dead primary button
+        if root.finish-label != "": AppButton {
             primary: true;
             label: root.finish-label;
             enabled: root.finish-enabled;
