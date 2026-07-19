@@ -530,6 +530,55 @@ async fn download_below_the_throughput_floor_is_bounded() {
     );
 }
 
+/// A server dribbling the response HEAD below the throughput floor (never
+/// completing `\r\n\r\n`, staying under the 64 KiB head cap) is bounded by the
+/// overall floor too — the head phase is not an idle-only escape hatch.
+#[tokio::test]
+async fn download_head_dribble_is_bounded_by_the_floor() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut c = [0u8; 1024];
+        let n = sock.read(&mut c).await.expect("read");
+        let _ = n;
+        // send a partial head, then dribble header bytes forever without ever
+        // sending the terminator — each gap under the idle window
+        sock.write_all(b"HTTP/1.1 200 OK\r\n").await.expect("partial head");
+        for _ in 0..300 {
+            if sock.write_all(b"x-molt-pad: y\r\n").await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    });
+
+    let mut tcp = TcpStream::connect(addr).await.expect("connect");
+    let headers = vec![("host".to_string(), "x".to_string())];
+    let mut sink: Vec<u8> = Vec::new();
+    let bounds = DownloadBounds {
+        idle: Duration::from_millis(500),
+        grace: Duration::from_millis(50),
+        min_throughput_bps: 100_000, // overall ~250 ms for 20_000 bytes
+    };
+    let started = Instant::now();
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        roundtrip_download(&mut tcp, "/b/k", &headers, &mut sink, 20_000, bounds, &mut |_, _| {}),
+    )
+    .await
+    .expect("must not hang");
+    let err = res.expect_err("a dribbling head must be bounded");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "bounded by the floor, not held by the idle-only head read"
+    );
+    assert!(
+        matches!(&err, S3Error::Protocol(m) if m.contains("head") && m.contains("floor")),
+        "honest head-floor error, got {err:?}"
+    );
+}
+
 /// A non-2xx from a keep-alive server (ignoring `Connection: close`) returns
 /// the honest status as soon as the Content-Length-framed error body is
 /// complete — the drain never masks the status with a read timeout (finding 3).

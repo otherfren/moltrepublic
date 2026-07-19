@@ -293,6 +293,13 @@ where
         .await
         .map_err(|_| S3Error::Protocol("http write timed out".to_string()))??;
 
+    // the whole receive — head, then body or error drain — is bounded both by
+    // the per-read idle window AND by an overall minimum-throughput floor, so a
+    // server dribbling even the response HEAD (under the 64 KiB cap, just under
+    // the idle window) cannot hold the restore task effectively unbounded
+    let started = Instant::now();
+    let overall = bounds.overall(max_bytes);
+
     // --- head: read until \r\n\r\n ---
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -302,6 +309,12 @@ where
         }
         if buf.len() > MAX_DOWNLOAD_HEAD {
             return Err(S3Error::Protocol("http response head exceeds 64 KiB".to_string()));
+        }
+        if started.elapsed() > overall {
+            return Err(S3Error::Protocol(format!(
+                "http response head too slow — below the {} B/s floor",
+                bounds.min_throughput_bps
+            )));
         }
         let n = timeout(idle, stream.read(&mut chunk))
             .await
@@ -314,11 +327,6 @@ where
         }
         buf.extend_from_slice(&chunk[..n]);
     };
-
-    // the body/drain phase is bounded both by the per-read idle window and by
-    // an overall minimum-throughput floor from here on
-    let started = Instant::now();
-    let overall = bounds.overall(max_bytes);
 
     if !(200..=299).contains(&status) {
         return drain_error_body(stream, status, &buf, body_start, &resp_headers, idle, started, overall)
