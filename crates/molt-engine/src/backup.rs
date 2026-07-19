@@ -36,6 +36,10 @@ impl State {
         if !self.persist {
             return Ok(Reply::Ack);
         }
+        // re-age the "last backup" label every pass, even when nothing is
+        // due: a confirmed upload stamps ~0 minutes and without this the UI
+        // would show "gerade eben" forever until a restart (review finding).
+        let mut changed = self.reage_backup_labels();
         // candidates: the per-workspace pref (mirrored in the entry) is on
         let candidates: Vec<WorkspaceId> = self
             .session
@@ -44,27 +48,31 @@ impl State {
             .filter(|w| w.s3 && !self.backup_inflight.contains(&w.id))
             .map(|w| w.id.clone())
             .collect();
-        if candidates.is_empty() {
-            return Ok(Reply::Ack);
-        }
-        // no configured target → nothing to do; the ticker stays silent
+        // clamp to the tick period: interval 0 must not mean "a full blob
+        // upload every single tick, forever"
+        let interval_secs = u64::from(self.session.settings.s3_interval_min.max(1)) * 60;
+        // no configured target → nothing to spawn; the ticker stays silent
         // (the settings panel / backup table already surface the state, and
-        // a per-minute notice would be spam, not honesty)
+        // a per-minute notice would be spam, not honesty). The re-aging
+        // above still ran, so emit if it moved a label.
         let s = &self.session.settings;
-        let Ok(config) = molt_net::s3::S3Config::from_settings(
+        let config = molt_net::s3::S3Config::from_settings(
             &s.s3_endpoint,
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
-        ) else {
-            return Ok(Reply::Ack);
+        );
+        let config = match config {
+            Ok(config) if !candidates.is_empty() => config,
+            _ => {
+                if changed {
+                    self.emit_session(SessionScope::Full);
+                }
+                return Ok(Reply::Ack);
+            }
         };
-        // clamp to the tick period: interval 0 must not mean "a full blob
-        // upload every single tick, forever"
-        let interval_secs = u64::from(s.s3_interval_min.max(1)) * 60;
         let now = now_secs();
         let root = self.workspace_root();
-        let mut changed = false;
         for id in candidates {
             let sealed = self
                 .session
@@ -81,12 +89,17 @@ impl State {
                 changed |= self.set_backup_error(&id, "workspace directory missing");
                 continue;
             };
-            // last completed backup: the engine-held prefs are authoritative
-            // for the open workspace (the writer applies updates in order)
-            let last_backup = match &self.active {
-                Some(a) if a.id == id => a.prefs.last_backup,
-                _ => molt_storage::read_prefs(&dir).last_backup,
-            };
+            if let Some(reason) = backup_refusal_reason(&dir) {
+                // a chainless (legacy) dir would ship a blob restore always
+                // refuses — skip it with an honest status, never a doomed
+                // upload the user only discovers at disaster time
+                changed |= self.set_backup_error(&id, reason);
+                continue;
+            }
+            // last completed backup: engine-held prefs for the open
+            // workspace, plus the in-memory last-done as a fallback so a
+            // stamp that could not be persisted does not re-upload every tick
+            let last_backup = self.effective_last_backup(&id, &dir);
             if last_backup.is_some_and(|t| now.saturating_sub(t) < interval_secs) {
                 continue; // not due yet
             }
@@ -105,6 +118,54 @@ impl State {
             self.emit_session(SessionScope::Full);
         }
         Ok(Reply::Ack)
+    }
+
+    /// The last CONFIRMED backup timestamp for a workspace: the durable
+    /// `prefs.last_backup` (engine-held for the open workspace, on-disk for
+    /// a closed one) OR the in-memory last-done, whichever is newer. The
+    /// in-memory copy survives a `prefs` write that could not land, so a
+    /// non-persistable stamp does not force a full re-upload every minute.
+    fn effective_last_backup(&self, id: &str, dir: &std::path::Path) -> Option<u64> {
+        let persisted = match &self.active {
+            Some(a) if a.id == id => a.prefs.last_backup,
+            _ => molt_storage::read_prefs(dir).last_backup,
+        };
+        let in_mem = self.backup_last_done.get(id).copied();
+        match (persisted, in_mem) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Refresh every entry's `last_backup_min` from its effective stamp so
+    /// the "letztes Backup" age keeps advancing between uploads. Returns
+    /// whether any label moved.
+    fn reage_backup_labels(&mut self) -> bool {
+        let now = now_secs();
+        let root = self.workspace_root();
+        let ids: Vec<WorkspaceId> = self
+            .session
+            .workspaces
+            .iter()
+            .map(|w| w.id.clone())
+            .collect();
+        let mut changed = false;
+        for id in ids {
+            let Some(dir) = molt_storage::find_workspace_dir(&root, &id) else {
+                continue;
+            };
+            let Some(ts) = self.effective_last_backup(&id, &dir) else {
+                continue;
+            };
+            let minutes = u32::try_from(now.saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1);
+            if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+                if ws.last_backup_min != minutes {
+                    ws.last_backup_min = minutes;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// The manual "backup now to S3" trigger (a tool on both surfaces):
@@ -142,6 +203,12 @@ impl State {
                 root.display()
             ))
         })?;
+        if let Some(reason) = backup_refusal_reason(&dir) {
+            // a chainless (legacy) dir exports a blob restore always refuses
+            // — refuse loudly here rather than upload a blob that only fails
+            // at disaster time
+            return Err(MoltError::Storage(reason.to_string()));
+        }
         let dialer = self
             .dialer_for()
             .map_err(|e| MoltError::Settings(e.to_string()))?;
@@ -184,27 +251,42 @@ impl State {
             .await;
             let cmd = match build {
                 Ok(Ok((blob, _outcome))) => {
-                    let object = molt_core::backup_key(&id, ts);
                     let bytes = u64::try_from(blob.len()).unwrap_or(u64::MAX);
-                    let client = molt_net::s3::S3Client::new(config, dialer);
-                    match client.put_object(&object, &blob).await {
-                        Ok(()) => {
-                            // retention only AFTER the confirmed upload; a
-                            // prune failure is surfaced, never blocks the
-                            // backup (the next success re-prunes)
-                            let prune_error = prune_old_copies(&client, &id, keep).await;
-                            Command::NetBackupDone {
-                                id,
-                                ts,
-                                object,
-                                bytes,
-                                prune_error,
-                            }
-                        }
-                        Err(e) => Command::NetBackupFailed {
+                    if bytes > crate::lifecycles::RESTORE_MAX_BYTES {
+                        // enforce the restore path's own size cap here: a blob
+                        // beyond it would be refused at restore time, so an
+                        // "upload" of it is a false backup, not a real one
+                        Command::NetBackupFailed {
                             id,
-                            error: e.to_string(),
-                        },
+                            error: format!(
+                                "workspace export is {bytes} bytes — beyond the \
+                                 {}-byte cap the restore path enforces; not uploaded",
+                                crate::lifecycles::RESTORE_MAX_BYTES
+                            ),
+                        }
+                    } else {
+                        let object = molt_core::backup_key(&id, ts);
+                        let client = molt_net::s3::S3Client::new(config, dialer);
+                        match client.put_object(&object, &blob).await {
+                            Ok(()) => {
+                                // retention only AFTER the confirmed upload; a
+                                // prune failure is surfaced, never blocks the
+                                // backup (the next success re-prunes)
+                                let prune_error =
+                                    prune_old_copies(&client, &id, keep, &object).await;
+                                Command::NetBackupDone {
+                                    id,
+                                    ts,
+                                    object,
+                                    bytes,
+                                    prune_error,
+                                }
+                            }
+                            Err(e) => Command::NetBackupFailed {
+                                id,
+                                error: e.to_string(),
+                            },
+                        }
                     }
                 }
                 Ok(Err(e)) => Command::NetBackupFailed {
@@ -231,12 +313,19 @@ impl State {
         prune_error: String,
     ) -> Result<Reply, MoltError> {
         self.backup_inflight.remove(&id);
-        self.stamp_backup_time(&id, ts);
+        // the in-memory last-done is the authoritative fallback: it is set
+        // even if the durable prefs stamp below cannot be written, so the
+        // due-check never re-uploads on a loop
+        self.backup_last_done.insert(id.clone(), ts);
+        // clear the last failure FIRST (this upload succeeded), then stamp:
+        // if the durable stamp cannot persist, `stamp_backup_time` re-sets
+        // an honest error, which must survive rather than be cleared here
         let minutes = u32::try_from(now_secs().saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1);
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.last_backup_min = minutes;
             ws.backup_error = String::new();
         }
+        self.stamp_backup_time(&id, ts);
         tracing::info!(id, object, bytes, "backup uploaded");
         if !prune_error.is_empty() {
             tracing::warn!(id, error = %prune_error, "backup retention pruning failed");
@@ -290,7 +379,13 @@ impl State {
         let mut prefs = molt_storage::read_prefs(&dir);
         prefs.last_backup = Some(ts);
         if let Err(e) = molt_storage::write_prefs(&dir, &prefs) {
+            // surface it: the upload happened, but the durable stamp did not
+            // land — the in-memory last-done (set in cmd_net_backup_done)
+            // keeps the due-check from re-uploading, and the user sees why
+            // the on-disk age will look stale after a restart
             tracing::warn!(error = %e, "persisting the backup stamp failed");
+            self.set_backup_error(id, &format!("backup uploaded but the stamp could not persist: {e}"));
+            self.note_backup(format!("backup-stamp-not-persisted:{e}"));
         }
     }
 
@@ -311,11 +406,15 @@ impl State {
 /// the prefix, sort keys (lexicographic == age, §6.2), DELETE the oldest
 /// beyond the keep window. Every failure is reported (first one wins the
 /// message), none is retried here — the next successful backup re-prunes.
+/// `just_uploaded` is the object this backup just confirmed — it is NEVER
+/// a prune candidate, so a clock regression that makes its timestamp sort
+/// "oldest" cannot delete the very copy `NetBackupDone` is confirming.
 /// Returns `""` on success.
 async fn prune_old_copies(
     client: &molt_net::s3::S3Client,
     id: &WorkspaceId,
     keep: usize,
+    just_uploaded: &str,
 ) -> String {
     let prefix = format!("{}{id}/", molt_core::BACKUP_OBJECT_PREFIX);
     let listed = match client.list_objects(&prefix).await {
@@ -324,20 +423,86 @@ async fn prune_old_copies(
     };
     // only keys that follow the backup naming scheme for THIS workspace are
     // ours to prune — foreign objects under the prefix are left alone
-    let mut keys: Vec<String> = listed
+    let keys: Vec<String> = listed
         .into_iter()
         .filter(|o| molt_core::parse_backup_key(&o.key).is_some_and(|(kid, _)| kid == *id))
         .map(|o| o.key)
         .collect();
-    keys.sort_unstable();
-    let excess = keys.len().saturating_sub(keep);
     let mut first_error = String::new();
-    for key in &keys[..excess] {
-        if let Err(e) = client.delete_object(key).await {
+    for key in prune_candidates(keys, keep, just_uploaded) {
+        if let Err(e) = client.delete_object(&key).await {
             if first_error.is_empty() {
                 first_error = format!("deleting {key} failed: {e}");
             }
         }
     }
     first_error
+}
+
+/// Pure retention decision: from a workspace's backup object keys, the
+/// oldest to delete so at most `keep` remain — but NEVER `just_uploaded`,
+/// the fresh copy this backup just confirmed. Keys sort lexicographically =
+/// age (§6.2 zero-padded timestamps). Filtering the just-uploaded key out
+/// of the delete set (rather than out of the candidates) keeps retention
+/// exact in the normal case and only ever over-retains by one under a clock
+/// regression — the rare case where our new object's timestamp sorts
+/// "oldest" and would otherwise be deleted while `NetBackupDone` confirms it.
+fn prune_candidates(mut keys: Vec<String>, keep: usize, just_uploaded: &str) -> Vec<String> {
+    keys.sort_unstable();
+    let excess = keys.len().saturating_sub(keep);
+    keys.into_iter()
+        .take(excess)
+        .filter(|k| k != just_uploaded)
+        .collect()
+}
+
+/// A dir the auto-backup path must NOT ship: a chainless (legacy,
+/// pre-chain) workspace has no `chain.state`, so its export carries no
+/// verifiable chain and the restore path rejects it outright
+/// (`lifecycles.rs::cmd_net_restore_staged`). Returns the honest reason, or
+/// `None` when the dir is backup-able.
+fn backup_refusal_reason(dir: &std::path::Path) -> Option<&'static str> {
+    if !dir.join("chain.state").exists() {
+        return Some(
+            "no persistent chain — a backup of this workspace could not be \
+             restored (chainless legacy directory)",
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prune_candidates;
+
+    fn key(ts: u64) -> String {
+        let id = "ab".repeat(32);
+        molt_core::backup_key(&id, ts)
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_and_deletes_the_oldest() {
+        let keys = vec![key(1), key(2), key(3), key(4), key(5)];
+        let just = key(5);
+        let del = prune_candidates(keys, 3, &just);
+        // 5 keys, keep 3 (excluding the just-uploaded newest) → delete oldest 2
+        assert_eq!(del, vec![key(1), key(2)]);
+    }
+
+    #[test]
+    fn the_just_uploaded_key_is_never_pruned_under_clock_regression() {
+        // the clock regressed: our fresh object's ts (5) is SMALLER than the
+        // existing generations (10..12), so lexicographically it sorts as the
+        // "oldest" — yet it is the copy the confirmation is about and must
+        // never be deleted.
+        let just = key(5);
+        let keys = vec![key(10), key(11), key(12), just.clone()];
+        let del = prune_candidates(keys, 2, &just);
+        assert!(
+            !del.contains(&just),
+            "the just-confirmed upload is never a prune candidate: {del:?}"
+        );
+        // of the OTHER three, keep 2 newest → only the oldest other (10) goes
+        assert_eq!(del, vec![key(10)]);
+    }
 }

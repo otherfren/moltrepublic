@@ -427,6 +427,28 @@ impl State {
         });
         let seed_present = staging.seed_entropy().is_some();
 
+        // never materialize over LIVE state: the collision/replace path
+        // (design §4.3) is for CLOSED dirs. Committing over the OPEN
+        // workspace would `fs::rename` the active directory into `.trash`
+        // from under its own running writer (ENOENT writes, a dangling
+        // `self.active`, a duplicate id dir); a backup in flight is reading
+        // the very files a replace moves. Refuse honestly in both cases —
+        // the staged blob is dropped, nothing is touched on disk.
+        if self.session.active_workspace == ws_id {
+            staging.abort();
+            return self.fail_restore(format!(
+                "workspace {ws_id} is currently open — close it before restoring \
+                 over it (a replace cannot move a live directory)"
+            ));
+        }
+        if self.backup_inflight.contains(&ws_id) {
+            staging.abort();
+            return self.fail_restore(format!(
+                "a backup of workspace {ws_id} is in flight — retry the restore \
+                 once it completes"
+            ));
+        }
+
         // ---- commit (design §4.1 step 3) ----
         let created = staging.created;
         let at_rest = staging.at_rest.clone();
@@ -1596,8 +1618,10 @@ impl State {
 // ---- the off-actor restore task (story 13) --------------------------------
 
 /// Hard cap on a restore download (an export blob has a known scale — a
-/// server claiming more is refused before a byte lands).
-const RESTORE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// server claiming more is refused before a byte lands). The auto-backup
+/// build side enforces the SAME cap (`backup.rs`), so it can never ship a
+/// blob its own restore path would refuse at disaster time.
+pub(crate) const RESTORE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// What the restore task fetches, resolved synchronously in
 /// [`State::cmd_restore_start`] (config + dialer fail fast on the actor).

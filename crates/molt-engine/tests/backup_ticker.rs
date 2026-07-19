@@ -424,3 +424,116 @@ async fn an_inflight_upload_is_never_doubled() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(puts.load(Ordering::SeqCst), 1, "one workspace, one in-flight upload");
 }
+
+/// Review finding (MEDIUM): sealing must not race an in-flight backup. A
+/// backup reads the very key material `EncryptWorkspace` deletes; if it
+/// commits mid-upload the bucket keeps a confirmed-but-unrestorable blob
+/// and retention prunes the good copies. Encrypt is refused with
+/// `WorkspaceBusy` while a backup of the same workspace is out.
+#[tokio::test]
+async fn encrypt_is_refused_while_a_backup_is_in_flight() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    // a slow store keeps the upload in flight across the encrypt attempt
+    let (endpoint, _log) = stub_server(Arc::new(|method, _p| match method {
+        "PUT" => (200, String::new(), 800),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    let phrase = entry(&session(&w).await, &id).seed.clone();
+    // kick off a backup while the workspace is open (inflight set now)
+    w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    // close so the active-workspace guard is out of the way — the inflight
+    // guard is what must catch the seal
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    let err = w
+        .execute(Command::EncryptWorkspace { id: id.clone(), phrase })
+        .await
+        .expect_err("sealing during an in-flight backup is refused");
+    assert!(
+        err.to_string().to_lowercase().contains("backup"),
+        "the refusal names the in-flight backup: {err}"
+    );
+    // once the upload settles the seal goes through
+    poll_session(&w, "backup settled", |sv| {
+        entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER
+            || !entry(sv, &id).backup_error.is_empty()
+    })
+    .await;
+}
+
+/// Review finding (MEDIUM, gap): a chainless (legacy, pre-chain) dir would
+/// export a blob that restore ALWAYS refuses ("no verifiable chain") — a
+/// doom discovered only at disaster time. The backup side refuses it up
+/// front instead of shipping a useless blob.
+#[tokio::test]
+async fn a_chainless_dir_is_refused_up_front_and_never_uploaded() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|_m, _p| (200, empty_listing(), 0))).await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    // simulate a legacy/chainless workspace: drop chain.state
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+    std::fs::remove_file(dir.join("chain.state")).expect("remove chain.state");
+    let err = w
+        .execute(Command::BackupNow { id: id.clone() })
+        .await
+        .expect_err("a chainless dir cannot be backed up");
+    assert!(
+        err.to_string().to_lowercase().contains("chain"),
+        "the refusal names the missing chain: {err}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        log.lock().expect("log").iter().all(|r| r.method != "PUT"),
+        "no doomed blob was uploaded"
+    );
+    // the ticker skips it with an honest status too, no dial
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    let sv = poll_session(&w, "chainless skip status", |sv| {
+        entry(sv, &id).backup_error.to_lowercase().contains("chain")
+    })
+    .await;
+    assert_eq!(entry(&sv, &id).last_backup_min, WorkspaceInfo::NEVER);
+    assert!(
+        log.lock().expect("log").iter().all(|r| r.method != "PUT"),
+        "the ticker did not upload a doomed blob either"
+    );
+}
+
+/// Review finding (LOW): the honest "sealed — skipped" backup status must
+/// not outlive the sealed state. Decrypting clears it, so the backup table
+/// stops claiming a now-openable workspace is un-backup-able.
+#[tokio::test]
+async fn decrypting_clears_the_sealed_skip_backup_status() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, _log) = stub_server(Arc::new(|_m, _p| (200, empty_listing(), 0))).await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    let phrase = entry(&session(&w).await, &id).seed.clone();
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    w.execute(Command::EncryptWorkspace { id: id.clone(), phrase: phrase.clone() })
+        .await
+        .expect("seal");
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "sealed skip status", |sv| {
+        entry(sv, &id).backup_error.contains("sealed")
+    })
+    .await;
+    // decrypt: the sealed-skip note no longer describes anything
+    w.execute(Command::DecryptWorkspace { id: id.clone(), phrase })
+        .await
+        .expect("decrypt");
+    let sv = session(&w).await;
+    assert_eq!(
+        entry(&sv, &id).backup_error,
+        "",
+        "the sealed-skip status is cleared on decrypt"
+    );
+    assert!(!entry(&sv, &id).encrypted, "decrypted");
+}

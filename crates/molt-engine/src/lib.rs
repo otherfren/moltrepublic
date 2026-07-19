@@ -492,6 +492,12 @@ pub(crate) struct State {
     /// ticker never spawns a second task for one while its first is out,
     /// and Done/Failed clear the mark. Runtime-only.
     pub(crate) backup_inflight: std::collections::HashSet<WorkspaceId>,
+    /// Last CONFIRMED upload timestamp per workspace, in memory (runtime-
+    /// only). Stamped on `NetBackupDone` and consulted as a fallback in the
+    /// ticker's due-check + label re-aging, so a `prefs.last_backup` that
+    /// could not be persisted (read-only dir) does not trigger a full-blob
+    /// re-upload every minute forever (review finding).
+    pub(crate) backup_last_done: std::collections::HashMap<WorkspaceId, u64>,
     /// Restore incarnation (story 13): bumped per `RestoreStart`/cancel so
     /// a superseded task's late progress/staged/failed reports are dropped.
     pub(crate) restore_generation: u64,
@@ -675,6 +681,7 @@ impl State {
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
+            backup_last_done: std::collections::HashMap::new(),
             restore_generation: 0,
             restore_task: None,
             restore_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
