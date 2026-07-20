@@ -824,12 +824,6 @@ export component AppWindow inherits Window {
     in property <string> org-img-path;
     in property <image> org-img;
     in property <bool> org-img-set: false;
-    // the logo's intrinsic width:height (Rust reads the source image's natural
-    // size, which Slint cannot in an expression). The Status identity header
-    // wraps the title below + stretches the panel when the logo, shown at its
-    // row height, would be wider than a third of the available width, so a
-    // banner logo is never cropped. `0` = no image.
-    in property <float> org-img-aspect: 0;
     // pick a new image via the real (rfd) file dialog — fills org-logo-draft
     callback org-logo-pick();
     // image preview overlay: a proposed image after its (mock) download —
@@ -4053,24 +4047,12 @@ export component AppWindow inherits Window {
                                 padding: 8px;
                                 spacing: 10px;
                                 alignment: start;
-                                identity := Rectangle {
-                                    // stretch to the full column width so a wide
-                                    // (banner) logo has room to show uncropped —
-                                    // this also gives a stable width for the
-                                    // "wider than a third" decision below
-                                    width: 100%;
+                                Rectangle {
                                     background: Theme.panel;
                                     border-radius: Theme.win95 ? 0px : 8px;
                                     border-width: Theme.border-w;
                                     border-color: Theme.line;
-                                    // a logo that, shown at the compact row height
-                                    // (56px), would be wider than a third of the
-                                    // panel wraps the title onto the next line
-                                    // (stacked + centered, shown contained) so it
-                                    // is never squeezed or cropped into the row
-                                    property <bool> logo-wide:
-                                        root.org-img-set && (56px * root.org-img-aspect) > (self.width / 3);
-                                    if !identity.logo-wide: HorizontalLayout {
+                                    HorizontalLayout {
                                         padding: 14px;
                                         spacing: 12px;
                                         // the republic's image stretches to
@@ -4154,63 +4136,6 @@ export component AppWindow inherits Window {
                                         // draft, top-right like an app bar
                                         VerticalLayout {
                                             alignment: start;
-                                            AppButton {
-                                                width: 26px;
-                                                height: 26px;
-                                                pad: 0px;
-                                                label: "✎";
-                                                tooltip: Strings.org-edit;
-                                                tooltip-left: true;
-                                                clicked => {
-                                                    root.org-name-draft = root.active-workspace;
-                                                    root.org-name-modal-open = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // wide/banner logo: the full logo stacked
-                                    // ABOVE the title, both centered, shown
-                                    // CONTAINED so nothing is cropped (the panel
-                                    // is already stretched to full width)
-                                    if identity.logo-wide: VerticalLayout {
-                                        padding: 14px;
-                                        spacing: 10px;
-                                        alignment: center;
-                                        Rectangle {
-                                            height: 100px;
-                                            Image {
-                                                source: root.org-img;
-                                                image-fit: contain;
-                                                width: 100%;
-                                                height: 100%;
-                                            }
-                                            // corner edit for the image (same
-                                            // action as the compact layout)
-                                            AppButton {
-                                                width: 22px;
-                                                height: 22px;
-                                                pad: 0px;
-                                                x: parent.width - self.width;
-                                                y: 0px;
-                                                label: "✎";
-                                                tooltip: Strings.org-edit;
-                                                tooltip-left: true;
-                                                clicked => {
-                                                    root.org-logo-draft = "";
-                                                    root.org-logo-modal-open = true;
-                                                }
-                                            }
-                                        }
-                                        Text {
-                                            text: root.active-workspace == "" ? "Republic" : root.active-workspace;
-                                            color: Theme.text;
-                                            font-size: Theme.fs-h1;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            wrap: word-wrap;
-                                        }
-                                        HorizontalLayout {
-                                            alignment: center;
                                             AppButton {
                                                 width: 26px;
                                                 height: 26px;
