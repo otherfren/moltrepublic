@@ -48,14 +48,15 @@ const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 
 /// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
-/// `net_link_down`) but from which **nothing** has been heard since its
-/// mesh-up for longer than this reads as a live-but-deaf queue — the SMP
-/// server idle-expired it while `SUB`/`SEND` still answer `OK`, so it is
-/// silently non-delivering. Reported as `Degraded`, never a false `Ok`.
-/// Generous (well above the keepalive period, `MESH_KEEPALIVE_SECS`) so a
-/// merely-quiet-but-alive peer — which keepalive keeps stamping — never
-/// flaps; a truly dead leg trips it after ~two missed keepalives.
-pub(crate) const MESH_DEAF_SECS: u64 = 600;
+/// `net_link_down`) but from which **nothing** has been heard for longer than
+/// this — measured from the LATER of its mesh-up and its last real sighting
+/// ([`State::deaf_legs`]) — reads as a live-but-deaf queue: the SMP server
+/// idle-expired it while `SUB`/`SEND` still answer `OK`, so it is silently
+/// non-delivering. Reported as `Degraded`, never a false `Ok`. Above the
+/// keepalive period ([`MESH_KEEPALIVE_SECS`]) with a safe margin (~2.5×) so a
+/// quiet-but-alive peer — which keepalive re-stamps every interval — never
+/// flaps; a truly dead or offline leg trips it after ~two missed keepalives.
+pub(crate) const MESH_DEAF_SECS: u64 = 300;
 
 /// Mesh keepalive interval (Stage 2, `documents/mesh_selfheal.md`): the
 /// engine sends an idle-only MLS liveness ping to a mesh peer whose leg has
@@ -64,10 +65,12 @@ pub(crate) const MESH_DEAF_SECS: u64 = 600;
 /// receipt, feeding Stage 1). Chosen well under the deaf window
 /// ([`MESH_DEAF_SECS`]) so a quiet-but-alive peer is proven live twice over
 /// before it could ever trip deaf, and conservatively under plausible SMP
-/// idle-expiry windows (which are unknown for public servers). The
+/// idle-expiry windows (which are unknown for public servers — a live
+/// 3-node test on `smp.simplex.im` idle-expired a queue inside the old 240 s
+/// interval, so the warming cadence is deliberately aggressive). The
 /// `NetMeshKeepaliveTick` ticker beats twice per interval so the effective
 /// cadence never drifts far past this.
-pub(crate) const MESH_KEEPALIVE_SECS: u64 = 240;
+pub(crate) const MESH_KEEPALIVE_SECS: u64 = 120;
 
 /// Minimum seconds between self-initiated **mesh rotates** for one peer
 /// (Stage 3, `documents/mesh_selfheal.md`): the periodic deaf-leg detector
@@ -2082,9 +2085,18 @@ impl State {
         self.mesh_up
             .iter()
             .filter(|(m, up)| {
+                // the leg is live (not already reported down) AND we have heard
+                // nothing from the peer for longer than the deaf window,
+                // measured from the LATER of mesh-up and the last real sighting.
+                // Using the max catches BOTH failure shapes: a leg that has
+                // delivered nothing since it came up (max = mesh_up), AND — the
+                // live-3-node case the earlier `last_seen < mesh_up` check
+                // missed — a leg that delivered for a while and then went silent
+                // when its queue idle-expired (max = last_seen, now stale).
+                // Keepalive re-stamps a healthy leg every interval, so only a
+                // truly dead or offline peer crosses the window.
                 !self.net_link_down.contains_key(*m)
-                    && now.saturating_sub(**up) > MESH_DEAF_SECS
-                    && self.member_last_seen(m) < **up
+                    && now.saturating_sub(self.member_last_seen(m).max(**up)) > MESH_DEAF_SECS
             })
             .map(|(m, _)| m.clone())
             .collect()
@@ -2785,6 +2797,37 @@ mod tests {
                 assert!(reason.contains("bob"), "names the deaf peer: {reason}");
             }
             other => panic!("expected Degraded for the deaf leg, got {other:?}"),
+        }
+    }
+
+    /// The live-3-node regression (config2 stopped receiving from config3): a
+    /// leg that delivered for a while and THEN went silent (its queue expired
+    /// on the server) MUST be flagged deaf. The earlier build measured only
+    /// `last_seen < mesh_up`, so once a leg had delivered anything its
+    /// `last_seen` moved past `mesh_up` and a later death slipped through the
+    /// detector forever — `net_health` stayed a false `Ok` and the rotate
+    /// never fired.
+    #[test]
+    fn a_leg_that_delivered_then_went_silent_goes_degraded() {
+        let mut st = presence_fixture();
+        // bob's leg comes live and delivers a frame: last_seen advances PAST
+        // mesh_up — exactly the shape the old `last_seen < mesh_up` check missed
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.clock_override = Some(T + 100);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard once");
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a leg still delivering is healthy"
+        );
+        // then the queue dies: nothing more is heard for a whole deaf window
+        st.clock_override = Some(T + 100 + super::MESH_DEAF_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob"), "names the now-deaf peer: {reason}");
+            }
+            other => panic!("expected Degraded for the died leg, got {other:?}"),
         }
     }
 
