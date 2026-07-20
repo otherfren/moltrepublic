@@ -50,18 +50,16 @@ async fn a_self_initiated_rotate_broadcasts_a_nonced_reannounce() {
         Some(MlsChannel::new(member_group)),
     );
 
-    // let the founder's mesh legs confirm so the outbox can broadcast
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if read_session(&a).await.net_health == NetHealth::Ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the founder mesh never confirmed Ok"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // The founder's mesh is up (found_with_mesh waited for "direct mesh
+    // established" = net.is_real()). Verify-at-open leaves the leg amber
+    // "verifying" until a frame is heard from the stub member — a raw supervisor
+    // that never warms back — so net_health does NOT reach Ok here, and the
+    // rotate does not need it to (it gates on the mesh being real, not on
+    // health). Just confirm the open is honest, not Down.
+    assert!(
+        !matches!(read_session(&a).await.net_health, NetHealth::Down { .. }),
+        "the founder's mesh must be up, not Down"
+    );
 
     // trigger a self-initiated rotate toward member-b
     a.execute(Command::NetMeshRotate {

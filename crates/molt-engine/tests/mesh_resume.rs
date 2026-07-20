@@ -234,10 +234,12 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     a2.execute(Command::OpenWorkspace { id: id.clone() })
         .await
         .expect("reopen after hard kill");
-    // Stage B honest open: the pill starts amber ("connecting") until every
-    // leg's watchdog confirms its subscription — poll until the honest Ok.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    // Stage B honest open: the reopen must be honest (not Down, not "detached"),
+    // but verify-at-open means the inbound leg cannot read the honest Ok YET — no
+    // real frame has been heard over it (the member's supervisor is not even up),
+    // so it stays amber "verifying". Ok is asserted below, once the member's reply
+    // has actually crossed the resumed leg and confirmed it.
+    {
         let sv = read_session(&a2).await;
         assert_eq!(sv.notice, "", "no detached notice — the mesh resumed");
         assert!(
@@ -245,15 +247,6 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
             "the resumed mesh must not be Down: {:?}",
             sv.net_health
         );
-        if sv.net_health == NetHealth::Ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "net_health never reached the honest Ok (all legs confirmed): {:?}",
-            sv.net_health
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     // the surviving member's runtime supervisor (kept alive across A's kill)
@@ -306,6 +299,23 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
             && m["from"] == serde_json::json!("member-b")),
         "the member's chat reached the resumed founder: {chat:?}"
     );
+
+    // verify-at-open honesty: a real frame HAS now been heard over the resumed
+    // inbound leg (the member's reply), so net_health clears "verifying" to the
+    // honest Ok — the leg is confirmed by actual delivery, not just a live SUB.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sv = read_session(&a2).await;
+        if sv.net_health == NetHealth::Ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "net_health never reached the honest Ok after a frame was heard: {:?}",
+            sv.net_health
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn genesis(member: &str) -> EventEnvelope {

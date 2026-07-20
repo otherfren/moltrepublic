@@ -2157,10 +2157,30 @@ impl State {
             })
             .map(|(m, _)| m.clone())
             .collect();
+        // Verify-at-open (Phase 1): a leg whose subscription is live but that has
+        // delivered NOTHING since coming up this incarnation (`last_seen <
+        // mesh_up`) is UNVERIFIED — honestly amber "verifying" from t=0, not a
+        // false `Ok`, for the whole grace window before it escalates to
+        // reconnecting/deaf. A healthy leg round-trips within one warm and clears
+        // to `Ok` immediately; only this removes the green flap a cold reopen
+        // showed. Listed once: excludes legs already named deaf, reconnecting, or
+        // link-down.
+        let verifying: Vec<MemberId> = self
+            .mesh_up
+            .iter()
+            .filter(|(m, up)| {
+                self.member_last_seen(m) < **up
+                    && !self.net_link_down.contains_key(*m)
+                    && !deaf.contains(*m)
+                    && !reconnecting.contains(*m)
+            })
+            .map(|(m, _)| m.clone())
+            .collect();
         let health = if self.net_link_down.is_empty()
             && self.net_send_stuck.is_empty()
             && deaf.is_empty()
             && reconnecting.is_empty()
+            && verifying.is_empty()
         {
             molt_core::NetHealth::Ok
         } else {
@@ -2171,6 +2191,7 @@ impl State {
                 .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
                 .chain(deaf.iter().map(|m| format!("no inbound from {m} since reconnect")))
                 .chain(reconnecting.iter().map(|m| format!("reconnecting to {m}")))
+                .chain(verifying.iter().map(|m| format!("verifying {m}")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -2805,8 +2826,11 @@ mod tests {
             }
             other => panic!("expected Degraded, got {other:?}"),
         }
-        // heal one leg: still degraded (the other is stuck)
+        // heal one leg: bob's subscription is back AND it delivers a frame (so
+        // the leg is verified, not merely live-but-unverified) — still degraded
+        // because the OTHER peer's outbox is stuck
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivers — leg verified");
         assert!(
             matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
             "cid's outbox is still stuck"
@@ -2852,6 +2876,29 @@ mod tests {
 
     // --- Stage 1 self-heal: honest health for a live-but-deaf leg ----------
 
+    /// Verify-at-open (Phase 1): the instant a leg's subscription comes up,
+    /// before anything has ever been heard over it, `net_health` reads
+    /// `Degraded("verifying {peer}")` — NOT a false `Ok`. This is what removes
+    /// the green flap a cold reopen showed while a born-dead leg sat silently
+    /// deaf for the whole grace window. A healthy leg clears to `Ok` within one
+    /// round-trip; a dead one escalates to reconnecting/deaf.
+    #[test]
+    fn a_fresh_live_leg_reads_verifying_not_ok() {
+        let mut st = presence_fixture();
+        // bob's leg comes live at T; nothing has ever been delivered over it
+        // (last_seen = NEVER < mesh_up = T), so it is unverified, not healthy
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(
+                    reason.contains("bob") && reason.contains("verifying"),
+                    "a never-heard fresh leg reads honestly verifying: {reason}"
+                );
+            }
+            other => panic!("expected Degraded verifying for the unverified leg, got {other:?}"),
+        }
+    }
+
     /// A peer whose inbound subscription is live but that has delivered
     /// NOTHING since mesh-up must stop reading as a false `Ok` — after
     /// `MESH_DEAF_SECS` it surfaces as `Degraded` naming the peer. This is
@@ -2860,13 +2907,16 @@ mod tests {
     #[test]
     fn a_live_but_silent_leg_goes_degraded_after_the_deaf_window() {
         let mut st = presence_fixture();
-        // bob's leg comes live at T; nothing is ever heard from it
+        // bob's leg comes live at T; nothing is ever heard from it. Honest from
+        // t=0 (verify-at-open): before the deaf window it reads "verifying", not
+        // a false Ok — it only escalates to the deaf reason once the window elapses
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a fresh live leg is healthy — the grace window has not elapsed"
-        );
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("verifying"), "unverified, not yet deaf: {reason}");
+            }
+            other => panic!("a fresh unverified leg reads verifying, got {other:?}"),
+        }
         // the deaf window elapses; the periodic presence tick re-evaluates
         // health (a silently-deaf leg fires no event of its own)
         st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);

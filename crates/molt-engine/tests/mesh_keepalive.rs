@@ -57,20 +57,16 @@ async fn an_idle_keepalive_stamps_presence_and_an_active_mesh_sends_none() {
     // the member's runtime supervisor, kept alive for the test
     let (member_sink, _member_sup) = spawn_member(hub, &member_mesh, &member_mls);
 
-    // let the founder's mesh legs confirm (honest Ok) so the outbox can send
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let sv = read_session(&a).await;
-        if sv.net_health == NetHealth::Ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the founder mesh never confirmed Ok: {:?}",
-            sv.net_health
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // The founder's mesh is up (found_with_mesh waited for "direct mesh
+    // established" = net.is_real()). Verify-at-open leaves the leg amber
+    // "verifying" until a frame is heard from the stub member — which is a raw
+    // supervisor that never warms back — so net_health does NOT reach Ok here,
+    // and the keepalive tick does not need it to (it gates on the mesh being
+    // real, not on health). Just confirm the open is honest, not Down.
+    assert!(
+        !matches!(read_session(&a).await.net_health, NetHealth::Down { .. }),
+        "the founder's mesh must be up, not Down"
+    );
 
     // (1) IDLE: a keepalive tick sends a ping that stamps the member's
     // presence WITHOUT delivering any event. Nothing has chatted, so
