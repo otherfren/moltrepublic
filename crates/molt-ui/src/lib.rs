@@ -3402,6 +3402,19 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             .then(|| std::fs::read(&b.org_stats.image).ok())
             .flatten()
             .and_then(|bytes| image_from_bytes(&bytes));
+        // the logo's intrinsic width:height — Slint cannot read a source
+        // image's natural size in an expression, so the identity header's
+        // "wider than a third" decision (wrap the title below + stretch the
+        // panel so a banner logo is never cropped) reads this. `0` = no image.
+        // image dimensions are bounded (`max_image_width`), so the u16 hop
+        // avoids a lossy `as` cast (workspace lint `as_conversions`).
+        let aspect = loaded.as_ref().map_or(0.0_f32, |img| {
+            let sz = img.size();
+            let w = f32::from(u16::try_from(sz.width).unwrap_or(u16::MAX));
+            let h = f32::from(u16::try_from(sz.height).unwrap_or(u16::MAX)).max(1.0);
+            w / h
+        });
+        ui.set_org_img_aspect(aspect);
         ui.set_org_img_set(loaded.is_some());
         ui.set_org_img(loaded.unwrap_or_default());
     }
