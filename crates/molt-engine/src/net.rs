@@ -58,6 +58,17 @@ const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 /// flaps; a truly dead or offline leg trips it after ~two missed keepalives.
 pub(crate) const MESH_DEAF_SECS: u64 = 300;
 
+/// Faster deaf window for a leg that has delivered **nothing** since it came
+/// up — a born-dead founding leg (its SMP queue was runtime-dead at birth) or
+/// a genuinely offline peer. With the immediate per-leg warm on link-up
+/// ([`State::warm_leg`]) an alive peer is heard within seconds, so a leg still
+/// silent this long is dead and should heal fast instead of sitting yellow for
+/// the full window. Well above the first-keepalive latency so an
+/// alive-but-not-yet-pinged leg is never falsely flagged (and a false rotate is
+/// harmless — it GCs its unused queue). A leg that delivered THEN went silent
+/// keeps the full [`MESH_DEAF_SECS`] to avoid flapping on a brief quiet.
+pub(crate) const MESH_DEAF_NEW_SECS: u64 = 45;
+
 /// Mesh keepalive interval (Stage 2, `documents/mesh_selfheal.md`): the
 /// engine sends an idle-only MLS liveness ping to a mesh peer whose leg has
 /// gone this long without any real outbound traffic, keeping the peer's
@@ -1982,10 +1993,14 @@ impl State {
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
             self.net_unreachable.remove(&member);
+            // the leg just proved delivery: drop any pending rotate for it so it
+            // no longer reads as "reconnecting", and a later re-death can rotate
+            // immediately (no stale cooldown).
+            self.rotate_at.remove(&member);
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
-            // the leg just proved liveness — clears any live-but-deaf flag
-            // the self-heal cross-check had raised for this peer (Stage 1).
+            // clears any live-but-deaf / reconnecting flag the self-heal
+            // cross-check had raised for this peer (Stage 1/3).
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -2026,7 +2041,10 @@ impl State {
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
             self.net_link_down.remove(&member);
-            self.mesh_up.insert(member, self.presence_now());
+            self.mesh_up.insert(member.clone(), self.presence_now());
+            // warm this peer's inbound queue right away so it cannot idle-expire
+            // in the gap before the first keepalive tick (the born-dead window)
+            self.warm_leg(&member);
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -2095,8 +2113,15 @@ impl State {
                 // when its queue idle-expired (max = last_seen, now stale).
                 // Keepalive re-stamps a healthy leg every interval, so only a
                 // truly dead or offline peer crosses the window.
-                !self.net_link_down.contains_key(*m)
-                    && now.saturating_sub(self.member_last_seen(m).max(**up)) > MESH_DEAF_SECS
+                if self.net_link_down.contains_key(*m) {
+                    return false;
+                }
+                let last = self.member_last_seen(m);
+                // never-delivered-since-mesh-up (born-dead / offline) heals on
+                // the SHORT window; delivered-then-silent (heard at or after
+                // mesh-up) uses the full window, so a brief quiet never flaps.
+                let window = if last < **up { MESH_DEAF_NEW_SECS } else { MESH_DEAF_SECS };
+                now.saturating_sub(last.max(**up)) > window
             })
             .map(|(m, _)| m.clone())
             .collect()
@@ -2116,9 +2141,26 @@ impl State {
             return;
         }
         let deaf = self.deaf_legs();
+        // peers we've rotated toward that STILL haven't delivered since: honestly
+        // "reconnecting". The rotate's rebuild re-stamps `mesh_up`, so the deaf
+        // cross-check resets to `Ok` the moment a rotate fires — without this the
+        // banner would flap green mid-heal even though delivery never resumed.
+        // Excludes deaf (listed once) and link_down (its own reason). Clears the
+        // moment the peer is actually heard (`peer_seen` drops its `rotate_at`).
+        let reconnecting: Vec<MemberId> = self
+            .rotate_at
+            .iter()
+            .filter(|(m, at)| {
+                self.member_last_seen(m) < **at
+                    && !self.net_link_down.contains_key(*m)
+                    && !deaf.contains(*m)
+            })
+            .map(|(m, _)| m.clone())
+            .collect();
         let health = if self.net_link_down.is_empty()
             && self.net_send_stuck.is_empty()
             && deaf.is_empty()
+            && reconnecting.is_empty()
         {
             molt_core::NetHealth::Ok
         } else {
@@ -2128,6 +2170,7 @@ impl State {
                 .map(|(m, r)| format!("link to {m}: {r}"))
                 .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
                 .chain(deaf.iter().map(|m| format!("no inbound from {m} since reconnect")))
+                .chain(reconnecting.iter().map(|m| format!("reconnecting to {m}")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -2196,43 +2239,79 @@ impl State {
             return Ok(Reply::Ack);
         }
         for peer in peers {
-            let transport = transport.clone();
-            let group = group.clone();
-            tokio::spawn(async move {
-                // one ratchet advance per ping, on the SHARED group (same Arc
-                // the supervisor uses — locked in sequence)
-                let Some(ct) = group
-                    .lock()
-                    .ok()
-                    .and_then(|mut g| g.encrypt(molt_net::MESH_KEEPALIVE_TAG).ok())
-                else {
-                    tracing::debug!(member = %peer.member, "encrypting the mesh keepalive failed");
-                    return;
-                };
-                // a fresh random id per ping: the receiver's reassembler dedups
-                // by message id, so a reused id would be dropped before it could
-                // stamp liveness (and a random 16 bytes never collides with the
-                // outbox's derived ids)
-                let mut idb = [0u8; 16];
-                if getrandom::getrandom(&mut idb).is_err() {
-                    return;
-                }
-                if let Err(e) = supervisor::send_framed(
-                    &transport,
-                    &peer.snd,
-                    &peer.wrap_out,
-                    molt_net::MsgId(idb),
-                    &ct,
-                )
-                .await
-                {
-                    tracing::debug!(member = %peer.member, error = %e, "mesh keepalive send failed");
-                }
-            });
+            Self::spawn_keepalive(transport.clone(), group.clone(), peer);
         }
         // count this round as mesh traffic so the gate paces to the interval
         self.last_mesh_out = now;
         Ok(Reply::Ack)
+    }
+
+    /// Encrypt one keepalive tag on the SHARED group and send it onto `peer`'s
+    /// inbound queue (best-effort, off the actor). Shared by the periodic
+    /// keepalive round and the immediate per-leg warm on link-up.
+    fn spawn_keepalive(
+        transport: crate::founding::RitualTransport,
+        group: Arc<Mutex<molt_net::MlsMember>>,
+        peer: PeerLink,
+    ) {
+        tokio::spawn(async move {
+            // one ratchet advance per ping, on the shared group (same Arc the
+            // supervisor uses — locked in sequence)
+            let Some(ct) = group
+                .lock()
+                .ok()
+                .and_then(|mut g| g.encrypt(molt_net::MESH_KEEPALIVE_TAG).ok())
+            else {
+                tracing::debug!(member = %peer.member, "encrypting the mesh keepalive failed");
+                return;
+            };
+            // a fresh random id per ping: the receiver's reassembler dedups by
+            // message id, so a reused id would be dropped before it could stamp
+            // liveness (and a random 16 bytes never collides with the outbox's
+            // derived ids)
+            let mut idb = [0u8; 16];
+            if getrandom::getrandom(&mut idb).is_err() {
+                return;
+            }
+            if let Err(e) = supervisor::send_framed(
+                &transport,
+                &peer.snd,
+                &peer.wrap_out,
+                molt_net::MsgId(idb),
+                &ct,
+            )
+            .await
+            {
+                tracing::debug!(member = %peer.member, error = %e, "mesh keepalive send failed");
+            }
+        });
+    }
+
+    /// Warm one peer's inbound queue immediately (mesh self-heal): send a
+    /// single keepalive the moment that leg's subscription confirms, so the
+    /// queue can never idle-expire in the gap between mesh-up and the first
+    /// keepalive tick — the born-dead-at-founding window. Best-effort; a leg
+    /// whose queue is genuinely dead still fails here and is healed by the
+    /// fast deaf-window rotate.
+    fn warm_leg(&self, member: &MemberId) {
+        let Some(net) = self.net.as_ref() else {
+            return;
+        };
+        if !net.is_real() {
+            return;
+        }
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+            return;
+        };
+        let Some(peer) = net
+            .mesh()
+            .iter()
+            .find(|l| l.member == *member)
+            .and_then(PeerLink::from_mesh)
+        else {
+            return;
+        };
+        Self::spawn_keepalive(transport, group, peer);
     }
 
     /// Record a real sighting on the active workspace entry's pill. The
@@ -2829,6 +2908,55 @@ mod tests {
             }
             other => panic!("expected Degraded for the died leg, got {other:?}"),
         }
+    }
+
+    /// Fast heal: a leg that has delivered NOTHING since coming up (born-dead
+    /// at founding) trips deaf on the SHORT window, while a leg that delivered
+    /// once and then went quiet keeps the full window (no flapping).
+    #[test]
+    fn a_never_delivered_leg_heals_on_the_fast_window() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up=T, never heard
+        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
+        st.cmd_net_peer_seen("cid".to_string(), None).expect("cid delivered at T");
+        // just past the FAST window, far under the full window
+        st.clock_override = Some(T + super::MESH_DEAF_NEW_SECS + 1);
+        st.cmd_net_presence_tick().expect("tick");
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob"), "the born-dead leg trips fast: {reason}");
+                assert!(
+                    !reason.contains("cid"),
+                    "a delivered-then-quiet leg keeps the full window: {reason}"
+                );
+            }
+            other => panic!("expected Degraded for the born-dead leg, got {other:?}"),
+        }
+    }
+
+    /// Honest heal state: a leg we've rotated toward that has NOT delivered
+    /// since reads `Degraded` "reconnecting" — even though the rotate's rebuild
+    /// re-stamped `mesh_up` (which alone would flap the banner green). It clears
+    /// to `Ok` the moment the peer is actually heard.
+    #[test]
+    fn a_rotated_leg_that_has_not_delivered_reads_reconnecting() {
+        let mut st = presence_fixture();
+        // the leg's subscription is freshly up (a rotate just rebuilt it), so the
+        // deaf cross-check is reset — but the rotate has not proven delivery yet
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
+        st.rotate_at.insert("bob".to_string(), T); // we rotated toward bob at T
+        st.recompute_net_health();
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("bob") && reason.contains("reconnecting"), "{reason}");
+            }
+            other => panic!("expected Degraded reconnecting, got {other:?}"),
+        }
+        // the peer finally delivers → drops the rotate → honest Ok
+        st.clock_override = Some(T + 5);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivered");
+        assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+        assert!(!st.rotate_at.contains_key("bob"), "delivery drops the pending rotate");
     }
 
     /// A leg that keeps being heard from stays `Ok`: a sighting after
