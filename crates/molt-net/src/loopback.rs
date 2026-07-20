@@ -71,6 +71,13 @@ struct Queue {
     sub: Option<mpsc::Sender<Delivery>>,
     /// Unacked blocks by delivery id.
     pending: HashMap<u64, PaddedBlock>,
+    /// Test seam for the SMP idle-expiry / "silently deaf" failure
+    /// (`documents/mesh_selfheal.md` §6): when set, `SUB` and `SEND` still
+    /// return `Ok` but every delivery to this queue is silently dropped —
+    /// exactly the server-side state the client cannot detect. Loopback is
+    /// otherwise permissive, so this is the only way to reproduce a
+    /// live-but-non-delivering (born-dead) leg.
+    expired: bool,
 }
 
 struct Hub {
@@ -131,6 +138,22 @@ impl LoopbackHub {
         }
     }
 
+    /// Mark a queue **idle-expired / silently deaf** (test seam,
+    /// `documents/mesh_selfheal.md` §6): from now on `SUB`/`SEND` still return
+    /// `Ok` but every delivery to it is silently dropped — the exact
+    /// server-side state that produces a born-dead / live-but-deaf leg. The
+    /// `id` is a queue's `QueueId` (a `PeerLink`'s `rcv.id`, which equals the
+    /// sender-face `snd.id` on the hub). Returns whether the queue existed.
+    pub fn expire_queue(&self, id: &QueueId) -> bool {
+        if let Ok(mut hub) = self.inner.lock() {
+            if let Some(q) = hub.queues.get_mut(id) {
+                q.expired = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// A transport endpoint on this hub.
     pub fn transport(&self) -> LoopbackTransport {
         LoopbackTransport {
@@ -149,6 +172,7 @@ impl LoopbackHub {
             Queue {
                 sub: None,
                 pending: HashMap::new(),
+                expired: false,
             },
         );
         Ok(QueuePair {
@@ -169,7 +193,16 @@ impl LoopbackHub {
                 tokio::time::sleep(delay).await;
             }
             let (sub, block, redeliver_after) = {
-                let Ok(hub) = hub.inner.lock() else { return };
+                let Ok(mut hub) = hub.inner.lock() else { return };
+                // a silently-deaf (idle-expired) queue drops every delivery and
+                // forgets it — SUB/SEND already returned Ok, so the sender never
+                // learns; the block is removed so it does not redeliver forever
+                if hub.queues.get(&queue).is_some_and(|q| q.expired) {
+                    if let Some(q) = hub.queues.get_mut(&queue) {
+                        q.pending.remove(&delivery);
+                    }
+                    return;
+                }
                 let Some(q) = hub.queues.get(&queue) else { return };
                 let Some(block) = q.pending.get(&delivery) else {
                     return; // acked in the meantime
@@ -449,5 +482,30 @@ mod tests {
             t.send(&ghost, block(3)).await,
             Err(NetError::UnknownQueue)
         ));
+    }
+
+    /// The idle-expiry / "silently deaf" test seam (mesh self-heal §6): once a
+    /// queue is expired, `SUB` and `SEND` still succeed but deliveries vanish —
+    /// exactly the server-side state the client cannot detect and the only way
+    /// to reproduce a born-dead leg on the otherwise-permissive hub.
+    #[tokio::test]
+    async fn an_expired_queue_accepts_sub_send_but_never_delivers() {
+        let hub = LoopbackHub::calm();
+        let t = hub.transport();
+        let pair = t.create_queue().await.expect("queue");
+        let mut rx = t.subscribe(&pair.rcv).await.expect("sub"); // SUB ok
+        // a normal send delivers
+        t.send(&pair.snd, block(1)).await.expect("send");
+        assert_eq!(rx.recv().await.expect("delivery").block, block(1));
+        // the queue idle-expires: SUB/SEND stay Ok, but deliveries silently drop
+        assert!(hub.expire_queue(&pair.rcv.id), "the queue exists");
+        t.send(&pair.snd, block(2))
+            .await
+            .expect("SEND still returns Ok on an expired queue");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an expired queue delivers nothing — the silent-deafness the client cannot see"
+        );
     }
 }
