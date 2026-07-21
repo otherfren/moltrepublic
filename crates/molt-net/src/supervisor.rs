@@ -977,8 +977,10 @@ where
                 continue;
             }
         };
+        tracing::debug!(peer = %peer.member, plain = plain.len(), "MESHRX unwrapped a block → reassembler");
         let (id, complete) = match reasm.push(&plain) {
             Ok(PushOutcome::Duplicate(id)) => {
+                tracing::debug!(peer = %peer.member, "MESHRX reassembler=DUPLICATE (redelivery/already-seen) — no decode");
                 if let Some(held) = chunk_acks.get_mut(&id.0) {
                     held.push(delivery.ack); // message still partial
                 } else if let Some(held) = buffered_ids
@@ -994,6 +996,7 @@ where
                 continue;
             }
             Ok(PushOutcome::Buffered(id)) => {
+                tracing::debug!(peer = %peer.member, "MESHRX reassembler=BUFFERED (incomplete message, holding for more chunks) — no decode yet");
                 chunk_acks.entry(id.0).or_default().push(delivery.ack);
                 if chunk_acks.len() > CHUNK_ACK_MAX {
                     // shed an arbitrary partial's acks (unacked → the
@@ -1005,7 +1008,10 @@ where
                 }
                 continue;
             }
-            Ok(PushOutcome::Complete(id, bytes)) => (id, bytes),
+            Ok(PushOutcome::Complete(id, bytes)) => {
+                tracing::debug!(peer = %peer.member, len = bytes.len(), "MESHRX reassembler=COMPLETE → MLS decode");
+                (id, bytes)
+            }
             Err(e) => {
                 tracing::warn!(peer = %peer.member, error = %e, "dropping a malformed chunk");
                 delivery.ack.ack();
@@ -1027,6 +1033,7 @@ where
         if let Some(ch) = &mls {
             match ch.decode(&complete) {
                 MlsDecode::Deliver(from, env) => {
+                    tracing::debug!(peer = %peer.member, from = %from, "MESHRX decode=DELIVER (an application message)");
                     sink.peer_seen(&peer.member).await;
                     if sink.deliver(&from, *env).await.is_err() {
                         tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
@@ -1035,6 +1042,7 @@ where
                     ack_all(acks);
                 }
                 MlsDecode::Keepalive => {
+                    tracing::debug!(peer = %peer.member, "MESHRX decode=KEEPALIVE");
                     // authenticated liveness ping (mesh self-heal Stage 2):
                     // stamps presence exactly like a delivered envelope, but
                     // carries no event — so it keeps this leg's `last_seen`
@@ -1044,6 +1052,7 @@ where
                     ack_all(acks);
                 }
                 MlsDecode::Probe => {
+                    tracing::debug!(peer = %peer.member, "MESHRX decode=PROBE");
                     // a solicited probe (mesh verify-at-open): stamp presence
                     // like a keepalive, AND warm the sender back once so it can
                     // confirm this leg round-trips. The warm-back is a keepalive
@@ -1053,6 +1062,7 @@ where
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
+                    tracing::debug!(peer = %peer.member, "MESHRX decode=EPOCH_ADVANCED (a re-key commit merged)");
                     ack_all(acks);
                     if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
                         return RecvEnd::EngineGone;
