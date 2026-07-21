@@ -157,8 +157,15 @@ lives on `link_up`, **founding gets it for free** — a leg born dead at foundin
 (the Test10 case ff8923c named) is probed and, if unheard within `T_verify`,
 rotated in seconds, instead of sitting yellow for the full deaf window. **No
 separate blocking founding handshake is needed** — which is exactly the
-non-goal-blocking posture (§1). *(Impl check: confirm `build_real_net` wires the
-same `link_up` sink as `build_real_net_shared`.)*
+non-goal-blocking posture (§1).
+
+**Impl check — CONFIRMED (2026-07-21):** `build_real_net` (`net.rs:811`, the
+founding path) delegates straight to `build_real_net_shared` (`net.rs:830`),
+which spawns the supervisor with the **same** `CmdSink` (`net.rs:862`) as the
+resume path. `CmdSink::link_up` records `Command::NetLinkUp` → `cmd_net_link_up`
+→ `arm_verify`. Founding and resume share one code path, so verify-on-link_up
+fires identically at founding mesh-up and at cold reopen — no founding-specific
+code.
 
 ### 4.4 The solicited probe frame (Phase 2 — decided, §7 Q3)
 
@@ -199,29 +206,41 @@ mid-window probe retry derives from it (`MESH_VERIFY_SECS / 2`).
   mesh_up`. No chain change, no `roster_canonical_bytes` / `molt-chain-*` bump
   (none of this is chained).
 
-## 6. Implementation plan (phased, test-first)
+## 6. Implementation plan (phased, test-first) — DONE (2026-07-21)
 
-Each phase lands green on master with its own tests before the next.
+Each phase landed green on master with its own tests, reviewed, clippy-clean.
 
-- **Phase 1 — Honest-from-t=0.** `recompute_net_health`: a linked-up-never-heard
-  leg reads `Degraded("verifying")`. **Red first:** a just-`link_up`-never-heard
-  leg reads `Ok` today (see the existing `a_leg_heard_from_since_mesh_up_stays_ok`
-  test neighbourhood, `net.rs:2966`) — must go `Degraded`. Kills the flap alone.
-- **Phase 2 — Solicited probe frame.** `MESH_PROBE_TAG` + `MlsDecode::Probe` +
-  warm-back-once. Unit-test the frame decode and the **no-echo** property (a probe
-  provokes exactly one keepalive back, never another probe), and that an unknown
-  `\x00`-control tag decodes to a dropped no-op. Must land before Phase 3 (which
-  uses it).
-- **Phase 3 — Verify-on-link_up + fast rotate.** `NetMeshVerify` one-shot armed in
-  `cmd_net_link_up` (sends the probe + schedules the `T_verify` check); handler
-  rotates an unverified leg. **Loopback test using `expire_queue`:** a born-dead
-  leg at open rotates within ~`T_verify` and delivery resumes; a healthy leg is
-  verified by the probe round-trip and never rotates.
-- **Phase 4 — Founding parity + real-SMP.** Confirm the `link_up` hook fires at
-  `cmd_net_mesh_ready` (impl check §4.3); extend `mesh_restart_over_smp.rs` with an
-  idle-then-cold-reopen case; the `#[ignore]`d real-SMP verify proof.
-- **Phase 5 — Land.** `/code-review` each phase's diff; `cargo clippy
-  --all-targets` = 0; green on master.
+- **Phase 1 — Honest-from-t=0.** ✅ `fff239a`. `recompute_net_health`: a
+  linked-up-never-heard leg reads `Degraded("verifying {peer}")` from t=0, not a
+  false `Ok`. New `a_fresh_live_leg_reads_verifying_not_ok` (red first: read `Ok`);
+  two unit tests + three loopback integration tests adjusted for the honest
+  semantic (`Ok` now requires bidirectional confirmation, not a live SUB).
+- **Phase 2 — Solicited probe frame.** ✅ `94f6a7c`. `MESH_PROBE_TAG` +
+  `MlsDecode::Probe`; the receiver stamps `peer_seen` AND warms back once via
+  `EngineSink::probe_received` → `Command::NetMeshWarm` → `warm_leg` (one
+  keepalive, never a probe → no echo by construction). Unknown `\x00`-control tag
+  → dropped no-op. molt-net decode unit test + engine warm-back test.
+- **Phase 3 — Verify-on-link_up + fast rotate.** ✅ `513f4cd`. `arm_verify` on
+  every `link_up` probes now + mid-window, then arms the `NetMeshVerify` one-shot
+  at `MESH_VERIFY_SECS`; the handler rotates a still-`leg_unverified` leg via the
+  existing `cmd_net_mesh_rotate`. `leg_unverified` is the single source of
+  "unverified" (the Phase-1 amber reuses it). Unit test for the gate + a
+  `mesh_rotate` integration test that the one-shot is gated (a verified leg is
+  left alone).
+- **Phase 4 — Founding parity + real-SMP.** ✅ Founding parity **confirmed by
+  inspection** (§4.3): `build_real_net` → `build_real_net_shared` → the same
+  `CmdSink.link_up`, so founding mesh-up runs verify-at-open with no extra code.
+  Real-SMP: the mechanism is exercised on cold reopen by the existing
+  `#[ignore]`d `mesh_restart_over_smp` restart-matrix test (run `-- --ignored`
+  against a live server); a dedicated idle-expiry heal test is impractical to run
+  fast (the public server's idle-expiry window is unknown/long) and the loopback
+  `expire_queue` seam is not wired to the engine test harness, so the born-dead
+  heal is proven by the `leg_unverified` gate + `cmd_net_mesh_rotate` tests rather
+  than a live idle-expiry.
+- **Phase 5 — Land.** ✅ Each phase reviewed + `cargo clippy --all-targets` = 0 +
+  green on master. Full `molt-core`/`molt-net`/`molt-engine`/`molt-mcp` suites
+  green including `two_instances` (real engines verify each other → the one-shot
+  never spuriously rotates).
 
 ## 7. Questions — settled 2026-07-21
 
@@ -249,3 +268,18 @@ Each phase lands green on master with its own tests before the next.
   **`T_verify = 10 s` conservative** (Q1); Q2/Q4/Q5 confirmed to the recommended
   defaults. Build order: honest health → probe frame → verify-on-link_up → founding
   parity → land.
+- 2026-07-21 — **all phases built + landed green on master** (`fff239a`,
+  `94f6a7c`, `513f4cd` + the doc), reviewed, clippy `--all-targets` = 0.
+  Adversarial correctness review over `ce5baa6..HEAD` found **no substantive
+  bugs**. One conscious tradeoff it surfaced, recorded here: the "a false positive
+  is harmless — the rotate GCs its unused queue on timeout" reasoning covers the
+  *no-reply* case; a genuinely healthy-but-**slow** leg whose round-trip exceeds
+  `T_verify` (plausible only on a degraded Tor circuit — sub-second on direct SMP)
+  will instead trigger one *real* rotate/rebuild that converges (a few in-flight
+  messages may be replay-rejected at peers, per the crate's MLS-window behaviour).
+  It is bounded — the 60 s rotate cooldown caps it to one per peer per minute, and
+  the leg verifies on its first post-rebuild delivery and stops re-rotating (a new
+  link_up is needed to re-arm). Rebuilding a > 10 s-RTT leg is arguably a true
+  positive (that circuit *is* degraded); left as-is. If moltrepublic is later run
+  primarily over slow Tor circuits, raise `MESH_VERIFY_SECS` or gate the
+  verify-rotate on transport type.
