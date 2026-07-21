@@ -151,6 +151,17 @@ fn main() -> anyhow::Result<()> {
         found = workspaces.len(),
         "workspace directory ready"
     );
+    // diagnostics: MOLT_MESH_PROBE_OPEN names the workspace to auto-open on start
+    // so the mesh transport probe (see molt-engine `probe`) can run headless.
+    // Resolved to its id here while the scanned list is in hand.
+    let probe_open_id: Option<String> = std::env::var("MOLT_MESH_PROBE_OPEN")
+        .ok()
+        .and_then(|want| {
+            workspaces
+                .iter()
+                .find(|w| w.name == want || w.id == want)
+                .map(|w| w.id.clone())
+        });
     let anonymity = &config.transport.anonymity;
     tracing::info!(
         network = ?anonymity.network,
@@ -235,6 +246,14 @@ fn main() -> anyhow::Result<()> {
         });
     }
     tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
+
+    // diagnostics: auto-open the probe target so its per-leg SMP self-test runs
+    // (headless); the probe listens ~20 s, so run_headless keeps the runtime up.
+    if let Some(id) = probe_open_id {
+        tracing::info!(target: "molt_mesh_probe", %id, "auto-opening the workspace for the mesh probe");
+        let w = wallet.clone();
+        let _ = rt.block_on(async move { w.execute(molt_core::Command::OpenWorkspace { id }).await });
+    }
 
     let shutdown_wallet = wallet.clone();
     let result = if config.node.headless {

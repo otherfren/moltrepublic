@@ -48,11 +48,16 @@ const MARKER: &[u8] = b"MOLT-MESH-PROBE:";
 pub(crate) enum LegVerdict {
     /// `SUB → Err`: the queue is gone (server-side expiry/deletion).
     QueueGone,
-    /// `SUB → Ok` and a frame was delivered — the queue works end-to-end, so
-    /// the deafness is above the transport, not the server.
+    /// `SUB → Ok` and a frame arrived that UNWRAPPED (our probe marker, or a
+    /// real waiting message) — the queue AND our wrap key both work, so the
+    /// deafness is above the transport, not the server.
     AliveDelivering,
-    /// `SUB → Ok` but nothing arrived in the window — the peer sent nothing, or
-    /// a queue-id split (compare ids across the two nodes' logs).
+    /// `SUB → Ok`, frames DO arrive, but our resumed wrap key cannot open them —
+    /// a wrap-key mismatch surviving resume. The transport delivers; we can't
+    /// read it. A moltrepublic bug, not the server.
+    AliveWrapMismatch,
+    /// `SUB → Ok` but nothing arrived in the window — the peer sent nothing.
+    /// The queue is alive (not expired), just quiet.
     AliveButSilent,
 }
 
@@ -133,10 +138,13 @@ async fn probe_leg(
         ),
     }
 
-    // (3) listen — receiving the peer's marker proves the queue DELIVERS
+    // (3) listen — classify every arriving frame: our marker, a real frame that
+    // UNWRAPS with our key (a waiting message), or a frame our key can't open
+    // (a wrap-key mismatch). The distinction pins the bug.
     let deadline = tokio::time::Instant::now() + listen;
     let mut got_probe = false;
-    let mut got_other: u32 = 0;
+    let mut backlog: u32 = 0; // unwrapped OK, not our marker — a real waiting frame
+    let mut undecryptable: u32 = 0; // arrived but our wrap key could not open it
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
@@ -147,10 +155,23 @@ async fn probe_leg(
                         tracing::info!(
                             target: "molt_mesh_probe", %me, peer = %peer.member,
                             from = %String::from_utf8_lossy(&bytes),
-                            "RECV → the peer's PROBE frame arrived — the queue DELIVERS end-to-end"
+                            "RECV → the peer's PROBE marker arrived and UNWRAPPED — queue delivers AND our wrap key matches"
                         );
                     }
-                    _ => got_other += 1,
+                    Ok(_) => {
+                        backlog += 1;
+                        tracing::info!(
+                            target: "molt_mesh_probe", %me, peer = %peer.member,
+                            "RECV → a real frame arrived and UNWRAPPED (not a probe) — a waiting message the transport delivered"
+                        );
+                    }
+                    Err(_) => {
+                        undecryptable += 1;
+                        tracing::info!(
+                            target: "molt_mesh_probe", %me, peer = %peer.member,
+                            "RECV → a frame arrived but our wrap key could NOT open it — a WRAP-KEY MISMATCH (the frame is on the queue; our resumed key is wrong)"
+                        );
+                    }
                 }
                 d.ack.ack();
             }
@@ -159,26 +180,25 @@ async fn probe_leg(
     }
 
     // (4) per-leg verdict
-    if got_probe {
+    if got_probe || backlog > 0 {
         tracing::info!(
-            target: "molt_mesh_probe", %me, peer = %peer.member,
-            "VERDICT: queue ALIVE + DELIVERING — the deafness is ABOVE the transport \
-             (MLS/mesh/resume wiring), NOT server expiry"
+            target: "molt_mesh_probe", %me, peer = %peer.member, backlog, undecryptable,
+            "VERDICT: queue ALIVE + DELIVERING (frames unwrap with our key) — the deafness is \
+             ABOVE the transport, NOT server expiry"
         );
         LegVerdict::AliveDelivering
-    } else if got_other > 0 {
+    } else if undecryptable > 0 {
         tracing::info!(
-            target: "molt_mesh_probe", %me, peer = %peer.member, frames = got_other,
-            "VERDICT: queue ALIVE + delivering real traffic (peer's probe not seen — is the \
-             PEER also in probe mode?); NOT server expiry"
+            target: "molt_mesh_probe", %me, peer = %peer.member, undecryptable,
+            "VERDICT: queue ALIVE, frames ARRIVE but our wrap key can't open them — a WRAP-KEY \
+             MISMATCH surviving resume (our bug, above the transport, NOT the server)"
         );
-        LegVerdict::AliveDelivering
+        LegVerdict::AliveWrapMismatch
     } else {
         tracing::info!(
             target: "molt_mesh_probe", %me, peer = %peer.member, rcv_id = %rcv_id, snd_id = %snd_id,
-            "VERDICT: SUB OK but NOTHING delivered in the window — either the peer sent nothing \
-             (run it in probe mode too), or a queue-id SPLIT: compare THIS leg's snd_id against \
-             the PEER's rcv_id in its log — they must be equal"
+            "VERDICT: SUB OK but NOTHING arrived in the window — the queue is ALIVE (not expired), \
+             the peer just sent nothing"
         );
         LegVerdict::AliveButSilent
     }
