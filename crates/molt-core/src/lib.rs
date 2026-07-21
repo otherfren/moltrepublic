@@ -3166,6 +3166,18 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The **verify-at-open one-shot** (engine-internal, mesh verify-at-open
+    /// Fix A): armed when a leg's subscription comes up, it fires after
+    /// `MESH_VERIFY_SECS`; if the leg has still delivered NOTHING since coming up
+    /// (its probes went unanswered), the leg is re-established via a rotate.
+    /// The node's own transport speaking — never an MCP tool.
+    NetMeshVerify {
+        /// The leg to verify (rotate if still unheard).
+        peer: MemberId,
+        /// Mesh incarnation (a torn-down/rebuilt mesh drops the stale verify).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Self-initiated **mesh rotate** (engine-internal, mesh self-heal Stage 3):
     /// a leg to `peer` is detected live-but-deaf, so this node mints a fresh
     /// inbound queue for it and re-announces the new address over the still-

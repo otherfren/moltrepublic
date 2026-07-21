@@ -91,3 +91,67 @@ async fn a_self_initiated_rotate_broadcasts_a_nonced_reannounce() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+/// Mesh verify-at-open (Fix A): the verify one-shot is GATED — it re-establishes
+/// only an unverified leg, and leaves a VERIFIED one alone. On the reliable
+/// loopback mesh the founder actually hears member-b, so its leg verifies
+/// (net_health Ok); firing `NetMeshVerify` then no-ops — no rotate, no
+/// re-announce. This exercises the `cmd_net_verify` → `leg_unverified` gate
+/// against a REAL net (not the fixture). The complementary direction — an
+/// UNVERIFIED leg IS rotated — is the `leg_unverified` predicate (unit-tested in
+/// the engine) feeding the very `cmd_net_mesh_rotate` the sibling test above
+/// drives directly, and the e2e born-dead heal is the real-SMP proof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_verify_one_shot_leaves_a_verified_leg_alone() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let (a, hub, member_mesh, member_mls, _id) = found_with_mesh(&root_a).await;
+    a.execute(Command::CreateFinish).await.expect("enter the workspace");
+
+    let links: Vec<PeerLink> = member_mesh.iter().filter_map(PeerLink::from_mesh).collect();
+    let member_group = MlsMember::restore(&member_mls).expect("restore member MLS");
+    let member_sink = CaptureSink::default();
+    let (_wake, wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub,
+        NetConfig::fast("member-b".to_string(), links, 11),
+        MemLog::new(),
+        MemStateStore::new(),
+        member_sink.clone(),
+        wake_rx,
+        Some(MlsChannel::new(member_group)),
+    );
+
+    // the leg verifies once the founder hears member-b over the reliable mesh
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if read_session(&a).await.net_health == NetHealth::Ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the leg never verified (heard) over loopback: {:?}",
+            read_session(&a).await.net_health
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // a VERIFIED leg is gated out of the verify rotate — firing the one-shot is a
+    // no-op (no fresh queue, no re-announce)
+    a.execute(Command::NetMeshVerify { peer: "member-b".to_string(), generation: None })
+        .await
+        .expect("verify");
+
+    // no re-establish reaches member-b: over a window that comfortably covers a
+    // rotate's broadcast, no MeshAnnounced arrives (founding events aside)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let got = member_sink.messages();
+    assert!(
+        !got.iter().any(|(from, env)| from == "founder-a"
+            && matches!(&env.body, WorkspaceEvent::MeshAnnounced { .. })),
+        "a verified leg must not be rotated by the verify one-shot; got {:?}",
+        got.iter()
+            .map(|(f, e)| (f.clone(), format!("{:?}", e.body)))
+            .collect::<Vec<_>>()
+    );
+}

@@ -1150,6 +1150,9 @@ impl State {
             Command::NetMeshWarm { peer, generation } => {
                 self.cmd_net_mesh_warm(peer, generation)
             }
+            Command::NetMeshVerify { peer, generation } => {
+                self.cmd_net_verify(peer, generation)
+            }
             Command::NetMeshRotate { peer, generation } => {
                 self.cmd_net_mesh_rotate(peer, generation)
             }

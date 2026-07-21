@@ -83,6 +83,15 @@ pub(crate) const MESH_DEAF_NEW_SECS: u64 = 45;
 /// cadence never drifts far past this.
 pub(crate) const MESH_KEEPALIVE_SECS: u64 = 120;
 
+/// Verify-at-open window (mesh verify-at-open, Fix A): when a leg's subscription
+/// comes up, this node probes the peer and — if nothing has been heard back
+/// after this many seconds (the probes went unanswered) — re-establishes the leg
+/// with a rotate, instead of waiting for the ~45 s born-dead deaf window and the
+/// 30 s presence-tick beat. Conservative: 1 RTT over SMP is sub-second, so 10 s
+/// tolerates a slow round-trip while still healing a born-dead leg in ~10 s. A
+/// false positive is harmless — the rotate GCs its unused queue on timeout.
+pub(crate) const MESH_VERIFY_SECS: u64 = 10;
+
 /// Minimum seconds between self-initiated **mesh rotates** for one peer
 /// (Stage 3, `documents/mesh_selfheal.md`): the periodic deaf-leg detector
 /// re-evaluates every presence tick, so without a cooldown it would spawn a
@@ -1906,6 +1915,24 @@ impl State {
         }
     }
 
+    /// The verify-at-open one-shot fired ([`Command::NetMeshVerify`], Fix A): if
+    /// the leg is still UNVERIFIED — its probes went unanswered, nothing heard
+    /// since mesh-up — re-establish it now with a rotate (fresh queue +
+    /// re-announce, the existing self-heal path), in ~`MESH_VERIFY_SECS` instead
+    /// of the ~45 s born-dead window and 30 s presence beat. A leg that has since
+    /// been heard is verified and this no-ops; a rebuilt mesh is dropped by the
+    /// generation guard, and the rotate's own cooldown bounds churn.
+    pub(crate) fn cmd_net_verify(
+        &mut self,
+        peer: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) && self.leg_unverified(&peer) {
+            let _ = self.cmd_net_mesh_rotate(peer, None);
+        }
+        Ok(Reply::Ack)
+    }
+
     // ---- the P5 appliers (live wire arrivals AND P6 drains) --------------
     //
     // Each resolves the target by stable id; an unknown target parks the
@@ -2051,9 +2078,11 @@ impl State {
         if self.net_generation_current(generation) {
             self.net_link_down.remove(&member);
             self.mesh_up.insert(member.clone(), self.presence_now());
-            // warm this peer's inbound queue right away so it cannot idle-expire
-            // in the gap before the first keepalive tick (the born-dead window)
-            self.warm_leg(&member);
+            // verify-at-open (Fix A): probe this peer now (which also warms its
+            // inbound queue so it cannot idle-expire) and arm the T_verify
+            // one-shot — if the probes go unanswered the leg is re-established by
+            // a rotate in ~seconds, not the ~45 s born-dead window.
+            self.arm_verify(&member);
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -2155,6 +2184,18 @@ impl State {
             .collect()
     }
 
+    /// Whether a leg is UP but still UNVERIFIED this incarnation: its
+    /// subscription is live (in `mesh_up`, not `net_link_down`) yet nothing has
+    /// been delivered over it since it came up (`last_seen < mesh_up`). The
+    /// single source of "unverified": the verify-at-open one-shot rotates such a
+    /// leg ([`Self::cmd_net_verify`]), and `recompute_net_health` shows it amber
+    /// "verifying" until a frame is heard.
+    fn leg_unverified(&self, peer: &MemberId) -> bool {
+        self.mesh_up.get(peer).is_some_and(|up| {
+            !self.net_link_down.contains_key(peer) && self.member_last_seen(peer) < *up
+        })
+    }
+
     /// Re-derive `session.net_health` from the runtime leg maps plus the
     /// self-heal liveness cross-check. `Down` is the open/config path's
     /// fail-closed verdict and is NEVER overridden here; otherwise a
@@ -2195,14 +2236,11 @@ impl State {
         // link-down.
         let verifying: Vec<MemberId> = self
             .mesh_up
-            .iter()
-            .filter(|(m, up)| {
-                self.member_last_seen(m) < **up
-                    && !self.net_link_down.contains_key(*m)
-                    && !deaf.contains(*m)
-                    && !reconnecting.contains(*m)
+            .keys()
+            .filter(|m| {
+                self.leg_unverified(m) && !deaf.contains(*m) && !reconnecting.contains(*m)
             })
-            .map(|(m, _)| m.clone())
+            .cloned()
             .collect();
         let health = if self.net_link_down.is_empty()
             && self.net_send_stuck.is_empty()
@@ -2295,45 +2333,46 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Encrypt one keepalive tag on the SHARED group and send it onto `peer`'s
-    /// inbound queue (best-effort, off the actor). Shared by the periodic
-    /// keepalive round and the immediate per-leg warm on link-up.
+    /// Encrypt one control `tag` on the SHARED group and send it onto `peer`'s
+    /// inbound queue (best-effort). The single send path for both control
+    /// frames: [`molt_net::MESH_KEEPALIVE_TAG`] (warm the queue / prove liveness)
+    /// and [`molt_net::MESH_PROBE_TAG`] (verify-at-open: also solicit a warm-back).
+    async fn send_ping(
+        transport: crate::founding::RitualTransport,
+        group: Arc<Mutex<molt_net::MlsMember>>,
+        peer: PeerLink,
+        tag: &'static [u8],
+    ) {
+        // one ratchet advance per ping, on the shared group (same Arc the
+        // supervisor uses — locked in sequence)
+        let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(tag).ok()) else {
+            tracing::debug!(member = %peer.member, "encrypting the mesh ping failed");
+            return;
+        };
+        // a fresh random id per ping: the receiver's reassembler dedups by
+        // message id, so a reused id would be dropped before it could stamp
+        // liveness (and a random 16 bytes never collides with the outbox's
+        // derived ids)
+        let mut idb = [0u8; 16];
+        if getrandom::getrandom(&mut idb).is_err() {
+            return;
+        }
+        if let Err(e) =
+            supervisor::send_framed(&transport, &peer.snd, &peer.wrap_out, molt_net::MsgId(idb), &ct)
+                .await
+        {
+            tracing::debug!(member = %peer.member, error = %e, "mesh ping send failed");
+        }
+    }
+
+    /// Spawn one keepalive ping off the actor (the periodic round and the
+    /// warm-back that answers a probe).
     fn spawn_keepalive(
         transport: crate::founding::RitualTransport,
         group: Arc<Mutex<molt_net::MlsMember>>,
         peer: PeerLink,
     ) {
-        tokio::spawn(async move {
-            // one ratchet advance per ping, on the shared group (same Arc the
-            // supervisor uses — locked in sequence)
-            let Some(ct) = group
-                .lock()
-                .ok()
-                .and_then(|mut g| g.encrypt(molt_net::MESH_KEEPALIVE_TAG).ok())
-            else {
-                tracing::debug!(member = %peer.member, "encrypting the mesh keepalive failed");
-                return;
-            };
-            // a fresh random id per ping: the receiver's reassembler dedups by
-            // message id, so a reused id would be dropped before it could stamp
-            // liveness (and a random 16 bytes never collides with the outbox's
-            // derived ids)
-            let mut idb = [0u8; 16];
-            if getrandom::getrandom(&mut idb).is_err() {
-                return;
-            }
-            if let Err(e) = supervisor::send_framed(
-                &transport,
-                &peer.snd,
-                &peer.wrap_out,
-                molt_net::MsgId(idb),
-                &ct,
-            )
-            .await
-            {
-                tracing::debug!(member = %peer.member, error = %e, "mesh keepalive send failed");
-            }
-        });
+        tokio::spawn(Self::send_ping(transport, group, peer, molt_net::MESH_KEEPALIVE_TAG));
     }
 
     /// Warm one peer's inbound queue immediately (mesh self-heal): send a
@@ -2361,6 +2400,65 @@ impl State {
             return;
         };
         Self::spawn_keepalive(transport, group, peer);
+    }
+
+    /// Verify-at-open (Fix A): probe `member`'s leg now and once more mid-window,
+    /// then arm the [`MESH_VERIFY_SECS`] one-shot ([`Command::NetMeshVerify`]). A
+    /// healthy peer answers a probe with a warm-back within one round trip (its
+    /// `last_seen` advances past mesh-up → the leg verifies → the one-shot
+    /// no-ops); a born-dead leg's probes go unanswered and the one-shot rotates
+    /// it in ~seconds instead of the ~45 s deaf window. The probe doubles as the
+    /// queue warm (traffic keeps the peer's inbound alive). Off the actor
+    /// (best-effort), modelled on the rotate task; a rebuilt mesh drops the stale
+    /// one-shot via the generation guard.
+    fn arm_verify(&self, member: &MemberId) {
+        let Some(net) = self.net.as_ref() else {
+            return;
+        };
+        if !net.is_real() {
+            return;
+        }
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+            return;
+        };
+        let Some(peer) = net
+            .mesh()
+            .iter()
+            .find(|l| l.member == *member)
+            .and_then(PeerLink::from_mesh)
+        else {
+            return;
+        };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        let generation = self.net_generation;
+        let half = std::time::Duration::from_secs(MESH_VERIFY_SECS) / 2;
+        let peer_name = member.clone();
+        tokio::spawn(async move {
+            // probe now, and once more mid-window — a solicited warm-back lets us
+            // confirm the leg round-trips even if the peer's own warm was lost
+            Self::send_ping(
+                transport.clone(),
+                group.clone(),
+                peer.clone(),
+                molt_net::MESH_PROBE_TAG,
+            )
+            .await;
+            tokio::time::sleep(half).await;
+            Self::send_ping(transport, group, peer, molt_net::MESH_PROBE_TAG).await;
+            tokio::time::sleep(half).await;
+            let (tx, _rx) = oneshot::channel();
+            let _ = cmd_tx
+                .send(Envelope {
+                    cmd: Command::NetMeshVerify {
+                        peer: peer_name,
+                        generation: Some(generation),
+                    },
+                    reply: tx,
+                })
+                .await;
+        });
     }
 
     /// Record a real sighting on the active workspace entry's pill. The
@@ -2925,6 +3023,32 @@ mod tests {
             }
             other => panic!("expected Degraded verifying for the unverified leg, got {other:?}"),
         }
+    }
+
+    /// Verify-at-open decision (Phase 3): a leg is UNVERIFIED the instant its
+    /// subscription comes up (nothing heard yet) and clears the moment a frame is
+    /// delivered; a leg the watchdog reports down is NOT counted unverified (it
+    /// has its own reason), and an unknown peer is never a leg. This predicate
+    /// gates both the `NetMeshVerify` one-shot's rotate and the amber "verifying".
+    #[test]
+    fn leg_unverified_tracks_link_up_and_delivery() {
+        let mut st = presence_fixture();
+        // no mesh_up yet → not a leg at all
+        assert!(!st.leg_unverified(&"bob".to_string()), "no leg before link_up");
+        // link comes up, nothing heard over it → unverified
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert!(st.leg_unverified(&"bob".to_string()), "a fresh live leg is unverified");
+        // a frame finally lands → verified, stays verified
+        st.clock_override = Some(T + 5);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard");
+        assert!(!st.leg_unverified(&"bob".to_string()), "a heard leg is verified");
+        // a leg the resubscribe watchdog reports down is not ALSO "unverified"
+        // (the down reason wins; verify must not rotate a leg already re-dialing)
+        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
+        assert!(st.leg_unverified(&"cid".to_string()), "cid is up but unheard");
+        st.cmd_net_link_down("cid".to_string(), "subscription ended".to_string(), None)
+            .expect("ack");
+        assert!(!st.leg_unverified(&"cid".to_string()), "a down leg is not 'unverified'");
     }
 
     /// A peer whose inbound subscription is live but that has delivered
