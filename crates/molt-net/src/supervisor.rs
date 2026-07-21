@@ -132,6 +132,19 @@ impl MlsChannel {
                 if plaintext == crate::MESH_KEEPALIVE_TAG {
                     return MlsDecode::Keepalive;
                 }
+                // a solicited mesh probe (verify-at-open): authenticated presence
+                // that ALSO asks the receiver to warm the sender back once, so a
+                // node can deterministically confirm its leg round-trips.
+                if plaintext == crate::MESH_PROBE_TAG {
+                    return MlsDecode::Probe;
+                }
+                // the `\x00molt-mesh-*` space is reserved for control frames; a
+                // JSON envelope never starts with NUL. An unknown control tag (a
+                // newer control frame this build predates) is dropped as a no-op,
+                // never mis-parsed as an event.
+                if plaintext.first() == Some(&0) {
+                    return MlsDecode::Discard;
+                }
                 match serde_json::from_slice::<EventEnvelope>(&plaintext) {
                     Ok(env) => MlsDecode::Deliver(from, Box::new(env)),
                     Err(_) => MlsDecode::Discard,
@@ -160,6 +173,11 @@ enum MlsDecode {
     /// authenticated presence with no payload — stamp `peer_seen`, deliver
     /// nothing, ack.
     Keepalive,
+    /// A solicited mesh probe (mesh verify-at-open, Fix A): authenticated
+    /// presence like a keepalive, but the receiver ALSO warms the sender back
+    /// once (`probe_received`) so the prober can confirm its leg round-trips.
+    /// The warm-back is a keepalive, never a probe — no echo.
+    Probe,
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     EpochAdvanced,
     /// Encrypted at an epoch this node has not reached — hold it (acks
@@ -245,6 +263,14 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     /// A previously failing send to `member` went through again — the
     /// backoff exit signal. Default no-op (Stage B, additive).
     fn send_ok(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
+        async {}
+    }
+    /// A solicited mesh probe arrived from `member` (mesh verify-at-open): the
+    /// engine should warm that peer back once (`warm_leg`) so the prober can
+    /// confirm its leg round-trips. Default no-op so existing sinks keep
+    /// compiling and a stub simply does not answer (additive).
+    fn probe_received(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
         let _ = member;
         async {}
     }
@@ -764,6 +790,14 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     sink.peer_seen(&peer.member).await;
                     ack_all(held);
                 }
+                MlsDecode::Probe => {
+                    // a probe held for its epoch: stamp presence and warm the
+                    // sender back once (verify-at-open), still no payload
+                    progressed = true;
+                    sink.peer_seen(&peer.member).await;
+                    sink.probe_received(&peer.member).await;
+                    ack_all(held);
+                }
                 MlsDecode::EpochAdvanced => {
                     progressed = true;
                     ack_all(held);
@@ -1007,6 +1041,15 @@ where
                     // fresh (feeding the Stage 1 deaf-leg cross-check) without
                     // touching the log.
                     sink.peer_seen(&peer.member).await;
+                    ack_all(acks);
+                }
+                MlsDecode::Probe => {
+                    // a solicited probe (mesh verify-at-open): stamp presence
+                    // like a keepalive, AND warm the sender back once so it can
+                    // confirm this leg round-trips. The warm-back is a keepalive
+                    // (the engine's `warm_leg`), never a probe — so no echo.
+                    sink.peer_seen(&peer.member).await;
+                    sink.probe_received(&peer.member).await;
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
@@ -1299,6 +1342,48 @@ mod tests {
         assert!(
             matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
             "a real envelope still classifies as Deliver"
+        );
+    }
+
+    /// Mesh verify-at-open: a solicited probe decodes to `Probe` (presence +
+    /// warm-back), distinct from a plain `Keepalive`, while an UNKNOWN control
+    /// frame in the reserved `\x00molt-mesh-*` space is dropped as a no-op — a
+    /// newer control tag this build predates must never be mis-parsed as an
+    /// event or answered.
+    #[test]
+    fn a_probe_classifies_as_probe_and_an_unknown_control_tag_drops() {
+        use ed25519_dalek::SigningKey;
+        let sk = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut founder = MlsMember::new(&sk(1), "founder").expect("founder");
+        let bob = MlsMember::new(&sk(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let recv = MlsChannel::new(bob);
+
+        // a probe: its own class, NOT a keepalive (so the recv loop warms back)
+        let probe = founder.encrypt(crate::MESH_PROBE_TAG).expect("encrypt probe");
+        assert!(
+            matches!(recv.decode(&probe), MlsDecode::Probe),
+            "the probe tag classifies as a solicited probe, not a keepalive"
+        );
+
+        // a keepalive is still its own class (never a probe — no echo)
+        let ka = founder.encrypt(crate::MESH_KEEPALIVE_TAG).expect("encrypt keepalive");
+        assert!(
+            matches!(recv.decode(&ka), MlsDecode::Keepalive),
+            "a keepalive stays a keepalive — it must not provoke a warm-back"
+        );
+
+        // an unknown NUL-prefixed control frame: dropped, never mis-parsed
+        let unknown = founder.encrypt(b"\x00molt-mesh-future-v9").expect("encrypt unknown");
+        assert!(
+            matches!(recv.decode(&unknown), MlsDecode::Discard),
+            "an unknown reserved control tag is a dropped no-op"
         );
     }
 

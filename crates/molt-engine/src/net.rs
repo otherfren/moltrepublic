@@ -388,6 +388,15 @@ impl EngineSink for CmdSink {
             })
             .await;
     }
+
+    async fn probe_received(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetMeshWarm {
+                peer: member.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
 }
 
 /// The log-backed outbox source of a persisted workspace: reads pending
@@ -2046,6 +2055,25 @@ impl State {
             // in the gap before the first keepalive tick (the born-dead window)
             self.warm_leg(&member);
             self.recompute_net_health();
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Warm a peer back in answer to a solicited probe (mesh verify-at-open,
+    /// Fix A): a probe arrived from `peer`, so send it exactly one keepalive
+    /// (`warm_leg`) — the deterministic pong that lets the prober confirm its
+    /// leg round-trips. The probe's own arrival already stamped `peer_seen`
+    /// (the supervisor calls it alongside `probe_received`), so this only owes
+    /// the reciprocal warm. Best-effort and idempotent (a keepalive carries
+    /// nothing); a probe on a torn-down mesh is dropped by the generation guard,
+    /// and the warm-back is a keepalive, never a probe — so there is no echo.
+    pub(crate) fn cmd_net_mesh_warm(
+        &mut self,
+        peer: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            self.warm_leg(&peer);
         }
         Ok(Reply::Ack)
     }

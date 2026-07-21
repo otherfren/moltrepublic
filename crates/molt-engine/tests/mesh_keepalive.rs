@@ -129,3 +129,52 @@ async fn an_idle_keepalive_stamps_presence_and_an_active_mesh_sends_none() {
         "an actively-chatting mesh must send no extra keepalive"
     );
 }
+
+/// Mesh verify-at-open (Fix A): the warm-back a solicited probe triggers —
+/// `NetMeshWarm` → `warm_leg` sends the peer exactly one keepalive, the
+/// deterministic pong that lets a prober confirm its leg round-trips. Each warm
+/// stamps the peer's presence and delivers NO event (it is a keepalive, never a
+/// probe — so there is no echo). The probe FRAME that triggers this over the
+/// wire, and the fact that a keepalive stays a keepalive, are pinned in
+/// molt-net's `a_probe_classifies_as_probe_and_an_unknown_control_tag_drops`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mesh_warm_back_sends_the_peer_one_keepalive_per_call() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let (a, hub, member_mesh, member_mls, _id) = found_with_mesh(&root_a).await;
+    a.execute(Command::CreateFinish).await.expect("enter the workspace");
+    let (member_sink, _member_sup) = spawn_member(hub, &member_mesh, &member_mls);
+
+    let founder_sightings =
+        |s: &CaptureSink| s.seen().iter().filter(|m| *m == "founder-a").count();
+
+    // let any initial link-up warm settle into a stable baseline (the founder is
+    // otherwise silent — its keepalive ticker is a 120 s idle beat)
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let base = founder_sightings(&member_sink);
+
+    // three warm-backs, as three probes would trigger: each sends exactly one
+    // keepalive, so the member's founder-a sightings rise by three. Driving more
+    // than one isolates the warm-back from a possible stray late initial warm.
+    for _ in 0..3 {
+        a.execute(Command::NetMeshWarm { peer: "member-b".to_string(), generation: None })
+            .await
+            .expect("warm member-b back");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if founder_sightings(&member_sink) >= base + 3 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the warm-backs never reached the peer (base {base}, now {})",
+            founder_sightings(&member_sink)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // (that a warm-back is a keepalive and carries NO event — the no-echo
+    // property — is pinned structurally by the molt-net decode test; here the
+    // founding also broadcasts real governance events to the member, so a global
+    // "no delivery" assertion would race the founding, not the warm-back.)
+}

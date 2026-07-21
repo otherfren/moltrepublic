@@ -3154,6 +3154,18 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// **Warm a peer back** in answer to a solicited probe (engine-internal,
+    /// mesh verify-at-open Fix A): a probe arrived from `peer`, so this node
+    /// sends it exactly one keepalive (`warm_leg`) — the deterministic pong that
+    /// lets the prober confirm its leg round-trips. The node's own transport
+    /// speaking — never an MCP tool (an agent must not forge mesh liveness).
+    NetMeshWarm {
+        /// The peer to warm back (the probe's sender).
+        peer: MemberId,
+        /// Mesh incarnation (a torn-down mesh drops the warm-back).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Self-initiated **mesh rotate** (engine-internal, mesh self-heal Stage 3):
     /// a leg to `peer` is detected live-but-deaf, so this node mints a fresh
     /// inbound queue for it and re-announces the new address over the still-

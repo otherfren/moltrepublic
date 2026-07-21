@@ -1147,6 +1147,9 @@ impl State {
             Command::NetMeshExtended { link, generation } => {
                 self.cmd_net_mesh_extended(link, generation)
             }
+            Command::NetMeshWarm { peer, generation } => {
+                self.cmd_net_mesh_warm(peer, generation)
+            }
             Command::NetMeshRotate { peer, generation } => {
                 self.cmd_net_mesh_rotate(peer, generation)
             }

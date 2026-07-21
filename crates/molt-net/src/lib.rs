@@ -76,6 +76,19 @@ pub use wrap::{WrapKey, CHUNK_PLAIN_LEN};
 /// JSON-encoded `EventEnvelope`.
 pub const MESH_KEEPALIVE_TAG: &[u8] = b"\x00molt-mesh-keepalive-v1";
 
+/// The transport-level **mesh probe** tag (mesh verify-at-open, Fix A). Like
+/// [`MESH_KEEPALIVE_TAG`] it is a NUL-prefixed control frame carried as an MLS
+/// application ciphertext — never a `WorkspaceEvent`, never logged or chained.
+/// It differs from a keepalive in one way: it is *solicited* — a receiver that
+/// decodes a probe stamps the sender's presence AND warms the sender back with
+/// exactly one keepalive, so the prober can deterministically confirm its leg
+/// round-trips (instead of waiting for the peer's independent warm). The
+/// warm-back is a plain keepalive, never another probe, so there is no echo.
+/// The leading NUL keeps it, like the keepalive tag, from ever colliding with a
+/// JSON-encoded `EventEnvelope`; the whole `\x00molt-mesh-*` space is reserved
+/// for control frames, and an unknown one decodes to a dropped no-op.
+pub const MESH_PROBE_TAG: &[u8] = b"\x00molt-mesh-probe-v1";
+
 /// Everything that can go wrong between a queue and the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
