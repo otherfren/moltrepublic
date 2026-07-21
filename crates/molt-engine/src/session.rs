@@ -614,7 +614,23 @@ impl State {
                 } else {
                     crate::founding::reopen_transport(&transport_state.mesh, creds, dialer.clone())
                 };
-                transport.and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
+                // DIAGNOSTIC (MOLT_MESH_PROBE): instead of standing up the real
+                // mesh, run a raw per-leg SMP self-test to tell server-side queue
+                // expiry apart from a moltrepublic resume/delivery bug on a
+                // workspace that reopens deaf. Replaces the mesh for this session
+                // (one subscription per queue). See `crate::probe`.
+                if crate::probe::armed() {
+                    if let Some(t) = transport {
+                        crate::probe::spawn_mesh_probe(
+                            t,
+                            transport_state.mesh.clone(),
+                            self.member(),
+                        );
+                    }
+                    None
+                } else {
+                    transport.and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
+                }
             }
             _ => None,
         };
@@ -677,6 +693,15 @@ impl State {
         } else {
             String::new()
         };
+        // diagnostics: make it unmistakable that the mesh is intentionally not
+        // running (the probe replaced it), so the offline banner isn't mistaken
+        // for the bug under investigation.
+        if crate::probe::armed() {
+            self.session.notice =
+                "mesh-probe: diagnostics only — the real mesh is NOT running; read the \
+                 molt_mesh_probe log"
+                    .to_string();
+        }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

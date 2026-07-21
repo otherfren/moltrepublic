@@ -35,6 +35,7 @@ mod events;
 mod founding;
 mod lifecycles;
 mod net;
+mod probe;
 mod proposals;
 mod recovery;
 mod session;
