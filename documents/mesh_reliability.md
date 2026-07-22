@@ -76,7 +76,31 @@ deaf window; a never-heard leg at open is "peer offline", gentle. This is a
 look healthier than you are") must still hold: we are NOT hiding a real outage,
 only not screaming about an absent friend.
 
-## Track B — Redundancy across servers and queues
+## Track B — Redundancy across servers and queues (N=2, staged)
+
+**Staging (from the change-surface survey; each stage independently landable):**
+- **Stage 0 ✅ BUILT (commit 30ce5a6):** `RcvQueue.server` + `MeshLink.rcv_server`
+  (additive, `#[serde(default)]`, no version bump); `subscribe` honors the queue's
+  own server (`server_of`). Fixes the latent resume bug; behaviour-neutral
+  (loopback ignores the server, single-server SMP has rcv_server == self.server).
+  Prerequisite for the rest.
+- **Stage 1 (next):** multi-server transport — route `send`/`subscribe`/
+  `create_queue`/`delete_queue` by the queue's own server (a `Multi` transport
+  wrapping N `SmpTransport`s, or per-server pools); extend `PersistedCreds` to
+  record each queue's server; replace `reopen_transport`'s first-non-empty-server
+  collapse with per-server construction. Config still single server → pure
+  refactor, identical behaviour, testable on two servers.
+- **Stage 2 (the feature):** N=2 redundant inbound queues per leg. `bootstrap_mesh`
+  mints N per peer; `MeshAnnounce.queues` → `Vec<QueueHandover>` per peer (additive);
+  `PeerLink` carries N send targets + N recv queues; the supervisor fans send to N
+  (reusing the ONE ciphertext per seq — never re-encrypt) and subscribes N (the N
+  recv loops of one peer MUST share one Reassembler + the single-writer cursor, or
+  the `(id,index)` dedup won't cross them — the key correctness detail); rotate /
+  extend / recovery mint N; config gains a server list. Bump
+  `TRANSPORT_STATE_VERSION` only if the MeshLink shape changes non-additively.
+
+---
+### Original design
 
 **Problem (latent, `mesh_selfheal.md` §7):** each per-pair leg is a **single
 queue on a single server**. `MeshLink` persists `snd_server` but **no
