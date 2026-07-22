@@ -153,7 +153,13 @@ impl std::fmt::Display for QueueId {
 /// The receive side of a queue (held by its creator, the recipient).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RcvQueue {
-    /// The queue id on its server.
+    /// The server holding the queue (`smp://fingerprint@host`; empty = the
+    /// transport's own server / the loopback hub). Persisted so a resumed or
+    /// redundant leg subscribes on the RIGHT server instead of collapsing to a
+    /// single one (the latent `rcv_server` bug + the prerequisite for a mesh
+    /// spread across servers).
+    pub server: String,
+    /// The queue id on that server.
     pub id: QueueId,
 }
 

@@ -303,6 +303,7 @@ impl PeerLink {
             snd_wrap: hex::encode(self.wrap_out.to_bytes()),
             rcv_queue: hex::encode(&self.rcv.id.0),
             rcv_wrap: hex::encode(self.wrap_in.to_bytes()),
+            rcv_server: self.rcv.server.clone(),
         }
     }
 
@@ -319,6 +320,7 @@ impl PeerLink {
             },
             wrap_out: WrapKey::from_bytes(snd_wrap),
             rcv: RcvQueue {
+                server: m.rcv_server.clone(),
                 id: crate::QueueId::from_bytes(hex::decode(&m.rcv_queue).ok()?),
             },
             wrap_in: WrapKey::from_bytes(rcv_wrap),
@@ -1279,6 +1281,9 @@ mod tests {
             },
             wrap_out: WrapKey::from_bytes([7u8; 32]),
             rcv: crate::RcvQueue {
+                // Stage 0: our inbound may live on a DIFFERENT server than the
+                // peer's inbound — the round-trip must preserve rcv_server.
+                server: "smp://rcvfp@host2".to_string(),
                 id: crate::QueueId::from_bytes(vec![9, 8, 7]),
             },
             wrap_in: WrapKey::from_bytes([3u8; 32]),
@@ -1286,11 +1291,13 @@ mod tests {
         let mesh = link.to_mesh();
         assert_eq!(mesh.member, "bob");
         assert_eq!(mesh.snd_server, "smp://fp@host");
+        assert_eq!(mesh.rcv_server, "smp://rcvfp@host2");
         let back = PeerLink::from_mesh(&mesh).expect("round trips");
         assert_eq!(back.member, link.member);
         assert_eq!(back.snd.server, link.snd.server);
         assert_eq!(back.snd.id.0, link.snd.id.0);
         assert_eq!(back.wrap_out.to_bytes(), link.wrap_out.to_bytes());
+        assert_eq!(back.rcv.server, link.rcv.server, "rcv_server survives the round-trip");
         assert_eq!(back.rcv.id.0, link.rcv.id.0);
         assert_eq!(back.wrap_in.to_bytes(), link.wrap_in.to_bytes());
     }
@@ -1304,6 +1311,7 @@ mod tests {
             snd_wrap: "zz".to_string(),
             rcv_queue: String::new(),
             rcv_wrap: String::new(),
+            rcv_server: String::new(),
         };
         assert!(PeerLink::from_mesh(&bad).is_none());
     }

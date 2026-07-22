@@ -107,6 +107,18 @@ impl SmpTransport {
         self.state.lock().ok()?.recv.get(id).cloned()
     }
 
+    /// Resolve a queue's own server string to an [`SmpServer`], falling back to
+    /// this transport's server when empty (loopback / same-server). Stage 0: a
+    /// queue can now name the server it lives on so a resumed/redundant leg
+    /// reaches the RIGHT server instead of the transport's single fixed one.
+    fn server_of(&self, server: &str) -> Result<SmpServer, NetError> {
+        if server.is_empty() {
+            Ok(self.server.clone())
+        } else {
+            SmpServer::parse(server)
+        }
+    }
+
     /// The transport's sender seed (tests pin the export/import round-trip).
     #[cfg(test)]
     fn sender_seed(&self) -> Option<[u8; 32]> {
@@ -359,6 +371,7 @@ impl Transport for SmpTransport {
             })
             .await?;
         let rcv = RcvQueue {
+            server: self.server.render(),
             id: QueueId::from_bytes(q.recipient_id.clone()),
         };
         let snd = SndQueueAddr {
@@ -448,7 +461,11 @@ impl Transport for SmpTransport {
         let queue = self
             .recv_queue(&q.id.0)
             .ok_or_else(|| NetError::Framing("subscribe to a queue this node did not create".into()))?;
-        let mut conn = SmpConn::connect(&self.dialer, &self.server).await?;
+        // honor the queue's OWN server (Stage 0): a resumed/redundant leg
+        // subscribes on the server it was created on, not the transport's single
+        // fixed one. Empty (loopback / same-server) falls back to `self.server`.
+        let server = self.server_of(&q.server)?;
+        let mut conn = SmpConn::connect(&self.dialer, &server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
         let rcv_tag = crate::supervisor::queue_tag(&queue.recipient_id);

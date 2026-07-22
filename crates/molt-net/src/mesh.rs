@@ -309,11 +309,11 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { id: QueueId::from_bytes(vec![0xa, 0xb]) }, WrapKey::from_bytes([10u8; 32])),
+            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xa, 0xb]) }, WrapKey::from_bytes([10u8; 32])),
         );
         my_inbound.insert(
             "cara".to_string(),
-            (RcvQueue { id: QueueId::from_bytes(vec![0xc, 0xd]) }, WrapKey::from_bytes([20u8; 32])),
+            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xc, 0xd]) }, WrapKey::from_bytes([20u8; 32])),
         );
 
         // bob's announcement includes the queue alice should send to.
@@ -362,7 +362,7 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
+            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
         );
         // no announcement from bob at all
         let announces = BTreeMap::new();
@@ -374,7 +374,7 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
+            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
         );
         // bob announced, but not a queue for alice
         let mut bob_q = BTreeMap::new();

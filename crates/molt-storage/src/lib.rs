@@ -2162,6 +2162,7 @@ mod tests {
                 channel: molt_core::ChannelRef::Group,
                 kind: molt_core::ChatKind::User,
                 reactions: BTreeMap::new(),
+                read_by: Default::default(),
                 deleted_by: None,
                 file: None,
             }),
@@ -2713,6 +2714,7 @@ mod tests {
             snd_server: "smp://fp@host".to_string(),
             snd_queue: "aa".to_string(),
             snd_wrap: "bb".to_string(),
+            rcv_server: String::new(),
             rcv_queue: "cc".to_string(),
             rcv_wrap: "dd".to_string(),
         }];

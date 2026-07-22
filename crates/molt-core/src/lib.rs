@@ -1382,6 +1382,13 @@ pub struct MeshLink {
     pub rcv_queue: String,
     /// The wrap key of this node's own inbound queue (lowercase hex).
     pub rcv_wrap: String,
+    /// This node's own inbound-queue server (`smp://fingerprint@host`; empty =
+    /// the transport's own server / loopback). Additive (Stage 0): an old
+    /// `transport.state` without it reads as empty and resumes single-server
+    /// exactly as before; a mesh spread across servers persists the real server
+    /// here so the resumed leg subscribes on it, not a collapsed single one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rcv_server: String,
 }
 
 /// `transport.state` — node-local transport bookkeeping (concept §6):

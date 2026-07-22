@@ -359,6 +359,7 @@ async fn open_with_mls_but_no_creds_is_honestly_offline() {
             snd_wrap: "bb".to_string(),
             rcv_queue: "cc".to_string(),
             rcv_wrap: "dd".to_string(),
+            rcv_server: String::new(),
         }],
         ..molt_core::TransportState::default()
     })

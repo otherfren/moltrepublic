@@ -176,7 +176,10 @@ impl LoopbackHub {
             },
         );
         Ok(QueuePair {
-            rcv: RcvQueue { id: id.clone() },
+            rcv: RcvQueue {
+                server: "loopback".to_string(),
+                id: id.clone(),
+            },
             snd: SndQueueAddr {
                 server: "loopback".to_string(),
                 id,
