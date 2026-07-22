@@ -151,6 +151,19 @@ handshake can't complete (same limit as verify-at-open). Rotation must be **safe
 under partial availability** — rotate only legs to *reachable* peers, defer the
 rest. And it must not fight verify-at-open's rotate (share the cooldown/seen-set).
 
+## Track D — Cold-reopen smoothing ✅ BUILT (2026-07-23, commit 9f69256)
+
+**Done.** The supervisor recv loop signals `EngineSink::raw_inbound` (throttled 2 s/
+leg) whenever a frame unwraps at the transport — decoded or not — stamping
+`last_raw_inbound` via the new INTERNAL `Command::NetRawInbound`. `leg_receiving`
+(activity within `MESH_RECEIVING_SECS` = 30 s) gates the rotate: `cmd_net_verify` /
+`rotate_deaf_legs` rotate only `leg_unverified && !leg_receiving` (resp.
+`deaf && !receiving`). So a demonstrably-alive leg (draining redelivery / holding
+future-epoch frames) is not churned to a fresh queue; a truly silent/born-dead leg
+(nothing arriving) still rotates. Raw activity is NEVER presence (it may be old
+redelivery — never advances `last_seen`). TDD:
+`a_receiving_leg_is_alive_and_gates_off_the_verify_rotate`. Original design below.
+
 ## Track D — Cold-reopen smoothing (trust the alive queues)
 
 The measurement shows the alive queues deliver within seconds on reopen. So the
