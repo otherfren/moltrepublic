@@ -575,6 +575,12 @@ pub(crate) struct State {
     /// [`crate::net::MESH_ROTATE_COOLDOWN_SECS`] while the heal completes (or
     /// the peer stays offline). Runtime-only; reset with the workspace.
     pub(crate) rotate_at: std::collections::HashMap<MemberId, u64>,
+    /// Track D — last RAW inbound activity per leg (any frame delivered at the
+    /// transport, decoded or not; stamped by [`Command::NetRawInbound`],
+    /// throttled by the supervisor). A leg with recent raw activity is ALIVE, so
+    /// verify-at-open must not rotate/churn it even before a frame decodes.
+    /// Runtime-only; reset with the workspace. Never advances presence.
+    pub(crate) last_raw_inbound: std::collections::HashMap<MemberId, u64>,
     /// Bounded FIFO of self-heal re-announce nonces already relayed
     /// (`WorkspaceEvent::MeshAnnounced.nonce`) — the Stage 3 loop-prevention
     /// seen-set: a nonce'd re-announce is adopted+relayed once, and copies of
@@ -791,6 +797,7 @@ impl State {
             mesh_up: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
             rotate_at: std::collections::HashMap::new(),
+            last_raw_inbound: std::collections::HashMap::new(),
             seen_announces: net::SeenNonces::default(),
             clock_override: None,
             s3_list_gen: 0,
@@ -1018,6 +1025,9 @@ impl State {
             } => self.cmd_net_delivered(from, envelope, generation),
             Command::NetPeerSeen { member, generation } => {
                 self.cmd_net_peer_seen(member, generation)
+            }
+            Command::NetRawInbound { peer, generation } => {
+                self.cmd_net_raw_inbound(peer, generation)
             }
             Command::NetSendFailed {
                 member,

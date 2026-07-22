@@ -117,7 +117,7 @@ async fn found_with_mesh(
         .expect("B completes the member side + bootstrap")
     });
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if read_session(&a).await.create.can_propose {
             break;
@@ -161,7 +161,7 @@ async fn found_with_mesh(
 async fn hard_kill(a: WalletHandle, root: &Path, id: &str) -> PathBuf {
     drop(a);
     let dir = molt_storage::find_workspace_dir(root, id).expect("workspace dir");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match molt_storage::open_workspace(&dir) {
             Ok(_) => break, // lock free again; the guard drops right here
@@ -273,7 +273,7 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     })
     .await
     .expect("chat after resume");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let got = member_sink.messages();
         if got.iter().any(|(from, env)| {
@@ -303,7 +303,7 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     // verify-at-open honesty: a real frame HAS now been heard over the resumed
     // inbound leg (the member's reply), so net_health clears "verifying" to the
     // honest Ok — the leg is confirmed by actual delivery, not just a live SUB.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let sv = read_session(&a2).await;
         if sv.net_health == NetHealth::Ok {

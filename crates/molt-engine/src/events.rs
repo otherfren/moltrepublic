@@ -526,6 +526,7 @@ impl State {
         self.net_link_down.clear();
         self.net_send_stuck.clear();
         self.mesh_up.clear();
+        self.last_raw_inbound.clear();
         self.last_mesh_out = 0;
         self.rotate_at.clear();
         self.seen_announces.clear();

@@ -2374,6 +2374,19 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// RAW inbound activity on a leg's queue (engine-internal, mesh reliability
+    /// Track D): a frame ARRIVED at the transport, decoded or not (a redelivered
+    /// duplicate, a held future-epoch frame, …). Unlike `NetPeerSeen` this does
+    /// NOT prove the peer is alive (it may be old redelivery) — it only proves
+    /// the QUEUE is alive and delivering, so verify-at-open must not churn it
+    /// with a rotate. Throttled by the supervisor; never advances presence.
+    NetRawInbound {
+        /// The leg (peer) whose queue delivered a frame.
+        peer: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Periodic presence aging (engine-internal ticker): re-derive the
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.

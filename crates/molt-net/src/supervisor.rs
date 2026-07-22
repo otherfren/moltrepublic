@@ -274,6 +274,14 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         let _ = member;
         async {}
     }
+    /// RAW inbound activity on `member`'s leg (mesh reliability Track D): a frame
+    /// arrived at the transport, decoded or not. Proves the QUEUE is alive (so
+    /// verify-at-open must not churn it) WITHOUT proving the peer is alive — it
+    /// never advances presence. Throttled by the caller. Default no-op (additive).
+    fn raw_inbound(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
+        async {}
+    }
 }
 
 /// One fully wired peer connection: their inbound queue's send address and
@@ -942,6 +950,11 @@ where
     // MLS path: complete messages encrypted at an epoch ahead of ours, held
     // (acks unfired) until a commit merges — the cross-epoch retry
     let mut epoch_buffer: Vec<([u8; 16], Vec<u8>, Vec<AckToken>)> = Vec::new();
+    // Track D: throttle the raw-inbound signal to at most one per this window per
+    // leg — every arriving frame proves the queue is alive, but the engine only
+    // needs the fact, not a command per frame.
+    let raw_throttle = Duration::from_secs(2);
+    let mut last_raw_signal: Option<tokio::time::Instant> = None;
     // this task is the sole writer of inbound[peer]; the shared state is
     // only the persistence snapshot
     let mut cursor = state
@@ -979,6 +992,18 @@ where
                 continue;
             }
         };
+        // Track D: a frame unwrapped — the queue is ALIVE (even if this turns out
+        // to be a duplicate/held/undecoded frame). Signal it, throttled, so
+        // verify-at-open does not churn a busy or redelivering leg with a rotate.
+        let raw_now = tokio::time::Instant::now();
+        let raw_due = match last_raw_signal {
+            Some(t) => raw_now.duration_since(t) >= raw_throttle,
+            None => true,
+        };
+        if raw_due {
+            last_raw_signal = Some(raw_now);
+            sink.raw_inbound(&peer.member).await;
+        }
         tracing::debug!(peer = %peer.member, plain = plain.len(), "MESHRX unwrapped a block → reassembler");
         let (id, complete) = match reasm.push(&plain) {
             Ok(PushOutcome::Duplicate(id)) => {

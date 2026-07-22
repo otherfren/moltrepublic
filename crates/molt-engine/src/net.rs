@@ -92,6 +92,13 @@ pub(crate) const MESH_KEEPALIVE_SECS: u64 = 120;
 /// false positive is harmless — the rotate GCs its unused queue on timeout.
 pub(crate) const MESH_VERIFY_SECS: u64 = 10;
 
+/// Track D window: a leg with RAW inbound activity (any frame at the transport,
+/// decoded or not) within this many seconds is treated as ALIVE — verify-at-open
+/// and the deaf detector must not rotate/churn it. Comfortably above the
+/// supervisor's 2 s raw-signal throttle, so a continuously-receiving leg always
+/// reads as receiving; a truly silent leg crosses it and rotates as before.
+pub(crate) const MESH_RECEIVING_SECS: u64 = 30;
+
 /// Minimum seconds between self-initiated **mesh rotates** for one peer
 /// (Stage 3, `documents/mesh_selfheal.md`): the periodic deaf-leg detector
 /// re-evaluates every presence tick, so without a cooldown it would spawn a
@@ -401,6 +408,15 @@ impl EngineSink for CmdSink {
     async fn probe_received(&self, member: &MemberId) {
         let _ = self
             .execute(Command::NetMeshWarm {
+                peer: member.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn raw_inbound(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetRawInbound {
                 peer: member.clone(),
                 generation: self.generation,
             })
@@ -1911,8 +1927,39 @@ impl State {
     /// and the per-peer cooldown keeps it to one attempt per window.
     fn rotate_deaf_legs(&mut self) {
         for peer in self.deaf_legs() {
-            let _ = self.cmd_net_mesh_rotate(peer, None);
+            // Track D: a leg with recent RAW inbound activity is ALIVE (draining
+            // redelivery, holding future-epoch frames, …) — don't churn it with a
+            // rotate to a fresh queue; let it drain.
+            if !self.leg_receiving(&peer) {
+                let _ = self.cmd_net_mesh_rotate(peer, None);
+            }
         }
+    }
+
+    /// Track D — whether a leg has RAW inbound activity within
+    /// [`MESH_RECEIVING_SECS`] (any frame delivered at the transport, decoded or
+    /// not). Such a leg's queue is demonstrably alive, so verify-at-open/deaf
+    /// rotation must not churn it; a truly dead/silent leg (nothing arriving)
+    /// still rotates. Never conflated with presence — a raw frame may be old
+    /// redelivery and does not prove the peer is online.
+    fn leg_receiving(&self, peer: &MemberId) -> bool {
+        self.last_raw_inbound
+            .get(peer)
+            .is_some_and(|t| self.presence_now().saturating_sub(*t) < MESH_RECEIVING_SECS)
+    }
+
+    /// RAW inbound activity on a leg (mesh reliability Track D): stamp when the
+    /// queue delivered a frame (throttled by the supervisor). Feeds
+    /// [`Self::leg_receiving`]; never touches presence or `last_seen`.
+    pub(crate) fn cmd_net_raw_inbound(
+        &mut self,
+        peer: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            self.last_raw_inbound.insert(peer, self.presence_now());
+        }
+        Ok(Reply::Ack)
     }
 
     /// The verify-at-open one-shot fired ([`Command::NetMeshVerify`], Fix A): if
@@ -1927,7 +1974,10 @@ impl State {
         peer: MemberId,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation) && self.leg_unverified(&peer) {
+        if self.net_generation_current(generation)
+            && self.leg_unverified(&peer)
+            && !self.leg_receiving(&peer)
+        {
             let _ = self.cmd_net_mesh_rotate(peer, None);
         }
         Ok(Reply::Ack)
@@ -3037,6 +3087,33 @@ mod tests {
         st.cmd_net_link_down("cid".to_string(), "subscription ended".to_string(), None)
             .expect("ack");
         assert!(!st.leg_unverified(&"cid".to_string()), "a down leg is not 'unverified'");
+    }
+
+    /// Track D: a leg with recent RAW inbound activity (a frame at the transport,
+    /// decoded or not) reads as RECEIVING — its queue is demonstrably alive, so
+    /// the verify rotate is gated off (`leg_unverified && !leg_receiving`) even
+    /// while the leg is still UNVERIFIED. Raw activity is NOT presence: it doesn't
+    /// prove the peer is online (may be old redelivery), so the leg stays
+    /// unverified. It ages out after `MESH_RECEIVING_SECS` so a leg that goes
+    /// truly silent rotates again.
+    #[test]
+    fn a_receiving_leg_is_alive_and_gates_off_the_verify_rotate() {
+        let mut st = presence_fixture();
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert!(st.leg_unverified(&"bob".to_string()), "unverified (nothing decoded)");
+        assert!(!st.leg_receiving(&"bob".to_string()), "no raw activity yet → not receiving");
+        // a raw frame lands on bob's queue (e.g. a redelivered duplicate): the
+        // queue is alive though nothing decoded → receiving, and the verify
+        // rotate's `leg_unverified && !leg_receiving` is now false
+        st.cmd_net_raw_inbound("bob".to_string(), None).expect("ack");
+        assert!(st.leg_receiving(&"bob".to_string()), "raw activity → receiving");
+        assert!(
+            st.leg_unverified(&"bob".to_string()),
+            "raw activity is not presence — the leg is still unverified"
+        );
+        // it ages out: a leg that stops receiving past the window is rotatable again
+        st.clock_override = Some(T + super::MESH_RECEIVING_SECS + 1);
+        assert!(!st.leg_receiving(&"bob".to_string()), "raw activity aged out → rotatable");
     }
 
     /// Track A: a NEVER-heard leg stays GENTLE even past the deaf window — an
