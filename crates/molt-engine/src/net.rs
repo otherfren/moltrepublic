@@ -2196,57 +2196,53 @@ impl State {
         })
     }
 
-    /// Re-derive `session.net_health` from the runtime leg maps plus the
-    /// self-heal liveness cross-check. `Down` is the open/config path's
-    /// fail-closed verdict and is NEVER overridden here; otherwise a
-    /// `Degraded` names every troubled peer: an inbound leg the watchdog
-    /// reported down, an outbox whose sends keep failing, OR a leg that is
-    /// subscribed-`OK` but has delivered nothing since mesh-up
-    /// ([`Self::deaf_legs`]) — the silent-deaf failure that used to read as
-    /// a false `Ok`. Only an honest all-clear is `Ok`. Emits only on an
-    /// actual change.
+    /// Track A — honest per-peer status: whether `peer`'s presence reads
+    /// online/stale (heard within [`molt_core::MemberInfo::STALE_SECS`]), so a
+    /// failing leg to it is a real alarm. A peer not seen in that window (or
+    /// never) is OFFLINE — a gentle presence state, aged out on its own pill,
+    /// never a "reconnecting" banner alarm. This is what stops one absent member
+    /// reading as a mesh-wide outage while the reachable peers deliver.
+    fn peer_present(&self, peer: &MemberId) -> bool {
+        molt_core::presence_state(self.presence_now(), self.member_last_seen(peer)) != 2
+    }
+
+    /// Re-derive `session.net_health` (Track A — honest per-peer status). `Down`
+    /// is the open/config path's fail-closed verdict and is NEVER overridden
+    /// here. Otherwise a `Degraded` names only the REAL troubles: an inbound leg
+    /// the watchdog reported down, an outbox whose sends keep failing, or a leg
+    /// to a peer we have RECENT contact with (presence online/stale,
+    /// [`Self::peer_present`]) that then goes silent — live-but-deaf
+    /// ([`Self::deaf_legs`]) or rotated-toward-and-still-unheard. A NEVER- or
+    /// long-unheard peer is simply OFFLINE — aged out on its own presence pill,
+    /// never a banner alarm — so one absent member no longer reads as a mesh-wide
+    /// "Verbinde erneut…" while the reachable peers deliver. Only an honest
+    /// all-clear is `Ok`. Emits only on an actual change.
     pub(crate) fn recompute_net_health(&mut self) {
         if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
             return;
         }
-        let deaf = self.deaf_legs();
-        // peers we've rotated toward that STILL haven't delivered since: honestly
-        // "reconnecting". The rotate's rebuild re-stamps `mesh_up`, so the deaf
-        // cross-check resets to `Ok` the moment a rotate fires — without this the
-        // banner would flap green mid-heal even though delivery never resumed.
-        // Excludes deaf (listed once) and link_down (its own reason). Clears the
-        // moment the peer is actually heard (`peer_seen` drops its `rotate_at`).
-        let reconnecting: Vec<MemberId> = self
-            .rotate_at
-            .iter()
-            .filter(|(m, at)| {
-                self.member_last_seen(m) < **at
-                    && !self.net_link_down.contains_key(*m)
-                    && !deaf.contains(*m)
-            })
-            .map(|(m, _)| m.clone())
+        // the real inbound-silence alarm: a leg to a PRESENT peer (recent
+        // contact) that is live-but-deaf, or one we've rotated toward and still
+        // not heard since. A leg to an OFFLINE peer (never/long-unheard) is gentle
+        // — it shows on the presence pill, not the banner. `peer_seen` clears a
+        // peer's `rotate_at` the moment it is heard, and advances its presence.
+        let mut reconnecting: Vec<MemberId> = self
+            .deaf_legs()
+            .into_iter()
+            .filter(|m| self.peer_present(m))
             .collect();
-        // Verify-at-open (Phase 1): a leg whose subscription is live but that has
-        // delivered NOTHING since coming up this incarnation (`last_seen <
-        // mesh_up`) is UNVERIFIED — honestly amber "verifying" from t=0, not a
-        // false `Ok`, for the whole grace window before it escalates to
-        // reconnecting/deaf. A healthy leg round-trips within one warm and clears
-        // to `Ok` immediately; only this removes the green flap a cold reopen
-        // showed. Listed once: excludes legs already named deaf, reconnecting, or
-        // link-down.
-        let verifying: Vec<MemberId> = self
-            .mesh_up
-            .keys()
-            .filter(|m| {
-                self.leg_unverified(m) && !deaf.contains(*m) && !reconnecting.contains(*m)
-            })
-            .cloned()
-            .collect();
+        for (m, at) in &self.rotate_at {
+            if self.peer_present(m)
+                && self.member_last_seen(m) < *at
+                && !self.net_link_down.contains_key(m)
+                && !reconnecting.contains(m)
+            {
+                reconnecting.push(m.clone());
+            }
+        }
         let health = if self.net_link_down.is_empty()
             && self.net_send_stuck.is_empty()
-            && deaf.is_empty()
             && reconnecting.is_empty()
-            && verifying.is_empty()
         {
             molt_core::NetHealth::Ok
         } else {
@@ -2255,9 +2251,7 @@ impl State {
                 .iter()
                 .map(|(m, r)| format!("link to {m}: {r}"))
                 .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
-                .chain(deaf.iter().map(|m| format!("no inbound from {m} since reconnect")))
                 .chain(reconnecting.iter().map(|m| format!("reconnecting to {m}")))
-                .chain(verifying.iter().map(|m| format!("verifying {m}")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -3002,27 +2996,21 @@ mod tests {
 
     // --- Stage 1 self-heal: honest health for a live-but-deaf leg ----------
 
-    /// Verify-at-open (Phase 1): the instant a leg's subscription comes up,
-    /// before anything has ever been heard over it, `net_health` reads
-    /// `Degraded("verifying {peer}")` — NOT a false `Ok`. This is what removes
-    /// the green flap a cold reopen showed while a born-dead leg sat silently
-    /// deaf for the whole grace window. A healthy leg clears to `Ok` within one
-    /// round-trip; a dead one escalates to reconnecting/deaf.
+    /// Track A — honest per-peer status: a fresh leg to a peer we have NOT heard
+    /// (its presence is offline) is GENTLE — `net_health` stays `Ok` and the peer
+    /// shows offline on its own pill. A never-heard peer is never a "reconnecting"
+    /// banner alarm; only a peer with recent contact that then fails is. (This is
+    /// what stops one offline member reading as a mesh-wide "Verbinde erneut…".)
     #[test]
-    fn a_fresh_live_leg_reads_verifying_not_ok() {
+    fn a_fresh_live_leg_to_an_offline_peer_is_gentle() {
         let mut st = presence_fixture();
-        // bob's leg comes live at T; nothing has ever been delivered over it
-        // (last_seen = NEVER < mesh_up = T), so it is unverified, not healthy
+        // bob's leg comes live at T, but bob has never been heard (presence offline)
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(
-                    reason.contains("bob") && reason.contains("verifying"),
-                    "a never-heard fresh leg reads honestly verifying: {reason}"
-                );
-            }
-            other => panic!("expected Degraded verifying for the unverified leg, got {other:?}"),
-        }
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "an unheard (offline) peer's fresh leg is gentle, not a banner alarm"
+        );
     }
 
     /// Verify-at-open decision (Phase 3): a leg is UNVERIFIED the instant its
@@ -3051,34 +3039,27 @@ mod tests {
         assert!(!st.leg_unverified(&"cid".to_string()), "a down leg is not 'unverified'");
     }
 
-    /// A peer whose inbound subscription is live but that has delivered
-    /// NOTHING since mesh-up must stop reading as a false `Ok` — after
-    /// `MESH_DEAF_SECS` it surfaces as `Degraded` naming the peer. This is
-    /// exactly the silent deafness the SMP idle-expiry bug produces (`SUB`
-    /// and `SEND` both answer `OK`, yet the queue delivers nothing).
+    /// Track A: a NEVER-heard leg stays GENTLE even past the deaf window — an
+    /// offline peer is not a banner alarm (contrast a HEARD-then-silent leg,
+    /// which IS one: `a_leg_that_delivered_then_went_silent_goes_degraded`). The
+    /// born-dead HEAL still fires — the leg is `deaf_legs` for the rotate trigger
+    /// — but the banner stays `Ok` while presence shows the peer offline.
     #[test]
-    fn a_live_but_silent_leg_goes_degraded_after_the_deaf_window() {
+    fn a_never_heard_leg_stays_gentle_past_the_deaf_window() {
         let mut st = presence_fixture();
-        // bob's leg comes live at T; nothing is ever heard from it. Honest from
-        // t=0 (verify-at-open): before the deaf window it reads "verifying", not
-        // a false Ok — it only escalates to the deaf reason once the window elapses
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("verifying"), "unverified, not yet deaf: {reason}");
-            }
-            other => panic!("a fresh unverified leg reads verifying, got {other:?}"),
-        }
-        // the deaf window elapses; the periodic presence tick re-evaluates
-        // health (a silently-deaf leg fires no event of its own)
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // never heard
         st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
         st.cmd_net_presence_tick().expect("tick");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("bob"), "names the deaf peer: {reason}");
-            }
-            other => panic!("expected Degraded for the deaf leg, got {other:?}"),
-        }
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a never-heard (offline) peer stays gentle — no reconnecting alarm"
+        );
+        // still deaf for the HEAL path (the background rotate keeps trying)
+        assert!(
+            st.deaf_legs().contains(&"bob".to_string()),
+            "the born-dead leg is still deaf for the rotate trigger"
+        );
     }
 
     /// The live-3-node regression (config2 stopped receiving from config3): a
@@ -3112,41 +3093,40 @@ mod tests {
         }
     }
 
-    /// Fast heal: a leg that has delivered NOTHING since coming up (born-dead
-    /// at founding) trips deaf on the SHORT window, while a leg that delivered
-    /// once and then went quiet keeps the full window (no flapping).
+    /// Fast heal: a leg that has delivered NOTHING since coming up (born-dead)
+    /// is flagged `deaf_legs` (the rotate trigger) on the SHORT window, while a
+    /// leg that delivered once and then went quiet keeps the full window (no
+    /// flapping). This drives the background HEAL, independent of the banner
+    /// (Track A: a never-heard peer is gentle on the banner, still healed here).
     #[test]
     fn a_never_delivered_leg_heals_on_the_fast_window() {
         let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up=T, never heard
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // never heard
         st.cmd_net_link_up("cid".to_string(), None).expect("ack");
         st.cmd_net_peer_seen("cid".to_string(), None).expect("cid delivered at T");
         // just past the FAST window, far under the full window
         st.clock_override = Some(T + super::MESH_DEAF_NEW_SECS + 1);
-        st.cmd_net_presence_tick().expect("tick");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("bob"), "the born-dead leg trips fast: {reason}");
-                assert!(
-                    !reason.contains("cid"),
-                    "a delivered-then-quiet leg keeps the full window: {reason}"
-                );
-            }
-            other => panic!("expected Degraded for the born-dead leg, got {other:?}"),
-        }
+        let deaf = st.deaf_legs();
+        assert!(deaf.contains(&"bob".to_string()), "the born-dead leg trips the fast window");
+        assert!(
+            !deaf.contains(&"cid".to_string()),
+            "a delivered-then-quiet leg keeps the full window"
+        );
     }
 
-    /// Honest heal state: a leg we've rotated toward that has NOT delivered
-    /// since reads `Degraded` "reconnecting" — even though the rotate's rebuild
-    /// re-stamped `mesh_up` (which alone would flap the banner green). It clears
-    /// to `Ok` the moment the peer is actually heard.
+    /// Honest heal state: a leg to a PRESENT peer (recent contact) that we've
+    /// rotated toward and still not heard since reads `Degraded` "reconnecting".
+    /// (A rotate toward an OFFLINE peer is gentle — Track A.) It clears to `Ok`
+    /// the moment the peer is actually heard again.
     #[test]
     fn a_rotated_leg_that_has_not_delivered_reads_reconnecting() {
         let mut st = presence_fixture();
-        // the leg's subscription is freshly up (a rotate just rebuilt it), so the
-        // deaf cross-check is reset — but the rotate has not proven delivery yet
         st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
-        st.rotate_at.insert("bob".to_string(), T); // we rotated toward bob at T
+        // bob WAS heard (present); then we rotate toward it and it stays silent —
+        // a real reconnect to an online peer, not an absent one
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard at T"); // present
+        st.clock_override = Some(T + 1);
+        st.rotate_at.insert("bob".to_string(), T + 1); // rotated at T+1, unheard since
         st.recompute_net_health();
         match &st.session.net_health {
             molt_core::NetHealth::Degraded { reason } => {
@@ -3154,7 +3134,7 @@ mod tests {
             }
             other => panic!("expected Degraded reconnecting, got {other:?}"),
         }
-        // the peer finally delivers → drops the rotate → honest Ok
+        // the peer delivers again → drops the rotate → honest Ok
         st.clock_override = Some(T + 5);
         st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivered");
         assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
@@ -3181,24 +3161,29 @@ mod tests {
         );
     }
 
-    /// A deaf leg clears the moment an authenticated frame finally lands:
-    /// `peer_seen` advances `last_seen` past mesh-up and re-derives health.
+    /// A reconnecting leg (a PRESENT peer that went silent) clears the moment an
+    /// authenticated frame finally lands: `peer_seen` advances `last_seen` and
+    /// re-derives health to `Ok`.
     #[test]
     fn a_deaf_leg_clears_when_a_frame_finally_lands() {
         let mut st = presence_fixture();
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
+        // bob was heard (present), then goes silent past the deaf window → a real
+        // reconnecting alarm (a present peer we lost contact with)
+        st.clock_override = Some(T + 10);
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard once");
+        st.clock_override = Some(T + 10 + super::MESH_DEAF_SECS + 1); // silent, still within STALE
         st.cmd_net_presence_tick().expect("tick");
         assert!(
             matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
-            "the leg is deaf before any frame lands"
+            "a present peer gone silent is a reconnecting alarm"
         );
-        // a frame from bob finally arrives
+        // a fresh frame from bob finally arrives
         st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
         assert_eq!(
             st.session.net_health,
             molt_core::NetHealth::Ok,
-            "a landed frame clears the deaf flag"
+            "a landed frame clears the reconnecting alarm"
         );
     }
 
@@ -3217,8 +3202,8 @@ mod tests {
             molt_core::NetHealth::Degraded { reason } => {
                 assert!(reason.contains("subscription ended"), "the down reason wins: {reason}");
                 assert!(
-                    !reason.contains("since reconnect"),
-                    "a down leg is not also flagged deaf: {reason}"
+                    !reason.contains("reconnecting"),
+                    "a down leg is not also flagged reconnecting: {reason}"
                 );
             }
             other => panic!("expected Degraded, got {other:?}"),

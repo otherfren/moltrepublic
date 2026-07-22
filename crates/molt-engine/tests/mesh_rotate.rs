@@ -122,19 +122,13 @@ async fn the_verify_one_shot_leaves_a_verified_leg_alone() {
         Some(MlsChannel::new(member_group)),
     );
 
-    // the leg verifies once the founder hears member-b over the reliable mesh
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if read_session(&a).await.net_health == NetHealth::Ok {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the leg never verified (heard) over loopback: {:?}",
-            read_session(&a).await.net_health
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // make the leg VERIFIED: the founder hears member-b (drive the peer-seen the
+    // supervisor reports on real inbound traffic — deterministic, vs. relying on
+    // loopback timing, and Track A no longer flips net_health to Ok on hearing an
+    // otherwise-offline peer). A verified leg must be gated out of the rotate.
+    a.execute(Command::NetPeerSeen { member: "member-b".to_string(), generation: None })
+        .await
+        .expect("member-b heard");
 
     // a VERIFIED leg is gated out of the verify rotate — firing the one-shot is a
     // no-op (no fresh queue, no re-announce)
