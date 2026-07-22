@@ -38,7 +38,18 @@ retention (queues persist), **redundancy across multiple servers/queues**, keepi
 connections warm, and **queue rotation** on a slow schedule — plus **honest
 per-connection status**. This doc plans those four tracks.
 
-## Track A — Honest per-peer status (fixes the "finden nix" perception)
+## Track A — Honest per-peer status ✅ BUILT (2026-07-23, commit 9b27e67)
+
+**Done.** `recompute_net_health` now alarms ("reconnecting to {m}") only for a leg
+to a peer with *recent contact* (`peer_present` = `presence_state != offline`)
+that is live-but-deaf or rotated-toward-and-unheard; a never-/long-unheard peer is
+gentle OFFLINE (its presence pill), never a banner alarm. `link_down`/`send_stuck`
+still alarm. Supersedes verify-at-open's Phase-1 "verifying" amber for a
+never-heard leg (green banner + offline pill = honest "connected, peer offline";
+green now means MY connection health, per-peer reachability is presence). The
+deaf-leg HEAL is unchanged (`deaf_legs` still drives the rotate). Tests reworked;
+full suite green, clippy clean. The boundary the user chose: **never-heard leg =
+offline (gentle).** Original design below.
 
 **Problem:** one offline member drags the whole banner to "reconnecting", so a
 working mesh looks dead.
