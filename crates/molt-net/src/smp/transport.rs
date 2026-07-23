@@ -559,6 +559,13 @@ impl Transport for SmpTransport {
     fn import_creds(&self, creds: &[u8]) {
         self.adopt_creds(creds);
     }
+
+    fn redundancy(&self) -> usize {
+        // one inbound queue per configured server, capped (Track B Stage 2); a
+        // single-server transport is N=1 (unchanged). `create_queue`'s
+        // round-robin then spreads a leg's N queues one-per-server.
+        self.servers.len().clamp(1, crate::MESH_REDUNDANCY_CAP)
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +576,28 @@ mod creds_tests {
 
     fn transport() -> SmpTransport {
         SmpTransport::new(SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server"))
+    }
+
+    /// Stage 2 redundancy: the per-leg inbound-queue count tracks the configured
+    /// server count, capped at [`crate::MESH_REDUNDANCY_CAP`]. Single-server is
+    /// N=1 (unchanged); the mint sites read this via `Transport::redundancy`.
+    #[test]
+    fn redundancy_tracks_the_server_count_capped() {
+        const FP2: &str = "0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=";
+        let s1 = SmpServer::parse(&format!("smp://{FP}@host-one.invalid")).expect("s1");
+        let s2 = SmpServer::parse(&format!("smp://{FP2}@host-two.invalid")).expect("s2");
+        assert_eq!(SmpTransport::new(s1.clone()).redundancy(), 1, "single server → N=1");
+        assert_eq!(
+            SmpTransport::new_multi(vec![s1.clone(), s2.clone()]).redundancy(),
+            2,
+            "two servers → N=2"
+        );
+        let many = vec![s1.clone(), s2.clone(), s1.clone(), s2];
+        assert_eq!(
+            SmpTransport::new_multi(many).redundancy(),
+            crate::MESH_REDUNDANCY_CAP,
+            "more servers than the cap → capped"
+        );
     }
 
     /// Stage 1 multi-server routing: a queue names which of the transport's

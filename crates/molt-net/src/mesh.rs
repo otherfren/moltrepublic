@@ -149,7 +149,7 @@ pub async fn bootstrap_mesh<T: Transport>(
     // redundancy across servers). Stage 2a mints N=1 (behaviour-neutral); Stage
     // 2b threads the config `redundancy` here and `create_queue`'s round-robin
     // spreads the N across servers. All N of a pair share ONE wrap key.
-    let redundancy = crate::MESH_REDUNDANCY;
+    let redundancy = transport.redundancy();
     let mut my_inbound: BTreeMap<MemberId, (Vec<RcvQueue>, WrapKey)> = BTreeMap::new();
     let mut queues: BTreeMap<MemberId, QueueHandover> = BTreeMap::new();
     let mut queues_extra: BTreeMap<MemberId, Vec<QueueHandover>> = BTreeMap::new();

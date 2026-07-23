@@ -89,13 +89,19 @@ pub const MESH_KEEPALIVE_TAG: &[u8] = b"\x00molt-mesh-keepalive-v1";
 /// for control frames, and an unknown one decodes to a dropped no-op.
 pub const MESH_PROBE_TAG: &[u8] = b"\x00molt-mesh-probe-v1";
 
-/// Inbound-queue redundancy factor N per directed peer-pair leg (Track B Stage
-/// 2). Each recipient mints N inbound queues (spread across servers by
-/// `create_queue`'s round-robin); senders fan the SAME ciphertext to all N and
-/// the receiver dedups. **Stage 2a: 1** (behaviour-neutral — a single-queue leg,
-/// every existing test unchanged). Stage 2b raises it (config-/transport-driven)
-/// to activate real redundancy. One constant so every mint site agrees.
+/// Default inbound-queue redundancy for the loopback `full_mesh` and any
+/// transport that doesn't override [`Transport::redundancy`] — **1** (a
+/// single-queue leg). Real redundancy is transport-driven: a multi-server
+/// `SmpTransport` returns `min(server_count, MESH_REDUNDANCY_CAP)` from
+/// `redundancy()`, so each leg's N queues spread across servers. Loopback stays
+/// 1 (one hub), so every loopback test is unchanged.
 pub const MESH_REDUNDANCY: usize = 1;
+
+/// Upper bound on the per-leg inbound-queue redundancy (Track B Stage 2): the
+/// user chose N=2 (the SimpleX sweet spot). A transport configured with more
+/// servers still mints at most this many queues per leg (bounding N× traffic /
+/// server load).
+pub const MESH_REDUNDANCY_CAP: usize = 2;
 
 /// Everything that can go wrong between a queue and the engine.
 #[derive(Debug, thiserror::Error)]
@@ -271,4 +277,14 @@ pub trait Transport: Send + Sync + Clone + 'static {
     /// Re-adopt credentials produced by [`Self::export_creds`] into a fresh
     /// transport on reopen. A no-op for transports without persistable creds.
     fn import_creds(&self, _creds: &[u8]) {}
+
+    /// How many redundant inbound queues to mint per directed peer-pair leg
+    /// (Track B Stage 2). The default is 1 (single queue — loopback and a
+    /// single-server SMP transport). A multi-server transport returns
+    /// `min(server_count, MESH_REDUNDANCY_CAP)`, so each leg's queues spread
+    /// across servers and one server's outage leaves the leg alive. A mint site
+    /// with `transport` in hand calls this — no config threading needed.
+    fn redundancy(&self) -> usize {
+        1
+    }
 }
