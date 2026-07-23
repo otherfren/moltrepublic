@@ -25,7 +25,6 @@
 //! resends, never history — the peers' dedup absorbs it.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -537,16 +536,22 @@ where
         };
         // Per peer: ONE merged channel + ONE consumer (the single Reassembler and
         // sole-writer cursor), fed by N forwarder tasks (one per redundant inbound
-        // queue). The shared `live` counter aggregates the peer's queues into ONE
-        // per-peer link_up/link_down (a leg is UP while ≥1 queue is live). N=1 is
-        // the former single-subscription watchdog exactly.
+        // queue). The shared `live` count aggregates the peer's queues into ONE
+        // per-peer link_up/link_down (a leg is UP while ≥1 queue is live). It is a
+        // `tokio::Mutex<usize>` — NOT an atomic — so each forwarder holds it
+        // ACROSS its count transition AND the resulting link_up/link_down engine
+        // round-trip (Stage-2 audit finding #2): that binds the notification to
+        // the transition, so the engine can never receive an up/down out of order
+        // w.r.t. the count and get stuck alarming a leg that has a live queue.
+        // N=1 is the former single-subscription watchdog exactly.
         let mut peer_tx: Vec<tokio::sync::mpsc::Sender<crate::Delivery>> =
             Vec::with_capacity(cfg.peers.len());
-        let mut peer_live: Vec<Arc<AtomicUsize>> = Vec::with_capacity(cfg.peers.len());
+        let mut peer_live: Vec<Arc<tokio::sync::Mutex<usize>>> =
+            Vec::with_capacity(cfg.peers.len());
         for peer in &cfg.peers {
             let (tx, rx) = tokio::sync::mpsc::channel(RECV_MERGE_CAP);
             peer_tx.push(tx);
-            peer_live.push(Arc::new(AtomicUsize::new(0)));
+            peer_live.push(Arc::new(tokio::sync::Mutex::new(0usize)));
             children.spawn(recv_consumer_task(
                 peer.clone(),
                 rx,
@@ -983,11 +988,17 @@ async fn recv_consumer_task<S, K>(
 /// deliveries into the peer's shared merged channel, and when the stream ends —
 /// a died SMP recv loop used to leave the seat deaf for the whole session —
 /// redial `subscribe` with capped jittered backoff, repeat. The shared `live`
-/// counter aggregates the peer's queues into ONE per-peer status: `link_up` on
-/// the 0→1 transition, `link_down` on 1→0 (all queues down) and on a subscribe
+/// count aggregates the peer's queues into ONE per-peer status: `link_up` on the
+/// 0→1 transition, `link_down` on 1→0 (all queues down) and on a subscribe
 /// failure while no queue is up. Ends only when the consumer (merged channel) is
 /// gone = engine gone. An SMP `subscribe` dials its own fresh connection, so the
 /// forwarder re-dials implicitly.
+///
+/// `live` is a `tokio::Mutex<usize>` held ACROSS each count transition AND its
+/// link_up/link_down round-trip (Stage-2 audit finding #2): a peer's N forwarders
+/// then notify the engine in a strict order that matches the count, so the engine
+/// can never process an up/down out of order and get stuck alarming a leg that
+/// still has a live queue.
 #[allow(clippy::too_many_arguments)]
 async fn recv_forwarder_task<T, K>(
     transport: T,
@@ -995,7 +1006,7 @@ async fn recv_forwarder_task<T, K>(
     member: MemberId,
     rcv: RcvQueue,
     merged: tokio::sync::mpsc::Sender<crate::Delivery>,
-    live: Arc<AtomicUsize>,
+    live: Arc<tokio::sync::Mutex<usize>>,
     sink: K,
     first: Option<tokio::sync::mpsc::Receiver<crate::Delivery>>,
     seed: u64,
@@ -1013,9 +1024,14 @@ async fn recv_forwarder_task<T, K>(
                 Ok(rx) => rx,
                 Err(e) => {
                     tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), error = %e, "inbound subscribe failed — backing off");
-                    // the leg is DOWN only if no other queue of it is up
-                    if live.load(Ordering::SeqCst) == 0 {
-                        sink.link_down(&member, &e.to_string()).await;
+                    // the leg is DOWN only if no other queue of it is up — read
+                    // the count and (if 0) alarm UNDER the lock, so this can't
+                    // race a sibling forwarder's link_up
+                    {
+                        let n = live.lock().await;
+                        if *n == 0 {
+                            sink.link_down(&member, &e.to_string()).await;
+                        }
                     }
                     let backoff = backoff_ms(&cfg, attempt, &mut rng);
                     tokio::time::sleep(Duration::from_millis(backoff)).await;
@@ -1025,25 +1041,39 @@ async fn recv_forwarder_task<T, K>(
             },
         };
         tracing::debug!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription live");
-        // this queue is up; the leg comes UP on the first live queue
-        if live.fetch_add(1, Ordering::SeqCst) == 0 {
-            sink.link_up(&member).await;
+        // this queue is up; the leg comes UP on the first live queue — the count
+        // bump AND the link_up are one critical section
+        {
+            let mut n = live.lock().await;
+            *n += 1;
+            if *n == 1 {
+                sink.link_up(&member).await;
+            }
         }
         let lived = tokio::time::Instant::now();
         // pump every delivery into the peer's shared merged channel until the
         // stream ends (`None`)
+        let mut consumer_gone = false;
         while let Some(d) = rx.recv().await {
             if merged.send(d).await.is_err() {
-                // the consumer is gone = engine gone: drop our live slot
-                // (best-effort) and stop
-                live.fetch_sub(1, Ordering::SeqCst);
-                return;
+                consumer_gone = true;
+                break;
             }
         }
-        // this queue's stream ended; the leg goes DOWN only when the LAST one does
-        if live.fetch_sub(1, Ordering::SeqCst) == 1 {
-            tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription ended — resubscribing");
-            sink.link_down(&member, "inbound subscription ended — resubscribing").await;
+        // this queue went down; the leg goes DOWN only when the LAST one does —
+        // count decrement AND the link_down are one critical section. If the
+        // CONSUMER is gone (engine gone) we just drop our slot without alarming
+        // (the engine is not listening anyway).
+        {
+            let mut n = live.lock().await;
+            *n = n.saturating_sub(1);
+            if *n == 0 && !consumer_gone {
+                tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription ended — resubscribing");
+                sink.link_down(&member, "inbound subscription ended — resubscribing").await;
+            }
+        }
+        if consumer_gone {
+            return;
         }
         // Reset the escalation only after a LONG-LIVED incarnation: a queue
         // whose subscription is accepted but ended immediately (e.g. a server END

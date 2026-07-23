@@ -394,6 +394,48 @@ async fn a_two_queue_leg_survives_one_expired_queue() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leg_stays_up_when_one_of_two_queues_dies() {
+    // Stage-2 audit finding #2 (honesty): with N=2, deleting ONE of a leg's two
+    // inbound queues (ending that forwarder's stream for good) must NOT make the
+    // leg report DOWN — the other queue is still live, so the aggregate `live`
+    // count stays ≥1 and no `link_down` fires. The per-peer live lock also keeps
+    // the up/down notifications ordered so a healthy leg can't get stuck alarming.
+    use molt_net::Transport;
+    let hub = LoopbackHub::calm();
+    let nodes = mesh_n(&hub, &["ada", "ben"], 11, 2).await;
+    // baseline: ben hears ada on the N=2 leg
+    post(&nodes[0], 1, "before the queue dies");
+    await_deliveries(&nodes[1].sink, 1, 10).await;
+
+    // delete ONE of ben's two inbound queues from ada (ends that forwarder)
+    let ben_rcv0 = nodes[1]
+        .links
+        .iter()
+        .find(|l| l.member == "ada")
+        .expect("ben's link to ada")
+        .rcvs[0]
+        .clone();
+    hub.transport().delete_queue(&ben_rcv0).await.expect("delete one queue");
+
+    // ada keeps sending; ben must keep hearing it on the surviving queue
+    post(&nodes[0], 2, "after one queue died");
+    await_deliveries(&nodes[1].sink, 2, 10).await;
+    // settle so any spurious link_down churn would surface
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let events = nodes[1].sink.link_events();
+    assert!(
+        !events.iter().any(|e| e.starts_with("down:ada")),
+        "a leg with one surviving queue must NEVER report link_down — events: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|e| e.as_str() == "up:ada").count(),
+        1,
+        "the N=2 leg comes up exactly once (not once per queue) — events: {events:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redundant_copies_dedup_to_one_delivery() {
     // N=2, no failure: ada fans the SAME ciphertext to BOTH of ben's queues, so
     // ben's ONE recv consumer (single shared Reassembler + sole-writer cursor)
