@@ -84,12 +84,20 @@ only not screaming about an absent friend.
   own server (`server_of`). Fixes the latent resume bug; behaviour-neutral
   (loopback ignores the server, single-server SMP has rcv_server == self.server).
   Prerequisite for the rest.
-- **Stage 1 (next):** multi-server transport — route `send`/`subscribe`/
-  `create_queue`/`delete_queue` by the queue's own server (a `Multi` transport
-  wrapping N `SmpTransport`s, or per-server pools); extend `PersistedCreds` to
-  record each queue's server; replace `reopen_transport`'s first-non-empty-server
-  collapse with per-server construction. Config still single server → pure
-  refactor, identical behaviour, testable on two servers.
+- **Stage 1 ✅ BUILT (commit e349f21):** `SmpTransport` is internally
+  multi-server — `server: SmpServer` → `servers: Vec<SmpServer>`, `pool` →
+  `pools` (one pool per server), plus a round-robin `next` cursor.
+  `send`/`subscribe`/`delete_queue` route by the queue's OWN server via
+  `route(&str)` (match by rendered address, fall back to the first for
+  empty/unconfigured); `create_queue` round-robins placement across the servers.
+  `with_dialer_multi`/`new_multi` build the N-server form; `new`/`with_dialer`
+  delegate with a single-element list, so single-server config is byte-for-byte
+  the former behaviour. Creds stay server-agnostic (the server rides on the
+  RcvQueue/SndQueueAddr, persisted in MeshLink since Stage 0). TDD:
+  `route_dispatches_by_the_queue_s_own_server`. All 23 smp transport tests +
+  full molt-net green, clippy clean. `reopen_transport` still builds a
+  single-server transport (config is single-server) — its per-server
+  construction lands with Stage 2 when the config gains a server list.
 - **Stage 2 (the feature):** N=2 redundant inbound queues per leg. `bootstrap_mesh`
   mints N per peer; `MeshAnnounce.queues` → `Vec<QueueHandover>` per peer (additive);
   `PeerLink` carries N send targets + N recv queues; the supervisor fans send to N
