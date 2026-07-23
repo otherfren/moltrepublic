@@ -98,14 +98,18 @@ only not screaming about an absent friend.
   full molt-net green, clippy clean. `reopen_transport` still builds a
   single-server transport (config is single-server) — its per-server
   construction lands with Stage 2 when the config gains a server list.
-- **Stage 2 (the feature):** N=2 redundant inbound queues per leg. `bootstrap_mesh`
-  mints N per peer; `MeshAnnounce.queues` → `Vec<QueueHandover>` per peer (additive);
-  `PeerLink` carries N send targets + N recv queues; the supervisor fans send to N
-  (reusing the ONE ciphertext per seq — never re-encrypt) and subscribes N (the N
-  recv loops of one peer MUST share one Reassembler + the single-writer cursor, or
-  the `(id,index)` dedup won't cross them — the key correctness detail); rotate /
-  extend / recovery mint N; config gains a server list. Bump
-  `TRANSPORT_STATE_VERSION` only if the MeshLink shape changes non-additively.
+- **Stage 2 (the feature) — MECHANISM ✅ BUILT + TESTED, activation pending.** See
+  `documents/mesh_redundancy_stage2.md` for the full record. Done + on master:
+  `PeerLink.snds/rcvs`, additive `MeshLink` extra + `MeshAnnounce.queues_extra`
+  (no `TRANSPORT_STATE_VERSION` bump — additive), the supervisor N-forwarder →
+  merged-channel → one-recv-consumer (single Reassembler + sole-writer cursor)
+  and the N-send fan (ONE ciphertext, never re-encrypt), transport-driven
+  `redundancy()`, and loopback TDD proving a leg survives one dead queue + N
+  copies dedup to one delivery. **Not yet activated in production** (single-server
+  config → N=1): needs a 2-server transport — either a *verified* second bundled
+  public server (do not invent the fingerprint) or a GUI-aware config server
+  list. mesh-extension/recovery still mint N=1 (asymmetric redundancy until a
+  rotation). A Stage-2 security audit is in progress.
 
 ---
 ### Original design

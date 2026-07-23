@@ -162,19 +162,38 @@ per-server construction deferred from Stage 1 lands here.
 
 ## 5. Staging (each independently landable, green, pushed)
 
-- **Stage 2a — Vec plumbing, N=1 (behaviour-neutral).** `PeerLink.snds/rcvs`,
-  `MeshLink` primary+extra, `MeshAnnounce.queues_extra`, `assemble_mesh`, the
-  supervisor N-forwarder/merge + N-send-fan structure — all wired but every mint
-  site still mints **1** queue (Vec of len 1). Every existing test passes
-  unchanged (N=1 == today). This lands the whole schema + concurrency refactor
-  with zero behaviour change. TDD: a unit test that a len-1 mesh behaves
-  identically; the merge/fan paths exercised at N=1.
-- **Stage 2b — activate N=2.** Mint N at every site; config server list +
-  `new_multi` construction; loopback `full_mesh` mints N. TDD over loopback:
-  (1) a 2-queue leg delivers when one queue is `expire_queue`d (redundancy);
-  (2) the receiver dedups the N copies to one delivery (shared reassembler);
-  (3) `live` count aggregation: link stays up while ≥1 queue live, down only when
-  all die; (4) send fans to all N, ≥1 success advances the seq.
+- **Stage 2a ✅ (commit 375fd57) — Vec plumbing, N=1 (behaviour-neutral).**
+  `PeerLink.snds/rcvs`, `MeshLink` additive primary+extra, `MeshAnnounce.
+  queues_extra`, `assemble_mesh`, the send-fan — all wired; every mint site mints
+  1 (Vec len 1). NO `TRANSPORT_STATE_VERSION` bump (additive). Every existing
+  test unchanged; whole workspace incl. molt-ui-window compiles.
+- **Stage 2b — activate N=2 (landed in pieces):**
+  - ✅ **recv restructure (commit c4a7805):** N forwarder tasks → one merged
+    channel → one `recv_consumer_task` (single Reassembler + sole-writer cursor);
+    shared `live` AtomicUsize aggregates per-peer link_up/link_down (leg up iff
+    ≥1 queue live). Behaviour-neutral at N=1.
+  - ✅ **redundancy TDD (commit 5d92939):** `LoopbackHub::full_mesh_n` +
+    `a_two_queue_leg_survives_one_expired_queue` (one queue idle-expired, the
+    message still arrives once via the other) + `redundant_copies_dedup_to_one_
+    delivery` (N copies → one delivery). Proves the load-bearing dedup detail.
+  - ✅ **transport-driven activation (commit 9cff628):** `Transport::redundancy()`
+    (default 1), `SmpTransport::redundancy() = servers.len().clamp(1,
+    MESH_REDUNDANCY_CAP=2)`; `bootstrap_mesh` mints that many. Redundancy turns on
+    automatically once the transport is built with 2 servers. Still N=1 in the
+    current build (single-server config).
+  - ⬜ **REMAINING — the last activation mile (needs a product decision):**
+    1. A **2-server transport in production**. Two routes, both a fork for the
+       user: (a) add a **second bundled public server** so `server="public"`
+       gives N=2 by default — BLOCKED on a *verified* second official SimpleX
+       server cert-pin fingerprint (do NOT invent one — CLAUDE.md); (b) a
+       **config server LIST** (`[transport.smp].urls`) the user fills with their
+       own servers — needs GUI awareness (the settings screen must round-trip the
+       list, or a save would drop a hand-added second server) + per-server Test.
+    2. **mesh-extension / recovery mint N** (currently N=1): a member who
+       joins/recovers gets single-queue legs until a rotation. Correct, just
+       asymmetric redundancy. The reply-reader in `recovery.rs` needs to accept a
+       survivor's reply on any of the N queues.
+    3. **Security audit** of the Stage 2 change-set (in progress).
 
 ## 6. TDD plan (loopback — the redundancy LOGIC is server-agnostic)
 
