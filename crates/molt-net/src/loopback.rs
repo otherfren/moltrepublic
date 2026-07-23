@@ -266,6 +266,19 @@ impl LoopbackHub {
         &self,
         members: &[MemberId],
     ) -> Result<BTreeMap<MemberId, Vec<PeerLink>>, NetError> {
+        self.full_mesh_n(members, crate::MESH_REDUNDANCY)
+    }
+
+    /// Like [`full_mesh`](LoopbackHub::full_mesh) but with an explicit redundancy
+    /// factor `n` (≥1): each directed pair gets `n` inbound queues sharing one
+    /// wrap key. Lets tests exercise the N-recv-merge / dedup / send-fan logic
+    /// over loopback independent of the production `MESH_REDUNDANCY`.
+    pub fn full_mesh_n(
+        &self,
+        members: &[MemberId],
+        n: usize,
+    ) -> Result<BTreeMap<MemberId, Vec<PeerLink>>, NetError> {
+        let n = n.max(1);
         // N inbound queues of (recipient, sender), sharing one wrap key
         // (Track B Stage 2 redundancy; N=1 == the former single-queue mesh)
         let mut queues: BTreeMap<(MemberId, MemberId), (Vec<QueuePair>, WrapKey)> = BTreeMap::new();
@@ -275,8 +288,8 @@ impl LoopbackHub {
                     continue;
                 }
                 let key = WrapKey::fresh()?;
-                let mut pairs = Vec::with_capacity(crate::MESH_REDUNDANCY);
-                for _ in 0..crate::MESH_REDUNDANCY {
+                let mut pairs = Vec::with_capacity(n);
+                for _ in 0..n {
                     pairs.push(self.create_queue_blocking()?);
                 }
                 queues.insert((recipient.clone(), sender.clone()), (pairs, key));
