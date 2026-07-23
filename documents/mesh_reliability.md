@@ -138,7 +138,20 @@ N×). Choose N (2 is the usual sweet spot). Schema ripples: `MeshLink`,
 `QueueHandover`, `roster`/founding queue creation, `reopen_transport`, the
 persisted creds. Big but mechanical; the dedup already exists.
 
-## Track C — Regular queue rotation
+## Track C — Regular queue rotation ✅ OPTION A BUILT (2026-07-24, commit 8f60bbf)
+
+**Done (Option A — the user's choice).** A slow scheduled rotation on the presence
+tick: `rotate_stale_legs` rotates the single oldest reachable leg whose queue has
+been the same for `MESH_ROTATE_CADENCE_SECS` (6 h), via the existing
+`cmd_net_mesh_rotate` (shared 60 s cooldown). A dedicated per-leg `established_at`
+(reset only for the rotated leg) drives the per-leg cadence; offline legs are
+deferred; one leg per tick bounds the whole-mesh-blip churn a rotate causes. No
+new `Command` (co-equality untouched). TDD: three pure-selection tests. The
+zero-loss overlap (old queue as `rcv_extra` a grace window) and per-queue rotation
+without a full rebuild (Option B) are follow-ups; with Stage-2 redundancy active,
+the sibling queue already carries traffic during a rotate. Full plan +
+architectural fork (Option A vs B) in `documents/mesh_rotation_trackc.md`. Original
+design below.
 
 **Problem:** a long-lived queue is a long-lived correlation handle (unlinkability)
 and a single point of staleness. SimpleX rotates queues on a slow schedule.
