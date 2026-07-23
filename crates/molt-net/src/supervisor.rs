@@ -25,6 +25,7 @@
 //! resends, never history — the peers' dedup absorbs it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -503,49 +504,80 @@ where
         // first send is one round-trip, not a cold circuit build. Drain-don't-
         // abort is untouched: each recv task still lands in the JoinSet and is
         // aborted with the rest on stop; only the initial dials go concurrent.
+        // Stage 2: a peer may have N redundant inbound queues, so prebuild every
+        // (peer, queue) leg (bounded), not just one per peer.
+        let legs: Vec<(usize, usize)> = cfg
+            .peers
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, p)| (0..p.rcvs.len()).map(move |qi| (pi, qi)))
+            .collect();
         let subscribed = {
             let transport = transport.clone();
             let peers = cfg.peers.clone();
-            prebuild_circuits(peers.len(), PREBUILD_PARALLELISM, move |i| {
+            let legs = legs.clone();
+            prebuild_circuits(legs.len(), PREBUILD_PARALLELISM, move |j| {
                 let transport = transport.clone();
-                let rcv = peers[i].rcv0().clone();
+                let (pi, qi) = legs[j];
+                let rcv = peers[pi].rcvs[qi].clone();
                 async move { transport.subscribe(&rcv).await }
             })
             .await
         };
-        for (i, (peer, sub)) in cfg.peers.iter().zip(subscribed).enumerate() {
-            // the prebuild's first subscribe seeds the watchdog; a failed
-            // first subscribe is NOT fatal any more — the watchdog redials
-            // with capped backoff until the engine goes away (Stage B)
-            let first = match sub {
-                Some(Ok(rx)) => Some(rx),
-                Some(Err(e)) => {
-                    tracing::error!(peer = %peer.member, error = %e, "subscribing inbound queue failed — the watchdog will retry");
-                    sink.link_down(&peer.member, &e.to_string()).await;
-                    None
-                }
-                None => {
-                    tracing::error!(peer = %peer.member, "prebuild subscribe task did not complete");
-                    sink.link_down(&peer.member, "prebuild subscribe did not complete").await;
-                    None
-                }
-            };
-            let seed = cfg
-                .seed
-                .wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(1 + u64::try_from(i).unwrap_or_default()))
-                | 1;
-            children.spawn(recv_watchdog_task(
-                transport.clone(),
-                cfg.clone(),
+        // Per peer: ONE merged channel + ONE consumer (the single Reassembler and
+        // sole-writer cursor), fed by N forwarder tasks (one per redundant inbound
+        // queue). The shared `live` counter aggregates the peer's queues into ONE
+        // per-peer link_up/link_down (a leg is UP while ≥1 queue is live). N=1 is
+        // the former single-subscription watchdog exactly.
+        let mut peer_tx: Vec<tokio::sync::mpsc::Sender<crate::Delivery>> =
+            Vec::with_capacity(cfg.peers.len());
+        let mut peer_live: Vec<Arc<AtomicUsize>> = Vec::with_capacity(cfg.peers.len());
+        for peer in &cfg.peers {
+            let (tx, rx) = tokio::sync::mpsc::channel(RECV_MERGE_CAP);
+            peer_tx.push(tx);
+            peer_live.push(Arc::new(AtomicUsize::new(0)));
+            children.spawn(recv_consumer_task(
                 peer.clone(),
+                rx,
                 store.clone(),
                 sink.clone(),
                 state.clone(),
                 mls.clone(),
+            ));
+        }
+        for ((pi, qi), sub) in legs.into_iter().zip(subscribed) {
+            let peer = &cfg.peers[pi];
+            // the prebuild's first subscribe seeds the forwarder; a failed one is
+            // NOT fatal — the forwarder redials with capped backoff (Stage B)
+            let first = match sub {
+                Some(Ok(rx)) => Some(rx),
+                Some(Err(e)) => {
+                    tracing::error!(peer = %peer.member, queue = %queue_tag(&peer.rcvs[qi].id.0), error = %e, "subscribing an inbound queue failed — the forwarder will retry");
+                    None
+                }
+                None => {
+                    tracing::error!(peer = %peer.member, "prebuild subscribe task did not complete");
+                    None
+                }
+            };
+            let seed = cfg.seed.wrapping_add(
+                0x9e37_79b9_7f4a_7c15u64
+                    .wrapping_mul(1 + u64::try_from(pi * 64 + qi).unwrap_or_default()),
+            ) | 1;
+            children.spawn(recv_forwarder_task(
+                transport.clone(),
+                cfg.clone(),
+                peer.member.clone(),
+                peer.rcvs[qi].clone(),
+                peer_tx[pi].clone(),
+                peer_live[pi].clone(),
+                sink.clone(),
                 first,
                 seed,
             ));
         }
+        // drop our tx clones so each merged channel closes when its forwarders end
+        drop(peer_tx);
         stopped.notified().await;
         // dropping the JoinSet aborts every child task
         drop(children);
@@ -597,6 +629,12 @@ where
 
 /// How many circuits the prebuild opens at once (concept §5).
 const PREBUILD_PARALLELISM: usize = 4;
+
+/// Capacity of a peer's merged inbound channel (Track B Stage 2): the N
+/// forwarders (one per redundant queue) push `Delivery`s into it and the single
+/// consumer drains. Bounded so a stalled consumer back-pressures the forwarders
+/// rather than growing unbounded.
+const RECV_MERGE_CAP: usize = 64;
 
 /// The per-peer outbox drainer. Never blocks the engine: it waits on the
 /// wakeup watch and reads pending envelopes straight from the log.
@@ -910,42 +948,64 @@ enum RecvEnd {
     StreamEnded,
 }
 
-/// The per-peer **resubscribe watchdog** (Stage B): run [`recv_task`] over
-/// a subscription, and when the stream ends — a died SMP recv loop used to
-/// leave the seat deaf for the whole session — report `link_down`, redial
-/// `subscribe` with capped jittered backoff, report `link_up`, repeat.
-/// Ends only when the engine is gone. Reassembler/reorder/epoch buffers are
-/// fresh per incarnation (delivery cursors live in the shared `state`;
-/// anything held un-acked redelivers on the new subscription). An SMP
-/// `subscribe` dials its own fresh connection, so the watchdog re-dials
-/// implicitly.
-#[allow(clippy::too_many_arguments)]
-async fn recv_watchdog_task<T, S, K>(
-    transport: T,
-    cfg: NetConfig,
+/// The per-peer receive **consumer** (Track B Stage 2): run the single
+/// [`recv_task`] — one `Reassembler` + the sole-writer delivery cursor — over the
+/// merged stream of the peer's N redundant inbound queues. Resubscribe lives in
+/// the forwarders, so the merged channel closing (all forwarders gone) = engine
+/// gone; either [`RecvEnd`] is terminal here.
+async fn recv_consumer_task<S, K>(
     peer: PeerLink,
+    merged_rx: tokio::sync::mpsc::Receiver<crate::Delivery>,
     store: S,
     sink: K,
     state: Arc<Mutex<TransportState>>,
     mls: Option<MlsChannel>,
+) where
+    S: StateStore,
+    K: EngineSink,
+{
+    let _ = recv_task(peer, merged_rx, store, sink, state, mls).await;
+}
+
+/// One inbound queue's **forwarder** (Track B Stage 2 + the Stage-B resubscribe
+/// watchdog): subscribe ONE of a peer's N redundant inbound queues, pump its
+/// deliveries into the peer's shared merged channel, and when the stream ends —
+/// a died SMP recv loop used to leave the seat deaf for the whole session —
+/// redial `subscribe` with capped jittered backoff, repeat. The shared `live`
+/// counter aggregates the peer's queues into ONE per-peer status: `link_up` on
+/// the 0→1 transition, `link_down` on 1→0 (all queues down) and on a subscribe
+/// failure while no queue is up. Ends only when the consumer (merged channel) is
+/// gone = engine gone. An SMP `subscribe` dials its own fresh connection, so the
+/// forwarder re-dials implicitly.
+#[allow(clippy::too_many_arguments)]
+async fn recv_forwarder_task<T, K>(
+    transport: T,
+    cfg: NetConfig,
+    member: MemberId,
+    rcv: RcvQueue,
+    merged: tokio::sync::mpsc::Sender<crate::Delivery>,
+    live: Arc<AtomicUsize>,
+    sink: K,
     first: Option<tokio::sync::mpsc::Receiver<crate::Delivery>>,
     seed: u64,
 ) where
     T: Transport,
-    S: StateStore,
     K: EngineSink,
 {
     let mut rng = seed;
     let mut attempt: u32 = 0;
     let mut next = first;
     loop {
-        let rx = match next.take() {
+        let mut rx = match next.take() {
             Some(rx) => rx,
-            None => match transport.subscribe(peer.rcv0()).await {
+            None => match transport.subscribe(&rcv).await {
                 Ok(rx) => rx,
                 Err(e) => {
-                    tracing::warn!(peer = %peer.member, error = %e, "resubscribe failed — backing off");
-                    sink.link_down(&peer.member, &e.to_string()).await;
+                    tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), error = %e, "inbound subscribe failed — backing off");
+                    // the leg is DOWN only if no other queue of it is up
+                    if live.load(Ordering::SeqCst) == 0 {
+                        sink.link_down(&member, &e.to_string()).await;
+                    }
                     let backoff = backoff_ms(&cfg, attempt, &mut rng);
                     tokio::time::sleep(Duration::from_millis(backoff)).await;
                     attempt = attempt.saturating_add(1);
@@ -953,30 +1013,31 @@ async fn recv_watchdog_task<T, S, K>(
                 }
             },
         };
-        tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription live");
-        sink.link_up(&peer.member).await;
+        tracing::debug!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription live");
+        // this queue is up; the leg comes UP on the first live queue
+        if live.fetch_add(1, Ordering::SeqCst) == 0 {
+            sink.link_up(&member).await;
+        }
         let lived = tokio::time::Instant::now();
-        match recv_task(
-            peer.clone(),
-            rx,
-            store.clone(),
-            sink.clone(),
-            state.clone(),
-            mls.clone(),
-        )
-        .await
-        {
-            RecvEnd::EngineGone => return,
-            RecvEnd::StreamEnded => {
-                tracing::warn!(peer = %peer.member, "subscription ended — resubscribing");
-                sink.link_down(&peer.member, "subscription ended — resubscribing").await;
+        // pump every delivery into the peer's shared merged channel until the
+        // stream ends (`None`)
+        while let Some(d) = rx.recv().await {
+            if merged.send(d).await.is_err() {
+                // the consumer is gone = engine gone: drop our live slot
+                // (best-effort) and stop
+                live.fetch_sub(1, Ordering::SeqCst);
+                return;
             }
         }
+        // this queue's stream ended; the leg goes DOWN only when the LAST one does
+        if live.fetch_sub(1, Ordering::SeqCst) == 1 {
+            tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription ended — resubscribing");
+            sink.link_down(&member, "inbound subscription ended — resubscribing").await;
+        }
         // Reset the escalation only after a LONG-LIVED incarnation: a queue
-        // whose subscription is accepted but ended immediately (e.g. a
-        // server END war on a contended queue) must keep escalating toward
-        // retry_cap_ms, or the loop redials at base rate forever and flaps
-        // link_up/link_down at the engine.
+        // whose subscription is accepted but ended immediately (e.g. a server END
+        // war on a contended queue) must keep escalating toward retry_cap_ms, or
+        // the loop redials at base rate forever and flaps link_up/link_down.
         if lived.elapsed() >= Duration::from_millis(cfg.retry_cap_ms) {
             attempt = 0;
         }
