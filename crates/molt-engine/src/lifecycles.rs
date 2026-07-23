@@ -1047,8 +1047,12 @@ impl State {
                     .await;
             }
         });
+        // Track B Stage 2: this node's configured redundancy servers, so the
+        // joiner mints its inbound queues across N servers (empty = single-server
+        // joiner, unchanged).
+        let extra_servers = self.session.settings.smp_urls.clone();
         tokio::spawn(async move {
-            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None, dialer).await {
+            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None, dialer, extra_servers).await {
                 Ok(result) => match serde_json::to_string(&result.sealed) {
                     Ok(json) => {
                         // hand the ritual transport back BEFORE reporting the

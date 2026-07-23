@@ -338,6 +338,36 @@ impl Default for SessionSettings {
     }
 }
 
+impl SessionSettings {
+    /// The effective SMP server URL list the transport builds over (Track B
+    /// Stage 2 redundancy). When `smp_urls` is non-empty it wins (de-duplicated,
+    /// order preserved — ≥2 entries activate N=2 redundancy); otherwise the
+    /// single-server resolution: the custom `smp_url` when `smp_server ==
+    /// "custom"` and it is set, else `default_public` (the caller passes the
+    /// bundled public server — `molt-core` has no transport/config dependency).
+    /// Always returns ≥1 entry, so a transport built from it is never empty.
+    pub fn smp_server_list(&self, default_public: &str) -> Vec<String> {
+        if !self.smp_urls.is_empty() {
+            let mut out: Vec<String> = Vec::with_capacity(self.smp_urls.len());
+            for u in &self.smp_urls {
+                let u = u.trim();
+                if !u.is_empty() && !out.iter().any(|e| e == u) {
+                    out.push(u.to_string());
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        let single = if self.smp_server == "custom" && !self.smp_url.trim().is_empty() {
+            self.smp_url.trim().to_string()
+        } else {
+            default_public.to_string()
+        };
+        vec![single]
+    }
+}
+
 /// The inconspicuous default S3 bucket name.
 fn default_s3_bucket() -> String {
     "media-archive".to_string()
@@ -4308,6 +4338,46 @@ mod tests {
             "demo orphans must not leak into the production session state"
         );
         assert!(SessionView::default().s3_list.is_empty(), "no listing ran yet");
+    }
+
+    /// Track B Stage 2: the SMP server-list resolution — a non-empty `smp_urls`
+    /// wins (de-duped, order kept), else the single custom/public server; always
+    /// ≥1 so a transport built from it is never empty.
+    #[test]
+    fn smp_server_list_resolves_redundancy_then_single() {
+        const PUB: &str = "smp://PUBLIC@default";
+        let def = SessionSettings::default();
+        assert_eq!(def.smp_server_list(PUB), vec![PUB.to_string()], "default → public");
+
+        let custom = SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: "smp://AAAA@one".to_string(),
+            ..SessionSettings::default()
+        };
+        assert_eq!(custom.smp_server_list(PUB), vec!["smp://AAAA@one".to_string()]);
+
+        let redundant = SessionSettings {
+            smp_urls: vec![
+                "smp://AAAA@one".to_string(),
+                "smp://BBBB@two".to_string(),
+                "smp://AAAA@one".to_string(), // dup
+                "  ".to_string(),             // blank
+            ],
+            ..SessionSettings::default()
+        };
+        assert_eq!(
+            redundant.smp_server_list(PUB),
+            vec!["smp://AAAA@one".to_string(), "smp://BBBB@two".to_string()],
+            "the list wins, de-duped, order preserved"
+        );
+
+        let blanks = SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: "smp://CCCC@three".to_string(),
+            smp_urls: vec!["".to_string()],
+            ..SessionSettings::default()
+        };
+        assert_eq!(blanks.smp_server_list(PUB), vec!["smp://CCCC@three".to_string()]);
     }
 
     /// The bucket object-naming scheme (`backup_restore_design.md` §6.2):

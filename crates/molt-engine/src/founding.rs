@@ -36,18 +36,81 @@ use crate::{Envelope, State};
 /// normally completes in well under a second; this only bounds a failed peer.
 pub(crate) const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Build the runtime SMP transport from settings (Track B Stage 2 redundancy):
+/// spread inbound queues across the configured server list. `prepend` is a server
+/// that MUST be reachable first (a joiner/recovery invite server the ritual talks
+/// to); it is placed first and de-duplicated against the config list. The result
+/// is capped at [`molt_net::MESH_REDUNDANCY_CAP`] servers.
+///
+/// N=2 REQUIRES the members to share a server set: `SmpTransport::route` matches a
+/// queue's server against THIS transport's configured list and falls back to the
+/// primary for an unconfigured one, so a peer's redundant queue on a server I did
+/// not configure mis-routes to my primary and that copy fails — the `≥1-success`
+/// send rule still delivers via the matching copy, so it is never broken, only
+/// non-redundant on that leg. (Dialing an arbitrary pinned announced server is a
+/// follow-up that would lift the shared-set constraint.)
+pub(crate) fn build_smp_transport(
+    settings: &molt_core::SessionSettings,
+    dialer: Dialer,
+    prepend: Option<SmpServer>,
+) -> Result<SmpTransport, String> {
+    let mut servers: Vec<SmpServer> = Vec::new();
+    if let Some(s) = prepend {
+        servers.push(s);
+    }
+    for url in settings.smp_server_list(&molt_config::default_public_smp()) {
+        if let Ok(s) = SmpServer::parse(url.trim()) {
+            if !servers.iter().any(|e| e.render() == s.render()) {
+                servers.push(s);
+            }
+        }
+    }
+    if servers.is_empty() {
+        return Err("no SMP server configured".to_string());
+    }
+    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
+    Ok(SmpTransport::with_dialer_multi(servers, dialer))
+}
+
 /// A fresh SMP transport for **resuming** a persisted mesh on reopen: build it
-/// for the mesh's server and re-adopt the persisted queue credentials (recv keys
-/// so it can subscribe to our inbound queues, secured sender keys so it can keep
-/// sending without a rejected re-SKEY). `None` for a loopback mesh (empty
-/// server — its in-memory queues cannot outlive the process) or bad creds.
+/// for the mesh's server(s) and re-adopt the persisted queue credentials (recv
+/// keys so it can subscribe to our inbound queues, secured sender keys so it can
+/// keep sending without a rejected re-SKEY). `None` for a loopback mesh (empty
+/// server — its in-memory queues cannot outlive the process) or bad creds. Track
+/// B Stage 2: gathers ALL distinct servers the persisted mesh uses (primary +
+/// extra, both send and receive sides) so a resumed multi-server mesh
+/// re-subscribes on every one, not a single collapsed server.
 pub(crate) fn reopen_transport(
     mesh: &[molt_core::MeshLink],
     creds: &[u8],
     dialer: Dialer,
 ) -> Option<RitualTransport> {
-    let server = mesh.iter().map(|l| l.snd_server.trim()).find(|s| !s.is_empty())?;
-    let t = SmpTransport::with_dialer(SmpServer::parse(server).ok()?, dialer);
+    let mut servers: Vec<SmpServer> = Vec::new();
+    let mut push = |raw: &str| {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            if let Ok(s) = SmpServer::parse(raw) {
+                if !servers.iter().any(|e| e.render() == s.render()) {
+                    servers.push(s);
+                }
+            }
+        }
+    };
+    for l in mesh {
+        push(&l.snd_server);
+        push(&l.rcv_server);
+        for x in &l.snd_extra {
+            push(&x.server);
+        }
+        for x in &l.rcv_extra {
+            push(&x.server);
+        }
+    }
+    if servers.is_empty() {
+        return None; // loopback mesh (empty servers) — nothing to resume
+    }
+    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
+    let t = SmpTransport::with_dialer_multi(servers, dialer);
     t.import_creds(creds);
     Some(RitualTransport::Smp(t))
 }
@@ -356,12 +419,6 @@ impl State {
         let use_smp = self.ritual_over_smp || (!manual && !self.ritual_sim);
         let mut sim = Vec::new();
         let transport = if use_smp {
-            let url = if self.session.settings.smp_server == "custom" {
-                self.session.settings.smp_url.clone()
-            } else {
-                molt_config::default_public_smp()
-            };
-            let server = SmpServer::parse(url.trim()).map_err(|e| e.to_string())?;
             // fail-closed: resolve the dialer from settings; a TorMisconfigured
             // aborts the founding with the reason and sets the health pill.
             let dialer = match self.resolve_dialer() {
@@ -371,7 +428,14 @@ impl State {
                     return Err(reason);
                 }
             };
-            let transport = RitualTransport::Smp(SmpTransport::with_dialer(server, dialer));
+            // Track B Stage 2: the founder's runtime transport spans the
+            // configured server list, so the founding mesh mints its inbound
+            // queues across N servers (N=1 for a single-server config, unchanged).
+            let transport = RitualTransport::Smp(build_smp_transport(
+                &self.session.settings,
+                dialer,
+                None,
+            )?);
             // SMP queue creation is async: provision off the actor, wire each
             // seat's recv loop, then hand the material out
             spawn_smp_provisioning(
@@ -943,6 +1007,7 @@ pub struct JoinResult {
 /// materialises it into its state; [`join_founding_over_smp`] writes it
 /// standalone).
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub async fn ritual_join_over_smp(
     link: &str,
     name: String,
@@ -951,6 +1016,7 @@ pub async fn ritual_join_over_smp(
     ratify: Option<Ratifier>,
     cancel: Option<mpsc::Receiver<()>>,
     dialer: Dialer,
+    extra_server_urls: Vec<String>,
 ) -> Result<JoinResult, String> {
     let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
@@ -964,7 +1030,22 @@ pub async fn ritual_join_over_smp(
     // clones share the recipient-key store) to hand back for the runtime
     // supervisor: it must reuse THIS instance to subscribe to the inbound
     // queues the bootstrap created.
-    let transport = RitualTransport::Smp(SmpTransport::with_dialer(server.clone(), dialer));
+    //
+    // Track B Stage 2: the invite server is the primary (the ritual reaches the
+    // founder there); this node's own configured redundancy servers
+    // (`extra_server_urls` = settings.smp_urls) are added so the joiner mints its
+    // inbound queues across N servers too. Capped at MESH_REDUNDANCY_CAP; an
+    // empty list is the former single-server joiner exactly.
+    let mut servers = vec![server.clone()];
+    for url in &extra_server_urls {
+        if let Ok(s) = SmpServer::parse(url.trim()) {
+            if !servers.iter().any(|e| e.render() == s.render()) {
+                servers.push(s);
+            }
+        }
+    }
+    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
+    let transport = RitualTransport::Smp(SmpTransport::with_dialer_multi(servers, dialer));
     let material = InviteMaterial {
         seat: inv.seat,
         transport: transport.clone(),
@@ -1019,7 +1100,9 @@ pub async fn join_founding_over_smp(
     // cmd_join_start, which bootstraps. A future CLI that keeps a node running
     // would pass true and persist the mesh (the plumbing below already handles it).
     let result =
-        ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None, dialer).await?;
+        // standalone one-shot: single-server (no running node / config list here)
+        ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None, dialer, Vec::new())
+            .await?;
     let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
     let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
     let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
