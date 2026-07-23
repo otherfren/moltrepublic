@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
@@ -40,12 +40,21 @@ use crate::{
 /// queue's own server address is a later step).
 #[derive(Clone)]
 pub struct SmpTransport {
-    server: SmpServer,
+    /// The server(s) this transport creates queues on and reaches. N=2
+    /// redundancy spreads a leg's queues across them; `subscribe`/`send`/
+    /// `delete_queue` route by the queue's OWN server
+    /// (`RcvQueue.server`/`SndQueueAddr.server`). A single-element list is the
+    /// former single-server transport, byte-for-byte in behaviour.
+    servers: Vec<SmpServer>,
     dialer: Dialer,
     state: Arc<Mutex<SmpState>>,
-    /// The reused connection for `create_queue`/`send`/`delete_queue` (one per
-    /// server; `subscribe` keeps its own). Clones of a transport share it.
-    pool: ConnPool<SmpConn>,
+    /// One reused connection pool per server (parallel to `servers`) for
+    /// `create_queue`/`send`/`delete_queue`; `subscribe` keeps its own
+    /// connection. Clones of a transport share them.
+    pools: Vec<ConnPool<SmpConn>>,
+    /// Round-robin cursor spreading `create_queue` across `servers` (shared by
+    /// clones), so a peer's N redundant inbound queues land on different servers.
+    next: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -83,40 +92,58 @@ impl SmpTransport {
         SmpTransport::with_dialer(server, Dialer::Direct)
     }
 
+    /// A transport spread across `servers` (N=2 redundancy), dialing directly.
+    pub fn new_multi(servers: Vec<SmpServer>) -> SmpTransport {
+        SmpTransport::with_dialer_multi(servers, Dialer::Direct)
+    }
+
     /// Like [`new`](SmpTransport::new) but routes every connection through
     /// `dialer` — e.g. a SOCKS5h Tor proxy (concept §4).
     pub fn with_dialer(server: SmpServer, dialer: Dialer) -> SmpTransport {
+        SmpTransport::with_dialer_multi(vec![server], dialer)
+    }
+
+    /// The general constructor: N servers + a dialer. A single-element `servers`
+    /// is the former single-server transport, identical in behaviour.
+    pub fn with_dialer_multi(servers: Vec<SmpServer>, dialer: Dialer) -> SmpTransport {
         // mint the sender seed once per transport incarnation; on an RNG
         // failure it stays None (first send fails with `NetError::Crypto`) —
         // NEVER a constant fallback, which would let anyone pre-`SKEY` the
         // queues this node is about to secure
         let mut seed = [0u8; 32];
         let sender_seed = getrandom::getrandom(&mut seed).ok().map(|()| seed);
+        let pools = servers.iter().map(|_| ConnPool::new()).collect();
         SmpTransport {
-            server,
+            servers,
             dialer,
             state: Arc::new(Mutex::new(SmpState {
                 sender_seed,
                 ..SmpState::default()
             })),
-            pool: ConnPool::new(),
+            pools,
+            next: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Route to the `(server, pool)` for a queue's own server string — matched
+    /// by rendered address, falling back to the first server (single-server, an
+    /// empty string, or a server no longer configured). N=2: a queue names which
+    /// of the transport's servers it lives on so we subscribe/send there, not on
+    /// a single collapsed one.
+    fn route(&self, server: &str) -> (&SmpServer, &ConnPool<SmpConn>) {
+        let idx = if server.is_empty() {
+            0
+        } else {
+            self.servers
+                .iter()
+                .position(|s| s.render() == server)
+                .unwrap_or(0)
+        };
+        (&self.servers[idx], &self.pools[idx])
     }
 
     fn recv_queue(&self, id: &[u8]) -> Option<NewQueue> {
         self.state.lock().ok()?.recv.get(id).cloned()
-    }
-
-    /// Resolve a queue's own server string to an [`SmpServer`], falling back to
-    /// this transport's server when empty (loopback / same-server). Stage 0: a
-    /// queue can now name the server it lives on so a resumed/redundant leg
-    /// reaches the RIGHT server instead of the transport's single fixed one.
-    fn server_of(&self, server: &str) -> Result<SmpServer, NetError> {
-        if server.is_empty() {
-            Ok(self.server.clone())
-        } else {
-            SmpServer::parse(server)
-        }
     }
 
     /// The transport's sender seed (tests pin the export/import round-trip).
@@ -364,18 +391,22 @@ impl<C: PooledConn> ConnPool<C> {
 
 impl Transport for SmpTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
-        let q = self
-            .pool
-            .with_conn(&self.dialer, &self.server, false, |c: &mut SmpConn| {
+        // round-robin the new queue across the configured servers, so a leg's N
+        // redundant inbound queues land on DIFFERENT servers (N=2 redundancy);
+        // a single-server transport always picks index 0.
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.servers.len();
+        let server = &self.servers[idx];
+        let q = self.pools[idx]
+            .with_conn(&self.dialer, server, false, |c: &mut SmpConn| {
                 Box::pin(async move { c.new_queue(false).await })
             })
             .await?;
         let rcv = RcvQueue {
-            server: self.server.render(),
+            server: server.render(),
             id: QueueId::from_bytes(q.recipient_id.clone()),
         };
         let snd = SndQueueAddr {
-            server: self.server.render(),
+            server: server.render(),
             id: QueueId::from_bytes(q.sender_id.clone()),
         };
         if let Ok(mut s) = self.state.lock() {
@@ -387,8 +418,10 @@ impl Transport for SmpTransport {
     async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {
         let sender_id = addr.id.0.clone();
         let state = self.state.clone();
-        self.pool
-            .with_conn(&self.dialer, &self.server, true, |c: &mut SmpConn| {
+        // route to the server this queue lives on (N=2: the redundant copies go
+        // to each of the peer's inbound servers)
+        let (server, pool) = self.route(&addr.server);
+        pool.with_conn(&self.dialer, server, true, |c: &mut SmpConn| {
                 let sender_id = sender_id.clone();
                 let state = state.clone();
                 let block = block.clone();
@@ -461,11 +494,11 @@ impl Transport for SmpTransport {
         let queue = self
             .recv_queue(&q.id.0)
             .ok_or_else(|| NetError::Framing("subscribe to a queue this node did not create".into()))?;
-        // honor the queue's OWN server (Stage 0): a resumed/redundant leg
-        // subscribes on the server it was created on, not the transport's single
-        // fixed one. Empty (loopback / same-server) falls back to `self.server`.
-        let server = self.server_of(&q.server)?;
-        let mut conn = SmpConn::connect(&self.dialer, &server).await?;
+        // subscribe on the queue's OWN server (Stage 1 multi-server routing): a
+        // resumed/redundant leg reaches the server it was created on, not a
+        // single collapsed one.
+        let (server, _) = self.route(&q.server);
+        let mut conn = SmpConn::connect(&self.dialer, server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
         let rcv_tag = crate::supervisor::queue_tag(&queue.recipient_id);
@@ -506,13 +539,13 @@ impl Transport for SmpTransport {
         };
         let recipient_id = queue.recipient_id.clone();
         let auth_sk = queue.auth_sk.clone();
-        self.pool
-            .with_conn(&self.dialer, &self.server, false, |c: &mut SmpConn| {
-                let recipient_id = recipient_id.clone();
-                let auth_sk = auth_sk.clone();
-                Box::pin(async move { c.delete(&recipient_id, &auth_sk).await })
-            })
-            .await?;
+        let (server, pool) = self.route(&q.server);
+        pool.with_conn(&self.dialer, server, false, |c: &mut SmpConn| {
+            let recipient_id = recipient_id.clone();
+            let auth_sk = auth_sk.clone();
+            Box::pin(async move { c.delete(&recipient_id, &auth_sk).await })
+        })
+        .await?;
         if let Ok(mut s) = self.state.lock() {
             s.recv.remove(&q.id.0);
         }
@@ -536,6 +569,28 @@ mod creds_tests {
 
     fn transport() -> SmpTransport {
         SmpTransport::new(SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server"))
+    }
+
+    /// Stage 1 multi-server routing: a queue names which of the transport's
+    /// servers it lives on, and `route` dispatches there instead of collapsing
+    /// every leg to one. Empty / unconfigured servers fall back to the first.
+    #[test]
+    fn route_dispatches_by_the_queue_s_own_server() {
+        const FP2: &str = "0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=";
+        let s1 = SmpServer::parse(&format!("smp://{FP}@host-one.invalid")).expect("s1");
+        let s2 = SmpServer::parse(&format!("smp://{FP2}@host-two.invalid")).expect("s2");
+        let t = SmpTransport::new_multi(vec![s1.clone(), s2.clone()]);
+        assert_eq!(t.route("").0.render(), s1.render(), "empty → first");
+        assert_eq!(
+            t.route(&format!("smp://{FP}@nowhere.invalid")).0.render(),
+            s1.render(),
+            "an unconfigured server → first (best-effort)"
+        );
+        assert_eq!(t.route(&s2.render()).0.render(), s2.render(), "names s2 → routes to s2");
+        assert_eq!(t.route(&s1.render()).0.render(), s1.render(), "names s1 → routes to s1");
+        // a single-server transport always routes to its one server
+        let single = SmpTransport::new(s1.clone());
+        assert_eq!(single.route(&s2.render()).0.render(), s1.render(), "single-server → its server");
     }
 
     /// D2: the sender key is a pure function of (seed, queue id) — the same
