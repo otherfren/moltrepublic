@@ -200,14 +200,23 @@ per-server construction deferred from Stage 1 lands here.
     round-tripped through `read_settings_draft`/push; the interim engine
     preserve-hack removed (the GUI now round-trips the list, so full-replace is
     the consistent model). Richer per-row add/remove/Test-each is a follow-up.
+  - ✅ **rotate/mesh-extension preserve redundancy** (audit fix, 73108de): a
+    rotate (deaf-heal, verify-at-open, or Track C scheduled) and the
+    mesh-extension REPLY now mint `transport.redundancy()` inbound queues (was 1),
+    so a rotate no longer decays an N=2 leg to N=1. `RitualTransport::redundancy()`
+    delegates to the inner transport (it had used the trait default 1).
   - ⬜ **REMAINING follow-ups (not blocking):**
-    1. **mesh-extension / recovery mint N** (currently N=1): a member who
-       joins-later/recovers gets single-queue legs until a rotation. Correct, just
-       asymmetric redundancy.
-    2. **Dial an arbitrary pinned announced server** so N=2 works across members
+    1. **recovery rejoin mint N** (`recovery.rs` still mints 1): a total-loss
+       member that rejoins gets single-queue legs until a rotation re-mints N.
+       Correct, just asymmetric until the first rotate.
+    2. **A joiner's send side** to the founder is bounded by what the founder
+       announced (the joiner already receives N; sends fan to the founder's
+       announced queues) — symmetric once both sides have rotated once.
+    3. **Dial an arbitrary pinned announced server** so N=2 works across members
        with DIFFERENT server sets (lift the shared-set constraint) — a `route()`
        change (parse+dial the queue's own fingerprint-pinned server) with its own
-       small audit.
+       small audit. Also lifts `reopen_transport`'s >2-server truncation
+       (audit info #4).
 
 ## 6. TDD plan (loopback — the redundancy LOGIC is server-agnostic)
 

@@ -31,6 +31,18 @@ remains the follow-up. Read `documents/mesh_reliability.md` (Track C) and
   grace window) and per-queue rotation are Option B follow-ups. With Stage 2
   redundancy ACTIVE, the other queue already carries traffic during a rotate.
 
+### Post-build audit fix (commit 73108de)
+
+The activation+Track C audit found that a rotate (deaf-heal, verify-at-open, AND
+scheduled) minted ONE queue and replaced the whole leg, so within a cadence every
+N=2 leg decayed to N=1 — silently nullifying Track B. FIXED: `cmd_net_mesh_rotate`
+and `spawn_mesh_extension` now mint `transport.redundancy()` inbound queues and
+build an N-rcv leg (announce all N; clean up all on failure); `RitualTransport`
+now delegates `redundancy()` to its inner transport (it had used the trait default
+1). So a rotate PRESERVES redundancy. Also: a proactive rotate of a healthy leg no
+longer flashes "reconnecting" (the alarm now needs a pending rotate AND no contact
+within the keepalive interval). N=1 stays byte-neutral.
+
 Original design below.
 
 ---
