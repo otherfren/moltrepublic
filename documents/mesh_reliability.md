@@ -189,6 +189,53 @@ reopen should feel instant, not churny.
 This makes a cold reopen resume on the existing (alive) queues — the SimpleX
 behaviour: your queue was there the whole time, you just re-subscribe and drain.
 
+## Security audit (2026-07-23, change-set `ce5baa6..HEAD`)
+
+An adversarial security audit ran over the whole session's mesh/net/crypto
+change-set (verify-at-open Phases 1–4, Tracks A/B-Stage0/1/D, the
+`MOLT_MESH_PROBE` diagnostic). **Verdict: no critical or high-severity
+exploitable vulnerability.** Cleared: no MLS nonce/sender-generation reuse
+(`send_ping` encrypts once per logical ping under the shared-group lock);
+capability confinement (the 3 new commands `NetMeshWarm`/`NetMeshVerify`/
+`NetRawInbound` are all engine-INTERNAL, none an MCP tool, all
+generation-guarded); probe/warm are MLS-authenticated with no echo/amplification
+loop and a sound `\x00molt-mesh-*` namespace guard; Track B `route()` cannot be
+tricked into an attacker-named server (it indexes the node's OWN server list,
+fingerprint is part of the match key); Track D `raw_inbound` fires only after
+`unwrap_block` succeeds (needs the per-pair wrap key — an external attacker
+cannot flood junk to suppress a rotate or spoof presence), and it never advances
+`last_seen`; MeshLink/rcv_server are additive and touch no signed/chained bytes;
+no new `unwrap()`; ratchet continuity preserved. Four findings + decisions:
+
+- **#1 (MEDIUM, design tradeoff) — `net_health` can read `Ok` during a total
+  silent-deaf partition.** Because `last_seen` is runtime-only (`NEVER` at cold
+  open) and `peer_present` ages to false after 30 min, an all-legs-silent node
+  shows `Ok` + offline pills rather than a connectivity alarm. **Decision:
+  accepted** — this is Track A's deliberate choice and matches SimpleX
+  (subscribed == connected; peer reachability is presence, not a banner alarm).
+  Real SUB/SEND failures still force `Degraded` (`link_down`/`send_stuck`), the
+  deaf-leg heal still fires for `NEVER` peers, and the 30-min present-peer window
+  is an honesty floor. **Future enhancement (not built):** a distinct banner
+  state for "subscribed, zero mesh traffic from ANY peer since open" (an
+  all-legs-silent condition, orthogonal to per-peer presence) so a genuine total
+  partition reads as a fault rather than `Ok` — deferred because a naive version
+  reintroduces exactly the over-alarming Track A removed for the common
+  "all my friends are offline" case.
+- **#2 (LOW, diagnostic footgun) — FIXED.** `probe.rs` acked EVERY received frame
+  incl. real backlog, silently destroying a user's waiting messages if the
+  operator ran the diagnostic on a live workspace. Fixed: **the probe never
+  acks** — it only observes one arrival (any frame proves the leg delivers) and
+  leaves it un-acked to redeliver to the real mesh. Marker detection was also
+  wrong (a chunk-framed marker starts with the MsgId, so `starts_with(MARKER)`
+  never matched → markers already fell through as "backlog"); switched to a
+  CONTAINS check. TDD: `the_probe_preserves_a_real_waiting_message`.
+- **#3 (LOW, info) — probe logs recipient queue ids.** Operator-gated diagnostic,
+  recipient id only (not the `auth_sk` receive credential), no keys/plaintext.
+  **Decision: accepted** (the id IS the diagnostic — which leg); ensure probe
+  logs are never shipped/aggregated.
+- **#4 (LOW, accepted) — warm-back spawn is un-throttled.** 1:1, not
+  amplification, and only MLS-authenticated members can solicit it. **Accepted.**
+
 ## Suggested order
 
 1. **Track A** (honest status) — smallest, highest perceived-reliability win; it

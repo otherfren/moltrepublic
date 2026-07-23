@@ -138,56 +138,60 @@ async fn probe_leg(
         ),
     }
 
-    // (3) listen — classify every arriving frame: our marker, a real frame that
-    // UNWRAPS with our key (a waiting message), or a frame our key can't open
-    // (a wrap-key mismatch). The distinction pins the bug.
+    // (3) listen for ONE arriving frame and classify it: our own probe marker,
+    // a real frame that UNWRAPS with our key (a waiting message), or a frame our
+    // key can't open (a wrap-key mismatch). Any arrival already proves the leg
+    // delivers, so we break on the first.
+    //
+    // CRITICAL (audit finding #2): the probe NEVER acks. Acking deletes a frame
+    // from the server, so a diagnostic run on a live workspace would silently
+    // destroy a user's waiting messages before the real mesh ever opens. We only
+    // OBSERVE — every received frame is left un-acked and redelivers to the real
+    // mesh on the next normal open (a real SMP server blocks the next delivery
+    // until the current one is acked anyway, so one observed frame is the most a
+    // read-only probe can see). The marker is chunk-framed by `send_framed`, so
+    // it is detected by CONTAINS, not a prefix match.
     let deadline = tokio::time::Instant::now() + listen;
     let mut got_probe = false;
-    let mut backlog: u32 = 0; // unwrapped OK, not our marker — a real waiting frame
-    let mut undecryptable: u32 = 0; // arrived but our wrap key could not open it
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(d)) => {
-                match molt_net::wrap::unwrap_block(&peer.wrap_in, &d.block) {
-                    Ok(bytes) if bytes.starts_with(MARKER) => {
-                        got_probe = true;
-                        tracing::info!(
-                            target: "molt_mesh_probe", %me, peer = %peer.member,
-                            from = %String::from_utf8_lossy(&bytes),
-                            "RECV → the peer's PROBE marker arrived and UNWRAPPED — queue delivers AND our wrap key matches"
-                        );
-                    }
-                    Ok(_) => {
-                        backlog += 1;
-                        tracing::info!(
-                            target: "molt_mesh_probe", %me, peer = %peer.member,
-                            "RECV → a real frame arrived and UNWRAPPED (not a probe) — a waiting message the transport delivered"
-                        );
-                    }
-                    Err(_) => {
-                        undecryptable += 1;
-                        tracing::info!(
-                            target: "molt_mesh_probe", %me, peer = %peer.member,
-                            "RECV → a frame arrived but our wrap key could NOT open it — a WRAP-KEY MISMATCH (the frame is on the queue; our resumed key is wrong)"
-                        );
-                    }
-                }
-                d.ack.ack();
+    let mut backlog = false; // unwrapped OK, not our marker — a real waiting frame
+    let mut undecryptable = false; // arrived but our wrap key could not open it
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if let Ok(Some(d)) = tokio::time::timeout(remaining, rx.recv()).await {
+        match molt_net::wrap::unwrap_block(&peer.wrap_in, &d.block) {
+            Ok(bytes) if bytes.windows(MARKER.len()).any(|w| w == MARKER) => {
+                got_probe = true;
+                tracing::info!(
+                    target: "molt_mesh_probe", %me, peer = %peer.member,
+                    "RECV → a PROBE marker arrived and UNWRAPPED — queue delivers AND our wrap key matches"
+                );
             }
-            _ => break,
+            Ok(_) => {
+                backlog = true;
+                tracing::info!(
+                    target: "molt_mesh_probe", %me, peer = %peer.member,
+                    "RECV → a real frame arrived and UNWRAPPED (not a probe) — a waiting message the transport delivered"
+                );
+            }
+            Err(_) => {
+                undecryptable = true;
+                tracing::info!(
+                    target: "molt_mesh_probe", %me, peer = %peer.member,
+                    "RECV → a frame arrived but our wrap key could NOT open it — a WRAP-KEY MISMATCH (the frame is on the queue; our resumed key is wrong)"
+                );
+            }
         }
+        // d dropped here WITHOUT ack — the frame stays on the server.
     }
 
     // (4) per-leg verdict
-    if got_probe || backlog > 0 {
+    if got_probe || backlog {
         tracing::info!(
-            target: "molt_mesh_probe", %me, peer = %peer.member, backlog, undecryptable,
+            target: "molt_mesh_probe", %me, peer = %peer.member, got_probe, backlog,
             "VERDICT: queue ALIVE + DELIVERING (frames unwrap with our key) — the deafness is \
              ABOVE the transport, NOT server expiry"
         );
         LegVerdict::AliveDelivering
-    } else if undecryptable > 0 {
+    } else if undecryptable {
         tracing::info!(
             target: "molt_mesh_probe", %me, peer = %peer.member, undecryptable,
             "VERDICT: queue ALIVE, frames ARRIVE but our wrap key can't open them — a WRAP-KEY \
@@ -242,6 +246,65 @@ mod tests {
         )
         .await;
         assert_eq!(verdict, LegVerdict::AliveDelivering);
+    }
+
+    /// Audit finding #2 (data-loss footgun): a diagnostic run must NEVER
+    /// consume a real waiting message. A non-marker frame proves the leg
+    /// delivers (→ `AliveDelivering`), but acking it would delete the user's
+    /// message from the server before the real mesh ever opens. So the probe
+    /// leaves every non-marker frame un-acked — it redelivers on the next
+    /// (real) subscribe.
+    #[tokio::test]
+    async fn the_probe_preserves_a_real_waiting_message() {
+        use molt_net::Transport;
+        let (_hub, t, leg) = self_loop_leg().await;
+        // a real (non-marker) application message is already waiting on the leg
+        let payload = b"a real waiting application message".to_vec();
+        supervisor::send_framed(&t, &leg.snd, &leg.wrap_out, MsgId([7u8; 16]), &payload)
+            .await
+            .expect("seed a real waiting frame");
+
+        // probing sees it → alive+delivering, but must not consume it
+        let verdict = probe_leg(
+            RitualTransport::Loopback(t.clone()),
+            leg.clone(),
+            "ada".to_string(),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(
+            verdict,
+            LegVerdict::AliveDelivering,
+            "a real waiting frame proves the leg delivers"
+        );
+
+        // the real message SURVIVES the probe: un-acked, it redelivers to a
+        // fresh subscribe (the real mesh on the next normal open).
+        let mut rx = t.subscribe(&leg.rcv).await.expect("resubscribe");
+        let survived = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let d = match rx.recv().await {
+                    Some(d) => d,
+                    None => return false,
+                };
+                // the frame is chunk-framed (MsgId + header + payload + pad), so
+                // the payload is CONTAINED, not byte-equal
+                let hit = matches!(
+                    molt_net::wrap::unwrap_block(&leg.wrap_in, &d.block),
+                    Ok(bytes) if bytes.windows(payload.len()).any(|w| w == payload.as_slice())
+                );
+                d.ack.ack();
+                if hit {
+                    return true;
+                }
+            }
+        })
+        .await
+        .expect("a frame redelivered within the window");
+        assert!(
+            survived,
+            "the probe must leave a real waiting message on the server (un-acked)"
+        );
     }
 
     /// The idle-expiry SHAPE (loopback `expire_queue`: SUB/SEND still Ok but
