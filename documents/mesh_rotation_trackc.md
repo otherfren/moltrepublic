@@ -1,5 +1,40 @@
 # Design: Track C — regular queue rotation (unlinkability)
 
+Status: **OPTION A BUILT 2026-07-24.** The 4th SimpleX-reliability track (after A
+honest-status ✅, D reopen-smoothing ✅, B redundancy ✅ complete). The user chose
+**Option A** (§3) — ship the simple scheduled rotation now, accepting the brief
+whole-mesh blip. Built + green + pushed; Option B (per-queue rotation, zero blip)
+remains the follow-up. Read `documents/mesh_reliability.md` (Track C) and
+`documents/mesh_verify_at_open.md` (the rotate machinery) first.
+
+## BUILT (Option A) — summary
+
+- `MESH_ROTATE_CADENCE_SECS` = 6 h; a per-leg `established_at` stamp (State,
+  runtime-only) — reset ONLY for the leg that rotates (unlike `mesh_up`, which a
+  whole-mesh rebuild refreshes for all legs, which would starve every leg but the
+  lowest-named).
+- `rotate_stale_legs` runs on the presence tick (after `rotate_deaf_legs`):
+  birth-stamps new legs, then rotates the SINGLE oldest REACHABLE leg past the
+  cadence via the existing `cmd_net_mesh_rotate` (sharing its 60 s `rotate_at`
+  cooldown, so a leg is never double-rotated by the heal + schedule). One leg per
+  tick bounds the whole-mesh re-subscribe churn. `established_at` is reset
+  OPTIMISTICALLY at rotate-initiation, so a rotate that fails to complete cannot
+  re-fire before a full cadence (the cooldown is the hard bound in between).
+- Offline legs are deferred (their adopt handshake can't complete — the same
+  partial-availability rule as verify-at-open).
+- `stale_leg_to_rotate` is a pure selection fn (unit-tested without a live mesh):
+  oldest-reachable-stale is chosen, offline is deferred, a fresh leg is
+  birth-stamped not rotated. No new `Command` (piggybacks the presence tick), so
+  co-equality is untouched. NOTE the residual: a rotate rebuilds the whole
+  supervisor, so a scheduled rotate is a brief whole-mesh blip (Option A's
+  accepted cost); the zero-loss overlap (keep the old queue as `rcv_extra` a
+  grace window) and per-queue rotation are Option B follow-ups. With Stage 2
+  redundancy ACTIVE, the other queue already carries traffic during a rotate.
+
+Original design below.
+
+---
+
 Status: **DESIGN DRAFT 2026-07-23.** The 4th SimpleX-reliability track (after A
 honest-status ✅, D reopen-smoothing ✅, B redundancy ✅ mechanism). Read
 `documents/mesh_reliability.md` (Track C) and `documents/mesh_verify_at_open.md`

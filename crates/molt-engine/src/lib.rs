@@ -575,6 +575,14 @@ pub(crate) struct State {
     /// [`crate::net::MESH_ROTATE_COOLDOWN_SECS`] while the heal completes (or
     /// the peer stays offline). Runtime-only; reset with the workspace.
     pub(crate) rotate_at: std::collections::HashMap<MemberId, u64>,
+    /// Track C — per-leg establishment time (`member → presence_now when this
+    /// leg's queue was last (re-)minted`), driving the SLOW scheduled queue
+    /// rotation for unlinkability. Unlike [`mesh_up`](Self::mesh_up) (refreshed
+    /// on every whole-mesh rebuild), this is reset ONLY for the leg that actually
+    /// rotates, so each leg rotates on its own cadence
+    /// ([`crate::net::MESH_ROTATE_CADENCE_SECS`]) independent of the others.
+    /// Lazily birth-stamped on the first tick a leg is seen. Runtime-only.
+    pub(crate) established_at: std::collections::HashMap<MemberId, u64>,
     /// Track D — last RAW inbound activity per leg (any frame delivered at the
     /// transport, decoded or not; stamped by [`Command::NetRawInbound`],
     /// throttled by the supervisor). A leg with recent raw activity is ALIVE, so
@@ -797,6 +805,7 @@ impl State {
             mesh_up: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
             rotate_at: std::collections::HashMap::new(),
+            established_at: std::collections::HashMap::new(),
             last_raw_inbound: std::collections::HashMap::new(),
             seen_announces: net::SeenNonces::default(),
             clock_override: None,

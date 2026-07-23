@@ -108,6 +108,16 @@ pub(crate) const MESH_RECEIVING_SECS: u64 = 30;
 /// another is tried.
 pub(crate) const MESH_ROTATE_COOLDOWN_SECS: u64 = 60;
 
+/// Track C — the cadence for the SLOW, scheduled queue rotation (unlinkability):
+/// each leg's inbound queue is proactively re-minted once it has been the same
+/// for this long, so a queue id is never a durable, weeks-long correlation
+/// handle (SimpleX rotates on a slow schedule). Well under any server retention
+/// window and slow enough to stay beaconless-ish
+/// (`concept-transport-simplex-tor.md` §3.4) — order of hours. One leg rotates
+/// per presence tick at most (the oldest reachable one), reusing the exact
+/// deaf-leg rotate machinery, sharing its per-peer cooldown.
+pub(crate) const MESH_ROTATE_CADENCE_SECS: u64 = 6 * 60 * 60;
+
 /// How long a rotate's off-actor task waits for the peer's reply announce on
 /// the freshly-minted queue before giving up (the leg stays deaf and the next
 /// detection re-triggers). Bounded so the task never lingers.
@@ -897,6 +907,11 @@ impl State {
         // stamp is harmless — it is masked by the `connecting` link-down below
         // until its fresh subscription re-stamps it on `NetLinkUp`.
         self.mesh_up.retain(|m, _| peer_names.contains(m));
+        // Track C: keep established_at only for current legs (a departed peer's
+        // stamp must not linger). A continuing leg keeps its stamp across this
+        // rebuild — that is the whole point (its rotation cadence is per-leg, not
+        // reset by an unrelated leg's rotate).
+        self.established_at.retain(|m, _| peer_names.contains(m));
         for p in &peer_names {
             self.net_link_down.insert(p.clone(), "connecting".to_string());
         }
@@ -1942,6 +1957,45 @@ impl State {
         }
     }
 
+    /// Track C — the single leg due for a SCHEDULED rotation: the OLDEST
+    /// `established_at` among reachable legs that has been the same for at least
+    /// [`MESH_ROTATE_CADENCE_SECS`]. `None` if nothing is due (or every stale leg
+    /// is to an offline peer — its rotate can't complete, so defer it). Reachable
+    /// = [`Self::peer_present`], the same boundary Track A uses. Pure (no
+    /// mutation) so the selection is unit-testable without a live mesh.
+    fn stale_leg_to_rotate(&self, now: u64) -> Option<MemberId> {
+        self.mesh_up
+            .keys()
+            .filter(|m| self.peer_present(m))
+            .filter_map(|m| self.established_at.get(m).map(|e| (m.clone(), *e)))
+            .filter(|(_, est)| now.saturating_sub(*est) >= MESH_ROTATE_CADENCE_SECS)
+            .min_by_key(|(_, est)| *est)
+            .map(|(m, _)| m)
+    }
+
+    /// Track C — proactively rotate ONE stale leg's inbound queue for
+    /// unlinkability (a long-lived queue id is a long-lived correlation handle).
+    /// Birth-stamps any new leg, rotates the single oldest reachable stale one
+    /// via the existing [`Self::cmd_net_mesh_rotate`] (sharing its per-peer
+    /// cooldown with the deaf-leg / verify-at-open rotates so a leg is never
+    /// double-rotated), and resets that leg's `established_at` OPTIMISTICALLY so a
+    /// rotate that fails to complete cannot re-fire before a full cadence — the
+    /// 60 s `rotate_at` cooldown is the hard bound in between. One leg per tick
+    /// bounds the whole-mesh re-subscribe churn a rotate causes.
+    fn rotate_stale_legs(&mut self) {
+        let now = self.presence_now();
+        // birth-stamp every current leg so its cadence starts when first seen
+        let legs: Vec<MemberId> = self.mesh_up.keys().cloned().collect();
+        for m in &legs {
+            self.established_at.entry(m.clone()).or_insert(now);
+        }
+        if let Some(peer) = self.stale_leg_to_rotate(now) {
+            self.established_at.insert(peer.clone(), now);
+            tracing::info!(%peer, "scheduled queue rotation (unlinkability)");
+            let _ = self.cmd_net_mesh_rotate(peer, None);
+        }
+    }
+
     /// Track D — whether a leg has RAW inbound activity within
     /// [`MESH_RECEIVING_SECS`] (any frame delivered at the transport, decoded or
     /// not). Such a leg's queue is demonstrably alive, so verify-at-open/deaf
@@ -2333,6 +2387,10 @@ impl State {
         // Stage 3: a leg that has stayed deaf past the window gets a debounced
         // self-initiated rotate (the periodic tick is the detection beat).
         self.rotate_deaf_legs();
+        // Track C: a HEALTHY leg whose queue has been the same past the rotation
+        // cadence gets a proactive rotate (unlinkability). One per tick, oldest
+        // reachable first; shares the rotate cooldown with the deaf-leg heal.
+        self.rotate_stale_legs();
         Ok(Reply::Ack)
     }
 
@@ -3123,6 +3181,85 @@ mod tests {
         // it ages out: a leg that stops receiving past the window is rotatable again
         st.clock_override = Some(T + super::MESH_RECEIVING_SECS + 1);
         assert!(!st.leg_receiving(&"bob".to_string()), "raw activity aged out → rotatable");
+    }
+
+    /// Track C: the scheduled-rotation selection picks the OLDEST reachable leg
+    /// whose queue has been the same past the cadence. `established_at` (queue
+    /// age) and presence (`last_seen`) are INDEPENDENT: a leg can be recently
+    /// heard (present) yet have a long-lived queue that is due to rotate.
+    #[test]
+    fn scheduled_rotation_picks_the_oldest_reachable_stale_leg() {
+        let mut st = presence_fixture();
+        let cadence = super::MESH_ROTATE_CADENCE_SECS;
+        let now = T + cadence + 5_000;
+        // both legs are UP and RECENTLY heard (present)…
+        st.clock_override = Some(now - 60);
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
+        st.cmd_net_peer_seen("cid".to_string(), None).expect("seen");
+        // …but their QUEUES were minted long ago — bob's older than cid's
+        st.established_at.insert("bob".to_string(), now - cadence - 200);
+        st.established_at.insert("cid".to_string(), now - cadence - 100);
+        st.clock_override = Some(now);
+        assert_eq!(
+            st.stale_leg_to_rotate(now),
+            Some("bob".to_string()),
+            "the oldest reachable stale leg is chosen"
+        );
+
+        // a fresh queue (well within the cadence) is NOT rotated
+        st.established_at.insert("bob".to_string(), now - 10);
+        st.established_at.insert("cid".to_string(), now - 20);
+        assert_eq!(st.stale_leg_to_rotate(now), None, "no leg is past the cadence");
+    }
+
+    /// Track C: a leg to an OFFLINE peer is NOT scheduled-rotated even when its
+    /// queue is stale — the rotate's adopt handshake can't complete, so defer it
+    /// (the same partial-availability rule as verify-at-open). A reachable stale
+    /// leg is still chosen.
+    #[test]
+    fn scheduled_rotation_defers_an_offline_leg() {
+        let mut st = presence_fixture();
+        let cadence = super::MESH_ROTATE_CADENCE_SECS;
+        let now = T + cadence + 5_000;
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
+        // bob was heard LONG ago (offline now); cid heard recently (present)
+        st.clock_override = Some(now - 4_000); // > STALE window → bob offline at `now`
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
+        st.clock_override = Some(now - 60);
+        st.cmd_net_peer_seen("cid".to_string(), None).expect("seen");
+        // both queues are stale
+        st.established_at.insert("bob".to_string(), now - cadence - 300);
+        st.established_at.insert("cid".to_string(), now - cadence - 100);
+        st.clock_override = Some(now);
+        assert!(!st.peer_present(&"bob".to_string()), "bob is offline");
+        assert_eq!(
+            st.stale_leg_to_rotate(now),
+            Some("cid".to_string()),
+            "the offline leg is deferred; the reachable stale leg is chosen"
+        );
+
+        // if the ONLY stale leg is offline, nothing rotates
+        st.established_at.insert("cid".to_string(), now - 10); // cid fresh
+        assert_eq!(st.stale_leg_to_rotate(now), None, "an offline stale leg is not rotated");
+    }
+
+    /// Track C: the tick birth-stamps a newly-seen leg, so a just-established
+    /// mesh is not rotated until a full cadence has passed (no churn at open).
+    #[test]
+    fn a_fresh_leg_is_birth_stamped_not_immediately_rotated() {
+        let mut st = presence_fixture();
+        st.clock_override = Some(T);
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
+        assert!(!st.established_at.contains_key("bob"), "not stamped before the first tick");
+        // a tick shortly after open birth-stamps the leg and rotates nothing
+        st.clock_override = Some(T + 30);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(st.established_at.get("bob"), Some(&(T + 30)), "birth-stamped on the tick");
+        assert!(!st.rotate_at.contains_key("bob"), "a fresh leg is not rotated");
     }
 
     /// Track A: a NEVER-heard leg stays GENTLE even past the deaf window — an
