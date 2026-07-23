@@ -173,6 +173,17 @@ impl Transport for RitualTransport {
             RitualTransport::Smp(t) => t.import_creds(creds),
         }
     }
+
+    fn redundancy(&self) -> usize {
+        // delegate to the inner transport (an SmpTransport spread across N
+        // servers returns N) — WITHOUT this, RitualTransport would use the
+        // trait default (1) and every rotate/bootstrap would mint a single
+        // queue, silently stripping Track B redundancy.
+        match self {
+            RitualTransport::Loopback(t) => t.redundancy(),
+            RitualTransport::Smp(t) => t.redundancy(),
+        }
+    }
 }
 
 /// One seat's transport material, held by the founder for the ritual's

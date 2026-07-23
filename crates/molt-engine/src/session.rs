@@ -1442,5 +1442,56 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
             "workspace_dir must not be empty".to_string(),
         ));
     }
+    // Fail CLOSED on a custom SMP server with no URL (audit finding #3): the
+    // resolver falls back to the bundled PUBLIC server otherwise, so a user who
+    // picks a private server but leaves the field blank would silently route over
+    // the public one — a metadata surprise. A `urls` list satisfies it too.
+    if s.smp_server == "custom" && s.smp_url.trim().is_empty() && s.smp_urls.is_empty() {
+        return Err(MoltError::Settings(
+            "a custom SMP server needs a URL (or a redundant-server list)".to_string(),
+        ));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding #3: a custom SMP server with a BLANK url (and no redundant
+    /// list) must be REJECTED — otherwise the resolver silently falls back to the
+    /// bundled public server, routing a user who picked a private server over the
+    /// public one. A url OR a urls list satisfies it; "public" needs neither.
+    #[test]
+    fn validate_rejects_a_custom_smp_server_with_no_url() {
+        let base = molt_core::SessionSettings::default();
+        // public default: fine with no url
+        assert!(validate_settings(&base).is_ok());
+
+        // custom + blank url + no list → rejected (fail closed)
+        let blank = molt_core::SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: "   ".to_string(),
+            smp_urls: Vec::new(),
+            ..base.clone()
+        };
+        assert!(validate_settings(&blank).is_err(), "custom + blank url must fail closed");
+
+        // custom + a url → fine
+        let with_url = molt_core::SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: "smp://AAAA@host".to_string(),
+            ..base.clone()
+        };
+        assert!(validate_settings(&with_url).is_ok());
+
+        // custom + a redundant list (but blank url) → fine (the list is the source)
+        let with_list = molt_core::SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: String::new(),
+            smp_urls: vec!["smp://AAAA@host".to_string()],
+            ..base
+        };
+        assert!(validate_settings(&with_list).is_ok());
+    }
 }

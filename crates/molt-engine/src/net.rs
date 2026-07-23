@@ -1593,24 +1593,47 @@ impl State {
             return;
         };
         tokio::spawn(async move {
-            let pair = match transport.create_queue().await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(%member, error = %e, "mesh-extension queue creation failed");
-                    return;
+            // N fresh inbound queues (Track B redundancy) sharing ONE wrap_in, so
+            // replying to a peer's announce/rotate does not collapse OUR inbound
+            // leg to a single queue.
+            let redundancy = transport.redundancy();
+            let mut pairs = Vec::with_capacity(redundancy);
+            for _ in 0..redundancy.max(1) {
+                match transport.create_queue().await {
+                    Ok(p) => pairs.push(p),
+                    Err(e) => {
+                        tracing::warn!(%member, error = %e, "mesh-extension queue creation failed");
+                        for p in &pairs {
+                            let _ = transport.delete_queue(&p.rcv).await;
+                        }
+                        return;
+                    }
                 }
-            };
+            }
             let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
+                for p in &pairs {
+                    let _ = transport.delete_queue(&p.rcv).await;
+                }
                 return;
             };
             let mut queues = std::collections::BTreeMap::new();
             queues.insert(
                 member.clone(),
-                molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
+                molt_net::mesh::QueueHandover::of(&pairs[0].snd, &wrap_in),
             );
+            let mut queues_extra = std::collections::BTreeMap::new();
+            if pairs.len() > 1 {
+                queues_extra.insert(
+                    member.clone(),
+                    pairs[1..]
+                        .iter()
+                        .map(|p| molt_net::mesh::QueueHandover::of(&p.snd, &wrap_in))
+                        .collect::<Vec<_>>(),
+                );
+            }
             let reply = molt_net::mesh::MeshAnnounce {
                 queues,
-                queues_extra: std::collections::BTreeMap::new(),
+                queues_extra,
             };
             let Ok(bytes) = serde_json::to_vec(&reply) else {
                 return;
@@ -1641,7 +1664,7 @@ impl State {
                 member: member.clone(),
                 snds: vec![snd],
                 wrap_out,
-                rcvs: vec![pair.rcv],
+                rcvs: pairs.iter().map(|p| p.rcv.clone()).collect(),
                 wrap_in,
             }
             .to_mesh();
@@ -1769,33 +1792,59 @@ impl State {
             // 1) fresh per-pair inbound queue, SUBSCRIBED before the announce so
             //    a fast reply cannot race the subscription (same discipline as
             //    the recovery rejoin's reader)
-            let pair = match transport.create_queue().await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(%peer, error = %e, "mesh rotate: queue creation failed");
-                    return;
-                }
-            };
+            // N fresh inbound queues (Track B redundancy) sharing ONE wrap_in,
+            // so a rotate PRESERVES the leg's redundancy instead of collapsing it
+            // to a single queue (a scheduled rotate of a healthy N=2 leg must not
+            // strip it to N=1). The reply arrives on the PRIMARY (index 0); the
+            // extras just widen our inbound.
+            let redundancy = transport.redundancy();
             let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
                 return;
             };
-            let mut rx = match transport.subscribe(&pair.rcv).await {
+            let mut pairs = Vec::with_capacity(redundancy);
+            for _ in 0..redundancy.max(1) {
+                match transport.create_queue().await {
+                    Ok(p) => pairs.push(p),
+                    Err(e) => {
+                        tracing::warn!(%peer, error = %e, "mesh rotate: queue creation failed");
+                        for p in &pairs {
+                            let _ = transport.delete_queue(&p.rcv).await;
+                        }
+                        return;
+                    }
+                }
+            }
+            let mut rx = match transport.subscribe(&pairs[0].rcv).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(%peer, error = %e, "mesh rotate: subscribe failed");
+                    for p in &pairs {
+                        let _ = transport.delete_queue(&p.rcv).await;
+                    }
                     return;
                 }
             };
-            // 2) encrypt the re-announce (this peer → our new inbound) on the
-            //    SHARED runtime group (one ratchet, used in sequence)
+            // 2) encrypt the re-announce (this peer → our new inbound queues) on
+            //    the SHARED runtime group (one ratchet, used in sequence) —
+            //    announce ALL N (primary + extras) so the peer sends to every one
             let mut queues = std::collections::BTreeMap::new();
             queues.insert(
                 peer.clone(),
-                molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
+                molt_net::mesh::QueueHandover::of(&pairs[0].snd, &wrap_in),
             );
+            let mut queues_extra = std::collections::BTreeMap::new();
+            if pairs.len() > 1 {
+                queues_extra.insert(
+                    peer.clone(),
+                    pairs[1..]
+                        .iter()
+                        .map(|p| molt_net::mesh::QueueHandover::of(&p.snd, &wrap_in))
+                        .collect::<Vec<_>>(),
+                );
+            }
             let announce = molt_net::mesh::MeshAnnounce {
                 queues,
-                queues_extra: std::collections::BTreeMap::new(),
+                queues_extra,
             };
             let Ok(bytes) = serde_json::to_vec(&announce) else {
                 return;
@@ -1840,7 +1889,9 @@ impl State {
                         // a peer that stays offline never leaks one server-side
                         // queue per rotate cooldown; detection will retry later
                         tracing::warn!(%peer, "mesh rotate: no reply before timeout — leg stays deaf, detection will retry");
-                        let _ = transport.delete_queue(&pair.rcv).await;
+                        for p in &pairs {
+                            let _ = transport.delete_queue(&p.rcv).await;
+                        }
                         return;
                     }
                 };
@@ -1890,11 +1941,26 @@ impl State {
                 let (Some(snd), Some(wrap_out)) = (handover.addr(), handover.wrap_key()) else {
                     continue;
                 };
+                // send side: the peer's primary + any redundant queues it
+                // announced for us (capped — audit finding #1's ingest bound)
+                let mut snds = vec![snd];
+                if let Some(extra) = reply_ann.queues_extra.get(&me) {
+                    for h in extra {
+                        if snds.len() >= molt_net::MESH_REDUNDANCY_CAP {
+                            break;
+                        }
+                        if let Some(a) = h.addr() {
+                            snds.push(a);
+                        }
+                    }
+                }
                 let link = PeerLink {
                     member: peer.clone(),
-                    snds: vec![snd],
+                    snds,
                     wrap_out,
-                    rcvs: vec![pair.rcv],
+                    // receive side: ALL N fresh queues we just minted — the
+                    // rotate preserves the leg's redundancy
+                    rcvs: pairs.iter().map(|p| p.rcv.clone()).collect(),
                     wrap_in,
                 }
                 .to_mesh();
@@ -2341,9 +2407,17 @@ impl State {
             .into_iter()
             .filter(|m| self.peer_present(m))
             .collect();
+        let now = self.presence_now();
         for (m, at) in &self.rotate_at {
+            // "reconnecting" needs BOTH a pending rotate toward the peer AND no
+            // recent contact — a leg heard within the keepalive interval is
+            // demonstrably alive, so a PROACTIVE (Track C scheduled) rotate of a
+            // healthy leg must not flash a false "reconnecting" (audit finding
+            // #2). A genuinely deaf-rotated leg has been silent far longer than
+            // this (≥ MESH_DEAF_SECS), so it still alarms immediately.
             if self.peer_present(m)
                 && self.member_last_seen(m) < *at
+                && now.saturating_sub(self.member_last_seen(m)) >= MESH_KEEPALIVE_SECS
                 && !self.net_link_down.contains_key(m)
                 && !reconnecting.contains(m)
             {
@@ -3345,11 +3419,23 @@ mod tests {
     fn a_rotated_leg_that_has_not_delivered_reads_reconnecting() {
         let mut st = presence_fixture();
         st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
-        // bob WAS heard (present); then we rotate toward it and it stays silent —
-        // a real reconnect to an online peer, not an absent one
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard at T"); // present
+        // bob WAS heard (present); we rotate toward it and it then stays silent
+        // PAST the keepalive interval — a real reconnect to an online peer.
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard at T"); // present, last_seen=T
+        // audit finding #2: a rotate followed by a FRESH sighting (heard within
+        // the keepalive interval) is NOT reconnecting — the leg is demonstrably
+        // alive (a proactive Track C rotate of a healthy leg must not flash it).
         st.clock_override = Some(T + 1);
-        st.rotate_at.insert("bob".to_string(), T + 1); // rotated at T+1, unheard since
+        st.rotate_at.insert("bob".to_string(), T + 1);
+        st.recompute_net_health();
+        assert_eq!(
+            st.session.net_health,
+            molt_core::NetHealth::Ok,
+            "a just-heard leg is not 'reconnecting' merely because we rotated toward it"
+        );
+        // …but once it has been SILENT past the keepalive interval, the pending
+        // rotate reads reconnecting (a genuine reconnect to an online peer).
+        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS + 1);
         st.recompute_net_health();
         match &st.session.net_health {
             molt_core::NetHealth::Degraded { reason } => {
@@ -3358,7 +3444,6 @@ mod tests {
             other => panic!("expected Degraded reconnecting, got {other:?}"),
         }
         // the peer delivers again → drops the rotate → honest Ok
-        st.clock_override = Some(T + 5);
         st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivered");
         assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
         assert!(!st.rotate_at.contains_key("bob"), "delivery drops the pending rotate");
