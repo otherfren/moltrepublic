@@ -177,6 +177,11 @@ component AnonNetworkGroup inherits DetailGroup {
 component SmpServerGroup inherits DetailGroup {
     in-out property <bool> smp-custom;
     in-out property <string> smp-url;
+    // Redundant server list (Track B Stage 2), one `smp://…@host` per line. When
+    // non-empty it OVERRIDES the single server above and spreads inbound queues
+    // across these servers for redundancy (2 = a server can go down and each
+    // connection stays alive on the other).
+    in-out property <string> smp-urls;
     in property <string> smp-test;
     callback test();
     title: Strings.field-smp-server;
@@ -209,6 +214,23 @@ component SmpServerGroup inherits DetailGroup {
             text <=> root.smp-url;
             placeholder: "smp://<fingerprint>@host";
         }
+    }
+    // Redundancy (Track B Stage 2): one server per line overrides the single
+    // server above and spreads inbound queues across them.
+    FieldLabel {
+        label: Strings.field-smp-redundant;
+        AppArea {
+            height: 84px;
+            text <=> root.smp-urls;
+            placeholder: "smp://<fingerprint>@host-1\nsmp://<fingerprint>@host-2";
+        }
+    }
+    Text {
+        text: Strings.smp-redundant-hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
     }
     HorizontalLayout {
         spacing: 12px;
@@ -872,6 +894,8 @@ export component AppWindow inherits Window {
     // SMP messaging server: false = bundled public server, true = custom url.
     in-out property <bool> cfg-smp-custom: false;
     in-out property <string> cfg-smp-url;
+    // Redundant SMP server list, one `smp://…@host` per line (Track B Stage 2).
+    in-out property <string> cfg-smp-urls;
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-smp-test;
     // run a live connectivity test against the SMP server in the draft
@@ -5992,6 +6016,7 @@ export component AppWindow inherits Window {
                                     SmpServerGroup {
                                         smp-custom <=> root.cfg-smp-custom;
                                         smp-url <=> root.cfg-smp-url;
+                                        smp-urls <=> root.cfg-smp-urls;
                                         smp-test: root.cfg-smp-test;
                                         test => {
                                             root.test-smp-server();
@@ -6010,6 +6035,7 @@ export component AppWindow inherits Window {
                                 SmpServerGroup {
                                     smp-custom <=> root.cfg-smp-custom;
                                     smp-url <=> root.cfg-smp-url;
+                                    smp-urls <=> root.cfg-smp-urls;
                                     smp-test: root.cfg-smp-test;
                                     test => {
                                         root.test-smp-server();

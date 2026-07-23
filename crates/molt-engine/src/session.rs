@@ -99,19 +99,9 @@ impl State {
 
     pub(crate) fn cmd_save_settings(
         &mut self,
-        mut settings: SessionSettings,
+        settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
         validate_settings(&settings)?;
-        // Preserve the redundant-server LIST across a GUI save until the visible
-        // list editor exists (Track B Stage 2): the GUI draft can't yet edit
-        // `smp_urls`, so it always arrives empty — carrying the current value
-        // forward keeps a TOML-configured `[transport.smp].urls` from being
-        // wiped by an unrelated settings save. (A save that legitimately clears
-        // the list will come from the editor, which sets a non-empty draft or an
-        // explicit clear.) The MCP surface CAN set it, so a non-empty draft wins.
-        if settings.smp_urls.is_empty() && !self.session.settings.smp_urls.is_empty() {
-            settings.smp_urls = self.session.settings.smp_urls.clone();
-        }
         self.invalidate_backup_listing_on_target_change(&settings);
         self.session.settings = settings;
         self.mark_restart_required();

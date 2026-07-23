@@ -1967,12 +1967,16 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         tor_port: ui.get_cfg_tor_port() as u16,
         smp_server: if ui.get_cfg_smp_custom() { "custom" } else { "public" }.to_string(),
         smp_url: ui.get_cfg_smp_url().to_string(),
-        // The redundant-server LIST has no GUI editor yet (Track B Stage 2
-        // activation): leave it empty here so the save is non-destructive — the
-        // engine's cmd_save_settings PRESERVES the configured list on an empty
-        // draft, so a TOML-set `[transport.smp].urls` survives a GUI settings
-        // save. The visible add/remove/Test editor binds to this field later.
-        smp_urls: Vec::new(),
+        // redundant server list (Track B Stage 2): one server per line — trim
+        // blanks so a trailing newline / empty line never becomes a "" server
+        smp_urls: ui
+            .get_cfg_smp_urls()
+            .to_string()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
     }
 }
 
@@ -2286,6 +2290,8 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_tor_port(s.tor_port as i32);
     ui.set_cfg_smp_custom(s.smp_server == "custom");
     ui.set_cfg_smp_url(s.smp_url.clone().into());
+    // redundant server list (Track B Stage 2): one server per line
+    ui.set_cfg_smp_urls(s.smp_urls.join("\n").into());
 }
 
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
@@ -4821,6 +4827,8 @@ lexicon! {
     smp_public: "Public default", "Öffentlicher Standard";
     smp_custom: "Custom server", "Eigener Server";
     field_smp_url: "Server URL", "Server-URL";
+    field_smp_redundant: "Redundant servers (one per line)", "Redundante Server (einer pro Zeile)";
+    smp_redundant_hint: "Optional. When set, connections spread across these servers instead of the single one above — if one server goes down, each connection stays alive on another. Two is a good default.", "Optional. Wenn gesetzt, verteilen sich die Verbindungen über diese Server statt über den einzelnen oben — fällt ein Server aus, bleibt jede Verbindung über einen anderen bestehen. Zwei ist ein guter Standard.";
     smp_test: "Test connection", "Verbindung testen";
     smp_test_tip: "Dials over the configured transport — Tor when it is enabled, the server's onion host if it advertises one.", "Verbindet über den konfigurierten Transport — via Tor, wenn aktiviert, und über den Onion-Host des Servers, falls vorhanden.";
     smp_untested: "not tested yet", "noch nicht getestet";

@@ -181,19 +181,33 @@ per-server construction deferred from Stage 1 lands here.
     MESH_REDUNDANCY_CAP=2)`; `bootstrap_mesh` mints that many. Redundancy turns on
     automatically once the transport is built with 2 servers. Still N=1 in the
     current build (single-server config).
-  - ⬜ **REMAINING — the last activation mile (needs a product decision):**
-    1. A **2-server transport in production**. Two routes, both a fork for the
-       user: (a) add a **second bundled public server** so `server="public"`
-       gives N=2 by default — BLOCKED on a *verified* second official SimpleX
-       server cert-pin fingerprint (do NOT invent one — CLAUDE.md); (b) a
-       **config server LIST** (`[transport.smp].urls`) the user fills with their
-       own servers — needs GUI awareness (the settings screen must round-trip the
-       list, or a save would drop a hand-added second server) + per-server Test.
-    2. **mesh-extension / recovery mint N** (currently N=1): a member who
-       joins/recovers gets single-queue legs until a rotation. Correct, just
-       asymmetric redundancy. The reply-reader in `recovery.rs` needs to accept a
-       survivor's reply on any of the N queues.
-    3. **Security audit** of the Stage 2 change-set (in progress).
+  - ✅ **security audit** of the Stage 2 change-set — three findings, all fixed
+    (2292c32 #1 fan-out amplification cap + #3 empty-servers guard, 88ca87c #2
+    link_up/down ordering under a per-peer live lock). See §7.
+  - ✅ **activation via a config server list** (the user's chosen route, e7314dd):
+    `[transport.smp].urls` (additive) → `SessionSettings::smp_server_list()` →
+    `build_smp_transport`/`with_dialer_multi`. The founder runtime transport, the
+    joiner (`ritual_join_over_smp` with the invite server prepended), and
+    `reopen_transport` (gathers all mesh servers) all build multi-server. N=2
+    turns on when ≥2 servers are configured; N=1 (single-server) is unchanged.
+    **Constraint:** N=2 requires members to SHARE a server set (`route()` matches
+    a queue's server against the local list, falls back to the primary otherwise;
+    the ≥1-success send rule keeps it delivering, just non-redundant on a leg to
+    an unshared server). Dialing an arbitrary pinned announced server (to lift the
+    constraint) is a follow-up.
+  - ✅ **GUI server-list editor** — a "one server per line" multi-line editor in
+    the SMP settings group (`SmpServerGroup.smp-urls` ↔ `cfg-smp-urls`),
+    round-tripped through `read_settings_draft`/push; the interim engine
+    preserve-hack removed (the GUI now round-trips the list, so full-replace is
+    the consistent model). Richer per-row add/remove/Test-each is a follow-up.
+  - ⬜ **REMAINING follow-ups (not blocking):**
+    1. **mesh-extension / recovery mint N** (currently N=1): a member who
+       joins-later/recovers gets single-queue legs until a rotation. Correct, just
+       asymmetric redundancy.
+    2. **Dial an arbitrary pinned announced server** so N=2 works across members
+       with DIFFERENT server sets (lift the shared-set constraint) — a `route()`
+       change (parse+dial the queue's own fingerprint-pinned server) with its own
+       small audit.
 
 ## 6. TDD plan (loopback — the redundancy LOGIC is server-agnostic)
 
