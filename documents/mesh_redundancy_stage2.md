@@ -1,0 +1,215 @@
+# Design: Track B Stage 2 — N=2 redundant inbound queues per leg
+
+Status: **EXECUTION-READY DESIGN 2026-07-23.** Builds on Stage 0 (`rcv_server`)
+and Stage 1 (multi-server `SmpTransport` routing), both landed + audited clean.
+Read `documents/mesh_reliability.md` (Track B) and the CLAUDE.md transport
+section first. N=2 chosen (the SimpleX sweet spot).
+
+## 0. Goal & the one correctness detail
+
+Today every directed peer-pair leg is **one inbound queue on one server**. One
+server hiccup ⇒ a dead leg (healed only by a rotate). SimpleX-level redundancy:
+each recipient creates **N inbound queues on N different servers**; every sender
+sends the SAME ciphertext to all N; the receiver subscribes all N and **dedups**.
+Losing one server/queue leaves the leg alive with zero heal latency.
+
+**The load-bearing correctness detail:** the N receive paths of ONE peer MUST
+share **one `Reassembler` and one delivery cursor** (the single writer of
+`inbound[peer]`). If each of the N queues got its own reassembler/cursor, the
+`(msg id, chunk index)` dedup would not cross them and the two cursors for one
+peer would collide — duplicate delivery and cursor thrash. So: **N subscriptions
+→ one merged channel → one `recv_task`.**
+
+## 1. Data model — wrap keys stay scalar, only ADDRESSES vectorize
+
+The wrap key is a **pairwise, per-direction** symmetric key. The N redundant
+queues are N *delivery paths* for the SAME encrypted stream, so they share the
+one direction key. Only the queue *addresses* become plural. This keeps the
+change small and the crypto unchanged.
+
+### 1.1 `PeerLink` (runtime, `supervisor.rs`) — free to change (never persisted directly)
+
+```rust
+pub struct PeerLink {
+    pub member: MemberId,
+    pub snds: Vec<SndQueueAddr>,   // the peer's N inbound queues — send the SAME ciphertext to all
+    pub wrap_out: WrapKey,         // ONE key, me→peer  (unchanged)
+    pub rcvs: Vec<RcvQueue>,       // my N inbound queues — subscribe all
+    pub wrap_in: WrapKey,          // ONE key, peer→me  (unchanged)
+}
+```
+
+Invariant: `snds`/`rcvs` are non-empty (≥1). N=1 == today's behaviour exactly.
+
+### 1.2 `MeshLink` (persisted, `molt-core`) — ADDITIVE primary+extra, no version bump
+
+`MeshLink` is transport bookkeeping — **not** chained or signed (audit-confirmed:
+`roster_canonical_bytes` hashes none of it), so no signature breaks. Keep the
+existing scalar fields as the **primary (index 0)** queue and ADD the extra
+queues as `#[serde(default)]` vectors:
+
+```rust
+// existing scalars = queue[0] (unchanged): snd_server, snd_queue, snd_wrap,
+//                                           rcv_queue, rcv_wrap, rcv_server
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub snd_extra: Vec<QueueRef>,   // queues[1..] I send to
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub rcv_extra: Vec<QueueRef>,   // queues[1..] I receive on
+// QueueRef { server: String, queue: String }  — wrap is shared (snd_wrap/rcv_wrap)
+```
+
+- Old `transport.state` (no extra) → 1 queue → single-server resume, **exactly as
+  before**. A downgraded binary ignores the unknown extra fields → 1 queue →
+  functional (no redundancy). Fully additive; `TRANSPORT_STATE_VERSION` unchanged.
+- `PeerLink::to_mesh`: primary = `snds[0]`/`rcvs[0]`, extra = the rest.
+- `PeerLink::from_mesh`: `snds = [primary] ++ snd_extra`, `rcvs = [primary] ++ rcv_extra`.
+
+### 1.3 `MeshAnnounce` / `QueueHandover` (in-band, `mesh.rs`) — ADDITIVE
+
+`MeshAnnounce.queues: BTreeMap<MemberId, QueueHandover>` stays (the primary queue
+per peer). ADD:
+
+```rust
+#[serde(default)]
+pub queues_extra: BTreeMap<MemberId, Vec<QueueHandover>>,  // peer → queues[1..]
+```
+
+An old announcer sends only `queues` (1 each) → an updated receiver assembles a
+1-queue leg toward it (no redundancy that direction, still works). An old
+receiver ignores `queues_extra` → 1-queue leg. Additive both ways.
+`QueueHandover` already carries `{server, queue, wrap}` — here each announced
+queue carries its own wrap (they *are* the same per-direction key, so all N of a
+peer's announced queues repeat the one wrap; the receiver uses `wrap_out` from
+`queues[me]` and treats extras as address-only, ignoring their repeated wrap).
+
+## 2. Concurrency — the supervisor (`supervisor.rs`)
+
+### 2.1 Receive: N forwarders → one merged channel → one `recv_task`
+
+Today: `recv_watchdog_task` per peer runs `recv_task` over ONE subscription;
+`recv_task` owns the `Reassembler`/reorder/epoch buffers and is the sole cursor
+writer; Stage-B resubscribe lives in the watchdog.
+
+New per peer:
+- Spawn **N forwarder tasks** (one per `rcvs[k]`). A forwarder owns the
+  subscribe + Stage-B resubscribe/backoff lifecycle for its one queue and pumps
+  every `Delivery` into a shared `mpsc` (`merged_tx`). It carries the AckToken
+  through untouched (the `recv_task` still owns ack discipline).
+- Spawn **one `recv_task`** reading `merged_rx` → the single shared
+  `Reassembler` + cursor + reorder + epoch buffers, unchanged internally. The
+  reassembler dedups the N-fold duplication by `(id, index)` for free.
+
+Per-leg health with redundancy (a leg is UP if ≥1 of its N queues is live):
+- Shared `live: Arc<AtomicUsize>` per peer. A forwarder that subscribes OK does
+  `fetch_add(1)`; on the 0→1 transition it calls `sink.link_up(peer)`. On stream
+  end it `fetch_sub(1)`; on the 1→0 transition it calls
+  `sink.link_down(peer, reason)`, then backs off and resubscribes.
+- The `recv_task` no longer resubscribes (that moved to the forwarders); it runs
+  until `merged_rx` closes (all forwarders gone = engine gone). Its
+  `link_up`/`link_down` calls move OUT to the forwarders.
+- Track D `raw_inbound` stays in the `recv_task` (fires after a successful
+  `unwrap_block` — one shared throttle across the N sources, honest: any queue
+  delivering = leg receiving).
+
+Result: a queue dying (server hiccup) drops `live` N→N-1; while ≥1 stays up the
+leg never reports down and messages keep flowing on the surviving queue(s). The
+dead queue's forwarder resubscribes in the background (Stage B). Zero heal
+latency for a single-server outage — the redundancy IS the heal.
+
+### 2.2 Send: fan the ONE ciphertext to all N (`outbox`)
+
+Today: `transport.send(&peer.snd, block.clone())`. New: for the block of wire
+seq S, send to **every** `peer.snds` target, reusing the one `block`
+(ciphertext) — NEVER re-encrypt (that would burn N sender generations / risk
+nonce reuse; the ciphertext is one logical message, the peer dedups the copies).
+
+- Success rule: seq S is "sent" if **≥1** target accepts (redundancy — one
+  server down, another delivers). Advance `wire_seq` once.
+- Retry: if **all** N fail, retry the whole seq on the existing capped backoff.
+  (Per-target retry refinement is a later optimisation; all-or-≥1 is correct and
+  simple.) The peer's reassembler dedups any target that later also succeeds.
+
+### 2.3 Prebuild
+
+`prebuild_circuits` warms cold (Tor) circuits at open. Extend it to prebuild all
+Σ(N over peers) subscriptions, still bounded by `PREBUILD_PARALLELISM`. Each
+forwarder is seeded with its prebuilt first subscription where available.
+
+## 3. Minting N — bootstrap / rotate / extend / recovery
+
+Every site that today creates ONE inbound queue per peer creates **N** (config
+`redundancy`, default 2 when a server list is present, else 1):
+
+- **Bootstrap** (`mesh.rs` bootstrap / the founding + join paths): mint N inbound
+  queues per peer with the ONE fresh per-direction wrap key; announce all N in
+  `queues` + `queues_extra`. `create_queue`'s Stage-1 round-robin spreads the N
+  across the transport's servers automatically.
+- **Rotate / mesh-extension / recovery** (`net.rs` `cmd_net_mesh_*`,
+  `lifecycles.rs`): mint N; the rotate machinery (Track C reuses this) replaces
+  one queue at a time.
+- **Loopback `full_mesh`**: mint N per pair (all on the loopback hub — server
+  string empty — so redundancy LOGIC is exercised over loopback even though the
+  "servers" collapse to one hub; the dedup/merge/fan paths are what the tests
+  cover).
+
+## 4. Config — a server LIST (`molt-config`)
+
+`[transport.smp]` gains an optional `servers` list (or repeatable `smp_url`);
+`redundancy` (default = min(N_configured, 2)). One server configured ⇒ N=1 ⇒
+behaviour-neutral. `reopen_transport` and the ritual transport builder construct
+a **multi-server** `SmpTransport` (`SmpTransport::new_multi`) from the list — the
+per-server construction deferred from Stage 1 lands here.
+
+## 5. Staging (each independently landable, green, pushed)
+
+- **Stage 2a — Vec plumbing, N=1 (behaviour-neutral).** `PeerLink.snds/rcvs`,
+  `MeshLink` primary+extra, `MeshAnnounce.queues_extra`, `assemble_mesh`, the
+  supervisor N-forwarder/merge + N-send-fan structure — all wired but every mint
+  site still mints **1** queue (Vec of len 1). Every existing test passes
+  unchanged (N=1 == today). This lands the whole schema + concurrency refactor
+  with zero behaviour change. TDD: a unit test that a len-1 mesh behaves
+  identically; the merge/fan paths exercised at N=1.
+- **Stage 2b — activate N=2.** Mint N at every site; config server list +
+  `new_multi` construction; loopback `full_mesh` mints N. TDD over loopback:
+  (1) a 2-queue leg delivers when one queue is `expire_queue`d (redundancy);
+  (2) the receiver dedups the N copies to one delivery (shared reassembler);
+  (3) `live` count aggregation: link stays up while ≥1 queue live, down only when
+  all die; (4) send fans to all N, ≥1 success advances the seq.
+
+## 6. TDD plan (loopback — the redundancy LOGIC is server-agnostic)
+
+Loopback collapses all "servers" to one hub, but the N-queue LOGIC (mint N,
+announce N, subscribe N → merge → dedup, fan send → N) is fully exercised. The
+`LoopbackHub::expire_queue` seam models a dead queue: a 2-queue leg with one
+expired must still deliver (the core redundancy assertion). Multi-*server*
+routing itself is unit-tested in Stage 1 (`route_dispatches_...`); real
+multi-server delivery is an `#[ignore]` SMP test.
+
+Red-first tests to write (Stage 2b):
+1. `a_two_queue_leg_survives_one_expired_queue` — mint 2, expire 1, a message
+   still arrives exactly once.
+2. `n_copies_dedup_to_one_delivery` — the same ciphertext sent to 2 queues is
+   delivered ONCE to the engine (shared reassembler).
+3. `a_leg_reports_down_only_when_all_queues_die` — `live` aggregation.
+4. `send_fans_to_all_targets_and_one_success_advances` — outbox fan-out.
+
+## 7. Security notes (carry the audit's Stage 0/1 clearance forward)
+
+- N queues in the handover is **not** a new attack surface: an announced queue
+  only affects where others send to reach the *announcer's own* inbound; it
+  cannot redirect other pairs, and queues are unsigned/unchained. A malicious
+  member announcing N attacker-server queues only harms its own reachability.
+- The ONE ciphertext reused across N sends preserves MLS nonce discipline
+  (no re-encrypt). The peer dedups copies; MLS `reuse_guard` already guards the
+  per-message path.
+- Wrap keys unchanged (per-direction). No key is exposed N times beyond the
+  handover it already rode in.
+- `net_health` stays honest: a leg is up iff ≥1 queue live; all-N-down is a real
+  `link_down`. Redundancy makes the honest state *better*, not louder.
+
+## 8. Open forks (confirm with the user)
+
+- **N× traffic / server load** accepted for N=2 (the user chose N=2 explicitly).
+- **Config surface**: `servers` list vs repeatable `smp_url` — pick the smaller
+  diff against the current `molt-config` shape.
+- **Per-target send retry** deferred (all-or-≥1 is the Stage-2b contract).
