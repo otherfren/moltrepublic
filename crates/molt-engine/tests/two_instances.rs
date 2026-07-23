@@ -2909,7 +2909,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
             "member-b".to_string(),
             mesh::QueueHandover::of(&own_q.snd, &own_wrap),
         );
-        let reply = mesh::MeshAnnounce { queues };
+        let reply = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
         let ct = c_reply_group
             .lock()
             .expect("c group")
@@ -3092,7 +3092,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues };
+    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
     let ct = b_group
         .lock()
         .expect("b group")
@@ -3161,9 +3161,9 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
     // the queue it announced — a second supervisor runs over it
     let rotated = PeerLink {
         member: "founder-a".to_string(),
-        snd: target.addr().expect("addr"),
+        snds: vec![target.addr().expect("addr")],
         wrap_out: target.wrap_key().expect("wrap"),
-        rcv: new_q.rcv.clone(),
+        rcvs: vec![new_q.rcv.clone()],
         wrap_in: new_wrap.clone(),
     };
     let feed2 = MemLog::new();
@@ -3221,7 +3221,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&third_q.snd, &third_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues };
+    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
     let ct = b_group
         .lock()
         .expect("b group")
@@ -3929,7 +3929,7 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues };
+    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
     let ct = b_group
         .encrypt(&serde_json::to_vec(&announce).expect("encode"))
         .expect("encrypt announce");
@@ -4097,7 +4097,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues };
+    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
     let ct = b_group
         .lock()
         .expect("b group")
@@ -4160,9 +4160,9 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
     let target = reply.queues.get("member-b").expect("a queue for member-b");
     let rotated = PeerLink {
         member: "founder-a".to_string(),
-        snd: target.addr().expect("addr"),
+        snds: vec![target.addr().expect("addr")],
         wrap_out: target.wrap_key().expect("wrap"),
-        rcv: new_q.rcv.clone(),
+        rcvs: vec![new_q.rcv.clone()],
         wrap_in: new_wrap.clone(),
     };
     let b_sink = RecordSink::default();

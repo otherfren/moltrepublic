@@ -284,53 +284,104 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     }
 }
 
-/// One fully wired peer connection: their inbound queue's send address and
-/// wrap key (we send), our queue and its wrap key (we receive).
+/// One fully wired peer connection: their inbound queue(s) send address and
+/// wrap key (we send), our queue(s) and its wrap key (we receive). Track B
+/// Stage 2: `snds`/`rcvs` are N ≥ 1 REDUNDANT queues (each typically on a
+/// different server); the wrap keys stay per-direction (one shared across the N
+/// queues). N=1 is the former single-queue leg exactly.
 #[derive(Debug, Clone)]
 pub struct PeerLink {
     /// The peer this link reaches.
     pub member: MemberId,
-    /// Send side of the peer's inbound queue.
-    pub snd: SndQueueAddr,
-    /// Wrap key of the peer's inbound queue.
+    /// Send sides of the peer's N inbound queues — the SAME ciphertext goes to
+    /// all (the peer dedups). Non-empty; index 0 is the primary.
+    pub snds: Vec<SndQueueAddr>,
+    /// Wrap key of the peer's inbound direction (shared across `snds`).
     pub wrap_out: WrapKey,
-    /// Our inbound queue from this peer.
-    pub rcv: RcvQueue,
-    /// Wrap key of our inbound queue.
+    /// Our N inbound queues from this peer — we subscribe all and dedup.
+    /// Non-empty; index 0 is the primary.
+    pub rcvs: Vec<RcvQueue>,
+    /// Wrap key of our inbound direction (shared across `rcvs`).
     pub wrap_in: WrapKey,
 }
 
 impl PeerLink {
+    /// The primary (index 0) send address — the outbox always has ≥1 target.
+    pub fn snd0(&self) -> &SndQueueAddr {
+        &self.snds[0]
+    }
+
+    /// The primary (index 0) receive queue.
+    pub fn rcv0(&self) -> &RcvQueue {
+        &self.rcvs[0]
+    }
+
     /// Persist this link as a [`molt_core::MeshLink`] (hex-encoded) for
-    /// `transport.state`.
+    /// `transport.state`. The primary queue is the scalar `snd_*`/`rcv_*`
+    /// fields; queues 1..N ride the additive `snd_extra`/`rcv_extra` vectors.
     pub fn to_mesh(&self) -> molt_core::MeshLink {
+        let snd0 = self.snd0();
+        let rcv0 = self.rcv0();
         molt_core::MeshLink {
             member: self.member.clone(),
-            snd_server: self.snd.server.clone(),
-            snd_queue: hex::encode(&self.snd.id.0),
+            snd_server: snd0.server.clone(),
+            snd_queue: hex::encode(&snd0.id.0),
             snd_wrap: hex::encode(self.wrap_out.to_bytes()),
-            rcv_queue: hex::encode(&self.rcv.id.0),
+            rcv_queue: hex::encode(&rcv0.id.0),
             rcv_wrap: hex::encode(self.wrap_in.to_bytes()),
-            rcv_server: self.rcv.server.clone(),
+            rcv_server: rcv0.server.clone(),
+            snd_extra: self.snds[1..]
+                .iter()
+                .map(|a| molt_core::QueueRef {
+                    server: a.server.clone(),
+                    queue: hex::encode(&a.id.0),
+                })
+                .collect(),
+            rcv_extra: self.rcvs[1..]
+                .iter()
+                .map(|r| molt_core::QueueRef {
+                    server: r.server.clone(),
+                    queue: hex::encode(&r.id.0),
+                })
+                .collect(),
         }
     }
 
     /// Rebuild a link from a persisted [`molt_core::MeshLink`]. `None` on any
-    /// malformed hex — a corrupt mesh entry drops that peer, never panics.
+    /// malformed hex — a corrupt mesh entry drops that peer, never panics. An
+    /// extra queue with malformed hex is skipped (the leg survives on the rest).
     pub fn from_mesh(m: &molt_core::MeshLink) -> Option<PeerLink> {
         let snd_wrap: [u8; 32] = hex::decode(&m.snd_wrap).ok()?.try_into().ok()?;
         let rcv_wrap: [u8; 32] = hex::decode(&m.rcv_wrap).ok()?.try_into().ok()?;
+        let mut snds = vec![SndQueueAddr {
+            server: m.snd_server.clone(),
+            id: crate::QueueId::from_bytes(hex::decode(&m.snd_queue).ok()?),
+        }];
+        for x in &m.snd_extra {
+            if let Ok(id) = hex::decode(&x.queue) {
+                snds.push(SndQueueAddr {
+                    server: x.server.clone(),
+                    id: crate::QueueId::from_bytes(id),
+                });
+            }
+        }
+        let mut rcvs = vec![RcvQueue {
+            server: m.rcv_server.clone(),
+            id: crate::QueueId::from_bytes(hex::decode(&m.rcv_queue).ok()?),
+        }];
+        for x in &m.rcv_extra {
+            if let Ok(id) = hex::decode(&x.queue) {
+                rcvs.push(RcvQueue {
+                    server: x.server.clone(),
+                    id: crate::QueueId::from_bytes(id),
+                });
+            }
+        }
         Some(PeerLink {
             member: m.member.clone(),
-            snd: SndQueueAddr {
-                server: m.snd_server.clone(),
-                id: crate::QueueId::from_bytes(hex::decode(&m.snd_queue).ok()?),
-            },
+            snds,
             wrap_out: WrapKey::from_bytes(snd_wrap),
-            rcv: RcvQueue {
-                server: m.rcv_server.clone(),
-                id: crate::QueueId::from_bytes(hex::decode(&m.rcv_queue).ok()?),
-            },
+            rcvs,
             wrap_in: WrapKey::from_bytes(rcv_wrap),
         })
     }
@@ -457,7 +508,7 @@ where
             let peers = cfg.peers.clone();
             prebuild_circuits(peers.len(), PREBUILD_PARALLELISM, move |i| {
                 let transport = transport.clone();
-                let rcv = peers[i].rcv.clone();
+                let rcv = peers[i].rcv0().clone();
                 async move { transport.subscribe(&rcv).await }
             })
             .await
@@ -673,27 +724,45 @@ where
                 return Err(());
             }
         };
+        // N-redundant fan-out (Track B Stage 2): send the SAME block to every one
+        // of the peer's inbound queues each round (the peer dedups the copies).
+        // A round SUCCEEDS if ≥1 target accepts — one server down, another
+        // delivers; only an ALL-fail round backs off and retries the whole set.
+        // At N=1 this is the former single-target retry loop exactly.
         let mut attempt: u32 = 0;
         loop {
-            match transport.send(&peer.snd, block.clone()).await {
-                Ok(()) => {
-                    tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.snd.id.0), "block sent");
-                    if attempt > 0 {
-                        // the backoff exit: sends to this member work again
-                        sink.send_ok(&peer.member).await;
+            let mut any_ok = false;
+            let mut last_err: Option<NetError> = None;
+            for snd in &peer.snds {
+                match transport.send(snd, block.clone()).await {
+                    Ok(()) => {
+                        any_ok = true;
+                        tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), "block sent");
                     }
-                    break;
-                }
-                Err(e) => {
-                    if attempt == 0 {
-                        sink.send_failed(&peer.member, &e.to_string()).await;
+                    Err(e) => {
+                        tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), error = %e, "block send to one queue failed");
+                        last_err = Some(e);
                     }
-                    let backoff = backoff_ms(cfg, attempt, rng);
-                    tracing::debug!(peer = %peer.member, error = %e, backoff_ms = backoff, "send failed — backing off");
-                    tokio::time::sleep(Duration::from_millis(backoff)).await;
-                    attempt = attempt.saturating_add(1);
                 }
             }
+            if any_ok {
+                if attempt > 0 {
+                    // the backoff exit: sends to this member work again
+                    sink.send_ok(&peer.member).await;
+                }
+                break;
+            }
+            // every target failed this round
+            let err = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "no send target".to_string());
+            if attempt == 0 {
+                sink.send_failed(&peer.member, &err).await;
+            }
+            let backoff = backoff_ms(cfg, attempt, rng);
+            tracing::debug!(peer = %peer.member, error = %err, backoff_ms = backoff, "all send targets failed — backing off");
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
+            attempt = attempt.saturating_add(1);
         }
     }
     Ok(())
@@ -872,7 +941,7 @@ async fn recv_watchdog_task<T, S, K>(
     loop {
         let rx = match next.take() {
             Some(rx) => rx,
-            None => match transport.subscribe(&peer.rcv).await {
+            None => match transport.subscribe(peer.rcv0()).await {
                 Ok(rx) => rx,
                 Err(e) => {
                     tracing::warn!(peer = %peer.member, error = %e, "resubscribe failed — backing off");
@@ -884,7 +953,7 @@ async fn recv_watchdog_task<T, S, K>(
                 }
             },
         };
-        tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.rcv.id.0), "inbound subscription live");
+        tracing::debug!(peer = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription live");
         sink.link_up(&peer.member).await;
         let lived = tokio::time::Instant::now();
         match recv_task(
@@ -1300,30 +1369,32 @@ mod tests {
     fn peer_link_round_trips_through_a_mesh_handover() {
         let link = PeerLink {
             member: "bob".to_string(),
-            snd: SndQueueAddr {
+            snds: vec![SndQueueAddr {
                 server: "smp://fp@host".to_string(),
                 id: crate::QueueId::from_bytes(vec![1, 2, 3, 4]),
-            },
+            }],
             wrap_out: WrapKey::from_bytes([7u8; 32]),
-            rcv: crate::RcvQueue {
+            rcvs: vec![crate::RcvQueue {
                 // Stage 0: our inbound may live on a DIFFERENT server than the
                 // peer's inbound — the round-trip must preserve rcv_server.
                 server: "smp://rcvfp@host2".to_string(),
                 id: crate::QueueId::from_bytes(vec![9, 8, 7]),
-            },
+            }],
             wrap_in: WrapKey::from_bytes([3u8; 32]),
         };
         let mesh = link.to_mesh();
         assert_eq!(mesh.member, "bob");
         assert_eq!(mesh.snd_server, "smp://fp@host");
         assert_eq!(mesh.rcv_server, "smp://rcvfp@host2");
+        assert!(mesh.snd_extra.is_empty(), "N=1 leg persists no extra queues");
+        assert!(mesh.rcv_extra.is_empty());
         let back = PeerLink::from_mesh(&mesh).expect("round trips");
         assert_eq!(back.member, link.member);
-        assert_eq!(back.snd.server, link.snd.server);
-        assert_eq!(back.snd.id.0, link.snd.id.0);
+        assert_eq!(back.snds[0].server, link.snds[0].server);
+        assert_eq!(back.snds[0].id.0, link.snds[0].id.0);
         assert_eq!(back.wrap_out.to_bytes(), link.wrap_out.to_bytes());
-        assert_eq!(back.rcv.server, link.rcv.server, "rcv_server survives the round-trip");
-        assert_eq!(back.rcv.id.0, link.rcv.id.0);
+        assert_eq!(back.rcvs[0].server, link.rcvs[0].server, "rcv_server survives the round-trip");
+        assert_eq!(back.rcvs[0].id.0, link.rcvs[0].id.0);
         assert_eq!(back.wrap_in.to_bytes(), link.wrap_in.to_bytes());
     }
 
@@ -1337,6 +1408,8 @@ mod tests {
             rcv_queue: String::new(),
             rcv_wrap: String::new(),
             rcv_server: String::new(),
+            snd_extra: Vec::new(),
+            rcv_extra: Vec::new(),
         };
         assert!(PeerLink::from_mesh(&bad).is_none());
     }

@@ -95,13 +95,17 @@ async fn probe_leg(
     me: MemberId,
     listen: Duration,
 ) -> LegVerdict {
-    let rcv_id = peer.rcv.id.to_string();
-    let snd_id = peer.snd.id.to_string();
+    // Stage 2: a leg may have N redundant queues; the diagnostic probes the
+    // primary (index 0). (Per-queue probing is a Stage-2b refinement.)
+    let rcv0 = peer.rcv0();
+    let snd0 = peer.snd0();
+    let rcv_id = rcv0.id.to_string();
+    let snd_id = snd0.id.to_string();
 
     // (1) does OUR inbound queue still exist on the server? SUB → Ok vs Err.
     // A `SUB → Ok` on a deaf leg DISPROVES server-side expiry (an expired/deleted
     // queue answers Err, not Ok).
-    let mut rx = match transport.subscribe(&peer.rcv).await {
+    let mut rx = match transport.subscribe(rcv0).await {
         Ok(rx) => {
             tracing::info!(
                 target: "molt_mesh_probe",
@@ -127,7 +131,7 @@ async fn probe_leg(
     // (effectively impossible) RNG failure rather than abort the probe
     let mut idb = [0u8; 16];
     let _ = getrandom::getrandom(&mut idb);
-    match supervisor::send_framed(&transport, &peer.snd, &peer.wrap_out, MsgId(idb), &marker).await {
+    match supervisor::send_framed(&transport, snd0, &peer.wrap_out, MsgId(idb), &marker).await {
         Ok(()) => tracing::info!(
             target: "molt_mesh_probe", %me, peer = %peer.member,
             "SEND → OK — a marked probe frame was accepted for the peer's inbound"
@@ -225,9 +229,9 @@ mod tests {
         let wk = WrapKey::fresh().expect("wrap key");
         let leg = PeerLink {
             member: "bob".to_string(),
-            snd: pair.snd,
+            snds: vec![pair.snd],
             wrap_out: wk.clone(),
-            rcv: pair.rcv,
+            rcvs: vec![pair.rcv],
             wrap_in: wk,
         };
         (hub, t, leg)
@@ -260,7 +264,7 @@ mod tests {
         let (_hub, t, leg) = self_loop_leg().await;
         // a real (non-marker) application message is already waiting on the leg
         let payload = b"a real waiting application message".to_vec();
-        supervisor::send_framed(&t, &leg.snd, &leg.wrap_out, MsgId([7u8; 16]), &payload)
+        supervisor::send_framed(&t, leg.snd0(), &leg.wrap_out, MsgId([7u8; 16]), &payload)
             .await
             .expect("seed a real waiting frame");
 
@@ -280,7 +284,7 @@ mod tests {
 
         // the real message SURVIVES the probe: un-acked, it redelivers to a
         // fresh subscribe (the real mesh on the next normal open).
-        let mut rx = t.subscribe(&leg.rcv).await.expect("resubscribe");
+        let mut rx = t.subscribe(leg.rcv0()).await.expect("resubscribe");
         let survived = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let d = match rx.recv().await {
@@ -314,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn an_expired_queue_reads_alive_but_silent() {
         let (hub, t, leg) = self_loop_leg().await;
-        assert!(hub.expire_queue(&leg.rcv.id), "the queue exists to expire");
+        assert!(hub.expire_queue(&leg.rcv0().id), "the queue exists to expire");
         let verdict = probe_leg(
             RitualTransport::Loopback(t),
             leg,

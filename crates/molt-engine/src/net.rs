@@ -1593,7 +1593,10 @@ impl State {
                 member.clone(),
                 molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
             );
-            let reply = molt_net::mesh::MeshAnnounce { queues };
+            let reply = molt_net::mesh::MeshAnnounce {
+                queues,
+                queues_extra: std::collections::BTreeMap::new(),
+            };
             let Ok(bytes) = serde_json::to_vec(&reply) else {
                 return;
             };
@@ -1621,9 +1624,9 @@ impl State {
             }
             let link = PeerLink {
                 member: member.clone(),
-                snd,
+                snds: vec![snd],
                 wrap_out,
-                rcv: pair.rcv,
+                rcvs: vec![pair.rcv],
                 wrap_in,
             }
             .to_mesh();
@@ -1775,7 +1778,10 @@ impl State {
                 peer.clone(),
                 molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
             );
-            let announce = molt_net::mesh::MeshAnnounce { queues };
+            let announce = molt_net::mesh::MeshAnnounce {
+                queues,
+                queues_extra: std::collections::BTreeMap::new(),
+            };
             let Ok(bytes) = serde_json::to_vec(&announce) else {
                 return;
             };
@@ -1871,9 +1877,9 @@ impl State {
                 };
                 let link = PeerLink {
                     member: peer.clone(),
-                    snd,
+                    snds: vec![snd],
                     wrap_out,
-                    rcv: pair.rcv,
+                    rcvs: vec![pair.rcv],
                     wrap_in,
                 }
                 .to_mesh();
@@ -2401,8 +2407,11 @@ impl State {
         if getrandom::getrandom(&mut idb).is_err() {
             return;
         }
+        // Stage 2a: ping the primary queue. Stage 2b fans the one ciphertext to
+        // all `peer.snds` (reusing `ct`) so a keepalive warms EVERY redundant
+        // queue, not just the primary.
         if let Err(e) =
-            supervisor::send_framed(&transport, &peer.snd, &peer.wrap_out, molt_net::MsgId(idb), &ct)
+            supervisor::send_framed(&transport, peer.snd0(), &peer.wrap_out, molt_net::MsgId(idb), &ct)
                 .await
         {
             tracing::debug!(member = %peer.member, error = %e, "mesh ping send failed");

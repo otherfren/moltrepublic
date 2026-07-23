@@ -266,16 +266,20 @@ impl LoopbackHub {
         &self,
         members: &[MemberId],
     ) -> Result<BTreeMap<MemberId, Vec<PeerLink>>, NetError> {
-        // inbound queue of (recipient, sender), with its wrap key
-        let mut queues: BTreeMap<(MemberId, MemberId), (QueuePair, WrapKey)> = BTreeMap::new();
+        // N inbound queues of (recipient, sender), sharing one wrap key
+        // (Track B Stage 2 redundancy; N=1 == the former single-queue mesh)
+        let mut queues: BTreeMap<(MemberId, MemberId), (Vec<QueuePair>, WrapKey)> = BTreeMap::new();
         for recipient in members {
             for sender in members {
                 if sender == recipient {
                     continue;
                 }
-                let pair = self.create_queue_blocking()?;
                 let key = WrapKey::fresh()?;
-                queues.insert((recipient.clone(), sender.clone()), (pair, key));
+                let mut pairs = Vec::with_capacity(crate::MESH_REDUNDANCY);
+                for _ in 0..crate::MESH_REDUNDANCY {
+                    pairs.push(self.create_queue_blocking()?);
+                }
+                queues.insert((recipient.clone(), sender.clone()), (pairs, key));
             }
         }
         let mut mesh = BTreeMap::new();
@@ -284,13 +288,13 @@ impl LoopbackHub {
                 .iter()
                 .filter(|p| *p != me)
                 .map(|peer| {
-                    let (out_pair, out_key) = &queues[&(peer.clone(), me.clone())];
-                    let (in_pair, in_key) = &queues[&(me.clone(), peer.clone())];
+                    let (out_pairs, out_key) = &queues[&(peer.clone(), me.clone())];
+                    let (in_pairs, in_key) = &queues[&(me.clone(), peer.clone())];
                     PeerLink {
                         member: peer.clone(),
-                        snd: out_pair.snd.clone(),
+                        snds: out_pairs.iter().map(|p| p.snd.clone()).collect(),
                         wrap_out: out_key.clone(),
-                        rcv: in_pair.rcv.clone(),
+                        rcvs: in_pairs.iter().map(|p| p.rcv.clone()).collect(),
                         wrap_in: in_key.clone(),
                     }
                 })

@@ -69,8 +69,16 @@ impl QueueHandover {
 /// and its wrap key. The announcer created one queue per peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshAnnounce {
-    /// peer handle → the queue that peer sends to (to reach the announcer).
+    /// peer handle → the PRIMARY queue that peer sends to (to reach the
+    /// announcer).
     pub queues: BTreeMap<MemberId, QueueHandover>,
+    /// peer handle → the announcer's EXTRA redundant queues (1..N) for that peer
+    /// (Track B Stage 2). Additive: an old announcer omits it ⇒ a 1-queue leg;
+    /// an old receiver ignores it ⇒ a 1-queue leg. All share the primary's wrap
+    /// key (the repeated `wrap` in each handover is ignored — the receiver takes
+    /// `wrap_out` from `queues`).
+    #[serde(default)]
+    pub queues_extra: BTreeMap<MemberId, Vec<QueueHandover>>,
 }
 
 /// Assemble this node's full-mesh [`PeerLink`]s. `me` is this node's handle;
@@ -81,12 +89,15 @@ pub struct MeshAnnounce {
 /// naming the first peer whose handover is missing/malformed.
 pub fn assemble_mesh(
     me: &str,
-    my_inbound: &BTreeMap<MemberId, (RcvQueue, WrapKey)>,
+    my_inbound: &BTreeMap<MemberId, (Vec<RcvQueue>, WrapKey)>,
     announces: &BTreeMap<MemberId, MeshAnnounce>,
 ) -> Result<Vec<PeerLink>, String> {
     let mut links = Vec::with_capacity(my_inbound.len());
-    for (peer, (rcv, rcv_wrap)) in my_inbound {
-        // where I send to reach `peer`: the queue `peer` announced for me
+    for (peer, (rcvs, rcv_wrap)) in my_inbound {
+        if rcvs.is_empty() {
+            return Err(format!("no inbound queue for {peer}"));
+        }
+        // where I send to reach `peer`: the queue(s) `peer` announced for me.
         let announce = announces
             .get(peer)
             .ok_or_else(|| format!("no mesh announcement from {peer}"))?;
@@ -94,17 +105,26 @@ pub fn assemble_mesh(
             .queues
             .get(me)
             .ok_or_else(|| format!("{peer}'s announcement carries no queue for {me}"))?;
-        let snd = target
-            .addr()
-            .ok_or_else(|| format!("{peer}'s queue for {me} is malformed"))?;
         let wrap_out = target
             .wrap_key()
             .ok_or_else(|| format!("{peer}'s wrap key for {me} is malformed"))?;
+        // primary + any extra redundant queues the peer announced for me (all
+        // share `wrap_out`); a malformed extra is skipped, the leg survives.
+        let mut snds = vec![target
+            .addr()
+            .ok_or_else(|| format!("{peer}'s queue for {me} is malformed"))?];
+        if let Some(extra) = announce.queues_extra.get(me) {
+            for h in extra {
+                if let Some(a) = h.addr() {
+                    snds.push(a);
+                }
+            }
+        }
         links.push(PeerLink {
             member: peer.clone(),
-            snd,
+            snds,
             wrap_out,
-            rcv: rcv.clone(),
+            rcvs: rcvs.clone(),
             wrap_in: rcv_wrap.clone(),
         });
     }
@@ -125,21 +145,38 @@ pub async fn bootstrap_mesh<T: Transport>(
     mut announce_in: tokio::sync::mpsc::Receiver<(MemberId, MeshAnnounce)>,
     timeout: std::time::Duration,
 ) -> Result<Vec<PeerLink>, String> {
-    // one per-pair inbound queue per peer (per-pair = unlinkability)
-    let mut my_inbound: BTreeMap<MemberId, (RcvQueue, WrapKey)> = BTreeMap::new();
+    // N per-pair inbound queues per peer (per-pair = unlinkability; N =
+    // redundancy across servers). Stage 2a mints N=1 (behaviour-neutral); Stage
+    // 2b threads the config `redundancy` here and `create_queue`'s round-robin
+    // spreads the N across servers. All N of a pair share ONE wrap key.
+    let redundancy = crate::MESH_REDUNDANCY;
+    let mut my_inbound: BTreeMap<MemberId, (Vec<RcvQueue>, WrapKey)> = BTreeMap::new();
     let mut queues: BTreeMap<MemberId, QueueHandover> = BTreeMap::new();
+    let mut queues_extra: BTreeMap<MemberId, Vec<QueueHandover>> = BTreeMap::new();
     for p in peers {
-        let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
         let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-        // the peer sends to pair.snd (wrapped with `wrap`); I receive on pair.rcv
-        queues.insert(p.clone(), QueueHandover::of(&pair.snd, &wrap));
-        my_inbound.insert(p.clone(), (pair.rcv, wrap));
+        let mut rcvs = Vec::with_capacity(redundancy);
+        let mut handovers = Vec::with_capacity(redundancy);
+        for _ in 0..redundancy {
+            let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
+            // the peer sends to pair.snd (wrapped with `wrap`); I receive on pair.rcv
+            handovers.push(QueueHandover::of(&pair.snd, &wrap));
+            rcvs.push(pair.rcv);
+        }
+        queues.insert(p.clone(), handovers[0].clone());
+        if handovers.len() > 1 {
+            queues_extra.insert(p.clone(), handovers[1..].to_vec());
+        }
+        my_inbound.insert(p.clone(), (rcvs, wrap));
     }
     // broadcast my handovers, then wait (up to `timeout` total) until every peer
     // has announced theirs — the bootstrap is best-effort, so a peer that never
     // shows up bounds the wait instead of hanging entry forever
     announce_out
-        .send(MeshAnnounce { queues })
+        .send(MeshAnnounce {
+            queues,
+            queues_extra,
+        })
         .await
         .map_err(|_| "mesh announce channel closed".to_string())?;
     let deadline = tokio::time::Instant::now() + timeout;
@@ -293,7 +330,10 @@ mod tests {
             "bob".to_string(),
             QueueHandover::of(&snd("", &[7, 7]), &WrapKey::from_bytes([1u8; 32])),
         );
-        let a = MeshAnnounce { queues };
+        let a = MeshAnnounce {
+            queues,
+            queues_extra: BTreeMap::new(),
+        };
         let wire = serde_json::to_vec(&a).expect("encode");
         let back: MeshAnnounce = serde_json::from_slice(&wire).expect("decode");
         assert_eq!(back, a);
@@ -309,11 +349,11 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xa, 0xb]) }, WrapKey::from_bytes([10u8; 32])),
+            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xa, 0xb]) }], WrapKey::from_bytes([10u8; 32])),
         );
         my_inbound.insert(
             "cara".to_string(),
-            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xc, 0xd]) }, WrapKey::from_bytes([20u8; 32])),
+            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![0xc, 0xd]) }], WrapKey::from_bytes([20u8; 32])),
         );
 
         // bob's announcement includes the queue alice should send to.
@@ -334,8 +374,14 @@ mod tests {
         );
 
         let mut announces = BTreeMap::new();
-        announces.insert("bob".to_string(), MeshAnnounce { queues: bob_q });
-        announces.insert("cara".to_string(), MeshAnnounce { queues: cara_q });
+        announces.insert(
+            "bob".to_string(),
+            MeshAnnounce { queues: bob_q, queues_extra: BTreeMap::new() },
+        );
+        announces.insert(
+            "cara".to_string(),
+            MeshAnnounce { queues: cara_q, queues_extra: BTreeMap::new() },
+        );
 
         let mut links = assemble_mesh("alice", &my_inbound, &announces).expect("assembles");
         links.sort_by(|a, b| a.member.cmp(&b.member));
@@ -344,17 +390,17 @@ mod tests {
         let bob = &links[0];
         assert_eq!(bob.member, "bob");
         // send to the queue bob announced FOR alice
-        assert_eq!(bob.snd.id.0, vec![0xb, 0x1]);
-        assert_eq!(bob.snd.server, "smp://b@srv");
+        assert_eq!(bob.snds[0].id.0, vec![0xb, 0x1]);
+        assert_eq!(bob.snds[0].server, "smp://b@srv");
         assert_eq!(bob.wrap_out.to_bytes(), [11u8; 32]);
         // receive on the queue alice created FOR bob
-        assert_eq!(bob.rcv.id.0, vec![0xa, 0xb]);
+        assert_eq!(bob.rcvs[0].id.0, vec![0xa, 0xb]);
         assert_eq!(bob.wrap_in.to_bytes(), [10u8; 32]);
 
         let cara = &links[1];
         assert_eq!(cara.member, "cara");
-        assert_eq!(cara.snd.id.0, vec![0xc, 0x1]);
-        assert_eq!(cara.rcv.id.0, vec![0xc, 0xd]);
+        assert_eq!(cara.snds[0].id.0, vec![0xc, 0x1]);
+        assert_eq!(cara.rcvs[0].id.0, vec![0xc, 0xd]);
     }
 
     #[test]
@@ -362,7 +408,7 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
+            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }], WrapKey::from_bytes([1u8; 32])),
         );
         // no announcement from bob at all
         let announces = BTreeMap::new();
@@ -374,7 +420,7 @@ mod tests {
         let mut my_inbound = BTreeMap::new();
         my_inbound.insert(
             "bob".to_string(),
-            (RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }, WrapKey::from_bytes([1u8; 32])),
+            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }], WrapKey::from_bytes([1u8; 32])),
         );
         // bob announced, but not a queue for alice
         let mut bob_q = BTreeMap::new();
@@ -383,7 +429,10 @@ mod tests {
             QueueHandover::of(&snd("", &[9]), &WrapKey::from_bytes([9u8; 32])),
         );
         let mut announces = BTreeMap::new();
-        announces.insert("bob".to_string(), MeshAnnounce { queues: bob_q });
+        announces.insert(
+            "bob".to_string(),
+            MeshAnnounce { queues: bob_q, queues_extra: BTreeMap::new() },
+        );
         assert!(assemble_mesh("alice", &my_inbound, &announces).is_err());
     }
 }

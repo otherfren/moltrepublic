@@ -203,17 +203,17 @@ async fn a_persisted_mesh_and_group_rebuild_a_running_mls_supervisor() {
     // the persisted mesh handovers (transport.state.mesh)
     let alice_link_to_bob = PeerLink {
         member: "bob".to_string(),
-        snd: q_bob_in.snd.clone(),
+        snds: vec![q_bob_in.snd.clone()],
         wrap_out: w_bob_in.clone(),
-        rcv: q_alice_in.rcv.clone(),
+        rcvs: vec![q_alice_in.rcv.clone()],
         wrap_in: w_alice_in.clone(),
     }
     .to_mesh();
     let bob_link_to_alice = PeerLink {
         member: "alice".to_string(),
-        snd: q_alice_in.snd.clone(),
+        snds: vec![q_alice_in.snd.clone()],
         wrap_out: w_alice_in.clone(),
-        rcv: q_bob_in.rcv.clone(),
+        rcvs: vec![q_bob_in.rcv.clone()],
         wrap_in: w_bob_in.clone(),
     }
     .to_mesh();

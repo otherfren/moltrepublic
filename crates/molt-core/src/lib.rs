@@ -1358,6 +1358,19 @@ pub struct OutboundCursor {
     pub wire_seq: u64,
 }
 
+/// One extra redundant queue on a [`MeshLink`] (Track B Stage 2, N-redundancy):
+/// a queue's server + id, sharing the link's single per-direction wrap key
+/// (`snd_wrap`/`rcv_wrap`). The primary (index 0) queue stays the scalar
+/// `snd_*`/`rcv_*` fields; these are queues 1..N. All strings so `molt-core`
+/// keeps no transport dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct QueueRef {
+    /// The queue's server (`smp://fingerprint@host`; empty for the loopback hub).
+    pub server: String,
+    /// The queue id, lowercase hex.
+    pub queue: String,
+}
+
 /// One peer's runtime **full-mesh handover** (concept §3.2/§3.3): the per-pair
 /// queues a node uses to reach and hear one peer. All fields are strings so
 /// `molt-core` keeps no transport dependency — `molt-net` parses them into a
@@ -1365,7 +1378,8 @@ pub struct OutboundCursor {
 /// is this node's own inbound queue it RECEIVES on from that peer (each party
 /// owns the queue it receives on). Persisted so a reopened workspace rebuilds
 /// its mesh without re-bootstrapping (real SMP queues live on their servers;
-/// the ephemeral loopback hub rebuilds fresh).
+/// the ephemeral loopback hub rebuilds fresh). Track B Stage 2: `snd_extra`/
+/// `rcv_extra` carry the redundant queues 1..N (additive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshLink {
     /// The peer this link reaches.
@@ -1389,6 +1403,15 @@ pub struct MeshLink {
     /// here so the resumed leg subscribes on it, not a collapsed single one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rcv_server: String,
+    /// EXTRA redundant queues (1..N) on the peer's inbound side this node SENDS
+    /// to, sharing `snd_wrap`. Additive (Stage 2): an old `transport.state`
+    /// without it reads as empty ⇒ a single-queue leg, exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snd_extra: Vec<QueueRef>,
+    /// EXTRA redundant queues (1..N) on this node's OWN inbound side it RECEIVES
+    /// on from the peer, sharing `rcv_wrap`. Additive (Stage 2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rcv_extra: Vec<QueueRef>,
 }
 
 /// `transport.state` — node-local transport bookkeeping (concept §6):

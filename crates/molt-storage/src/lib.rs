@@ -2717,6 +2717,8 @@ mod tests {
             rcv_server: String::new(),
             rcv_queue: "cc".to_string(),
             rcv_wrap: "dd".to_string(),
+            snd_extra: Vec::new(),
+            rcv_extra: Vec::new(),
         }];
         handle.persist_mesh_crypto_blocking(
             Some(b"fresh-mls".to_vec()),

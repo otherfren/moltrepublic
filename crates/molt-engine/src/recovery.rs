@@ -642,7 +642,8 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
     // one fresh per-pair inbound queue per survivor (per-pair = unlinkability,
     // same as the founding bootstrap), each subscribed BEFORE it is announced
     // so a fast reply cannot race the subscription
-    let mut my_inbound: BTreeMap<String, (molt_net::RcvQueue, WrapKey)> = BTreeMap::new();
+    // Stage 2: N inbound queues per survivor (2a mints N=1 → a 1-element vec)
+    let mut my_inbound: BTreeMap<String, (Vec<molt_net::RcvQueue>, WrapKey)> = BTreeMap::new();
     let mut queues: BTreeMap<String, mesh::QueueHandover> = BTreeMap::new();
     let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(survivors.len().max(1));
     let mut readers = Vec::with_capacity(survivors.len());
@@ -651,7 +652,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
         let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
         let mut rx = transport.subscribe(&pair.rcv).await.map_err(|e| e.to_string())?;
         queues.insert(s.clone(), mesh::QueueHandover::of(&pair.snd, &wrap));
-        my_inbound.insert(s.clone(), (pair.rcv, wrap.clone()));
+        my_inbound.insert(s.clone(), (vec![pair.rcv], wrap.clone()));
         // the survivor's reply is the FIRST frame on this queue (it sends the
         // reply before it stands its extended supervisor up, and the queue is
         // fresh) — read exactly one framed message, ack it, and stop, leaving
@@ -683,7 +684,10 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
 
     // announce the queues — MLS-encrypted, so every survivor authenticates the
     // sender — over the recovery channel (the coordinator relays to the mesh)
-    let announce = mesh::MeshAnnounce { queues };
+    let announce = mesh::MeshAnnounce {
+        queues,
+        queues_extra: BTreeMap::new(),
+    };
     let bytes = serde_json::to_vec(&announce).map_err(|e| e.to_string())?;
     let ct = mls.encrypt(&bytes).map_err(|e| e.to_string())?;
     let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
@@ -753,7 +757,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
     }
     // assemble over the survivors that actually replied (all of them on the
     // happy path; the answering subset after a timeout)
-    let inbound: BTreeMap<String, (molt_net::RcvQueue, WrapKey)> = my_inbound
+    let inbound: BTreeMap<String, (Vec<molt_net::RcvQueue>, WrapKey)> = my_inbound
         .into_iter()
         .filter(|(m, _)| announces.contains_key(m))
         .collect();
@@ -1143,7 +1147,7 @@ mod tests {
             let own_wrap = WrapKey::fresh().expect("own wrap");
             let mut queues = std::collections::BTreeMap::new();
             queues.insert("bob".to_string(), mesh::QueueHandover::of(&own_q.snd, &own_wrap));
-            let reply = mesh::MeshAnnounce { queues };
+            let reply = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
             let ct = mls
                 .encrypt(&serde_json::to_vec(&reply).expect("encode"))
                 .expect("encrypt reply");
@@ -1301,7 +1305,7 @@ mod tests {
             let own_wrap = WrapKey::fresh().expect("own wrap");
             let mut queues = std::collections::BTreeMap::new();
             queues.insert("bob".to_string(), mesh::QueueHandover::of(&own_q.snd, &own_wrap));
-            let reply = mesh::MeshAnnounce { queues };
+            let reply = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
             let ct = coord
                 .encrypt(&serde_json::to_vec(&reply).expect("encode"))
                 .expect("encrypt reply");

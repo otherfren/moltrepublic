@@ -89,6 +89,14 @@ pub const MESH_KEEPALIVE_TAG: &[u8] = b"\x00molt-mesh-keepalive-v1";
 /// for control frames, and an unknown one decodes to a dropped no-op.
 pub const MESH_PROBE_TAG: &[u8] = b"\x00molt-mesh-probe-v1";
 
+/// Inbound-queue redundancy factor N per directed peer-pair leg (Track B Stage
+/// 2). Each recipient mints N inbound queues (spread across servers by
+/// `create_queue`'s round-robin); senders fan the SAME ciphertext to all N and
+/// the receiver dedups. **Stage 2a: 1** (behaviour-neutral — a single-queue leg,
+/// every existing test unchanged). Stage 2b raises it (config-/transport-driven)
+/// to activate real redundancy. One constant so every mint site agrees.
+pub const MESH_REDUNDANCY: usize = 1;
+
 /// Everything that can go wrong between a queue and the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
