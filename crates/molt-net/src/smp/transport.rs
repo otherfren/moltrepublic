@@ -105,7 +105,22 @@ impl SmpTransport {
 
     /// The general constructor: N servers + a dialer. A single-element `servers`
     /// is the former single-server transport, identical in behaviour.
-    pub fn with_dialer_multi(servers: Vec<SmpServer>, dialer: Dialer) -> SmpTransport {
+    ///
+    /// An EMPTY `servers` would divide-by-zero in `create_queue`'s round-robin
+    /// and index-panic in `route` (Stage-2 audit finding #3) — and the deferred
+    /// config server-list path could feed one in. Guard it: an empty list is
+    /// treated as a single loopback-style placeholder server (`smp://…@invalid`)
+    /// so the transport is always non-empty; every dial against it simply fails
+    /// (fail-closed) instead of panicking.
+    pub fn with_dialer_multi(mut servers: Vec<SmpServer>, dialer: Dialer) -> SmpTransport {
+        if servers.is_empty() {
+            tracing::error!("SmpTransport built with no servers — using a fail-closed placeholder");
+            if let Ok(placeholder) = SmpServer::parse(
+                "smp://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=@no-server.invalid",
+            ) {
+                servers.push(placeholder);
+            }
+        }
         // mint the sender seed once per transport incarnation; on an RNG
         // failure it stays None (first send fails with `NetError::Crypto`) —
         // NEVER a constant fallback, which would let anyone pre-`SKEY` the
@@ -576,6 +591,19 @@ mod creds_tests {
 
     fn transport() -> SmpTransport {
         SmpTransport::new(SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server"))
+    }
+
+    /// Stage-2 audit finding #3: an EMPTY server list must not panic
+    /// (divide-by-zero in `create_queue`, index panic in `route`). The
+    /// constructor substitutes a fail-closed placeholder, so the transport is
+    /// always non-empty and `route`/`redundancy` are safe.
+    #[test]
+    fn an_empty_server_list_does_not_panic() {
+        let t = SmpTransport::new_multi(Vec::new());
+        assert_eq!(t.redundancy(), 1, "empty → a single (placeholder) server");
+        // route on any string must not panic (index 0 exists)
+        let _ = t.route("");
+        let _ = t.route("smp://whatever@host");
     }
 
     /// Stage 2 redundancy: the per-leg inbound-queue count tracks the configured

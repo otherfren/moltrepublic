@@ -354,11 +354,19 @@ impl PeerLink {
     pub fn from_mesh(m: &molt_core::MeshLink) -> Option<PeerLink> {
         let snd_wrap: [u8; 32] = hex::decode(&m.snd_wrap).ok()?.try_into().ok()?;
         let rcv_wrap: [u8; 32] = hex::decode(&m.rcv_wrap).ok()?.try_into().ok()?;
+        // SECURITY (Stage-2 audit finding #1): cap the reloaded queue count at
+        // the SAME `MESH_REDUNDANCY_CAP` the mint + announce-ingest sides use, so
+        // a tampered/inflated `transport.state` can never reload an unbounded
+        // send fan-out (or subscription set) that survives reopen.
+        let cap = crate::MESH_REDUNDANCY_CAP.max(1);
         let mut snds = vec![SndQueueAddr {
             server: m.snd_server.clone(),
             id: crate::QueueId::from_bytes(hex::decode(&m.snd_queue).ok()?),
         }];
         for x in &m.snd_extra {
+            if snds.len() >= cap {
+                break;
+            }
             if let Ok(id) = hex::decode(&x.queue) {
                 snds.push(SndQueueAddr {
                     server: x.server.clone(),
@@ -371,6 +379,9 @@ impl PeerLink {
             id: crate::QueueId::from_bytes(hex::decode(&m.rcv_queue).ok()?),
         }];
         for x in &m.rcv_extra {
+            if rcvs.len() >= cap {
+                break;
+            }
             if let Ok(id) = hex::decode(&x.queue) {
                 rcvs.push(RcvQueue {
                     server: x.server.clone(),

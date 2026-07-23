@@ -115,6 +115,16 @@ pub fn assemble_mesh(
             .ok_or_else(|| format!("{peer}'s queue for {me} is malformed"))?];
         if let Some(extra) = announce.queues_extra.get(me) {
             for h in extra {
+                // SECURITY (Stage-2 audit finding #1): cap the fan-out targets.
+                // A malicious member could announce an arbitrarily long
+                // `queues_extra[me]` and we would fan EVERY outbound block to all
+                // of them (egress amplification toward attacker-chosen queues,
+                // and it would persist). The mint side is capped at
+                // `MESH_REDUNDANCY_CAP`; enforce the SAME bound on the ingest
+                // side so a peer's announcement can never inflate our fan-out.
+                if snds.len() >= crate::MESH_REDUNDANCY_CAP {
+                    break;
+                }
                 if let Some(a) = h.addr() {
                     snds.push(a);
                 }
@@ -401,6 +411,43 @@ mod tests {
         assert_eq!(cara.member, "cara");
         assert_eq!(cara.snds[0].id.0, vec![0xc, 0x1]);
         assert_eq!(cara.rcvs[0].id.0, vec![0xc, 0xd]);
+    }
+
+    /// SECURITY (Stage-2 audit finding #1): an oversized `queues_extra` from a
+    /// (malicious) peer must NOT inflate our send fan-out — `assemble_mesh` caps
+    /// the resulting `snds` at `MESH_REDUNDANCY_CAP`.
+    #[test]
+    fn assemble_caps_an_oversized_queues_extra() {
+        let mut my_inbound = BTreeMap::new();
+        my_inbound.insert(
+            "bob".to_string(),
+            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }], WrapKey::from_bytes([1u8; 32])),
+        );
+        // bob announces the primary for alice PLUS 50 extra attacker queues
+        let mut bob_q = BTreeMap::new();
+        bob_q.insert(
+            "alice".to_string(),
+            QueueHandover::of(&snd("smp://b@srv", &[0]), &WrapKey::from_bytes([2u8; 32])),
+        );
+        let mut bob_extra = BTreeMap::new();
+        bob_extra.insert(
+            "alice".to_string(),
+            (0..50u8)
+                .map(|i| QueueHandover::of(&snd("smp://evil@srv", &[i]), &WrapKey::from_bytes([9u8; 32])))
+                .collect::<Vec<_>>(),
+        );
+        let mut announces = BTreeMap::new();
+        announces.insert(
+            "bob".to_string(),
+            MeshAnnounce { queues: bob_q, queues_extra: bob_extra },
+        );
+        let links = assemble_mesh("alice", &my_inbound, &announces).expect("assembles");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].snds.len(),
+            crate::MESH_REDUNDANCY_CAP,
+            "the fan-out is capped at MESH_REDUNDANCY_CAP regardless of how many queues the peer announced"
+        );
     }
 
     #[test]
