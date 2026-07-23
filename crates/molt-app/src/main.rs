@@ -199,6 +199,7 @@ fn main() -> anyhow::Result<()> {
             tor_port: config.transport.anonymity.tor.port,
             smp_server: config.transport.smp.server.clone(),
             smp_url: config.transport.smp.url.clone(),
+            smp_urls: config.transport.smp.urls.clone(),
             download_dir: config.storage.download_dir.clone(),
         },
         // the scanned on-disk workspaces replace the demo list

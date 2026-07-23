@@ -1967,6 +1967,12 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         tor_port: ui.get_cfg_tor_port() as u16,
         smp_server: if ui.get_cfg_smp_custom() { "custom" } else { "public" }.to_string(),
         smp_url: ui.get_cfg_smp_url().to_string(),
+        // The redundant-server LIST has no GUI editor yet (Track B Stage 2
+        // activation): leave it empty here so the save is non-destructive — the
+        // engine's cmd_save_settings PRESERVES the configured list on an empty
+        // draft, so a TOML-set `[transport.smp].urls` survives a GUI settings
+        // save. The visible add/remove/Test editor binds to this field later.
+        smp_urls: Vec::new(),
     }
 }
 

@@ -434,6 +434,15 @@ fn settings_arg(args: &Value) -> SessionSettings {
         tor_port: port("tor_port", d.tor_port),
         smp_server: text("smp_server", d.smp_server),
         smp_url: text("smp_url", d.smp_url),
+        smp_urls: args
+            .get("smp_urls")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or(d.smp_urls),
     }
 }
 

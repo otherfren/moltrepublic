@@ -261,6 +261,11 @@ pub struct SessionSettings {
     /// Custom SMP server URL, used when `smp_server = "custom"`.
     #[serde(default)]
     pub smp_url: String,
+    /// Redundant SMP server list (Track B Stage 2). When non-empty, the node
+    /// spreads its inbound queues across these servers for redundancy; empty =
+    /// single-server (unchanged). Additive.
+    #[serde(default)]
+    pub smp_urls: Vec<String>,
     /// Where downloaded chat files land when no explicit destination is
     /// given (`~` expands).
     #[serde(default = "default_download_dir")]
@@ -324,6 +329,7 @@ impl Default for SessionSettings {
             tor_port: 9050,
             smp_server: "public".to_string(),
             smp_url: String::new(),
+            smp_urls: Vec::new(),
             download_dir: default_download_dir(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
