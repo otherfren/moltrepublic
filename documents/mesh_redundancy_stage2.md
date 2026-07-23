@@ -214,17 +214,33 @@ Red-first tests to write (Stage 2b):
 
 ## 7. Security notes (carry the audit's Stage 0/1 clearance forward)
 
-- N queues in the handover is **not** a new attack surface: an announced queue
-  only affects where others send to reach the *announcer's own* inbound; it
-  cannot redirect other pairs, and queues are unsigned/unchained. A malicious
-  member announcing N attacker-server queues only harms its own reachability.
 - The ONE ciphertext reused across N sends preserves MLS nonce discipline
   (no re-encrypt). The peer dedups copies; MLS `reuse_guard` already guards the
-  per-message path.
+  per-message path. **(Audit-confirmed: `ciphertext_for` memoizes per seq;
+  `send_one` wraps once per chunk and clones to each target.)**
 - Wrap keys unchanged (per-direction). No key is exposed N times beyond the
   handover it already rode in.
 - `net_health` stays honest: a leg is up iff ≥1 queue live; all-N-down is a real
   `link_down`. Redundancy makes the honest state *better*, not louder.
+  **(Audit finding #2: the naive AtomicUsize aggregation could reorder the
+  up/down notifications at the engine and get STUCK alarming a live leg — FIXED
+  by binding each transition to its notification under a per-peer `tokio::Mutex`,
+  commit 88ca87c.)**
+
+### 7.1 CORRECTION — the "only harms its own reachability" claim was WRONG
+
+An earlier draft claimed "a malicious member announcing N attacker-server queues
+only harms its own reachability." The Stage-2 security audit proved this **false**
+for the send/extra path: `MeshAnnounce.queues_extra[victim]` names queues the
+VICTIM will send to, so an oversized/attacker-chosen list makes the *victim* fan
+every outbound block to attacker endpoints (egress amplification), and it was
+uncapped on the ingest side even at N=1. **FIXED (commit 2292c32):**
+`assemble_mesh` and `PeerLink::from_mesh` cap the fan-out at
+`MESH_REDUNDANCY_CAP`. An empty `servers` list also panicked
+(`with_dialer_multi`); fixed with a fail-closed placeholder. All three Stage-2
+findings (#1 amplification, #2 aggregation honesty, #3 empty-servers) are closed;
+the rest of the change-set audited clean (no MLS nonce reuse, dedup sound,
+shutdown clean, additive schema, no signature break, routing sound).
 
 ## 8. Open forks (confirm with the user)
 
