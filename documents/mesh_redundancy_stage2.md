@@ -227,6 +227,15 @@ per-server construction deferred from Stage 1 lands here.
     dial goes through the transport's dialer, so the Tor posture is unchanged;
     which HOST a peer points us at is inherent to contact-hosted queues (SimpleX
     is the same), which is why the map is bounded.
+    **Accepted residual risk (recorded, not mitigated):** a member of our own
+    republic can therefore make us attempt an outbound TLS connection to a host
+    of its choosing (an internal or LAN address included) — a bounded SSRF-lite.
+    It is bounded to `MAX_ROUTED_SERVERS` distinct hosts, gains the attacker no
+    response content (the pin makes the handshake fail, and only SMP framing is
+    ever parsed), needs an *authenticated group member* (announcements are MLS-
+    authenticated), and vanishes entirely in the Tor modes (every dial goes
+    through SOCKS). The alternative — refusing unconfigured servers — is what we
+    just removed, because it silently halves redundancy instead.
   - ⬜ **REMAINING follow-up (not blocking):** a joiner's send side to the founder
     is bounded by what the founder announced (the joiner already receives N; sends
     fan to the founder's announced queues) — symmetric once both sides have
