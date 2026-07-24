@@ -190,11 +190,8 @@ per-server construction deferred from Stage 1 lands here.
     joiner (`ritual_join_over_smp` with the invite server prepended), and
     `reopen_transport` (gathers all mesh servers) all build multi-server. N=2
     turns on when ≥2 servers are configured; N=1 (single-server) is unchanged.
-    **Constraint:** N=2 requires members to SHARE a server set (`route()` matches
-    a queue's server against the local list, falls back to the primary otherwise;
-    the ≥1-success send rule keeps it delivering, just non-redundant on a leg to
-    an unshared server). Dialing an arbitrary pinned announced server (to lift the
-    constraint) is a follow-up.
+    (The former **shared-server-set constraint** is GONE — see the pinned dynamic
+    routing below; a member's list is now purely its own redundancy.)
   - ✅ **GUI server-list editor** — a "one server per line" multi-line editor in
     the SMP settings group (`SmpServerGroup.smp-urls` ↔ `cfg-smp-urls`),
     round-tripped through `read_settings_draft`/push; the interim engine
@@ -205,18 +202,35 @@ per-server construction deferred from Stage 1 lands here.
     mesh-extension REPLY now mint `transport.redundancy()` inbound queues (was 1),
     so a rotate no longer decays an N=2 leg to N=1. `RitualTransport::redundancy()`
     delegates to the inner transport (it had used the trait default 1).
-  - ⬜ **REMAINING follow-ups (not blocking):**
-    1. **recovery rejoin mint N** (`recovery.rs` still mints 1): a total-loss
-       member that rejoins gets single-queue legs until a rotation re-mints N.
-       Correct, just asymmetric until the first rotate.
-    2. **A joiner's send side** to the founder is bounded by what the founder
-       announced (the joiner already receives N; sends fan to the founder's
-       announced queues) — symmetric once both sides have rotated once.
-    3. **Dial an arbitrary pinned announced server** so N=2 works across members
-       with DIFFERENT server sets (lift the shared-set constraint) — a `route()`
-       change (parse+dial the queue's own fingerprint-pinned server) with its own
-       small audit. Also lifts `reopen_transport`'s >2-server truncation
-       (audit info #4).
+  - ✅ **every ADOPT path keeps N** (follow-up, ae92afd): `spawn_mesh_extension`
+    read only `announce.queues[me]` and built a single-element `snds`, so whoever
+    ADOPTED a rotate/rejoin sent on one queue while its own inbound stayed N —
+    each adopted announce halved the leg in the send direction. All three ingest
+    sites (`assemble_mesh`, the rotate reply fold, the mesh extension) now share
+    ONE entry point, `molt_net::mesh::send_targets`, which folds the announced
+    extras and enforces the finding-#1 fan-out bound in one place.
+  - ✅ **recovery rejoin mints N** (follow-up, ae92afd): `rejoin_mesh` mints
+    `transport.redundancy()` queues per survivor (one shared wrap key, reply
+    reader on the primary, extras announced as `queues_extra`, half-minted queues
+    deleted on a failed mint), and `transport_for` takes the joiner's
+    `extra_server_urls` (`settings.smp_urls`) so the rejoiner's own transport
+    reports N at all — the coordinator's link server stays the primary.
+  - ✅ **dial an arbitrary pinned announced server** (follow-up, 6cb11db):
+    `route()` parses an unmatched queue server — which succeeds only with a valid
+    32-byte pin — and dials it on its own lazily created, clone-shared pool
+    (bounded by `MAX_ROUTED_SERVERS = 64`; beyond it, and for any unpinned
+    address, it degrades to the primary as before, so an unpinned host is never
+    dialed). This lifts the shared-server-set constraint AND `reopen_transport`'s
+    >2-server truncation (audit info #4): the truncated list only seeds
+    `create_queue`'s spread, while a leg on a server beyond the cut still routes
+    to its own server. TLS verifies against the pin the announcer named and the
+    dial goes through the transport's dialer, so the Tor posture is unchanged;
+    which HOST a peer points us at is inherent to contact-hosted queues (SimpleX
+    is the same), which is why the map is bounded.
+  - ⬜ **REMAINING follow-up (not blocking):** a joiner's send side to the founder
+    is bounded by what the founder announced (the joiner already receives N; sends
+    fan to the founder's announced queues) — symmetric once both sides have
+    rotated once.
 
 ## 6. TDD plan (loopback — the redundancy LOGIC is server-agnostic)
 

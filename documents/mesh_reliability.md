@@ -110,6 +110,15 @@ only not screaming about an absent friend.
   public server (do not invent the fingerprint) or a GUI-aware config server
   list. mesh-extension/recovery still mint N=1 (asymmetric redundancy until a
   rotation). A Stage-2 security audit is in progress.
+- **Stage 2 ✅ ACTIVATED + the follow-ups closed (2026-07-24/25).** The config
+  server list (`[transport.smp].urls` + GUI editor) turns N=2 on; the audit fix
+  made rotate/mesh-extension mint N; and the three redundancy follow-ups are done:
+  **every adopt path keeps N** (one shared `mesh::send_targets` ingest point —
+  the mesh extension used to drop the announced extras), **the recovery rejoin
+  mints + announces N** (and its own transport spans the configured servers), and
+  **`route()` dials a queue's OWN pinned server** (bounded dynamic pools), which
+  removes the shared-server-set constraint and `reopen_transport`'s >2-server
+  truncation. Full record in `documents/mesh_redundancy_stage2.md`.
 
 ---
 ### Original design
