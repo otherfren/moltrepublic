@@ -42,13 +42,10 @@ pub(crate) const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Durati
 /// to); it is placed first and de-duplicated against the config list. The result
 /// is capped at [`molt_net::MESH_REDUNDANCY_CAP`] servers.
 ///
-/// N=2 REQUIRES the members to share a server set: `SmpTransport::route` matches a
-/// queue's server against THIS transport's configured list and falls back to the
-/// primary for an unconfigured one, so a peer's redundant queue on a server I did
-/// not configure mis-routes to my primary and that copy fails — the `≥1-success`
-/// send rule still delivers via the matching copy, so it is never broken, only
-/// non-redundant on that leg. (Dialing an arbitrary pinned announced server is a
-/// follow-up that would lift the shared-set constraint.)
+/// The list is this node's OWN redundancy — not a requirement on the others:
+/// `SmpTransport::route` dials a queue's own (pinned) server even when it is not
+/// in this list, so every member picks its inbound servers independently and a
+/// leg keeps both copies either way.
 pub(crate) fn build_smp_transport(
     settings: &molt_core::SessionSettings,
     dialer: Dialer,
@@ -79,7 +76,10 @@ pub(crate) fn build_smp_transport(
 /// server — its in-memory queues cannot outlive the process) or bad creds. Track
 /// B Stage 2: gathers ALL distinct servers the persisted mesh uses (primary +
 /// extra, both send and receive sides) so a resumed multi-server mesh
-/// re-subscribes on every one, not a single collapsed server.
+/// re-subscribes on every one, not a single collapsed server. The list is
+/// truncated to the redundancy cap because it seeds `create_queue`'s spread; a
+/// leg on a server beyond the cut is NOT lost — `SmpTransport::route` dials it
+/// as a pinned dynamic server.
 pub(crate) fn reopen_transport(
     mesh: &[molt_core::MeshLink],
     creds: &[u8],

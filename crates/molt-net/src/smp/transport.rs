@@ -36,8 +36,9 @@ use crate::{
     Transport,
 };
 
-/// Per-node SMP transport bound to one server (multi-server routing by the
-/// queue's own server address is a later step).
+/// Per-node SMP transport: queues are created on the configured server(s), and
+/// every send/subscribe is routed to the server the queue itself names — a
+/// configured one, or (pinned, bounded) one only the peer configured.
 #[derive(Clone)]
 pub struct SmpTransport {
     /// The server(s) this transport creates queues on and reaches. N=2
@@ -52,6 +53,12 @@ pub struct SmpTransport {
     /// `create_queue`/`send`/`delete_queue`; `subscribe` keeps its own
     /// connection. Clones of a transport share them.
     pools: Vec<ConnPool<SmpConn>>,
+    /// Pools for servers this transport did **not** configure but a queue names
+    /// — a peer's inbound queue on its own server, or (after a reopen) a leg of
+    /// our persisted mesh beyond the truncated server list. Keyed by the
+    /// server's rendered address, created on first route, shared by clones, and
+    /// bounded by [`MAX_ROUTED_SERVERS`].
+    routed: Arc<Mutex<RoutedPools>>,
     /// Round-robin cursor spreading `create_queue` across `servers` (shared by
     /// clones), so a peer's N redundant inbound queues land on different servers.
     next: Arc<AtomicUsize>,
@@ -72,6 +79,17 @@ struct SmpState {
     /// to a predictable (attacker-pre-SKEYable) constant seed.
     sender_seed: Option<[u8; 32]>,
 }
+
+/// Lazily opened pools for servers only a queue names, keyed by rendered address.
+type RoutedPools = HashMap<String, (SmpServer, ConnPool<SmpConn>)>;
+
+/// How many **unconfigured** servers one transport will dial and keep a pooled
+/// connection for (queues a peer hosts on its own servers, plus a resumed
+/// mesh's servers beyond the configured list). A generous bound — a republic's
+/// legs name at most two servers per peer — that exists so a misbehaving member
+/// cannot make us hold connections to arbitrarily many hosts by announcing
+/// ever-new ones. Beyond it, routing degrades to the primary.
+const MAX_ROUTED_SERVERS: usize = 64;
 
 /// Derive the deterministic sender key for one queue:
 /// `Ed25519(HMAC-SHA256(key = seed, msg = "molt-smp-sender-v1" ‖ sender_id))`.
@@ -136,25 +154,66 @@ impl SmpTransport {
                 ..SmpState::default()
             })),
             pools,
+            routed: Arc::new(Mutex::new(HashMap::new())),
             next: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// Route to the `(server, pool)` for a queue's own server string — matched
-    /// by rendered address, falling back to the first server (single-server, an
-    /// empty string, or a server no longer configured). N=2: a queue names which
-    /// of the transport's servers it lives on so we subscribe/send there, not on
-    /// a single collapsed one.
-    fn route(&self, server: &str) -> (&SmpServer, &ConnPool<SmpConn>) {
-        let idx = if server.is_empty() {
-            0
-        } else {
-            self.servers
-                .iter()
-                .position(|s| s.render() == server)
-                .unwrap_or(0)
+    /// Route to the `(server, pool)` for a queue's own server string.
+    ///
+    /// A configured server is matched by rendered address. A server we did NOT
+    /// configure but whose address parses — which means it carries a valid
+    /// 32-byte server pin — gets its own lazily created, shared connection pool
+    /// and is dialed **there** ([`MAX_ROUTED_SERVERS`] of them at most). That is
+    /// what lets a peer host its inbound queues on servers of its own choosing:
+    /// before it, an unconfigured server silently collapsed to our primary, so
+    /// N=2 redundancy demanded a shared server set across all members and a
+    /// resumed mesh spread wider than [`crate::MESH_REDUNDANCY_CAP`] servers
+    /// mis-subscribed on the truncated list.
+    ///
+    /// SECURITY: the dialed address always comes with the pin the announcer
+    /// named, so TLS verifies against exactly that certificate (no third party
+    /// can interpose) and every dial still goes through this transport's
+    /// `dialer` (Tor stays Tor). What it does NOT constrain is *which host* a
+    /// peer points us at — inherent to contact-hosted queues (the same holds in
+    /// SimpleX), which is why the map is bounded and an address without a valid
+    /// pin is never dialed at all: it degrades to the primary.
+    fn route(&self, server: &str) -> (SmpServer, ConnPool<SmpConn>) {
+        let primary = || (self.servers[0].clone(), self.pools[0].clone());
+        let raw = server.trim();
+        if raw.is_empty() {
+            return primary();
+        }
+        if let Some(i) = self.servers.iter().position(|s| s.render() == raw) {
+            return (self.servers[i].clone(), self.pools[i].clone());
+        }
+        // not a literal match — parse (which enforces the pin) and try again on
+        // the normalized address before opening a dynamic pool for it
+        let Ok(parsed) = SmpServer::parse(raw) else {
+            tracing::warn!(server = %raw, "queue names an unusable server — falling back to the primary");
+            return primary();
         };
-        (&self.servers[idx], &self.pools[idx])
+        let key = parsed.render();
+        if let Some(i) = self.servers.iter().position(|s| s.render() == key) {
+            return (self.servers[i].clone(), self.pools[i].clone());
+        }
+        let Ok(mut routed) = self.routed.lock() else {
+            return primary();
+        };
+        if let Some(hit) = routed.get(&key) {
+            return hit.clone();
+        }
+        if routed.len() >= MAX_ROUTED_SERVERS {
+            tracing::warn!(
+                server = %key,
+                bound = MAX_ROUTED_SERVERS,
+                "too many distinct queue servers — falling back to the primary"
+            );
+            return primary();
+        }
+        let pool = ConnPool::new();
+        routed.insert(key, (parsed.clone(), pool.clone()));
+        (parsed, pool)
     }
 
     fn recv_queue(&self, id: &[u8]) -> Option<NewQueue> {
@@ -436,7 +495,7 @@ impl Transport for SmpTransport {
         // route to the server this queue lives on (N=2: the redundant copies go
         // to each of the peer's inbound servers)
         let (server, pool) = self.route(&addr.server);
-        pool.with_conn(&self.dialer, server, true, |c: &mut SmpConn| {
+        pool.with_conn(&self.dialer, &server, true, |c: &mut SmpConn| {
                 let sender_id = sender_id.clone();
                 let state = state.clone();
                 let block = block.clone();
@@ -513,7 +572,7 @@ impl Transport for SmpTransport {
         // resumed/redundant leg reaches the server it was created on, not a
         // single collapsed one.
         let (server, _) = self.route(&q.server);
-        let mut conn = SmpConn::connect(&self.dialer, server).await?;
+        let mut conn = SmpConn::connect(&self.dialer, &server).await?;
         conn.sub(&queue.recipient_id, &queue.auth_sk).await?;
         let (tx, rx) = mpsc::channel::<Delivery>(64);
         let rcv_tag = crate::supervisor::queue_tag(&queue.recipient_id);
@@ -555,7 +614,7 @@ impl Transport for SmpTransport {
         let recipient_id = queue.recipient_id.clone();
         let auth_sk = queue.auth_sk.clone();
         let (server, pool) = self.route(&q.server);
-        pool.with_conn(&self.dialer, server, false, |c: &mut SmpConn| {
+        pool.with_conn(&self.dialer, &server, false, |c: &mut SmpConn| {
             let recipient_id = recipient_id.clone();
             let auth_sk = auth_sk.clone();
             Box::pin(async move { c.delete(&recipient_id, &auth_sk).await })
@@ -630,7 +689,8 @@ mod creds_tests {
 
     /// Stage 1 multi-server routing: a queue names which of the transport's
     /// servers it lives on, and `route` dispatches there instead of collapsing
-    /// every leg to one. Empty / unconfigured servers fall back to the first.
+    /// every leg to one. An empty server (loopback / pre-Stage-0 link) is the
+    /// primary.
     #[test]
     fn route_dispatches_by_the_queue_s_own_server() {
         const FP2: &str = "0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=";
@@ -638,16 +698,70 @@ mod creds_tests {
         let s2 = SmpServer::parse(&format!("smp://{FP2}@host-two.invalid")).expect("s2");
         let t = SmpTransport::new_multi(vec![s1.clone(), s2.clone()]);
         assert_eq!(t.route("").0.render(), s1.render(), "empty → first");
-        assert_eq!(
-            t.route(&format!("smp://{FP}@nowhere.invalid")).0.render(),
-            s1.render(),
-            "an unconfigured server → first (best-effort)"
-        );
         assert_eq!(t.route(&s2.render()).0.render(), s2.render(), "names s2 → routes to s2");
         assert_eq!(t.route(&s1.render()).0.render(), s1.render(), "names s1 → routes to s1");
-        // a single-server transport always routes to its one server
-        let single = SmpTransport::new(s1.clone());
-        assert_eq!(single.route(&s2.render()).0.render(), s1.render(), "single-server → its server");
+        // whitespace / an equivalent spelling still matches the CONFIGURED server
+        // (not a second, dynamically routed copy of it)
+        assert_eq!(
+            t.route(&format!("  {}  ", s2.render())).0.render(),
+            s2.render(),
+            "a padded spelling matches the configured server"
+        );
+    }
+
+    /// **A queue on a server we did not configure is dialed at ITS server.**
+    /// Falling back to the primary (the Stage-1 behaviour) mis-routed every such
+    /// queue: it made N=2 require a shared server set across all members, and it
+    /// broke a resumed mesh whose servers exceed `MESH_REDUNDANCY_CAP` (the
+    /// reopen list is truncated). The address carries the server's 32-byte pin,
+    /// so the dial is verified against exactly what the peer named.
+    #[test]
+    fn route_dials_an_unconfigured_but_pinned_server() {
+        const FP2: &str = "0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=";
+        let s1 = SmpServer::parse(&format!("smp://{FP}@host-one.invalid")).expect("s1");
+        let peer = SmpServer::parse(&format!("smp://{FP2}@a-peers-server.invalid")).expect("peer");
+        let t = SmpTransport::new(s1.clone());
+        assert_eq!(
+            t.route(&peer.render()).0.render(),
+            peer.render(),
+            "a pinned server we never configured is routed to ITSELF, not the primary"
+        );
+        // one pooled connection per dynamic server, shared by every route() and
+        // by transport clones — not a fresh dial per send
+        let a = t.route(&peer.render()).1;
+        let b = t.clone().route(&peer.render()).1;
+        assert!(
+            Arc::ptr_eq(&a.slot, &b.slot),
+            "the dynamic server keeps ONE shared connection pool"
+        );
+        // an unparseable / unpinned address is not dialed at all — it falls back
+        // to the primary exactly as before (fail-soft, never an unpinned dial)
+        assert_eq!(t.route("not-a-server").0.render(), s1.render(), "garbage → primary");
+        assert_eq!(
+            t.route("smp://short@host.invalid").0.render(),
+            s1.render(),
+            "a fingerprint that is not a 32-byte SHA-256 → primary, never dialed"
+        );
+    }
+
+    /// The dynamic pool map is bounded: a member cannot make us hold an
+    /// unbounded number of server connections by naming ever-new hosts. Beyond
+    /// the bound the route degrades to the primary (the old best-effort
+    /// behaviour) instead of growing without limit.
+    #[test]
+    fn dynamic_routing_is_bounded() {
+        let s1 = SmpServer::parse(&format!("smp://{FP}@host-one.invalid")).expect("s1");
+        let t = SmpTransport::new(s1.clone());
+        for i in 0..MAX_ROUTED_SERVERS {
+            let s = format!("smp://{FP}@host-{i}.invalid");
+            assert_eq!(t.route(&s).0.render(), s, "server {i} is within the bound");
+        }
+        let overflow = format!("smp://{FP}@one-too-many.invalid");
+        assert_eq!(
+            t.route(&overflow).0.render(),
+            s1.render(),
+            "beyond the bound the route degrades to the primary"
+        );
     }
 
     /// D2: the sender key is a pure function of (seed, queue id) — the same
