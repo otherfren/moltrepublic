@@ -639,20 +639,51 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
     use molt_net::mesh;
     use std::collections::BTreeMap;
 
-    // one fresh per-pair inbound queue per survivor (per-pair = unlinkability,
-    // same as the founding bootstrap), each subscribed BEFORE it is announced
-    // so a fast reply cannot race the subscription
-    // Stage 2: N inbound queues per survivor (2a mints N=1 → a 1-element vec)
+    // N fresh per-pair inbound queues per survivor (per-pair = unlinkability,
+    // same as the founding bootstrap; N = `transport.redundancy()`, so a
+    // recovered member comes back with the SAME redundancy every other mint
+    // site gives a leg — minting 1 here left the rejoiner's legs at N=1 in both
+    // directions until some later rotation happened to widen them). All N of a
+    // pair share ONE wrap key; the reply arrives on the PRIMARY (index 0),
+    // which is subscribed BEFORE the announce so a fast reply cannot race the
+    // subscription. The extras only widen our inbound and are handed to the
+    // supervisor unsubscribed, exactly like a rotate's.
+    let redundancy = transport.redundancy().max(1);
     let mut my_inbound: BTreeMap<String, (Vec<molt_net::RcvQueue>, WrapKey)> = BTreeMap::new();
     let mut queues: BTreeMap<String, mesh::QueueHandover> = BTreeMap::new();
+    let mut queues_extra: BTreeMap<String, Vec<mesh::QueueHandover>> = BTreeMap::new();
     let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(survivors.len().max(1));
     let mut readers = Vec::with_capacity(survivors.len());
     for s in survivors {
-        let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
         let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-        let mut rx = transport.subscribe(&pair.rcv).await.map_err(|e| e.to_string())?;
-        queues.insert(s.clone(), mesh::QueueHandover::of(&pair.snd, &wrap));
-        my_inbound.insert(s.clone(), (vec![pair.rcv], wrap.clone()));
+        let mut pairs = Vec::with_capacity(redundancy);
+        for _ in 0..redundancy {
+            match transport.create_queue().await {
+                Ok(p) => pairs.push(p),
+                Err(e) => {
+                    // don't leave this survivor's half-minted queues behind
+                    for p in &pairs {
+                        let _ = transport.delete_queue(&p.rcv).await;
+                    }
+                    return Err(e.to_string());
+                }
+            }
+        }
+        let mut rx = transport.subscribe(&pairs[0].rcv).await.map_err(|e| e.to_string())?;
+        queues.insert(s.clone(), mesh::QueueHandover::of(&pairs[0].snd, &wrap));
+        if pairs.len() > 1 {
+            queues_extra.insert(
+                s.clone(),
+                pairs[1..]
+                    .iter()
+                    .map(|p| mesh::QueueHandover::of(&p.snd, &wrap))
+                    .collect(),
+            );
+        }
+        my_inbound.insert(
+            s.clone(),
+            (pairs.iter().map(|p| p.rcv.clone()).collect(), wrap.clone()),
+        );
         // the survivor's reply is the FIRST frame on this queue (it sends the
         // reply before it stands its extended supervisor up, and the queue is
         // fresh) — read exactly one framed message, ack it, and stop, leaving
@@ -686,7 +717,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
     // sender — over the recovery channel (the coordinator relays to the mesh)
     let announce = mesh::MeshAnnounce {
         queues,
-        queues_extra: BTreeMap::new(),
+        queues_extra,
     };
     let bytes = serde_json::to_vec(&announce).map_err(|e| e.to_string())?;
     let ct = mls.encrypt(&bytes).map_err(|e| e.to_string())?;
@@ -770,25 +801,50 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
 /// only the recovery phrase). Builds this node's OWN transport to the
 /// coordinator's server (SMP clones share the recipient-key store, so the caller
 /// can reuse it for the follow-on catch-up mesh) and drives [`run_rejoin`].
+/// `extra_server_urls` are this node's own configured redundancy servers
+/// (`settings.smp_urls`), the recovery twin of the joiner's.
 pub async fn rejoin_over_smp(
     link: &str,
     phrase: &str,
     bootstrap: bool,
     dialer: Dialer,
+    extra_server_urls: &[String],
 ) -> Result<RejoinOutcome, String> {
     let inv = RecoveryInvite::parse(link).ok_or("not an actionable recovery link")?;
-    let transport = transport_for(&inv, dialer)?;
+    let transport = transport_for(&inv, dialer, extra_server_urls)?;
     run_rejoin(transport, inv, phrase, bootstrap).await
 }
 
-/// The rejoiner's OWN SMP transport to the coordinator's server, from a parsed
-/// recovery link — split out of [`rejoin_over_smp`] so the engine can park a
-/// clone in its transport slot BEFORE the rejoin consumes it (the clone's `Arc`
-/// owns the re-established mesh queues' receive credentials the runtime
-/// supervisor must reuse — the SMP subscribe gotcha).
-pub(crate) fn transport_for(inv: &RecoveryInvite, dialer: Dialer) -> Result<RitualTransport, String> {
+/// The rejoiner's OWN SMP transport, from a parsed recovery link — split out of
+/// [`rejoin_over_smp`] so the engine can park a clone in its transport slot
+/// BEFORE the rejoin consumes it (the clone's `Arc` owns the re-established mesh
+/// queues' receive credentials the runtime supervisor must reuse — the SMP
+/// subscribe gotcha).
+///
+/// Track B Stage 2, recovery twin of [`crate::founding::ritual_join_over_smp`]:
+/// the coordinator's link server is the PRIMARY (the recovery round-trip must
+/// reach it there), followed by this node's own configured servers, de-duplicated
+/// and capped at [`molt_net::MESH_REDUNDANCY_CAP`]. Without them the rejoiner's
+/// transport reported `redundancy() == 1` and a recovered member re-entered an
+/// N=2 mesh with single-queue legs.
+pub(crate) fn transport_for(
+    inv: &RecoveryInvite,
+    dialer: Dialer,
+    extra_server_urls: &[String],
+) -> Result<RitualTransport, String> {
     let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
-    Ok(RitualTransport::Smp(SmpTransport::with_dialer(server, dialer)))
+    let mut servers = vec![server];
+    for url in extra_server_urls {
+        if let Ok(s) = SmpServer::parse(url.trim()) {
+            if !servers.iter().any(|e| e.render() == s.render()) {
+                servers.push(s);
+            }
+        }
+    }
+    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
+    Ok(RitualTransport::Smp(SmpTransport::with_dialer_multi(
+        servers, dialer,
+    )))
 }
 
 #[cfg(test)]
@@ -1061,6 +1117,41 @@ mod tests {
         (vec![genesis], republic_id)
     }
 
+    /// **The rejoiner's own transport must span its configured redundancy
+    /// servers**, exactly like the joiner's (`ritual_join_over_smp`): the
+    /// coordinator's link server is the primary (the recovery round-trip must
+    /// reach it), this node's own configured servers follow, capped. Built
+    /// single-server, `redundancy()` was 1 and every mint site downstream —
+    /// including the rejoin itself — could only ever mint one queue per leg.
+    #[test]
+    fn the_rejoiner_transport_spans_the_configured_redundancy_servers() {
+        use molt_net::Transport;
+        const FP: &str = "f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=";
+        const FP2: &str = "0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=";
+        let mut inv = sample();
+        inv.server = format!("smp://{FP}@coordinator.invalid");
+
+        let alone = transport_for(&inv, Dialer::Direct, &[]).expect("single-server transport");
+        assert_eq!(alone.redundancy(), 1, "no configured extras → the former single-server rejoin");
+
+        let spread = transport_for(
+            &inv,
+            Dialer::Direct,
+            &[format!("smp://{FP2}@mine.invalid")],
+        )
+        .expect("multi-server transport");
+        assert_eq!(spread.redundancy(), 2, "the configured server widens the rejoin to N=2");
+
+        // the link's own server must not be duplicated into a phantom second slot
+        let dup = transport_for(&inv, Dialer::Direct, &[inv.server.clone()]).expect("transport");
+        assert_eq!(dup.redundancy(), 1, "the link server de-duplicates against the config list");
+
+        // a malformed link server is still a hard error, not a silent fallback
+        let mut bad = sample();
+        bad.server = "not-a-server".to_string();
+        assert!(transport_for(&bad, Dialer::Direct, &[]).is_err(), "bad link server fails loudly");
+    }
+
     fn recovery_inv(member: &str, republic_id: &str) -> RecoveryInvite {
         RecoveryInvite {
             republic: "Guild".to_string(),
@@ -1071,6 +1162,179 @@ mod tests {
             wrap: "bb".to_string(),
             republic_id: republic_id.to_string(),
         }
+    }
+
+    /// A loopback transport that reports `redundancy() == 2` — the test stand-in
+    /// for a two-server `SmpTransport`, so a mint site's N can be pinned without
+    /// a real SMP server. Everything else delegates unchanged.
+    #[derive(Clone)]
+    struct RedundantLoopback(molt_net::LoopbackTransport);
+
+    impl Transport for RedundantLoopback {
+        fn create_queue(
+            &self,
+        ) -> impl std::future::Future<Output = Result<molt_net::QueuePair, molt_net::NetError>> + Send
+        {
+            self.0.create_queue()
+        }
+        fn send(
+            &self,
+            addr: &SndQueueAddr,
+            block: molt_net::PaddedBlock,
+        ) -> impl std::future::Future<Output = Result<(), molt_net::NetError>> + Send {
+            self.0.send(addr, block)
+        }
+        fn subscribe(
+            &self,
+            q: &molt_net::RcvQueue,
+        ) -> impl std::future::Future<
+            Output = Result<mpsc::Receiver<molt_net::Delivery>, molt_net::NetError>,
+        > + Send {
+            self.0.subscribe(q)
+        }
+        fn delete_queue(
+            &self,
+            q: &molt_net::RcvQueue,
+        ) -> impl std::future::Future<Output = Result<(), molt_net::NetError>> + Send {
+            self.0.delete_queue(q)
+        }
+        fn redundancy(&self) -> usize {
+            2
+        }
+    }
+
+    /// **A recovery rejoin must mint the transport's redundancy, like every
+    /// other per-leg mint site.** The rejoiner used to mint exactly ONE inbound
+    /// queue per survivor and announce no extras, so a recovered member came
+    /// back into an N=2 mesh with N=1 legs in BOTH directions (the survivor can
+    /// only send where it was pointed) until a later rotation happened to widen
+    /// them. Pins: N inbound queues minted + announced, and the survivor's own
+    /// extras adopted on the send side.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejoin_mints_and_announces_the_transport_s_redundancy() {
+        use molt_net::{mesh, supervisor, LoopbackHub, MlsIncoming, MlsMember, Reassembler};
+        use molt_net::{msg_id, Transport};
+
+        let (coord_sk, _) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
+        let (bob_sk, _) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
+        let mut coord = MlsMember::new(&coord_sk, "coordinator").expect("coord mls");
+        let mut bob = MlsMember::new(&bob_sk, "bob").expect("bob mls");
+        coord.create_group().expect("group");
+        let welcome = coord
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add members")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        let hub = LoopbackHub::calm();
+        let transport = hub.transport();
+        let recover_q = transport.create_queue().await.expect("recovery queue");
+        let recover_wrap = WrapKey::fresh().expect("wrap");
+
+        // bob rejoins over a transport that mints N=2
+        let bob_transport = RedundantLoopback(hub.transport());
+        let recover_snd = recover_q.snd.clone();
+        let rw = recover_wrap.clone();
+        let bob_task = tokio::spawn(async move {
+            rejoin_mesh(
+                "bob",
+                &["coordinator".to_string()],
+                &bob_transport,
+                &mut bob,
+                &recover_snd,
+                &rw,
+                std::time::Duration::from_secs(10),
+            )
+            .await
+        });
+
+        // the coordinator: read bob's announce off the recovery queue, check it
+        // carries N queues for us, and reply with TWO of its own
+        let coord_transport = hub.transport();
+        let coord_task = tokio::spawn(async move {
+            let mut rx = coord_transport.subscribe(&recover_q.rcv).await.expect("subscribe");
+            let mut reasm = Reassembler::new();
+            let ct = loop {
+                let d = rx.recv().await.expect("recovery queue open");
+                let Ok(plain) = molt_net::wrap::unwrap_block(&recover_wrap, &d.block) else {
+                    d.ack.ack();
+                    continue;
+                };
+                let out = reasm.push(&plain);
+                d.ack.ack();
+                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = out {
+                    if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
+                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
+                    {
+                        break hex::decode(&ct).expect("announce hex");
+                    }
+                }
+            };
+            let MlsIncoming::Application { from, plaintext } =
+                coord.decrypt(&ct).expect("decrypt bob's announce")
+            else {
+                panic!("bob's announce is an application message");
+            };
+            assert_eq!(from, "bob");
+            let a: mesh::MeshAnnounce = serde_json::from_slice(&plaintext).expect("announce");
+            let target = a.queues.get("coordinator").expect("a primary queue for me");
+            let extra = a
+                .queues_extra
+                .get("coordinator")
+                .map(|v| v.len())
+                .unwrap_or(0);
+            // the survivor answers with its OWN two queues for bob
+            let own_a = coord_transport.create_queue().await.expect("own queue a");
+            let own_b = coord_transport.create_queue().await.expect("own queue b");
+            let own_wrap = WrapKey::fresh().expect("own wrap");
+            let mut queues = std::collections::BTreeMap::new();
+            queues.insert("bob".to_string(), mesh::QueueHandover::of(&own_a.snd, &own_wrap));
+            let mut queues_extra = std::collections::BTreeMap::new();
+            queues_extra.insert(
+                "bob".to_string(),
+                vec![mesh::QueueHandover::of(&own_b.snd, &own_wrap)],
+            );
+            let reply = mesh::MeshAnnounce { queues, queues_extra };
+            let ct = coord
+                .encrypt(&serde_json::to_vec(&reply).expect("encode"))
+                .expect("encrypt reply");
+            let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
+            let payload = serde_json::to_vec(&msg).expect("payload");
+            supervisor::send_framed(
+                &coord_transport,
+                &target.addr().expect("announced addr"),
+                &target.wrap_key().expect("announced wrap"),
+                msg_id("coordinator", "bob", 1),
+                &payload,
+            )
+            .await
+            .expect("reply reaches bob's announced primary queue");
+            extra
+        });
+
+        let links = tokio::time::timeout(std::time::Duration::from_secs(15), bob_task)
+            .await
+            .expect("bob's mesh re-join finishes in time")
+            .expect("bob task")
+            .expect("bob assembles his mesh");
+        let announced_extra = tokio::time::timeout(std::time::Duration::from_secs(5), coord_task)
+            .await
+            .expect("the coordinator fake finished")
+            .expect("coordinator task");
+
+        assert_eq!(announced_extra, 1, "the rejoiner ANNOUNCES its extra inbound queue");
+        assert_eq!(links.len(), 1, "one link to the survivor");
+        assert_eq!(
+            links[0].rcv_extra.len(),
+            1,
+            "the rejoiner MINTS transport.redundancy() inbound queues per survivor"
+        );
+        assert_eq!(
+            links[0].snd_extra.len(),
+            1,
+            "and adopts the survivor's own extra queue on the send side"
+        );
+        assert!(molt_net::PeerLink::from_mesh(&links[0]).is_some(), "the link is runnable");
     }
 
     /// **Dynamic mesh membership, rejoiner side.** Bob (recovered, in the MLS

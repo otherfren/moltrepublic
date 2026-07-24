@@ -81,6 +81,49 @@ pub struct MeshAnnounce {
     pub queues_extra: BTreeMap<MemberId, Vec<QueueHandover>>,
 }
 
+/// The send side of ONE announcement: where `me` must send to reach the
+/// announcer, and with which wrap key. The announced **primary** queue comes
+/// first, followed by the announcer's redundant `queues_extra` (Track B Stage 2)
+/// — all under the primary's wrap key, since every queue of a leg shares one.
+///
+/// This is the single ingest point for a peer's handover, shared by every adopt
+/// path (bootstrap [`assemble_mesh`], the rotate reply fold, the mesh
+/// extension) so all of them keep the leg's redundancy AND enforce the same
+/// bound. Without it an adopter silently collapsed the send side to N=1.
+///
+/// SECURITY (Stage-2 audit finding #1): the fan-out is capped at
+/// [`crate::MESH_REDUNDANCY_CAP`]. A malicious member could otherwise announce
+/// an arbitrarily long `queues_extra[me]` and every outbound block would fan to
+/// all of them (durable egress amplification toward attacker-chosen queues).
+/// A malformed *extra* is skipped (the leg survives on the rest); a missing or
+/// malformed *primary* is an error — never a link that sends nowhere.
+pub fn send_targets(
+    announce: &MeshAnnounce,
+    me: &str,
+) -> Result<(Vec<SndQueueAddr>, WrapKey), String> {
+    let target = announce
+        .queues
+        .get(me)
+        .ok_or_else(|| format!("the announcement carries no queue for {me}"))?;
+    let wrap_out = target
+        .wrap_key()
+        .ok_or_else(|| format!("the announced wrap key for {me} is malformed"))?;
+    let mut snds = vec![target
+        .addr()
+        .ok_or_else(|| format!("the announced queue for {me} is malformed"))?];
+    if let Some(extra) = announce.queues_extra.get(me) {
+        for h in extra {
+            if snds.len() >= crate::MESH_REDUNDANCY_CAP {
+                break;
+            }
+            if let Some(a) = h.addr() {
+                snds.push(a);
+            }
+        }
+    }
+    Ok((snds, wrap_out))
+}
+
 /// Assemble this node's full-mesh [`PeerLink`]s. `me` is this node's handle;
 /// `my_inbound` are the inbound queues it created for each peer (peer → the
 /// [`RcvQueue`] it receives on from that peer, and that queue's wrap key);
@@ -97,39 +140,13 @@ pub fn assemble_mesh(
         if rcvs.is_empty() {
             return Err(format!("no inbound queue for {peer}"));
         }
-        // where I send to reach `peer`: the queue(s) `peer` announced for me.
+        // where I send to reach `peer`: the queue(s) `peer` announced for me —
+        // primary + capped extras, via the shared ingest point.
         let announce = announces
             .get(peer)
             .ok_or_else(|| format!("no mesh announcement from {peer}"))?;
-        let target = announce
-            .queues
-            .get(me)
-            .ok_or_else(|| format!("{peer}'s announcement carries no queue for {me}"))?;
-        let wrap_out = target
-            .wrap_key()
-            .ok_or_else(|| format!("{peer}'s wrap key for {me} is malformed"))?;
-        // primary + any extra redundant queues the peer announced for me (all
-        // share `wrap_out`); a malformed extra is skipped, the leg survives.
-        let mut snds = vec![target
-            .addr()
-            .ok_or_else(|| format!("{peer}'s queue for {me} is malformed"))?];
-        if let Some(extra) = announce.queues_extra.get(me) {
-            for h in extra {
-                // SECURITY (Stage-2 audit finding #1): cap the fan-out targets.
-                // A malicious member could announce an arbitrarily long
-                // `queues_extra[me]` and we would fan EVERY outbound block to all
-                // of them (egress amplification toward attacker-chosen queues,
-                // and it would persist). The mint side is capped at
-                // `MESH_REDUNDANCY_CAP`; enforce the SAME bound on the ingest
-                // side so a peer's announcement can never inflate our fan-out.
-                if snds.len() >= crate::MESH_REDUNDANCY_CAP {
-                    break;
-                }
-                if let Some(a) = h.addr() {
-                    snds.push(a);
-                }
-            }
-        }
+        let (snds, wrap_out) =
+            send_targets(announce, me).map_err(|e| format!("{peer}: {e}"))?;
         links.push(PeerLink {
             member: peer.clone(),
             snds,
@@ -448,6 +465,65 @@ mod tests {
             crate::MESH_REDUNDANCY_CAP,
             "the fan-out is capped at MESH_REDUNDANCY_CAP regardless of how many queues the peer announced"
         );
+    }
+
+    /// The send side of ONE announcement, shared by every adopt path (bootstrap
+    /// assembly, the rotate reply fold, the mesh extension): primary FIRST, the
+    /// announced extras folded in behind it, capped, malformed extras skipped.
+    #[test]
+    fn send_targets_folds_the_announced_extras_capped() {
+        let mut queues = BTreeMap::new();
+        queues.insert(
+            "alice".to_string(),
+            QueueHandover::of(&snd("smp://b@srv", &[0xb, 0x1]), &WrapKey::from_bytes([11u8; 32])),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "alice".to_string(),
+            vec![
+                // malformed (odd-length hex) — skipped, the leg survives
+                QueueHandover {
+                    server: "smp://b@srv".to_string(),
+                    queue: "abc".to_string(),
+                    wrap: "00".to_string(),
+                },
+                QueueHandover::of(&snd("smp://b2@srv", &[0xb, 0x2]), &WrapKey::from_bytes([11u8; 32])),
+                QueueHandover::of(&snd("smp://b3@srv", &[0xb, 0x3]), &WrapKey::from_bytes([11u8; 32])),
+            ],
+        );
+        let a = MeshAnnounce { queues, queues_extra: extra };
+        let (snds, wrap) = send_targets(&a, "alice").expect("a usable handover for alice");
+        assert_eq!(wrap.to_bytes(), [11u8; 32], "the wrap key comes from the PRIMARY handover");
+        assert_eq!(snds[0].id.0, vec![0xb, 0x1], "the primary is first");
+        assert_eq!(
+            snds.len(),
+            crate::MESH_REDUNDANCY_CAP,
+            "capped at MESH_REDUNDANCY_CAP however many the peer announced"
+        );
+        assert_eq!(snds[1].id.0, vec![0xb, 0x2], "the malformed extra is skipped, not fatal");
+    }
+
+    /// No handover for me, or a malformed primary, is an error — never a
+    /// half-wired link that sends nowhere.
+    #[test]
+    fn send_targets_errors_without_a_usable_primary() {
+        let empty = MeshAnnounce {
+            queues: BTreeMap::new(),
+            queues_extra: BTreeMap::new(),
+        };
+        assert!(send_targets(&empty, "alice").is_err(), "no queue for me");
+
+        let mut queues = BTreeMap::new();
+        queues.insert(
+            "alice".to_string(),
+            QueueHandover {
+                server: "smp://b@srv".to_string(),
+                queue: "not-hex".to_string(),
+                wrap: hex::encode([1u8; 32]),
+            },
+        );
+        let bad = MeshAnnounce { queues, queues_extra: BTreeMap::new() };
+        assert!(send_targets(&bad, "alice").is_err(), "malformed primary queue id");
     }
 
     #[test]

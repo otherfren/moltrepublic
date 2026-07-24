@@ -1571,13 +1571,16 @@ impl State {
         }
         self.mesh_extension_at.insert(member.clone(), now);
         let me = self.member();
-        let Some(target) = announce.queues.get(&me) else {
-            tracing::warn!(%member, "mesh announce carries no queue for this node");
-            return;
-        };
-        let (Some(snd), Some(wrap_out)) = (target.addr(), target.wrap_key()) else {
-            tracing::warn!(%member, "mesh announce handover is malformed");
-            return;
+        // send side: the announcer's primary PLUS the redundant queues it
+        // announced for us (capped). Taking only the primary here silently
+        // collapsed our outbound to N=1 on every adopted rotate/rejoin, while
+        // our own inbound stayed N — the leg decayed to half-redundancy.
+        let (snds, wrap_out) = match molt_net::mesh::send_targets(announce, &me) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(%member, reason = %e, "mesh announce carries no usable queue for this node");
+                return;
+            }
         };
         let Some(net) = self.net.as_ref() else {
             return;
@@ -1648,9 +1651,11 @@ impl State {
             let Ok(payload) = serde_json::to_vec(&msg) else {
                 return;
             };
+            // the reply goes to the announcer's PRIMARY queue (per-queue FIFO
+            // puts it ahead of runtime traffic); the extras only widen the leg
             if let Err(e) = supervisor::send_framed(
                 &transport,
-                &snd,
+                &snds[0],
                 &wrap_out,
                 molt_net::msg_id(&me, &member, 3),
                 &payload,
@@ -1662,7 +1667,7 @@ impl State {
             }
             let link = PeerLink {
                 member: member.clone(),
-                snds: vec![snd],
+                snds,
                 wrap_out,
                 rcvs: pairs.iter().map(|p| p.rcv.clone()).collect(),
                 wrap_in,
@@ -1935,25 +1940,11 @@ impl State {
                 else {
                     continue;
                 };
-                let Some(handover) = reply_ann.queues.get(&me) else {
-                    continue;
-                };
-                let (Some(snd), Some(wrap_out)) = (handover.addr(), handover.wrap_key()) else {
-                    continue;
-                };
                 // send side: the peer's primary + any redundant queues it
                 // announced for us (capped — audit finding #1's ingest bound)
-                let mut snds = vec![snd];
-                if let Some(extra) = reply_ann.queues_extra.get(&me) {
-                    for h in extra {
-                        if snds.len() >= molt_net::MESH_REDUNDANCY_CAP {
-                            break;
-                        }
-                        if let Some(a) = h.addr() {
-                            snds.push(a);
-                        }
-                    }
-                }
+                let Ok((snds, wrap_out)) = molt_net::mesh::send_targets(&reply_ann, &me) else {
+                    continue;
+                };
                 let link = PeerLink {
                     member: peer.clone(),
                     snds,

@@ -1267,10 +1267,14 @@ impl State {
                 return Err(MoltError::Recover(reason));
             }
         };
+        // Track B Stage 2: this node's own configured redundancy servers ride
+        // along, so the rejoiner mints its inbound queues across N servers like
+        // a joiner does (the coordinator's link server stays the primary).
+        let extra_servers = self.session.settings.smp_urls.clone();
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
-            let cmd = match crate::recovery::transport_for(&inv, dialer) {
+            let cmd = match crate::recovery::transport_for(&inv, dialer, &extra_servers) {
                 Ok(transport) => {
                     if let Ok(mut slot) = transport_slot.lock() {
                         *slot = Some(transport.clone());
