@@ -472,10 +472,15 @@ Checkpoint-Recovery).
   Das ist genau C2 (Catch-up über die Chain); die durable Wahrheit liegt in
   `chain.state`, das WP4a nie anfasst (C3).
 
-**Offen (Testbefund, keine Sicherheitslücke):**
-`recovery_distributes_the_rekey_commit_to_a_live_survivor` (two_instances) ist
-zu ~50 % flaky — es wartet auf die Chat-Notiz der neuen MLS-Epoche beim
-Überlebenden. Die Kompaktierung feuert in diesem Test nachweislich NIE
-(verifiziert per Log), WP4a scheidet also aus; ob es der Adopt-Pfad
-(`send_targets`, bei N=1 verhaltensgleich) oder ein vorbestehendes Rennen im
-Supervisor-Rebuild ist, wird gegen den Vor-Session-Stand gemessen.
+**Offen (Testbefund, keine Sicherheitslücke) — VORBESTEHEND, gemessen:**
+`recovery_distributes_the_rekey_commit_to_a_live_survivor` (two_instances)
+wartet auf die Chat-Notiz der neuen MLS-Epoche beim Überlebenden und ist flaky.
+Kontrollierter A/B-Test mit beiden Testbinaries, abwechselnd auf derselben
+Maschine, je 10 Läufe: **Vor-Session (7b7542a) 2/10 Fehlschläge, HEAD 3/10** —
+also vorbestehend, nicht von diesem Change-Set eingeführt. (Einzelne
+6/6-grüne Serien auf dem alten Stand hatten das zunächst anders aussehen
+lassen; nur der interleavte Vergleich ist aussagekräftig.) Zusätzlich
+ausgeschlossen: die Kompaktierung feuert in diesem Test nie (per Log
+verifiziert), und `ae92afd` (Mesh-Follow-ups) lief 6/6 grün. Der wahrscheinliche
+Kandidat bleibt ein Rennen im Supervisor-Rebuild der Mesh-Extension gegen die
+in-flight Chat-Notiz — ein eigener Untersuchungspunkt, kein Audit-Befund.
