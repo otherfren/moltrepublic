@@ -916,6 +916,9 @@ impl OpenedWorkspace {
     /// Runs once, before the first drop: from then on there is exactly ONE
     /// deletion class (erase the key, unlink the file).
     pub fn migrate_to_segment_keys(&mut self) -> Result<(), StorageError> {
+        // the active segment is rewritten from what is ON DISK, so any
+        // buffered append has to be there first
+        self.sync()?;
         let mut table = match self.seg_keys.take() {
             Some(t) => t,
             None => segkeys::SegmentKeyTable::new(),
@@ -1602,6 +1605,8 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         _ => 1,
     };
     let compaction_floor = seg_keys.as_ref().map(|t| t.floor).unwrap_or(0);
+    // the seq of the first surviving frame — what a usable snapshot must reach
+    let expected_seq_of_first = expected_seq;
     let last_idx = segments.len() - 1;
     let mut last_seg = (1u64, 0u64); // (segment number, byte length after recovery)
     for (idx, (seg_no, path)) in segments.iter().enumerate() {
@@ -1694,7 +1699,22 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let mut snapshot: Option<WorkspaceSnapshot> = None;
     let mut snaps = list_sorted(&ws_dir.join("snapshots"), ".msnap");
     snaps.reverse();
+    // WP4a: on a COMPACTED log the surviving frames start above 1, so a
+    // snapshot must reach at least to the seq before them or the replay would
+    // have a hole where the dropped segments used to be. An older snapshot
+    // (kept as the spare) is exactly such a hole — skip it, and if none
+    // covers, that is a hard error rather than silently thinner state.
+    let log_starts_at = expected_seq_of_first;
     for (at_seq, path) in snaps {
+        if compaction_floor > 0 && at_seq + 1 < log_starts_at {
+            tracing::warn!(
+                path = %path.display(),
+                at_seq,
+                log_starts_at,
+                "snapshot predates the compacted log — skipping it"
+            );
+            continue;
+        }
         if at_seq > last_seq {
             tracing::warn!(
                 path = %path.display(),
@@ -1710,6 +1730,14 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
             }
             Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping snapshot"),
         }
+    }
+    if compaction_floor > 0 && snapshot.is_none() {
+        // the dropped history lived only in that snapshot; replaying the
+        // surviving tail alone would present a partial state as complete
+        return Err(StorageError::Corrupt(format!(
+            "the log starts at seq {log_starts_at} (compacted) but no usable \
+             snapshot covers what came before — refusing to open a partial state"
+        )));
     }
     let floor = snapshot.as_ref().map(|s| s.at_seq).unwrap_or(0);
     let tail: Vec<EventEnvelope> = history.into_iter().filter(|e| e.seq > floor).collect();
@@ -2023,6 +2051,11 @@ enum WriterMsg {
         ignore_peers: Vec<String>,
         ack: mpsc::SyncSender<CompactionOutcome>,
     },
+    /// Flush + fsync everything queued so far, acking when durable. The
+    /// group-commit means a just-appended event can still be in the buffer;
+    /// anything that COPIES the directory (backup, export) has to force it
+    /// out first or the copy silently misses the newest frames.
+    Flush(mpsc::SyncSender<()>),
     /// Persist the whole persistent commit-block chain (`chain.state`), acking
     /// when durable — a governance commit must not be lost, so it uses the same
     /// blocking-ack shape as `MergeCrypto`.
@@ -2078,6 +2111,16 @@ impl StorageHandle {
     /// (`Some((ext, bytes))` materializes, `None` removes). Fire-and-forget.
     pub fn set_logo(&self, logo: Option<(String, Vec<u8>)>) {
         let _ = self.tx.send(WriterMsg::Logo(logo));
+    }
+
+    /// Force everything queued so far to disk and wait for it. Call before
+    /// copying the workspace directory (backup/export): without it the copy
+    /// can miss events the caller already considers written.
+    pub fn flush_blocking(&self) {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
+        }
     }
 
     /// Enqueue a snapshot write.
@@ -2419,6 +2462,12 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::LoadTransport(reply)) => {
                         let _ = reply.send(ws.read_transport_state());
                     }
+                    Ok(WriterMsg::Flush(ack)) => {
+                        if let Err(e) = ws.sync() {
+                            fail(&failed_flag, "flush", &e);
+                        }
+                        let _ = ack.send(());
+                    }
                     Ok(WriterMsg::Compact { snapshot, ignore_peers, ack }) => {
                         let outcome = match compact_once(&mut ws, &snapshot, &ignore_peers) {
                             Ok(o) => o,
@@ -2613,6 +2662,18 @@ mod tests {
         ws.sync().expect("sync");
     }
 
+    /// Write a snapshot covering the whole log so far — what the real
+    /// compactor always does BEFORE dropping anything (R1). The drop tests
+    /// exercise the primitives directly, so they have to do it themselves.
+    fn cover_with_snapshot(ws: &mut OpenedWorkspace) {
+        let snap = WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq: ws.next_seq - 1,
+            state: molt_core::EngineStateDump::default(),
+        };
+        ws.write_snapshot(&snap).expect("snapshot");
+    }
+
     /// **WP4a F6 migration.** Putting every segment under its own data key is
     /// invisible to the log: the same events replay, at the same seqs, and the
     /// workspace reopens exactly as before. It is also idempotent — running it
@@ -2660,6 +2721,7 @@ mod tests {
         rotate_n(&mut ws, 2, 3);
         let dir = ws.dir().to_path_buf();
         ws.migrate_to_segment_keys().expect("migrate");
+        cover_with_snapshot(&mut ws);
         // keep a copy of segment 1's bytes: after the drop they must be
         // undecryptable even if the file itself is recovered
         let seg1_path = dir.join("log").join(segment_name(1));
@@ -2706,6 +2768,7 @@ mod tests {
         rotate_n(&mut ws, 1, 3);
         let dir = ws.dir().to_path_buf();
         ws.migrate_to_segment_keys().expect("migrate");
+        cover_with_snapshot(&mut ws);
         let seg1 = dir.join("log").join(segment_name(1));
         let bytes = fs::read(&seg1).expect("segment 1");
         ws.drop_segments_below(4).expect("drop");
@@ -2812,6 +2875,36 @@ mod tests {
             read_manifest(&dir).expect("manifest").version,
             molt_core::STORAGE_VERSION,
             "and leaves older binaries able to open it"
+        );
+    }
+
+    /// **A compacted log with no snapshot covering what was dropped must not
+    /// open.** The dropped history lived only in that snapshot; replaying the
+    /// surviving tail alone would present a PARTIAL state as complete — the
+    /// one failure mode compaction must never have. (`compact_once` writes the
+    /// snapshot first, so this is the guard against a torn/lost one.)
+    #[test]
+    fn a_compacted_log_without_a_covering_snapshot_refuses_to_open() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 1, 3);
+        let dir = ws.dir().to_path_buf();
+        ws.migrate_to_segment_keys().expect("migrate");
+        cover_with_snapshot(&mut ws);
+        ws.drop_segments_below(4).expect("drop");
+        drop(ws);
+        // the covering snapshot is lost (torn write, partial restore)
+        for (_, path) in list_sorted(&dir.join("snapshots"), ".msnap") {
+            fs::remove_file(path).expect("remove snapshot");
+        }
+        let err = match open_workspace(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("a partial state must not open"),
+        };
+        assert!(
+            err.to_string().contains("compacted"),
+            "the error names the cause: {err}"
         );
     }
 

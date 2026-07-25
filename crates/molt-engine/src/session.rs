@@ -1176,6 +1176,12 @@ impl State {
                 root.display()
             )));
         };
+        // same rule as the S3 backup: the blob COPIES the directory, so
+        // force the writer's group-commit out first — otherwise a just-sent
+        // message can still be in its buffer and silently miss the export
+        if let Some(active) = self.active.as_ref().filter(|a| a.id == id) {
+            active.handle.flush_blocking();
+        }
         let dest_path = molt_storage::expand_tilde(dest.trim());
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {

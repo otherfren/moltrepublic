@@ -586,6 +586,14 @@ impl State {
         self.pending_recovery.clear();
         self.chat.clear();
         self.chat_pos.clear();
+        // the compaction state belongs to the workspace we are leaving:
+        // carrying `chat_pruned` over would make the NEXT workspace refuse
+        // legacy index-addressed ops it can still resolve, and carrying the
+        // per-sender counts over would synthesize WRONG legacy ids there
+        // (the ordinal would start above zero) — cross-workspace divergence
+        self.chat_pruned = false;
+        self.chat_pruned_counts.clear();
+        self.compacted_at = 0;
         self.parked.clear();
         self.share_paths.clear();
         self.downloads.clear();
@@ -1132,6 +1140,36 @@ mod tests {
         st2.restore_dump(snap);
         assert_eq!(st2.chat.len(), 2, "the share + the new-era message survive");
         assert_eq!(st2.chat[1].id, molt_core::MessageId([0x42; 16]));
+    }
+
+    /// **The compaction state must not cross the workspace boundary.** It
+    /// describes ONE workspace's log: carrying `chat_pruned` into the next
+    /// would refuse legacy index-addressed ops it can still resolve, and
+    /// carrying the per-sender counts would start that workspace's legacy
+    /// ordinals above zero — synthesizing ids no peer agrees with.
+    #[test]
+    fn closing_a_workspace_clears_its_compaction_state() {
+        let mut st = plain_state();
+        for env in &mixed_envs() {
+            st.apply(env);
+        }
+        let mut snap = st.dump();
+        assert!(snap.prune_chat_before(105) > 0, "something was dropped");
+        st.restore_dump(snap);
+        assert!(st.chat_pruned);
+        assert!(!st.chat_pruned_counts.is_empty());
+
+        st.reset_workspace_state();
+        assert!(!st.chat_pruned, "the next workspace starts unpruned");
+        assert!(st.chat_pruned_counts.is_empty(), "and with no carried ordinals");
+
+        // proof it matters: the SAME legacy log now synthesizes the SAME ids
+        // as on a node that never pruned anything
+        for env in &mixed_envs() {
+            st.apply(env);
+        }
+        assert_eq!(st.chat[0].id.to_string(), LEGACY_ID_OF_MSG_0);
+        assert_eq!(st.chat[1].id.to_string(), LEGACY_ID_OF_MSG_1);
     }
 
     /// **A legacy INDEX-addressed op must be ignored once this node pruned.**

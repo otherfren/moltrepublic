@@ -243,6 +243,15 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return; // actor shutting down — no task, no inflight mark
         };
+        // the blob is built by COPYING the directory, so everything the
+        // caller already considers written has to be on disk first — the
+        // writer group-commits (fsync at most every 50 ms), so a just-sent
+        // chat message can still be in its buffer and would silently be
+        // missing from the backup (an intermittent, load-dependent hole in
+        // the one copy that exists for disaster recovery)
+        if let Some(active) = self.active.as_ref().filter(|a| a.id == id) {
+            active.handle.flush_blocking();
+        }
         self.backup_inflight.insert(id.clone());
         let root = self.workspace_root();
         let keep = usize::from(self.session.settings.s3_keep_copies.max(1));
