@@ -48,6 +48,7 @@ pub use sealing::{is_sealed, seal_at_rest, unseal_at_rest};
 
 pub mod export;
 pub mod import;
+mod segkeys;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -86,6 +87,9 @@ const TRANSPORT_SEGMENT: u64 = u64::MAX - 1;
 /// AAD segment number that marks the `chain.state` frame (the persistent
 /// commit-block chain — `documents/persistent_chain.md`).
 const CHAIN_SEGMENT: u64 = u64::MAX - 2;
+/// AAD segment number that marks the `log/keys.state` frame (the per-segment
+/// log key table — WP4a, [`segkeys`]).
+const KEYS_SEGMENT: u64 = u64::MAX - 3;
 
 /// The on-disk shape of `chain.state` (WP4b): historically a bare block
 /// array; a PRUNED holder stores the checkpoint blob next to its suffix.
@@ -563,6 +567,25 @@ fn decrypt_frame(
         })
 }
 
+/// Decrypt a single-frame state file (`transport.state`, `chain.state`,
+/// `log/keys.state`): exactly one well-formed frame under `key`, at the
+/// file's own AAD segment marker and seq 0.
+fn decrypt_state_file(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    data: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let (frames, torn) = split_frames(data);
+    let [frame] = frames.as_slice() else {
+        return Err(StorageError::Corrupt("state-file framing".to_string()));
+    };
+    if torn.is_some() {
+        return Err(StorageError::Corrupt("state-file torn tail".to_string()));
+    }
+    decrypt_frame(key, id, segment, 0, frame.nonce, frame.ciphertext)
+}
+
 /// One structurally valid frame inside a segment buffer.
 struct RawFrame<'a> {
     nonce: &'a [u8],
@@ -780,6 +803,10 @@ pub struct LoadedState {
     /// Non-zero means the caller must not write to this workspace (a
     /// partial history would fork state).
     pub unknown_events: u64,
+    /// The compaction floor (WP4a): the highest seq physically dropped from
+    /// this log. 0 = the log is complete. A peer whose delivery cursor is at
+    /// or below it can no longer be served from the log (§A.1 C2).
+    pub compaction_floor: u64,
 }
 
 /// An open (locked) workspace directory: the append handle of the active
@@ -793,6 +820,10 @@ pub struct OpenedWorkspace {
     key: [u8; 32],
     id: [u8; 32],
     _lock: WorkspaceLock,
+    /// The per-segment log key table (WP4a §A.3), once this workspace has
+    /// been compacted at least once. `None` = never compacted: every segment
+    /// is under the workspace key, exactly the pre-WP4a shape.
+    seg_keys: Option<segkeys::SegmentKeyTable>,
     seg_no: u64,
     seg: File,
     seg_len: u64,
@@ -823,12 +854,215 @@ impl OpenedWorkspace {
         }
         let plaintext = serde_json::to_vec(env)
             .map_err(|e| StorageError::Corrupt(format!("encoding envelope: {e}")))?;
-        let frame = encode_frame(&self.key, &self.id, self.seg_no, env.seq, &plaintext)?;
+        let frame = encode_frame(
+            &self.segment_key(self.seg_no),
+            &self.id,
+            self.seg_no,
+            env.seq,
+            &plaintext,
+        )?;
         self.seg.write_all(&frame)?;
         self.seg_len += u64::try_from(frame.len()).unwrap_or(u64::MAX);
         self.next_seq += 1;
         self.dirty = true;
         Ok(())
+    }
+
+    /// The key one segment's frames are encrypted under: its own data key
+    /// once the log has been migrated (WP4a §A.3), else the workspace key —
+    /// which is where every segment of a never-compacted workspace lives.
+    fn segment_key(&self, no: u64) -> [u8; 32] {
+        self.seg_keys
+            .as_ref()
+            .and_then(|t| t.dek(no))
+            .unwrap_or(self.key)
+    }
+
+    /// Decrypt one log frame, tolerating a **half-finished migration**: the
+    /// table gets its DEKs before the segment files are rewritten (losing the
+    /// key of an already-rewritten segment would lose the log), so a crash in
+    /// between leaves segments that are still under the workspace key while
+    /// the table already names a DEK. Trying the DEK first and the workspace
+    /// key second makes the migration crash-safe and repeatable; a genuinely
+    /// bad frame still fails, with the DEK error (the expected one).
+    fn decrypt_log_frame(
+        &self,
+        no: u64,
+        seq: u64,
+        nonce: &[u8],
+        ct: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        let dek = self.seg_keys.as_ref().and_then(|t| t.dek(no));
+        match dek {
+            Some(dek) => match decrypt_frame(&dek, &self.id, no, seq, nonce, ct) {
+                Ok(p) => Ok(p),
+                Err(e) => decrypt_frame(&self.key, &self.id, no, seq, nonce, ct).map_err(|_| e),
+            },
+            None => decrypt_frame(&self.key, &self.id, no, seq, nonce, ct),
+        }
+    }
+
+    /// The compaction floor: the highest seq physically dropped (0 = the log
+    /// is complete).
+    pub fn compaction_floor(&self) -> u64 {
+        self.seg_keys.as_ref().map(|t| t.floor).unwrap_or(0)
+    }
+
+    /// **F6 migration: put every existing segment under its own data key.**
+    /// Idempotent and crash-safe — the table (with the new keys AND each
+    /// segment's first seq) is written first, then each segment is rewritten
+    /// via `tmp/` + rename; a crash leaves a segment readable under either
+    /// key ([`Self::decrypt_log_frame`]) and the next run finishes the job.
+    /// Runs once, before the first drop: from then on there is exactly ONE
+    /// deletion class (erase the key, unlink the file).
+    pub fn migrate_to_segment_keys(&mut self) -> Result<(), StorageError> {
+        let mut table = match self.seg_keys.take() {
+            Some(t) => t,
+            None => segkeys::SegmentKeyTable::new(),
+        };
+        // 1) every segment gets an entry (number, first seq, fresh key)
+        let segments = list_sorted(&self.dir.join("log"), ".mlog");
+        let mut seq = table.floor;
+        for (no, path) in &segments {
+            let first_seq = seq + 1;
+            if table.dek(*no).is_none() {
+                table.put(segkeys::SegmentKey {
+                    no: *no,
+                    first_seq,
+                    dek: segkeys::SegmentKeyTable::fresh_dek()?,
+                });
+            }
+            let data = fs::read(path)?;
+            let (frames, _torn) = split_frames(&data);
+            seq += u64::try_from(frames.len()).unwrap_or(0);
+        }
+        segkeys::write_table(&self.dir, &self.key, &self.id, &table)?;
+        self.seg_keys = Some(table);
+
+        // 2) rewrite each segment under its key (skipping ones already done)
+        for (no, path) in &segments {
+            let data = fs::read(path)?;
+            let (frames, torn) = split_frames(&data);
+            if torn.is_some() {
+                return Err(StorageError::Corrupt(format!(
+                    "segment {} has a torn tail — not migrating a damaged log",
+                    path.display()
+                )));
+            }
+            let Some(dek) = self.seg_keys.as_ref().and_then(|t| t.dek(*no)) else {
+                continue;
+            };
+            let first_seq = self
+                .seg_keys
+                .as_ref()
+                .and_then(|t| t.first_seq(*no))
+                .unwrap_or(1);
+            let mut out = Vec::with_capacity(data.len());
+            let mut migrated = false;
+            for (i, frame) in frames.iter().enumerate() {
+                let seq = first_seq + u64::try_from(i).unwrap_or(0);
+                // already under the DEK? then this segment is done
+                if decrypt_frame(&dek, &self.id, *no, seq, frame.nonce, frame.ciphertext).is_ok() {
+                    continue;
+                }
+                let plaintext =
+                    decrypt_frame(&self.key, &self.id, *no, seq, frame.nonce, frame.ciphertext)?;
+                out.extend_from_slice(&encode_frame(&dek, &self.id, *no, seq, &plaintext)?);
+                migrated = true;
+            }
+            if !migrated {
+                continue; // this segment was already rewritten
+            }
+            let rel = format!("log/{}", segment_name(*no));
+            write_atomic(&self.dir, &rel, &out, false)?;
+            // the ACTIVE segment's append handle now points at the replaced
+            // file — reopen it, or the next append would write into an
+            // unlinked inode and vanish
+            if *no == self.seg_no {
+                self.seg = OpenOptions::new().append(true).open(self.dir.join(&rel))?;
+                self.seg_len = u64::try_from(out.len()).unwrap_or(self.seg_len);
+            }
+        }
+        Ok(())
+    }
+
+    /// **Drop every segment that lies entirely at or below `floor`** — erase
+    /// its data key, then unlink the file (WP4a §A.4 order: the key first, so
+    /// a crash cannot leave readable bytes without a key entry). Partially
+    /// covered segments are never touched: compaction drops whole segments,
+    /// it never rewrites one. The active segment is never dropped.
+    ///
+    /// Requires the F6 migration (a log still under the workspace key would
+    /// leave decryptable bytes behind on an unlink); it is a no-op otherwise.
+    /// Returns how many segments went.
+    pub fn drop_segments_below(&mut self, floor: u64) -> Result<usize, StorageError> {
+        let Some(mut table) = self.seg_keys.clone() else {
+            return Ok(0);
+        };
+        let segments = list_sorted(&self.dir.join("log"), ".mlog");
+        let mut doomed: Vec<(u64, PathBuf)> = Vec::new();
+        for (idx, (no, path)) in segments.iter().enumerate() {
+            if *no == self.seg_no {
+                continue;
+            }
+            // the segment's last seq = the next segment's first_seq - 1
+            let Some(first) = table.first_seq(*no) else {
+                continue;
+            };
+            let next_first = segments
+                .get(idx + 1)
+                .and_then(|(n, _)| table.first_seq(*n))
+                .unwrap_or(self.next_seq);
+            let last = next_first.saturating_sub(1);
+            if last <= floor && first <= last {
+                doomed.push((*no, path.clone()));
+            }
+        }
+        if doomed.is_empty() {
+            return Ok(0);
+        }
+        let dropped_to = doomed
+            .iter()
+            .filter_map(|(no, _)| {
+                let idx = segments.iter().position(|(n, _)| n == no)?;
+                let next_first = segments
+                    .get(idx + 1)
+                    .and_then(|(n, _)| table.first_seq(*n))
+                    .unwrap_or(self.next_seq);
+                Some(next_first.saturating_sub(1))
+            })
+            .max()
+            .unwrap_or(table.floor);
+        for (no, _) in &doomed {
+            table.forget(*no);
+        }
+        table.floor = table.floor.max(dropped_to);
+        // 1) the keys are gone and durable …
+        segkeys::write_table(&self.dir, &self.key, &self.id, &table)?;
+        self.seg_keys = Some(table);
+        // 2) … only then the bytes (a crash in between leaves files nobody
+        //    can read, which the next run unlinks)
+        for (_, path) in &doomed {
+            let _ = fs::remove_file(path);
+        }
+        Ok(doomed.len())
+    }
+
+    /// Unlink log segments the table has no key for — the crash-recovery half
+    /// of [`Self::drop_segments_below`] (§A.4: orphans under the floor are
+    /// cleaned by the next run). Their bytes are already worthless.
+    fn sweep_keyless_segments(&self) -> usize {
+        let Some(table) = self.seg_keys.as_ref() else {
+            return 0;
+        };
+        let mut swept = 0;
+        for (no, path) in list_sorted(&self.dir.join("log"), ".mlog") {
+            if table.dek(no).is_none() && fs::remove_file(&path).is_ok() {
+                tracing::info!(segment = no, "swept a log segment whose key was erased");
+                swept += 1;
+            }
+        }
+        swept
     }
 
     /// fsync the active segment (the group-commit point).
@@ -842,9 +1076,26 @@ impl OpenedWorkspace {
 
     fn rotate(&mut self) -> Result<(), StorageError> {
         self.sync()?;
-        self.seg_no += 1;
+        let no = self.seg_no + 1;
+        // a compacted log gives every segment its own key — minted and made
+        // DURABLE before the first frame lands in it, or a crash would leave
+        // frames nobody holds a key for (unrecoverable, unlike the reverse)
+        if let Some(table) = self.seg_keys.clone() {
+            let mut table = table;
+            table.put(segkeys::SegmentKey {
+                no,
+                first_seq: self.next_seq,
+                dek: segkeys::SegmentKeyTable::fresh_dek()?,
+            });
+            segkeys::write_table(&self.dir, &self.key, &self.id, &table)?;
+            self.seg_keys = Some(table);
+        }
+        self.seg_no = no;
         let path = self.dir.join("log").join(segment_name(self.seg_no));
-        self.seg = OpenOptions::new().append(true).create_new(true).open(path)?;
+        self.seg = OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .open(path)?;
         self.seg_len = 0;
         Ok(())
     }
@@ -1076,8 +1327,18 @@ impl OpenedWorkspace {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let mut seq: u64 = 0; // seq of the previous frame; current = seq + 1
+        // seq of the previous frame; current = seq + 1. On a compacted log the
+        // first surviving segment starts above 1 and says so.
+        let mut seq: u64 = self.compaction_floor();
         for (seg_no, path) in list_sorted(&self.dir.join("log"), ".mlog") {
+            if let Some(table) = self.seg_keys.as_ref() {
+                if table.dek(seg_no).is_none() {
+                    continue; // dropped, awaiting the unlink sweep
+                }
+                if let Some(first) = table.first_seq(seg_no) {
+                    seq = first.saturating_sub(1);
+                }
+            }
             let data = fs::read(&path)?;
             let (frames, _torn) = split_frames(&data);
             for frame in frames {
@@ -1086,7 +1347,7 @@ impl OpenedWorkspace {
                     continue;
                 }
                 let plaintext =
-                    decrypt_frame(&self.key, &self.id, seg_no, seq, frame.nonce, frame.ciphertext)?;
+                    self.decrypt_log_frame(seg_no, seq, frame.nonce, frame.ciphertext)?;
                 match serde_json::from_slice::<EventEnvelope>(&plaintext) {
                     Ok(env) => out.push(env),
                     Err(_) => {
@@ -1253,6 +1514,9 @@ pub fn create_workspace(
         key,
         id,
         _lock: lock,
+        // a fresh workspace has never been compacted: its segments live
+        // under the workspace key until the first compaction migrates them
+        seg_keys: None,
         seg_no: 1,
         seg,
         seg_len,
@@ -1310,8 +1574,22 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let key = unseal_workspace_key(&device_key, &id, &sealed)?;
     let prefs = read_prefs(ws_dir);
 
-    // replay the segments; seq is implicit and strictly monotonic from 1
-    let segments = list_sorted(&ws_dir.join("log"), ".mlog");
+    // The per-segment key table (WP4a). Absent = never compacted: every
+    // segment is under the workspace key and seq counts from 1, exactly as
+    // before. Present = the log may start above 1 and each segment names both
+    // its first seq and its own key.
+    let seg_keys = segkeys::read_table(ws_dir, &key, &id)?;
+
+    // replay the segments; seq is positional and strictly monotonic — from 1
+    // on a complete log, from the surviving segment's own first seq after a
+    // compaction dropped the ones below it
+    let mut segments = list_sorted(&ws_dir.join("log"), ".mlog");
+    if let Some(table) = seg_keys.as_ref() {
+        // a segment whose key was erased is dropped-but-not-yet-unlinked (a
+        // crash between §A.4's key-erase and unlink): its bytes are already
+        // worthless, so it is not part of the log
+        segments.retain(|(no, _)| table.dek(*no).is_some());
+    }
     if segments.is_empty() {
         return Err(StorageError::Corrupt(
             "workspace has no log segments".to_string(),
@@ -1319,7 +1597,11 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     }
     let mut history = Vec::new();
     let mut unknown_events: u64 = 0;
-    let mut expected_seq: u64 = 1;
+    let mut expected_seq: u64 = match (seg_keys.as_ref(), segments.first()) {
+        (Some(table), Some((no, _))) => table.first_seq(*no).unwrap_or(1),
+        _ => 1,
+    };
+    let compaction_floor = seg_keys.as_ref().map(|t| t.floor).unwrap_or(0);
     let last_idx = segments.len() - 1;
     let mut last_seg = (1u64, 0u64); // (segment number, byte length after recovery)
     for (idx, (seg_no, path)) in segments.iter().enumerate() {
@@ -1344,16 +1626,38 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
                 )));
             }
         }
+        // a compacted log states each segment's first seq; a disagreement with
+        // the running count means the table and the files no longer describe
+        // the same log — refuse rather than replay at a shifted seq (the AAD
+        // would fail anyway, but the honest error names the cause)
+        if let Some(stated) = seg_keys.as_ref().and_then(|t| t.first_seq(*seg_no)) {
+            if stated != expected_seq {
+                return Err(StorageError::Corrupt(format!(
+                    "log key table says segment {seg_no} starts at seq {stated}, \
+                     the surviving log reaches it at {expected_seq}"
+                )));
+            }
+        }
+        let seg_key = seg_keys.as_ref().and_then(|t| t.dek(*seg_no)).unwrap_or(key);
         let mut seg_len = 0u64;
         for frame in &frames {
-            let plaintext = decrypt_frame(
-                &key,
+            let plaintext = match decrypt_frame(
+                &seg_key,
                 &id,
                 *seg_no,
                 expected_seq,
                 frame.nonce,
                 frame.ciphertext,
-            )?;
+            ) {
+                Ok(p) => p,
+                // a half-finished F6 migration: this segment is still under
+                // the workspace key (see `decrypt_log_frame`)
+                Err(e) if seg_key != key => {
+                    decrypt_frame(&key, &id, *seg_no, expected_seq, frame.nonce, frame.ciphertext)
+                        .map_err(|_| e)?
+                }
+                Err(e) => return Err(e),
+            };
             match serde_json::from_slice::<EventEnvelope>(&plaintext) {
                 Ok(env) => {
                     if env.seq != expected_seq {
@@ -1414,24 +1718,31 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let seg = OpenOptions::new()
         .append(true)
         .open(ws_dir.join("log").join(segment_name(seg_no)))?;
-    Ok((
-        OpenedWorkspace {
+    let opened = OpenedWorkspace {
             dir: ws_dir.to_path_buf(),
             manifest,
             prefs,
             key,
             id,
             _lock: lock,
+            seg_keys,
             seg_no,
             seg,
             seg_len,
             next_seq: last_seq + 1,
             dirty: false,
-        },
+    };
+    // §A.4 crash recovery: a segment whose key was erased but whose file
+    // survived the crash is already unreadable — unlink it now (the replay
+    // above skipped it, so this only reclaims the bytes)
+    opened.sweep_keyless_segments();
+    Ok((
+        opened,
         LoadedState {
             snapshot,
             tail,
             unknown_events,
+            compaction_floor,
         },
     ))
 }
@@ -2177,6 +2488,159 @@ mod tests {
         }
         ws.sync().expect("sync");
         ws.dir().to_path_buf()
+    }
+
+    /// Append until the active segment has rotated `n` times — the compactor
+    /// can only drop WHOLE segments, so every drop test needs a multi-segment
+    /// log. Rotation is size-driven in production (8 MiB); driving it
+    /// directly keeps the test to a handful of frames.
+    fn rotate_n(ws: &mut OpenedWorkspace, n: usize, per_segment: u64) {
+        for _ in 0..n {
+            for _ in 0..per_segment {
+                let seq = ws.next_seq;
+                ws.append(&chat(seq, &format!("seg {} msg {seq}", ws.seg_no)))
+                    .expect("append");
+            }
+            ws.rotate().expect("rotate");
+        }
+        for _ in 0..per_segment {
+            let seq = ws.next_seq;
+            ws.append(&chat(seq, &format!("tail msg {seq}"))).expect("append");
+        }
+        ws.sync().expect("sync");
+    }
+
+    /// **WP4a F6 migration.** Putting every segment under its own data key is
+    /// invisible to the log: the same events replay, at the same seqs, and the
+    /// workspace reopens exactly as before. It is also idempotent — running it
+    /// twice changes nothing.
+    #[test]
+    fn migrating_to_segment_keys_keeps_the_log_replaying_identically() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 2, 3);
+        let dir = ws.dir().to_path_buf();
+        let before: Vec<EventEnvelope> = ws.read_log_from(1).expect("read");
+        assert_eq!(before.len(), 10, "genesis + 3 segments à 3 messages");
+
+        ws.migrate_to_segment_keys().expect("migrate");
+        ws.migrate_to_segment_keys().expect("migrate again (idempotent)");
+        assert_eq!(ws.read_log_from(1).expect("read"), before, "the live handle still reads it");
+        drop(ws);
+
+        let (ws, loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(ws.read_log_from(1).expect("read"), before, "and so does a fresh open");
+        assert_eq!(loaded.compaction_floor, 0, "migration alone drops nothing");
+        assert_eq!(ws.next_seq, 11, "the append position is unchanged");
+        // the segments really are under their own keys now: the workspace key
+        // no longer opens a frame
+        let (no, path) = list_sorted(&dir.join("log"), ".mlog").remove(0);
+        let data = fs::read(&path).expect("segment bytes");
+        let (frames, _) = split_frames(&data);
+        assert!(
+            decrypt_frame(&ws.key, &ws.id, no, 1, frames[0].nonce, frames[0].ciphertext).is_err(),
+            "a migrated segment is no longer readable with the workspace key"
+        );
+    }
+
+    /// **WP4a §A.4: dropping a segment erases its key first, then unlinks the
+    /// file** — and what survives replays from the floor. This is the whole
+    /// point of compaction: after it, the dropped content is not merely
+    /// unreachable but undecryptable, while the surviving log opens normally
+    /// at its own starting seq.
+    #[test]
+    fn dropping_segments_erases_their_keys_and_the_rest_replays_from_the_floor() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 2, 3);
+        let dir = ws.dir().to_path_buf();
+        ws.migrate_to_segment_keys().expect("migrate");
+        // keep a copy of segment 1's bytes: after the drop they must be
+        // undecryptable even if the file itself is recovered
+        let seg1_path = dir.join("log").join(segment_name(1));
+        let seg1_bytes = fs::read(&seg1_path).expect("segment 1");
+
+        // segment 1 holds seqs 1..=4 (genesis + 3), segment 2 starts at 5
+        let dropped = ws.drop_segments_below(4).expect("drop");
+        assert_eq!(dropped, 1, "exactly the fully covered segment goes");
+        assert_eq!(ws.compaction_floor(), 4);
+        assert!(!seg1_path.exists(), "the file is unlinked");
+        // …and the ACTIVE segment is never dropped, however high the floor
+        assert_eq!(ws.drop_segments_below(u64::MAX).expect("drop the rest"), 1);
+        assert!(ws.next_seq > ws.compaction_floor(), "the active segment survives");
+        drop(ws);
+
+        let (ws, loaded) = open_workspace(&dir).expect("reopen after compaction");
+        assert_eq!(loaded.compaction_floor, 7, "the floor persisted");
+        let rest = ws.read_log_from(1).expect("read");
+        assert_eq!(
+            rest.first().map(|e| e.seq),
+            Some(8),
+            "the surviving log starts above the floor"
+        );
+        assert_eq!(ws.next_seq, 11, "the append position is untouched by compaction");
+
+        // the erasure is real: the recovered bytes of segment 1 no longer
+        // decrypt under ANY key this workspace still holds
+        let (frames, _) = split_frames(&seg1_bytes);
+        assert!(
+            decrypt_frame(&ws.key, &ws.id, 1, 1, frames[0].nonce, frames[0].ciphertext).is_err(),
+            "recovered bytes of a dropped segment stay undecryptable"
+        );
+    }
+
+    /// A crash between erasing a segment's key (§A.4 step 3a) and unlinking
+    /// its file (3b) must be harmless: the orphan is not part of the log, and
+    /// the next open sweeps it. The reverse order — unlink first — would leave
+    /// a live key for bytes still on the medium, which is why it is not used.
+    #[test]
+    fn a_keyless_orphan_segment_is_ignored_and_swept_on_the_next_open() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 1, 3);
+        let dir = ws.dir().to_path_buf();
+        ws.migrate_to_segment_keys().expect("migrate");
+        let seg1 = dir.join("log").join(segment_name(1));
+        let bytes = fs::read(&seg1).expect("segment 1");
+        ws.drop_segments_below(4).expect("drop");
+        drop(ws);
+        // the crash: the file comes back (an interrupted unlink, a restored
+        // backup copy) while its key stays erased
+        fs::write(&seg1, &bytes).expect("resurrect the file");
+
+        let (ws, loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(loaded.compaction_floor, 4);
+        assert!(!seg1.exists(), "the keyless orphan is swept");
+        assert_eq!(
+            ws.read_log_from(1).expect("read").first().map(|e| e.seq),
+            Some(5),
+            "and was never part of the replayed log"
+        );
+    }
+
+    /// The table is the log's map: a version from a newer build must stop the
+    /// open, never make this build guess which segments it may drop.
+    #[test]
+    fn a_newer_key_table_refuses_the_open() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        ws.migrate_to_segment_keys().expect("migrate");
+        let dir = ws.dir().to_path_buf();
+        let (key, id) = (ws.key, ws.id);
+        let mut table = segkeys::read_table(&dir, &key, &id)
+            .expect("read")
+            .expect("a migrated workspace has a table");
+        table.version = segkeys::KEYS_VERSION + 1;
+        segkeys::write_table(&dir, &key, &id, &table).expect("write");
+        drop(ws);
+        assert!(
+            matches!(open_workspace(&dir), Err(StorageError::NewerVersion(_))),
+            "a too-new key table stops the open"
+        );
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
