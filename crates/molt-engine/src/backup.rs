@@ -248,10 +248,14 @@ impl State {
         // writer group-commits (fsync at most every 50 ms), so a just-sent
         // chat message can still be in its buffer and would silently be
         // missing from the backup (an intermittent, load-dependent hole in
-        // the one copy that exists for disaster recovery)
-        if let Some(active) = self.active.as_ref().filter(|a| a.id == id) {
-            active.handle.flush_blocking();
-        }
+        // the one copy that exists for disaster recovery). The flush itself
+        // waits on an fsync, so it belongs in the task, NOT on the actor —
+        // a slow disk must never stall command handling.
+        let flush = self
+            .active
+            .as_ref()
+            .filter(|a| a.id == id)
+            .map(|a| a.handle.clone());
         self.backup_inflight.insert(id.clone());
         let root = self.workspace_root();
         let keep = usize::from(self.session.settings.s3_keep_copies.max(1));
@@ -259,6 +263,9 @@ impl State {
             let ts = now_secs();
             let build_dir = dir.clone();
             let build = tokio::task::spawn_blocking(move || {
+                if let Some(handle) = flush {
+                    handle.flush_blocking();
+                }
                 let mut blob = Vec::new();
                 molt_storage::export::export_dir(
                     &root,

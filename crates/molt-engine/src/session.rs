@@ -1176,12 +1176,16 @@ impl State {
                 root.display()
             )));
         };
-        // same rule as the S3 backup: the blob COPIES the directory, so
-        // force the writer's group-commit out first — otherwise a just-sent
-        // message can still be in its buffer and silently miss the export
-        if let Some(active) = self.active.as_ref().filter(|a| a.id == id) {
-            active.handle.flush_blocking();
-        }
+        // same rule as the S3 backup: the blob COPIES the directory, so the
+        // writer's group-commit has to be forced out first — otherwise a
+        // just-sent message can still be in its buffer and silently miss the
+        // export. It waits on an fsync, so it runs in the blocking task
+        // below, never on the actor.
+        let flush = self
+            .active
+            .as_ref()
+            .filter(|a| a.id == id)
+            .map(|a| a.handle.clone());
         let dest_path = molt_storage::expand_tilde(dest.trim());
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -1198,6 +1202,9 @@ impl State {
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
             let res = tokio::task::spawn_blocking(move || {
+                if let Some(handle) = flush {
+                    handle.flush_blocking();
+                }
                 export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
             })
             .await;

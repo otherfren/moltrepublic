@@ -24,6 +24,13 @@
 //! *k*), so once whole segments are gone the replay has to be told where the
 //! surviving log starts.
 //!
+//! Erasure is meant literally, so the keys are wiped from MEMORY too: an
+//! erased DEK is zeroized before its entry is dropped, and every plaintext
+//! copy of the table (the JSON it is serialized to, the JSON it is decrypted
+//! from) is held in `Zeroizing` buffers. Otherwise "the key is gone" would
+//! hold only for the file while copies of it sat in freed heap, a swap file
+//! or a core dump.
+//!
 //! Honest limits (documented, not solved here): (1) on a journaling/flash
 //! filesystem an OLD copy of this small table can survive a rewrite — a hard
 //! guarantee needs TRIM or full-disk encryption; (2) S3 backup copies taken
@@ -33,6 +40,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::StorageError;
 
@@ -53,6 +61,15 @@ pub(crate) struct SegmentKey {
     pub first_seq: u64,
     /// This segment's data key. Erasing it is the deletion.
     pub dek: [u8; 32],
+}
+
+impl Drop for SegmentKey {
+    /// A dropped entry must not leave the data key in freed memory — the
+    /// whole point of erasing it is that the segment's bytes become
+    /// worthless.
+    fn drop(&mut self) {
+        self.dek.zeroize();
+    }
 }
 
 /// The whole table (`log/keys.state`).
@@ -102,7 +119,8 @@ impl SegmentKeyTable {
         self.segments.sort_by_key(|s| s.no);
     }
 
-    /// **Erase** a segment's key — the crypto half of dropping it.
+    /// **Erase** a segment's key — the crypto half of dropping it. The
+    /// removed entry zeroizes its key as it goes ([`SegmentKey::drop`]).
     pub(crate) fn forget(&mut self, no: u64) {
         self.segments.retain(|s| s.no != no);
     }
@@ -131,9 +149,10 @@ pub(crate) fn read_table(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let plaintext =
+    let plaintext = Zeroizing::new(
         crate::decrypt_state_file(&keys_key(ws_key, id), id, crate::KEYS_SEGMENT, &data)
-            .map_err(|e| StorageError::Corrupt(format!("log key table: {e}")))?;
+            .map_err(|e| StorageError::Corrupt(format!("log key table: {e}")))?,
+    );
     let table: SegmentKeyTable = serde_json::from_slice(&plaintext)
         .map_err(|e| StorageError::Corrupt(format!("log key table decode: {e}")))?;
     if table.version > KEYS_VERSION {
@@ -150,8 +169,12 @@ pub(crate) fn write_table(
     id: &[u8; 32],
     table: &SegmentKeyTable,
 ) -> Result<(), StorageError> {
-    let plaintext = serde_json::to_vec(table)
-        .map_err(|e| StorageError::Corrupt(format!("encoding the log key table: {e}")))?;
+    // the serialized table is every DEK in the clear — never leave it in
+    // freed heap
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(table)
+            .map_err(|e| StorageError::Corrupt(format!("encoding the log key table: {e}")))?,
+    );
     let frame = crate::encode_frame(
         &keys_key(ws_key, id),
         id,

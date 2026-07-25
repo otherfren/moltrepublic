@@ -62,6 +62,8 @@ pub struct SmpTransport {
     /// Round-robin cursor spreading `create_queue` across `servers` (shared by
     /// clones), so a peer's N redundant inbound queues land on different servers.
     next: Arc<AtomicUsize>,
+    /// Monotonic use stamp for the `routed` table's LRU eviction.
+    routed_clock: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -80,15 +82,21 @@ struct SmpState {
     sender_seed: Option<[u8; 32]>,
 }
 
-/// Lazily opened pools for servers only a queue names, keyed by rendered address.
-type RoutedPools = HashMap<String, (SmpServer, ConnPool<SmpConn>)>;
+/// Lazily opened pools for servers only a queue names, keyed by rendered
+/// address. The `u64` is a use stamp: when the bound is reached the
+/// least-recently-used entry is evicted, so a member that keeps announcing
+/// ever-new hosts cannot permanently fill the table and push the servers of
+/// HONEST peers onto the primary (where their queues do not exist).
+type RoutedPools = HashMap<String, (SmpServer, ConnPool<SmpConn>, u64)>;
 
 /// How many **unconfigured** servers one transport will dial and keep a pooled
 /// connection for (queues a peer hosts on its own servers, plus a resumed
 /// mesh's servers beyond the configured list). A generous bound — a republic's
 /// legs name at most two servers per peer — that exists so a misbehaving member
 /// cannot make us hold connections to arbitrarily many hosts by announcing
-/// ever-new ones. Beyond it, routing degrades to the primary.
+/// ever-new ones. Beyond it the least-recently-used entry is evicted (its
+/// pooled connection closes with it) — never a fallback to the primary, which
+/// would mis-route an honest peer's queue to a server it does not live on.
 const MAX_ROUTED_SERVERS: usize = 64;
 
 /// Derive the deterministic sender key for one queue:
@@ -156,6 +164,7 @@ impl SmpTransport {
             pools,
             routed: Arc::new(Mutex::new(HashMap::new())),
             next: Arc::new(AtomicUsize::new(0)),
+            routed_clock: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -200,19 +209,31 @@ impl SmpTransport {
         let Ok(mut routed) = self.routed.lock() else {
             return primary();
         };
-        if let Some(hit) = routed.get(&key) {
-            return hit.clone();
+        let stamp = self.routed_clock.fetch_add(1, Ordering::Relaxed);
+        if let Some(hit) = routed.get_mut(&key) {
+            hit.2 = stamp;
+            return (hit.0.clone(), hit.1.clone());
         }
         if routed.len() >= MAX_ROUTED_SERVERS {
-            tracing::warn!(
-                server = %key,
-                bound = MAX_ROUTED_SERVERS,
-                "too many distinct queue servers — falling back to the primary"
-            );
-            return primary();
+            // evict the least recently used rather than degrading THIS route:
+            // a member announcing ever-new hosts would otherwise fill the
+            // table once and permanently mis-route every honest peer that
+            // later moves to a new server
+            if let Some(victim) = routed
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(k, _)| k.clone())
+            {
+                tracing::warn!(
+                    evicted = %victim,
+                    bound = MAX_ROUTED_SERVERS,
+                    "dynamic server table full — evicting the least recently used"
+                );
+                routed.remove(&victim);
+            }
         }
         let pool = ConnPool::new();
-        routed.insert(key, (parsed.clone(), pool.clone()));
+        routed.insert(key, (parsed.clone(), pool.clone(), stamp));
         (parsed, pool)
     }
 
@@ -744,23 +765,37 @@ mod creds_tests {
         );
     }
 
-    /// The dynamic pool map is bounded: a member cannot make us hold an
-    /// unbounded number of server connections by naming ever-new hosts. Beyond
-    /// the bound the route degrades to the primary (the old best-effort
-    /// behaviour) instead of growing without limit.
+    /// The dynamic pool table is bounded AND self-cleaning: a member cannot
+    /// make us hold an unbounded number of server connections by naming
+    /// ever-new hosts, and — the security half — filling it must not push an
+    /// honest peer's server onto our primary, where its queue does not exist.
+    /// The least recently used entry is evicted instead.
     #[test]
-    fn dynamic_routing_is_bounded() {
+    fn dynamic_routing_is_bounded_and_evicts_the_least_recently_used() {
         let s1 = SmpServer::parse(&format!("smp://{FP}@host-one.invalid")).expect("s1");
         let t = SmpTransport::new(s1.clone());
-        for i in 0..MAX_ROUTED_SERVERS {
-            let s = format!("smp://{FP}@host-{i}.invalid");
-            assert_eq!(t.route(&s).0.render(), s, "server {i} is within the bound");
+        let flood: Vec<String> = (0..MAX_ROUTED_SERVERS)
+            .map(|i| format!("smp://{FP}@host-{i}.invalid"))
+            .collect();
+        for (i, s) in flood.iter().enumerate() {
+            assert_eq!(&t.route(s).0.render(), s, "server {i} is within the bound");
         }
-        let overflow = format!("smp://{FP}@one-too-many.invalid");
+        // keep the FIRST one hot, then overflow the table
+        let _ = t.route(&flood[0]);
+        let honest = format!("smp://{FP}@an-honest-peer.invalid");
         assert_eq!(
-            t.route(&overflow).0.render(),
-            s1.render(),
-            "beyond the bound the route degrades to the primary"
+            t.route(&honest).0.render(),
+            honest,
+            "a new server is still routed to ITSELF when the table is full"
+        );
+        assert_eq!(
+            t.route(&flood[0]).0.render(),
+            flood[0],
+            "the recently used entry survived the eviction"
+        );
+        assert!(
+            t.routed.lock().expect("lock").len() <= MAX_ROUTED_SERVERS,
+            "the table stays bounded"
         );
     }
 

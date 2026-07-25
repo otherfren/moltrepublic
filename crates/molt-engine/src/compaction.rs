@@ -52,18 +52,25 @@ impl State {
         now.saturating_sub(window.saturating_mul(1 + CONTENT_GRACE_WINDOWS))
     }
 
-    /// Peers whose delivery cursor no longer holds the log back (F4): out of
-    /// contact for longer than [`PEER_GRACE_WINDOWS`] retention windows. They
-    /// are not forgotten — they catch up over the chain (§A.1 C2) instead of
-    /// pinning every segment on every remaining node forever.
-    pub(crate) fn peers_past_grace(&self, now: u64) -> Vec<MemberId> {
+    /// The peers whose delivery cursor still holds the log back (R2): every
+    /// roster member except us that has been in contact within
+    /// [`PEER_GRACE_WINDOWS`] retention windows. A peer past that grace is not
+    /// forgotten — it catches up over the chain (§A.1 C2) instead of pinning
+    /// every segment on every remaining node forever.
+    ///
+    /// This is deliberately a list of who HOLDS, not of who may be ignored:
+    /// the compactor then treats a holding peer with no cursor entry (never
+    /// delivered to, or a lost `transport.state`) as "has received nothing"
+    /// and drops nothing. The inverse phrasing would silently drop the log
+    /// out from under exactly those peers.
+    pub(crate) fn peers_holding_the_log(&self, now: u64) -> Vec<MemberId> {
         let window = self.org_effective().retention_days * 86_400;
         let grace = window.saturating_mul(PEER_GRACE_WINDOWS);
         let me = self.member();
         self.roster()
             .into_iter()
             .filter(|m| *m != me)
-            .filter(|m| now.saturating_sub(self.member_last_seen(m)) > grace)
+            .filter(|m| now.saturating_sub(self.member_last_seen(m)) <= grace)
             .collect()
     }
 
@@ -140,7 +147,7 @@ impl State {
         let Some((dump, dropped)) = self.compact_chat(cutoff) else {
             return;
         };
-        let ignore_peers = self.peers_past_grace(now);
+        let holding_peers = self.peers_holding_the_log(now);
         let snapshot = WorkspaceSnapshot {
             version: molt_core::STORAGE_VERSION,
             at_seq: self.next_seq.saturating_sub(1),
@@ -152,7 +159,7 @@ impl State {
         let handle = active.handle.clone();
         tracing::info!(dropped, cutoff, "compacting the ephemeral log");
         let run = move || {
-            let out = handle.compact_blocking(snapshot, ignore_peers);
+            let out = handle.compact_blocking(snapshot, holding_peers);
             if out.segments_dropped > 0 {
                 tracing::info!(
                     floor = out.floor,
@@ -343,10 +350,10 @@ mod tests {
             };
         }
         st.session.workspaces.push(entry);
-        let past = st.peers_past_grace(now);
-        assert!(past.contains(&"gone".to_string()), "the long-gone peer is released");
-        assert!(!past.contains(&"quiet".to_string()), "a merely quiet peer still counts");
-        assert!(!past.contains(&st.member()), "we never ignore our own cursor");
+        let holding = st.peers_holding_the_log(now);
+        assert!(holding.contains(&"quiet".to_string()), "a merely quiet peer still holds");
+        assert!(!holding.contains(&"gone".to_string()), "the long-gone peer is released");
+        assert!(!holding.contains(&st.member()), "our own cursor never holds us back");
     }
 
     /// The daily gate (F8): without an open workspace nothing runs at all, and

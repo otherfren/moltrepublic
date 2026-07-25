@@ -494,11 +494,69 @@ pub fn peek_genesis(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<EventEnv
     let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file)).ok()?;
     let device_key = load_or_create_device_key(&device_key_path(root)).ok()?;
     let key = unseal_workspace_key(&device_key, &id, &sealed).ok()?;
+    // the genesis is the log's first frame — while the log still HAS one.
+    // WP4a compaction encrypts each segment under its own key and may drop
+    // the earliest segments entirely, so try that first, then fall back to
+    // the snapshot, which carries every genesis-derived fact by design (it
+    // has to: the genesis is before the snapshot and never replayed).
+    if let Some(env) = genesis_from_log(ws_dir, &key, &id) {
+        return Some(env);
+    }
+    genesis_from_snapshot(ws_dir, &manifest, &key, &id)
+}
+
+/// The genesis envelope as it lies in the log's first segment, under whatever
+/// key that segment uses (a compacted log gives it its own).
+fn genesis_from_log(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> Option<EventEnvelope> {
+    let seg_key = segkeys::read_table(ws_dir, key, id)
+        .ok()
+        .flatten()
+        .and_then(|t| t.dek(1))
+        .unwrap_or(*key);
     let data = fs::read(ws_dir.join("log").join(segment_name(1))).ok()?;
     let (frames, _torn) = split_frames(&data);
     let first = frames.first()?;
-    let plaintext = decrypt_frame(&key, &id, 1, 1, first.nonce, first.ciphertext).ok()?;
+    let plaintext = decrypt_frame(&seg_key, id, 1, 1, first.nonce, first.ciphertext).ok()?;
     serde_json::from_slice(&plaintext).ok()
+}
+
+/// Rebuild the genesis facts from the newest snapshot — the honest source once
+/// compaction has dropped the segment the real genesis frame lived in. Every
+/// field comes from persisted state (`rule_n` from the manifest's identity
+/// card); the attestation set is deliberately empty, exactly as for a
+/// checkpoint-recovered workspace: this is display/bootstrap metadata, never
+/// consensus input, and the chain holds the authority either way.
+fn genesis_from_snapshot(
+    ws_dir: &Path,
+    manifest: &WorkspaceManifest,
+    key: &[u8; 32],
+    id: &[u8; 32],
+) -> Option<EventEnvelope> {
+    let mut snaps = list_sorted(&ws_dir.join("snapshots"), ".msnap");
+    snaps.reverse();
+    for (at_seq, path) in snaps {
+        let Ok(snap) = read_snapshot(key, id, at_seq, &path) else {
+            continue;
+        };
+        let st = snap.state;
+        return Some(EventEnvelope {
+            seq: 1,
+            ts: st.founded_ts,
+            by: st.member.clone(),
+            body: WorkspaceEvent::Founded {
+                name: st.name,
+                rule_m: st.rule_m,
+                rule_n: manifest.workspace.rule_n,
+                member: st.member,
+                roster: st.roster,
+                identities: st.identities,
+                attestations: Vec::new(),
+                republic_id: st.republic_id,
+                agenda: st.agenda,
+            },
+        });
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2048,7 +2106,7 @@ enum WriterMsg {
     /// floor (`ignore_peers`, F4).
     Compact {
         snapshot: WorkspaceSnapshot,
-        ignore_peers: Vec<String>,
+        holding_peers: Vec<String>,
         ack: mpsc::SyncSender<CompactionOutcome>,
     },
     /// Flush + fsync everything queued so far, acking when durable. The
@@ -2135,14 +2193,14 @@ impl StorageHandle {
     pub fn compact_blocking(
         &self,
         snapshot: WorkspaceSnapshot,
-        ignore_peers: Vec<String>,
+        holding_peers: Vec<String>,
     ) -> CompactionOutcome {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         if self
             .tx
             .send(WriterMsg::Compact {
                 snapshot,
-                ignore_peers,
+                holding_peers,
                 ack: ack_tx,
             })
             .is_err()
@@ -2301,8 +2359,12 @@ pub struct CompactionOutcome {
 /// 1. the TRIMMED snapshot, atomically — the surviving state must be durable
 ///    before anything is dropped (R1: the floor can never exceed it);
 /// 2. the floor: the snapshot position, held back by the delivery cursor of
-///    every peer still inside its grace (R2/C2 — a peer past its grace is
-///    redirected to the chain catch-up instead of pinning the log forever);
+///    every peer still inside its grace (`holding_peers`; R2/C2 — a peer past
+///    its grace is redirected to the chain catch-up instead of pinning the log
+///    forever). A holding peer with NO cursor at all — never delivered to, or
+///    its `transport.state` was lost — counts as cursor 0 and stops the round:
+///    "no record of having sent it anything" must never read as "it has
+///    everything";
 /// 3. the F6 migration, once, so every segment is under its own key;
 /// 4. the drop itself (keys erased first, then the files).
 ///
@@ -2312,16 +2374,14 @@ pub struct CompactionOutcome {
 fn compact_once(
     ws: &mut OpenedWorkspace,
     snapshot: &WorkspaceSnapshot,
-    ignore_peers: &[String],
+    holding_peers: &[String],
 ) -> Result<CompactionOutcome, StorageError> {
     ws.write_snapshot(snapshot)?;
     ws.sync()?;
+    let cursors = ws.read_transport_state().outbound;
     let mut floor = snapshot.at_seq;
-    for (peer, cursor) in ws.read_transport_state().outbound {
-        if ignore_peers.contains(&peer) {
-            continue;
-        }
-        floor = floor.min(cursor.log_seq);
+    for peer in holding_peers {
+        floor = floor.min(cursors.get(peer).map_or(0, |c| c.log_seq));
     }
     if floor == 0 {
         return Ok(CompactionOutcome {
@@ -2468,8 +2528,8 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         }
                         let _ = ack.send(());
                     }
-                    Ok(WriterMsg::Compact { snapshot, ignore_peers, ack }) => {
-                        let outcome = match compact_once(&mut ws, &snapshot, &ignore_peers) {
+                    Ok(WriterMsg::Compact { snapshot, holding_peers, ack }) => {
+                        let outcome = match compact_once(&mut ws, &snapshot, &holding_peers) {
                             Ok(o) => o,
                             Err(e) => {
                                 // compaction is hygiene, never correctness: a
@@ -2666,10 +2726,22 @@ mod tests {
     /// compactor always does BEFORE dropping anything (R1). The drop tests
     /// exercise the primitives directly, so they have to do it themselves.
     fn cover_with_snapshot(ws: &mut OpenedWorkspace) {
+        // a real snapshot carries the genesis-derived facts (the genesis is
+        // before it and never replayed) — the empty default would make the
+        // compacted workspace look rosterless, which is not what production
+        // writes
+        let state = molt_core::EngineStateDump {
+            name: "Chess Club".to_string(),
+            member: "mithra".to_string(),
+            rule_m: 2,
+            roster: vec!["mithra".to_string(), "anahita".to_string()],
+            founded_ts: 42,
+            ..molt_core::EngineStateDump::default()
+        };
         let snap = WorkspaceSnapshot {
             version: molt_core::STORAGE_VERSION,
             at_seq: ws.next_seq - 1,
-            state: molt_core::EngineStateDump::default(),
+            state,
         };
         ws.write_snapshot(&snap).expect("snapshot");
     }
@@ -2820,7 +2892,7 @@ mod tests {
             at_seq,
             state: molt_core::EngineStateDump::default(),
         };
-        let out = handle.compact_blocking(snap, vec!["ghost".to_string()]);
+        let out = handle.compact_blocking(snap, vec!["slowpoke".to_string()]);
         assert_eq!(out.floor, 4, "the floor stops at the slow peer's covered segment");
         assert_eq!(out.segments_dropped, 1, "only segment 1 is fully below it");
         handle.close(None);
@@ -2864,7 +2936,7 @@ mod tests {
             at_seq,
             state: molt_core::EngineStateDump::default(),
         };
-        let out = handle.compact_blocking(snap, Vec::new());
+        let out = handle.compact_blocking(snap, vec!["fresh-peer".to_string()]);
         assert_eq!(out, CompactionOutcome::default(), "nothing dropped, no floor");
         handle.close(None);
         assert!(
@@ -2905,6 +2977,81 @@ mod tests {
         assert!(
             err.to_string().contains("compacted"),
             "the error names the cause: {err}"
+        );
+    }
+
+    /// **A peer inside its grace with NO cursor at all must stop the round.**
+    /// "We have no record of ever delivering to it" is the opposite of "it has
+    /// everything" — treating an absent cursor as satisfied would drop the log
+    /// out from under exactly the peers that still need it (a fresh member, or
+    /// one whose `transport.state` was lost, which the design elsewhere calls
+    /// merely a cause for resends).
+    #[test]
+    fn a_holding_peer_without_a_cursor_stops_the_round() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 2, 3);
+        let dir = ws.dir().to_path_buf();
+        // one peer HAS delivered far along; the other has no cursor at all
+        let mut ts = TransportState::default();
+        ts.outbound.insert(
+            "delivered".to_string(),
+            molt_core::OutboundCursor { log_seq: 9, wire_seq: 3 },
+        );
+        ws.write_transport_state(&ts).expect("transport state");
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+        let snap = WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq,
+            state: molt_core::EngineStateDump::default(),
+        };
+        let out = handle.compact_blocking(
+            snap,
+            vec!["delivered".to_string(), "never-heard-from".to_string()],
+        );
+        assert_eq!(out, CompactionOutcome::default(), "the cursorless peer holds everything");
+        handle.close(None);
+        assert!(
+            !dir.join(segkeys::KEYS_FILE).exists(),
+            "and the log is not even migrated"
+        );
+    }
+
+    /// **The Open screen must still know the republic after a compaction.**
+    /// `peek_genesis` reads the log's first frame; compaction re-keys that
+    /// segment and eventually drops it entirely, which would leave the
+    /// workspace list without a roster or charter for exactly the long-lived
+    /// workspaces. Both stages are covered: keyed segment, then snapshot.
+    #[test]
+    fn the_genesis_stays_peekable_across_migration_and_drop() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 2, 3);
+        let dir = ws.dir().to_path_buf();
+        let id = ws.manifest.workspace.id.clone();
+        let roster_of = |env: &EventEnvelope| match &env.body {
+            WorkspaceEvent::Founded { roster, .. } => roster.clone(),
+            _ => panic!("not a genesis"),
+        };
+        let before = peek_genesis(tmp.path(), &dir, &id).expect("peek before");
+
+        // 1) after the migration the frame lives under the segment key
+        ws.migrate_to_segment_keys().expect("migrate");
+        let after_migrate = peek_genesis(tmp.path(), &dir, &id).expect("peek after migrate");
+        assert_eq!(roster_of(&after_migrate), roster_of(&before));
+
+        // 2) after the drop it comes from the snapshot, with the same facts
+        cover_with_snapshot(&mut ws);
+        assert_eq!(ws.drop_segments_below(4).expect("drop"), 1, "segment 1 goes");
+        drop(ws);
+        let after_drop = peek_genesis(tmp.path(), &dir, &id).expect("peek after drop");
+        assert_eq!(
+            roster_of(&after_drop),
+            roster_of(&before),
+            "the roster survives the loss of the genesis frame"
         );
     }
 
