@@ -410,3 +410,72 @@ Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
   wählbarer Schnitt in v1).
 - **B-F2:** Lokales Droppen ≤ `upto` automatisch nach dem Commit (der
   Vote hat die Korrektheit bestätigt); kein separates Verb.
+
+---
+
+## Sicherheits-Audit WP4a + Mesh-Follow-ups (2026-07-25)
+
+Adversariales Audit über den Change-Set `7b7542a..HEAD`. Angreifermodell: ein
+**bösartiges Mitglied** der Republik (kann MLS-authentisch beliebige Announces
+schicken), ein **bösartiger Server**, und ein Angreifer mit **Zugriff auf das
+Medium** (für die Erasure-Behauptung). Keine kritische Lücke; fünf Befunde,
+alle gefixt (Commit `15f0f2f` — er enthält entgegen seiner Commit-Message auch
+Befund #5).
+
+**#1 — Stiller Datenverlust: Peer ohne Cursor (WP4a).** Der Kompaktor bekam die
+Liste der zu IGNORIERENDEN Peers; ein Peer ganz ohne Cursor-Eintrag (nie
+beliefert, oder `transport.state` verloren — anderswo im Design ausdrücklich nur
+ein Grund für Resends) hielt damit gar nichts zurück. Der Log konnte genau
+denen unter den Füßen weggezogen werden, die ihn noch brauchten. Umgedreht: die
+Engine liefert jetzt, wer den Log HÄLT (`peers_holding_the_log`), und ein
+haltender Peer ohne Cursor zählt als „hat nichts bekommen" und stoppt die Runde.
+
+**#2 — DoS durch ein Mitglied: dynamische Server-Tabelle (Mesh).** Die Tabelle
+der gepinnten Fremdserver evictete nie. Ein Mitglied, das bei jeder Rotation
+neue Hosts announced, füllt alle 64 Plätze dauerhaft; danach landet jeder
+EHRLICHE Peer, der später den Server wechselt, auf unserer Primary — wo seine
+Queue nicht existiert. Die Zustellung bricht also bei den Ehrlichen, nicht beim
+Angreifer. Jetzt wird der am längsten ungenutzte Eintrag verdrängt.
+
+**#3 — Erasure nur auf Platte, nicht im Speicher (WP4a).** Die Kompaktierung
+verspricht, dass die Bytes eines gedroppten Segments wertlos sind, weil der
+Schlüssel weg ist — der DEK blieb aber im freigegebenen Heap liegen (Eintrag
+ohne Zeroize gedroppt; jede Klartext-Kopie der Tabelle beim Schreiben und Lesen
+ebenfalls). `SegmentKey` zeroisiert jetzt beim Drop, beide Klartext-Puffer sind
+`Zeroizing`. Das Dateisystem-Restrisiko (§A.3) bleibt wie dokumentiert bestehen.
+
+**#4 — Verfügbarkeit: fsync auf dem Actor (selbst eingebaut).** Der neue
+Pre-Backup-Flush wartete auf dem Actor auf einen fsync — gegen die eigene Regel,
+dass Handler nie I/O awaiten; eine langsame Platte hätte die Kommandobearbeitung
+angehalten. Beide kopierenden Pfade flushen jetzt in ihrem Blocking-Task, die
+Reihenfolge-Garantie bleibt.
+
+**#5 — Funktionsregression: `peek_genesis` (WP4a).** Der Open-Screen liest die
+Genesis als ERSTEN Log-Frame und entschlüsselte ihn mit dem Workspace-Key. Nach
+der F6-Migration liegt Segment 1 unter seinem DEK, nach dem ersten Drop ist es
+ganz weg — der Workspace-Liste wären für genau die langlebigen Republiken
+Roster und Charter abhandengekommen. `peek_genesis` liest jetzt segment-keyed
+und fällt danach auf den Snapshot zurück, der alle Genesis-Fakten ohnehin trägt
+(Attestations bleiben leer — Anzeige-Metadaten, nie Konsens-Input, wie beim
+Checkpoint-Recovery).
+
+**Geprüft und als akzeptabel bewertet (nicht geändert):**
+- Ein Mitglied kann in `queues_extra` fremde oder sogar UNSERE eigene Queue
+  announcen. Der Fan-out ist auf `MESH_REDUNDANCY_CAP` gedeckelt, der Inhalt
+  bleibt MLS-verschlüsselt (der Announcer ist ohnehin Mitglied), und eine
+  Selbst-Announce scheitert am Wrap-Key-Mismatch. Kosten: etwas Bandbreite.
+- Der gebundene SSRF-lite des Pinned-Dial (siehe `mesh_redundancy_stage2.md`).
+- Ein manipulierter `EngineStateDump` (via Restore-Blob) könnte `chat_pruned`
+  oder die Ordinal-Zähler setzen — das setzt aber die Recovery-Phrase voraus,
+  also dieselbe Vertrauensstufe wie das ganze Workspace.
+- Peers jenseits der Karenz verlieren flüchtige Gossip-Events unter dem Floor.
+  Das ist genau C2 (Catch-up über die Chain); die durable Wahrheit liegt in
+  `chain.state`, das WP4a nie anfasst (C3).
+
+**Offen (Testbefund, keine Sicherheitslücke):**
+`recovery_distributes_the_rekey_commit_to_a_live_survivor` (two_instances) ist
+zu ~50 % flaky — es wartet auf die Chat-Notiz der neuen MLS-Epoche beim
+Überlebenden. Die Kompaktierung feuert in diesem Test nachweislich NIE
+(verifiziert per Log), WP4a scheidet also aus; ob es der Adopt-Pfad
+(`send_targets`, bei N=1 verhaltensgleich) oder ein vorbestehendes Rennen im
+Supervisor-Rebuild ist, wird gegen den Vor-Session-Stand gemessen.
