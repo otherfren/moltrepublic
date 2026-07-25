@@ -2456,6 +2456,10 @@ impl State {
         // cadence gets a proactive rotate (unlinkability). One per tick, oldest
         // reachable first; shares the rotate cooldown with the deaf-leg heal.
         self.rotate_stale_legs();
+        // WP4a: the DAILY compaction beat rides this tick (F8) — expired chat
+        // stops existing on this device, it does not merely leave the read
+        // filter. Gated to one round a day; the work itself is off-actor.
+        self.maybe_compact(self.presence_now());
         Ok(Reply::Ack)
     }
 

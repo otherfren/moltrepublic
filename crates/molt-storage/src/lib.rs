@@ -2011,6 +2011,18 @@ enum WriterMsg {
     },
     /// Load `transport.state` (defaults when absent/damaged).
     LoadTransport(tokio::sync::oneshot::Sender<TransportState>),
+    /// **One compaction round** (WP4a): write the trimmed snapshot, then drop
+    /// every log segment the snapshot and the peers no longer need. The floor
+    /// is computed HERE because the writer owns both inputs — the snapshot
+    /// position (R1) and the persisted delivery cursors (R2); the engine
+    /// contributes the policy: which content aged out (it trimmed the
+    /// snapshot) and which peers are past their grace and no longer hold the
+    /// floor (`ignore_peers`, F4).
+    Compact {
+        snapshot: WorkspaceSnapshot,
+        ignore_peers: Vec<String>,
+        ack: mpsc::SyncSender<CompactionOutcome>,
+    },
     /// Persist the whole persistent commit-block chain (`chain.state`), acking
     /// when durable — a governance commit must not be lost, so it uses the same
     /// blocking-ack shape as `MergeCrypto`.
@@ -2071,6 +2083,30 @@ impl StorageHandle {
     /// Enqueue a snapshot write.
     pub fn snapshot(&self, snap: WorkspaceSnapshot) {
         let _ = self.tx.send(WriterMsg::Snapshot(snap));
+    }
+
+    /// Run one compaction round on the writer thread and wait for it (WP4a
+    /// §A.4). Blocking, like the other durability-critical calls: the trimmed
+    /// snapshot must be on disk before any segment is dropped, and the caller
+    /// wants the honest outcome to log.
+    pub fn compact_blocking(
+        &self,
+        snapshot: WorkspaceSnapshot,
+        ignore_peers: Vec<String>,
+    ) -> CompactionOutcome {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(WriterMsg::Compact {
+                snapshot,
+                ignore_peers,
+                ack: ack_tx,
+            })
+            .is_err()
+        {
+            return CompactionOutcome::default();
+        }
+        ack_rx.recv().unwrap_or_default()
     }
 
     /// Enqueue one message from an async context. The writer queue is a
@@ -2207,6 +2243,60 @@ impl StorageHandle {
     }
 }
 
+/// What one compaction round did — honest zeroes when nothing was eligible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionOutcome {
+    /// The floor after this round: the highest seq physically dropped.
+    pub floor: u64,
+    /// How many log segments were dropped.
+    pub segments_dropped: usize,
+}
+
+/// One compaction round on the writer thread (WP4a §A.4), in the order that
+/// makes every step idempotent and a crash between them harmless:
+///
+/// 1. the TRIMMED snapshot, atomically — the surviving state must be durable
+///    before anything is dropped (R1: the floor can never exceed it);
+/// 2. the floor: the snapshot position, held back by the delivery cursor of
+///    every peer still inside its grace (R2/C2 — a peer past its grace is
+///    redirected to the chain catch-up instead of pinning the log forever);
+/// 3. the F6 migration, once, so every segment is under its own key;
+/// 4. the drop itself (keys erased first, then the files).
+///
+/// The manifest version is raised on the first real drop: an older binary,
+/// which knows neither the key table nor a log that starts above seq 1, then
+/// refuses the workspace politely instead of reading it as damaged.
+fn compact_once(
+    ws: &mut OpenedWorkspace,
+    snapshot: &WorkspaceSnapshot,
+    ignore_peers: &[String],
+) -> Result<CompactionOutcome, StorageError> {
+    ws.write_snapshot(snapshot)?;
+    ws.sync()?;
+    let mut floor = snapshot.at_seq;
+    for (peer, cursor) in ws.read_transport_state().outbound {
+        if ignore_peers.contains(&peer) {
+            continue;
+        }
+        floor = floor.min(cursor.log_seq);
+    }
+    if floor == 0 {
+        return Ok(CompactionOutcome {
+            floor: ws.compaction_floor(),
+            segments_dropped: 0,
+        });
+    }
+    ws.migrate_to_segment_keys()?;
+    let segments_dropped = ws.drop_segments_below(floor)?;
+    if segments_dropped > 0 {
+        ws.bump_pruned_version()?;
+    }
+    Ok(CompactionOutcome {
+        floor: ws.compaction_floor(),
+        segments_dropped,
+    })
+}
+
 /// Move an opened workspace onto its own writer thread and return the handle.
 pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
     let (tx, rx) = mpsc::sync_channel::<WriterMsg>(WRITER_QUEUE);
@@ -2328,6 +2418,19 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     }
                     Ok(WriterMsg::LoadTransport(reply)) => {
                         let _ = reply.send(ws.read_transport_state());
+                    }
+                    Ok(WriterMsg::Compact { snapshot, ignore_peers, ack }) => {
+                        let outcome = match compact_once(&mut ws, &snapshot, &ignore_peers) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                // compaction is hygiene, never correctness: a
+                                // failed round leaves the log exactly as it
+                                // was and the next one retries
+                                fail(&failed_flag, "log compaction", &e);
+                                CompactionOutcome::default()
+                            }
+                        };
+                        let _ = ack.send(outcome);
                     }
                     Ok(WriterMsg::PersistChain { blob, blocks, ack }) => {
                         // WP4b: raise the manifest version BEFORE writing a
@@ -2618,6 +2721,97 @@ mod tests {
             ws.read_log_from(1).expect("read").first().map(|e| e.seq),
             Some(5),
             "and was never part of the replayed log"
+        );
+    }
+
+    /// **One full compaction round through the real writer** (WP4a §A.4): the
+    /// trimmed snapshot lands first, the floor respects the slowest peer that
+    /// is still inside its grace (R2), the covered segments go, and the
+    /// manifest version rises so an older binary refuses the compacted
+    /// workspace instead of reading it as damaged.
+    #[test]
+    fn a_compaction_round_writes_the_snapshot_then_drops_what_nobody_needs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 3, 3); // segments 1..4, seqs 1..=13
+        let dir = ws.dir().to_path_buf();
+        // two peers: one still around but far behind, one long gone
+        let mut ts = TransportState::default();
+        ts.outbound.insert(
+            "slowpoke".to_string(),
+            molt_core::OutboundCursor { log_seq: 5, wire_seq: 1 },
+        );
+        ts.outbound.insert(
+            "ghost".to_string(),
+            molt_core::OutboundCursor { log_seq: 2, wire_seq: 1 },
+        );
+        ws.write_transport_state(&ts).expect("transport state");
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+
+        // the ghost is past its peer grace and no longer holds the log back;
+        // the slow peer does — so the floor is ITS cursor, not the snapshot
+        let snap = WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq,
+            state: molt_core::EngineStateDump::default(),
+        };
+        let out = handle.compact_blocking(snap, vec!["ghost".to_string()]);
+        assert_eq!(out.floor, 4, "the floor stops at the slow peer's covered segment");
+        assert_eq!(out.segments_dropped, 1, "only segment 1 is fully below it");
+        handle.close(None);
+
+        let manifest = read_manifest(&dir).expect("manifest");
+        assert_eq!(
+            manifest.version,
+            molt_core::STORAGE_VERSION_PRUNED,
+            "a compacted workspace stops older binaries at the gate"
+        );
+        let (ws, loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(loaded.compaction_floor, 4);
+        assert_eq!(
+            ws.read_log_from(1).expect("read").first().map(|e| e.seq),
+            Some(5),
+            "the surviving log starts right above the floor"
+        );
+        assert_eq!(ws.next_seq, at_seq + 1, "the append position is untouched");
+    }
+
+    /// A round with no eligible terrain must be a **no-op**, not a partial
+    /// migration: a peer sitting at cursor 0 (never delivered anything) holds
+    /// the whole log, so nothing is dropped and nothing is rewritten.
+    #[test]
+    fn a_compaction_round_that_can_drop_nothing_changes_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 1, 3);
+        let dir = ws.dir().to_path_buf();
+        let mut ts = TransportState::default();
+        ts.outbound.insert(
+            "fresh-peer".to_string(),
+            molt_core::OutboundCursor { log_seq: 0, wire_seq: 0 },
+        );
+        ws.write_transport_state(&ts).expect("transport state");
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+        let snap = WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq,
+            state: molt_core::EngineStateDump::default(),
+        };
+        let out = handle.compact_blocking(snap, Vec::new());
+        assert_eq!(out, CompactionOutcome::default(), "nothing dropped, no floor");
+        handle.close(None);
+        assert!(
+            !dir.join(segkeys::KEYS_FILE).exists(),
+            "a no-op round does not even migrate the log"
+        );
+        assert_eq!(
+            read_manifest(&dir).expect("manifest").version,
+            molt_core::STORAGE_VERSION,
+            "and leaves older binaries able to open it"
         );
     }
 

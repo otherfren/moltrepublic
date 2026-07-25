@@ -520,7 +520,14 @@ fn collect_entries(
                 for seg in fs::read_dir(&path)? {
                     let seg = seg?;
                     let seg_name = seg.file_name().to_string_lossy().into_owned();
-                    if seg_name.ends_with(".mlog") && seg.file_type()?.is_file() {
+                    // the segments AND, on a compacted workspace, the key
+                    // table that unlocks them (WP4a): a blob with segments
+                    // but no `log/keys.state` would restore into a log
+                    // nobody can decrypt. It is encrypted under a workspace
+                    // sub-key, exactly like the exported `chain.state`.
+                    if (seg_name.ends_with(".mlog") || seg_name == "keys.state")
+                        && seg.file_type()?.is_file()
+                    {
                         files.push((format!("log/{seg_name}"), ExportSource::File(seg.path())));
                     } else if !seg_name.starts_with('.') {
                         skipped.push(format!("log/{seg_name}"));
@@ -995,6 +1002,31 @@ mod tests {
     }
 
     const PASS: &str = "correct horse battery";
+
+    /// **A compacted workspace exports the key that unlocks its log** (WP4a).
+    /// Its segments are encrypted under per-segment data keys living in
+    /// `log/keys.state`; a blob carrying the segments but not the table would
+    /// restore into a log nobody can decrypt — silent, total history loss on
+    /// the one path that exists to recover it.
+    #[test]
+    fn a_compacted_workspaces_key_table_travels_with_its_segments() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        // pretend a compaction ran: the table is what it leaves behind
+        fs::write(dir.join("log").join("keys.state"), b"a key table").expect("table");
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert!(
+            !outcome.skipped.iter().any(|s| s.contains("keys.state")),
+            "the key table is not an unknown file: {:?}",
+            outcome.skipped
+        );
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        let e = entry(&a, "log/keys.state").expect("the key table travels");
+        assert_eq!(e.data, b"a key table", "byte-identical");
+    }
 
     /// Round-trip keystone (storage half): everything the include table
     /// names is in the blob byte-identical, the exclusions are hard, the

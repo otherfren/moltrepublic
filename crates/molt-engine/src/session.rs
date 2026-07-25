@@ -959,6 +959,11 @@ impl State {
     }
 
     pub(crate) fn close_active_storage(&mut self) {
+        // WP4a F8: the clean close is the second compaction trigger — the
+        // snapshot and the delivery cursors are freshest exactly here. It
+        // runs BEFORE the close so its trimmed snapshot is the one the
+        // closing write persists.
+        self.compact_now(crate::now_secs(), true);
         if let Some(active) = self.active.take() {
             let snap = self.snapshot_now();
             // close is synchronous (acked by the writer thread), so the

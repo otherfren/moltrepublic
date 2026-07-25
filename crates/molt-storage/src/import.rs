@@ -341,7 +341,10 @@ fn allowed_entry(path: &str) -> bool {
         "manifest.toml" | "prefs.toml" | "chain.state" => true,
         p => {
             if let Some(file) = p.strip_prefix("log/") {
-                return numeric_stem(file, ".mlog");
+                // the per-segment key table of a compacted workspace travels
+                // with its segments (WP4a) — without it the restored log is
+                // undecryptable
+                return file == "keys.state" || numeric_stem(file, ".mlog");
             }
             if let Some(file) = p.strip_prefix("snapshots/") {
                 return numeric_stem(file, ".msnap");
@@ -689,6 +692,9 @@ mod tests {
         assert!(allowed_entry("chain.state"));
         assert!(allowed_entry("log/000001.mlog"));
         assert!(allowed_entry("snapshots/000000000009.msnap"));
+        // WP4a: a compacted workspace's key table is part of the log
+        assert!(allowed_entry("log/keys.state"));
+        assert!(!allowed_entry("log/keys.state.bak"), "only the table itself");
         assert!(allowed_entry("logo.png"));
         for evil in [
             "transport.state",

@@ -29,6 +29,7 @@
 
 mod backup;
 mod chain;
+mod compaction;
 mod chat;
 mod configstore;
 mod events;
@@ -454,6 +455,9 @@ pub(crate) struct State {
     /// Persisted in the snapshot dump (`EngineStateDump::chat_pruned`) and
     /// sticky — an older, un-pruned snapshot never clears it.
     pub(crate) chat_pruned: bool,
+    /// When the last log-compaction round ran (WP4a F8: one per day). 0 =
+    /// none yet this session, so the first eligible tick runs one.
+    pub(crate) compacted_at: u64,
     /// Per sender, how many of its chat messages compaction dropped — the
     /// carry-forward that keeps synthesized legacy ids stable across a prune
     /// ([`molt_core::EngineStateDump::chat_pruned_counts`]).
@@ -788,6 +792,7 @@ impl State {
             chat_pos: HashMap::new(),
             chat_pruned: false,
             chat_pruned_counts: std::collections::BTreeMap::new(),
+            compacted_at: 0,
             parked: net::ParkedRefs::new(),
             share_paths: HashMap::new(),
             downloads: HashMap::new(),
