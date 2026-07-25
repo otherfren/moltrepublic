@@ -162,14 +162,17 @@ impl State {
                 // state carries a nil id, and chat_pos indexes the whole
                 // log (the pre-B1 nil-skip is obsolete).
                 if msg.id.is_nil() {
-                    let ordinal = self.chat.iter().filter(|m| m.from == msg.from).count();
+                    let ordinal = self.sender_ordinal(&msg.from, self.chat.len());
                     msg.id = legacy_message_id(ordinal, &msg.from, msg.ts, &msg.body);
                 }
                 // a legacy numeric quote resolves to the (possibly just
                 // synthesized) id of the message it pointed at — the index
                 // is still well-defined at apply time; the legacy field
                 // itself stays readable and is never written by new code
-                if msg.quote_id.is_none() {
+                // (WP4a: not on a node that has physically pruned — the
+                // positions moved, so resolving would attribute the quote to
+                // an innocent surviving message. It stays unresolved instead.)
+                if msg.quote_id.is_none() && !self.chat_pruned {
                     if let Some(q) = msg.quote {
                         msg.quote_id = usize::try_from(q)
                             .ok()
@@ -346,6 +349,22 @@ impl State {
         }
     }
 
+    /// The **sender ordinal** the legacy id formula hashes: how many messages
+    /// from `from` this node has ever ingested before position `upto` —
+    /// the ones still in the log, PLUS the ones compaction physically dropped
+    /// ([`EngineStateDump::chat_pruned_counts`]). Without the pruned part a
+    /// compacted node would restart the count and synthesize different ids
+    /// than its peers for the very same message (WP4a keystone).
+    fn sender_ordinal(&self, from: &str, upto: usize) -> usize {
+        let live = self.chat.iter().take(upto).filter(|p| p.from == from).count();
+        let pruned = self
+            .chat_pruned_counts
+            .get(from)
+            .copied()
+            .unwrap_or(0);
+        live.saturating_add(usize::try_from(pruned).unwrap_or(usize::MAX))
+    }
+
     /// Resolve a chat event's target message: **prefer the stable id**
     /// (chat bus) and fall back to the legacy position only when the event
     /// predates ids (`id == None`). An id that is present but unknown means
@@ -358,6 +377,12 @@ impl State {
     ) -> Option<&mut molt_core::ChatMessage> {
         let pos = match id {
             Some(id) => *self.chat_pos.get(id)?,
+            // WP4a: once expired content has been physically dropped, a
+            // position no longer identifies the message the sender meant —
+            // every entry below it moved up. An id-less (pre-chat-bus) op is
+            // therefore ignored on a pruned node rather than mis-addressed
+            // onto an innocent surviving message.
+            None if self.chat_pruned => return None,
             None => usize::try_from(index).ok()?,
         };
         self.chat.get_mut(pos)
@@ -404,6 +429,8 @@ impl State {
                 .map(|(id, p)| (*id, p.clone()))
                 .collect(),
             next_proposal_id: self.next_id,
+            chat_pruned: self.chat_pruned,
+            chat_pruned_counts: self.chat_pruned_counts.clone(),
         }
     }
 
@@ -419,6 +446,14 @@ impl State {
     /// Load a snapshot dump back into the actor (the open path; the log
     /// tail is then replayed through [`State::apply`]).
     pub(crate) fn restore_dump(&mut self, dump: EngineStateDump) {
+        // sticky: a workspace that once pruned can never trust chat positions
+        // again (WP4a). Restoring an older, un-pruned snapshot must not clear
+        // it either — hence `|=`.
+        self.chat_pruned |= dump.chat_pruned;
+        for (from, n) in &dump.chat_pruned_counts {
+            let slot = self.chat_pruned_counts.entry(from.clone()).or_insert(0);
+            *slot = (*slot).max(*n);
+        }
         self.replica = Some(ReplicaState {
             name: dump.name,
             member: dump.member,
@@ -445,13 +480,11 @@ impl State {
         // apply time.)
         for i in 0..self.chat.len() {
             if self.chat.get(i).is_some_and(|m| m.id.is_nil()) {
-                let ordinal = self.chat.get(i).map(|m| {
-                    self.chat
-                        .iter()
-                        .take(i)
-                        .filter(|p| p.from == m.from)
-                        .count()
-                });
+                let ordinal = self
+                    .chat
+                    .get(i)
+                    .map(|m| m.from.clone())
+                    .map(|from| self.sender_ordinal(&from, i));
                 let id = self
                     .chat
                     .get(i)
@@ -461,9 +494,12 @@ impl State {
                     m.id = id;
                 }
             }
+            // (WP4a: a pruned node never resolves a position again — see the
+            // same guard in `apply`'s Chat arm.)
             let unresolved_quote = self
                 .chat
                 .get(i)
+                .filter(|_| !self.chat_pruned)
                 .filter(|m| m.quote_id.is_none())
                 .and_then(|m| m.quote);
             if let Some(q) = unresolved_quote {
@@ -941,6 +977,266 @@ mod tests {
             }
             assert_eq!(st2.dump(), full, "diverged at k={k}");
         }
+    }
+
+    /// **WP4a keystone (F9): a PRUNED snapshot + continued replay must not
+    /// disturb what the log still means.** This is the proof the compaction
+    /// design stands on (`documents/log_compaction.md` §A.5/F9) — it runs
+    /// BEFORE any compactor code, and a red run is a design stop, not a bug to
+    /// patch.
+    ///
+    /// The compactor cuts at the HEAD (it writes the trimmed state as the
+    /// snapshot the log continues from), so the events that follow a prune are
+    /// the ones still to come. Over several retention cutoffs this pins:
+    /// 1. **Nothing inside the window is lost, everything past it is gone.**
+    /// 2. **Surviving messages are byte-identical** to the same id on a node
+    ///    that never pruned — the two legacy POSITIONAL fields may degrade to
+    ///    "unresolved" (a position cannot be re-resolved once a prefix is
+    ///    dropped) but never to a DIFFERENT value, which would be
+    ///    mis-attribution.
+    /// 3. **Ids synthesized after a prune still match the peers'.** A legacy
+    ///    id hashes a per-sender ordinal; the pruned node carries the dropped
+    ///    count forward, so the very next legacy message from that sender gets
+    ///    the same id everywhere. This is the property that made pruning
+    ///    dangerous, and the one `chat_pruned_counts` exists for.
+    /// 4. **`chat_pos` stays consistent** with the shortened log.
+    #[test]
+    fn a_pruned_snapshot_plus_replay_keeps_every_surviving_message_identical() {
+        let all = mixed_envs();
+        // what still happens AFTER the compaction: an id-addressed reaction on
+        // a surviving message, and a LEGACY (nil-id) message from a sender
+        // whose earlier messages were pruned — its synthesized id must match
+        // the never-pruned node's
+        let after = |from_seq: u64| -> Vec<EventEnvelope> {
+            let mut legacy = ChatMessage::text(molt_core::MessageId::NIL, "petra", "later", 200);
+            legacy.id = molt_core::MessageId::NIL;
+            vec![
+                EventEnvelope {
+                    seq: from_seq,
+                    ts: 200,
+                    by: "petra".to_string(),
+                    body: WorkspaceEvent::Chat(legacy),
+                },
+                EventEnvelope {
+                    seq: from_seq + 1,
+                    ts: 201,
+                    by: "petra".to_string(),
+                    body: WorkspaceEvent::ChatReacted {
+                        index: 0,
+                        id: Some(molt_core::MessageId([0x42; 16])),
+                        emoji: "🎉".to_string(),
+                        by: "petra".to_string(),
+                        op: Some(molt_core::ReactOp::Add),
+                    },
+                },
+            ]
+        };
+        let full = {
+            let mut st = plain_state();
+            for env in all.iter().chain(after(10).iter()) {
+                st.apply(env);
+            }
+            st.dump()
+        };
+
+        for cutoff in [103u64, 105, 108, 109] {
+            let mut st = plain_state();
+            for env in &all {
+                st.apply(env);
+            }
+            let mut snap = st.dump();
+            let dropped = snap.prune_chat_before(cutoff);
+            assert!(
+                snap.chat.iter().all(|m| !(m.ts != 0 && m.ts < cutoff)),
+                "pruning left expired content behind (cutoff {cutoff})"
+            );
+            if dropped > 0 {
+                assert!(snap.chat_pruned, "a prune marks the dump as pruned");
+                assert_eq!(
+                    snap.chat_pruned_counts.values().sum::<u64>(),
+                    u64::try_from(dropped).expect("dropped count fits u64"),
+                    "every dropped message is carried in the per-sender counts"
+                );
+            }
+            let mut st2 = plain_state();
+            st2.restore_dump(snap);
+            for env in &after(10) {
+                st2.apply(env);
+            }
+            let got = st2.dump();
+
+            // 1. the window boundary held in both directions
+            for f in full.chat.iter().filter(|f| f.ts == 0 || f.ts >= cutoff) {
+                assert!(
+                    got.chat.iter().any(|m| m.id == f.id),
+                    "message {} inside the window was lost (cutoff {cutoff})",
+                    f.id
+                );
+            }
+            assert!(
+                got.chat.iter().all(|m| m.ts == 0 || m.ts >= cutoff),
+                "expired content came back (cutoff {cutoff})"
+            );
+            // 2. + 3. every message both nodes hold is identical, INCLUDING
+            //    the legacy message ingested after the prune (its id proves
+            //    the sender ordinal survived the compaction)
+            for m in &got.chat {
+                let same = full
+                    .chat
+                    .iter()
+                    .find(|f| f.id == m.id)
+                    .unwrap_or_else(|| panic!("invented message {} (cutoff {cutoff})", m.id));
+                let mut normalized = m.clone();
+                if m.quote.is_none() {
+                    normalized.quote = same.quote;
+                }
+                if m.quote_id.is_none() {
+                    normalized.quote_id = same.quote_id;
+                }
+                assert_eq!(
+                    &normalized, same,
+                    "message {} diverged from the never-pruned node (cutoff {cutoff})",
+                    m.id
+                );
+            }
+            assert!(
+                got.chat.iter().any(|m| m.body == "later"),
+                "the legacy message ingested after the prune kept the peers' id (cutoff {cutoff})"
+            );
+            // 4. the id→position map matches the shortened log
+            for (i, m) in got.chat.iter().enumerate() {
+                assert_eq!(
+                    st2.chat_pos.get(&m.id),
+                    Some(&i),
+                    "chat_pos lost message {} (cutoff {cutoff})",
+                    m.id
+                );
+            }
+        }
+
+        // the cross-node id contract, spelled out: a node that pruned before
+        // ts 105 no longer HAS the two pinned legacy messages, and the ones it
+        // keeps are untouched
+        let mut st = plain_state();
+        for env in &all {
+            st.apply(env);
+        }
+        let mut snap = st.dump();
+        assert_eq!(snap.prune_chat_before(105), 2, "gm + re: gm age out at 105");
+        assert!(
+            snap.chat.iter().all(|m| m.id.to_string() != LEGACY_ID_OF_MSG_0
+                && m.id.to_string() != LEGACY_ID_OF_MSG_1),
+            "the expired legacy messages are physically gone"
+        );
+        let mut st2 = plain_state();
+        st2.restore_dump(snap);
+        assert_eq!(st2.chat.len(), 2, "the share + the new-era message survive");
+        assert_eq!(st2.chat[1].id, molt_core::MessageId([0x42; 16]));
+    }
+
+    /// **A legacy INDEX-addressed op must be ignored once this node pruned.**
+    /// Positions move when content is dropped, so honouring the index would
+    /// react on / delete / un-share an innocent SURVIVING message — silent
+    /// corruption. Dropping the op is the honest outcome (it addresses a
+    /// message this node no longer has); an id-addressed op is unaffected.
+    /// The same rule covers the legacy numeric `quote`, which would otherwise
+    /// attribute a reply to the wrong message.
+    #[test]
+    fn legacy_index_addressed_ops_are_ignored_once_pruned() {
+        let mut st = plain_state();
+        for env in &mixed_envs() {
+            st.apply(env);
+        }
+        let mut snap = st.dump();
+        assert_eq!(snap.prune_chat_before(105), 2, "the two oldest go");
+        let mut st = plain_state();
+        st.restore_dump(snap);
+        let survivor = st.chat[0].id;
+        let before = st.chat.clone();
+
+        // an index-addressed reaction/delete/file-removal at position 0 —
+        // which USED to mean petra's "gm" and now would hit the share
+        for body in [
+            WorkspaceEvent::ChatReacted {
+                index: 0,
+                id: None,
+                emoji: "👍".to_string(),
+                by: "walter".to_string(),
+                op: None,
+            },
+            WorkspaceEvent::ChatDeleted {
+                index: 0,
+                id: None,
+                by: "walter".to_string(),
+            },
+            WorkspaceEvent::FileRemoved {
+                index: 0,
+                id: None,
+                by: "walter".to_string(),
+            },
+        ] {
+            st.apply(&EventEnvelope {
+                seq: 20,
+                ts: 210,
+                by: "walter".to_string(),
+                body,
+            });
+        }
+        assert_eq!(st.chat, before, "no id-less op touched a surviving message");
+
+        // …while the SAME ops addressed by id still land
+        st.apply(&EventEnvelope {
+            seq: 21,
+            ts: 211,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::ChatReacted {
+                index: 999,
+                id: Some(survivor),
+                emoji: "👍".to_string(),
+                by: "walter".to_string(),
+                op: Some(molt_core::ReactOp::Add),
+            },
+        });
+        assert_eq!(
+            st.chat[0].reactions["👍"],
+            vec!["walter".to_string()],
+            "an id-addressed op is unaffected by pruning"
+        );
+
+        // a legacy numeric quote is no longer resolved by position
+        let mut quoting = ChatMessage::text(molt_core::MessageId([0x77; 16]), "walter", "re", 212);
+        quoting.quote = Some(0);
+        st.apply(&EventEnvelope {
+            seq: 22,
+            ts: 212,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::Chat(quoting),
+        });
+        let posted = st.chat.last().expect("the quoting message landed");
+        assert_eq!(
+            posted.quote_id, None,
+            "a positional quote stays unresolved on a pruned node instead of pointing at the wrong message"
+        );
+    }
+
+    /// A dump that still carries a **nil-id (pre-chat-bus) message** must not
+    /// be pruned at all: the legacy id is synthesized from the per-sender
+    /// ordinal counted over the dump, so dropping a prefix before synthesis
+    /// would hand this node DIFFERENT ids than its peers — silent divergence.
+    /// The compactor skips such a dump instead (it materializes on the next
+    /// open, and the round after prunes normally).
+    #[test]
+    fn a_dump_with_unsynthesized_legacy_ids_refuses_to_prune() {
+        let mut dump = plain_state().dump();
+        let mut legacy = ChatMessage::text(molt_core::MessageId([1u8; 16]), "petra", "old", 100);
+        legacy.id = molt_core::MessageId::NIL;
+        dump.chat = vec![
+            legacy,
+            ChatMessage::text(molt_core::MessageId([7u8; 16]), "petra", "new", 200),
+        ];
+        assert_eq!(dump.prune_chat_before(150), 0, "nothing is dropped");
+        assert_eq!(dump.chat.len(), 2, "the dump is left exactly as it was");
+        assert!(!dump.chat_pruned, "and it is not marked pruned");
     }
 
     /// The P4 pins for `legacy_log_replay_synthesizes_stable_ids` — the

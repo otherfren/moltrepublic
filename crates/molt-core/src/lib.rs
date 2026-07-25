@@ -1992,6 +1992,77 @@ pub struct EngineStateDump {
     pub proposals: BTreeMap<u64, ProposalRecord>,
     /// The next proposal id to assign.
     pub next_proposal_id: u64,
+    /// This node has physically dropped expired chat content (WP4a
+    /// compaction). Additive with a default: an un-pruned dump reads `false`
+    /// and behaves exactly as before.
+    ///
+    /// It is load-bearing, not bookkeeping: chat positions shift when a prefix
+    /// is dropped, so a **legacy index-addressed** event (pre-chat-bus, no
+    /// `id`) can no longer be resolved — honouring it would silently react on
+    /// or delete the WRONG surviving message. Once this is set, the engine
+    /// ignores id-less chat ops instead. Sticky: it stays true for the life of
+    /// the workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat_pruned: bool,
+    /// How many of each sender's chat messages compaction has physically
+    /// dropped. Additive with a default (empty = nothing pruned).
+    ///
+    /// A legacy (pre-chat-bus) message's id is synthesized from its **sender
+    /// ordinal** — how many messages from that sender preceded it. Dropping
+    /// old messages would restart that count and give this node a DIFFERENT
+    /// id for the same message than its peers, so the count of what was
+    /// dropped is carried forward and added to the ordinal. That keeps the
+    /// cross-node id contract intact across any number of compactions,
+    /// including out-of-order arrivals (it is a total, never a position).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_pruned_counts: BTreeMap<MemberId, u64>,
+}
+
+impl EngineStateDump {
+    /// Physically drop every chat message that aged past `cutoff` (WP4a
+    /// §A.1 R3) — the compactor's content trim, returning how many went.
+    /// A `ts` of 0 means "unknown age" and is NEVER dropped, matching the
+    /// read filter (`State::aged_out_at`), so unknown content cannot silently
+    /// vanish.
+    ///
+    /// Refuses (drops nothing, returns 0) while any message still carries a
+    /// **nil id**: legacy ids are synthesized from a per-sender ordinal
+    /// counted over the dump, so trimming before that synthesis would give
+    /// this node different ids than its peers. A dump taken from live engine
+    /// state always has them materialized (both ingest choke points fill them
+    /// in), so this only guards a hand-built or pre-chat-bus dump.
+    ///
+    /// Dropping entries invalidates the legacy numeric `quote` positions of
+    /// the survivors, so they are cleared — the resolved `quote_id` (which
+    /// both ingest points materialize) is the real reference and stays. A
+    /// quote pointing AT a dropped message keeps its id and simply dangles,
+    /// exactly like a quote of a deleted message.
+    pub fn prune_chat_before(&mut self, cutoff: u64) -> usize {
+        if self.chat.iter().any(|m| m.id.is_nil()) {
+            return 0;
+        }
+        let before = self.chat.len();
+        let mut counts = std::mem::take(&mut self.chat_pruned_counts);
+        self.chat.retain(|m| {
+            let keep = !(m.ts != 0 && m.ts < cutoff);
+            if !keep {
+                // carry the sender ordinal forward, or every legacy id
+                // synthesized after this compaction would differ from the
+                // peers' (see the field's doc)
+                *counts.entry(m.from.clone()).or_insert(0) += 1;
+            }
+            keep
+        });
+        self.chat_pruned_counts = counts;
+        let dropped = before - self.chat.len();
+        if dropped > 0 {
+            self.chat_pruned = true;
+            for m in &mut self.chat {
+                m.quote = None;
+            }
+        }
+        dropped
+    }
 }
 
 /// A state snapshot at a log position. Snapshots are an *optimization* —

@@ -448,6 +448,16 @@ pub(crate) struct State {
     /// synthesized at the ingest choke points (P4), so no message in state
     /// ever carries a nil id.
     pub(crate) chat_pos: HashMap<MessageId, usize>,
+    /// This workspace has physically dropped expired chat (WP4a compaction),
+    /// so chat POSITIONS are no longer meaningful and a legacy index-addressed
+    /// op must be ignored instead of mis-applied ([`State::chat_target`]).
+    /// Persisted in the snapshot dump (`EngineStateDump::chat_pruned`) and
+    /// sticky — an older, un-pruned snapshot never clears it.
+    pub(crate) chat_pruned: bool,
+    /// Per sender, how many of its chat messages compaction dropped — the
+    /// carry-forward that keeps synthesized legacy ids stable across a prune
+    /// ([`molt_core::EngineStateDump::chat_pruned_counts`]).
+    pub(crate) chat_pruned_counts: std::collections::BTreeMap<MemberId, u64>,
     /// The P6 parking buffer: wire reactions/deletes/file-removes whose
     /// target message has not arrived yet (cross-sender ordering is not
     /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
@@ -776,6 +786,8 @@ impl State {
             cmd_tx: cmd_tx.downgrade(),
             chat: Vec::new(),
             chat_pos: HashMap::new(),
+            chat_pruned: false,
+            chat_pruned_counts: std::collections::BTreeMap::new(),
             parked: net::ParkedRefs::new(),
             share_paths: HashMap::new(),
             downloads: HashMap::new(),
