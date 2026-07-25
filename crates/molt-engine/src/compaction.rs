@@ -89,9 +89,22 @@ impl State {
             .enumerate()
             .map(|(i, m)| (m.id, i))
             .collect();
-        // a share whose message is gone is gone with it (§A.1 C4: the user's
-        // own files are never touched — only our record that we serve them)
+        // §A.1 C4 (Etappe 4, "share forgetting"): a share whose message is
+        // gone is gone with it — both the runtime map and the persistent
+        // `prefs.shared_files` sidecar, so a restart cannot resurrect it. The
+        // user's own FILE is never touched; what falls is our record that we
+        // serve it, after which a download request meets the honest
+        // `Refused`/`FileExpired` the read path already produces.
         self.share_paths.retain(|id, _| self.chat_pos.contains_key(id));
+        if let Some(active) = self.active.as_mut() {
+            let before = active.prefs.shared_files.len();
+            let live: std::collections::HashSet<String> =
+                dump.chat.iter().map(|m| m.id.to_string()).collect();
+            active.prefs.shared_files.retain(|id, _| live.contains(id));
+            if active.prefs.shared_files.len() != before {
+                active.handle.set_prefs(active.prefs.clone());
+            }
+        }
         Some((dump, dropped))
     }
 
@@ -220,6 +233,70 @@ mod tests {
 
         // a second round with nothing eligible is a no-op
         assert!(st.compact_chat(1_000).is_none());
+    }
+
+    /// Etappe 4 (§A.1 C4): the share record of a dropped message falls with
+    /// it in the PERSISTENT sidecar too, not just in the runtime map — a
+    /// restart must not resurrect a share whose message no longer exists. The
+    /// user's own file is never touched; what goes is our record of serving
+    /// it, after which a download meets the honest refusal the read path
+    /// already produces.
+    #[test]
+    fn compaction_forgets_the_dropped_shares_in_the_prefs_sidecar() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed =
+            molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
+                .expect("entropy");
+        let genesis = molt_core::EventEnvelope {
+            seq: 1,
+            ts: 10,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Founded {
+                name: "Compaction".to_string(),
+                rule_m: 1,
+                rule_n: 1,
+                member: "me".to_string(),
+                roster: vec!["me".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
+                republic_id: String::new(),
+                agenda: String::new(),
+            },
+        };
+        let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let mut st = plain_state();
+        let old = ChatMessage::text(molt_core::MessageId([1u8; 16]), "me", "ancient", 100);
+        let new = ChatMessage::text(molt_core::MessageId([2u8; 16]), "me", "recent", 5_000);
+        st.apply(&molt_core::EventEnvelope {
+            seq: 1,
+            ts: 10,
+            by: "me".to_string(),
+            body: genesis.body.clone(),
+        });
+        for (seq, m) in [(2u64, old.clone()), (3, new.clone())] {
+            st.apply(&molt_core::EventEnvelope {
+                seq,
+                ts: m.ts,
+                by: "me".to_string(),
+                body: molt_core::WorkspaceEvent::Chat(m),
+            });
+        }
+        let mut prefs = molt_core::WorkspacePrefs::default();
+        prefs.shared_files.insert(old.id.to_string(), "/tmp/ancient.pdf".to_string());
+        prefs.shared_files.insert(new.id.to_string(), "/tmp/recent.pdf".to_string());
+        st.active = Some(crate::ActiveStorage {
+            id: "w-compact".to_string(),
+            dir,
+            prefs,
+            handle: molt_storage::start_writer(ws),
+        });
+
+        st.compact_chat(1_000).expect("something ages out");
+        let live = &st.active.as_ref().expect("active").prefs.shared_files;
+        assert!(!live.contains_key(&old.id.to_string()), "the dropped share is forgotten");
+        assert!(live.contains_key(&new.id.to_string()), "the live share stays");
+        st.active.take().expect("active").handle.close(None);
     }
 
     /// F4: a peer that is merely quiet still pins the log; one that has been

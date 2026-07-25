@@ -103,15 +103,62 @@ Terrain) kann nie entstehen.
 ## A.5 Etappen WP4a
 
 1. ✅ dieses Doc (entschieden 2026-07-17).
-2. Keystone-Beweis (F9) + molt-storage-Primitive: Segment-Keys +
-   Key-Tabelle (F3/F6), atomarer Snapshot-Swap, Segment-Drop, Floor im
-   Manifest.
-3. Engine-Kompaktor (Ticker + Clean-Close, F8; sync Handler entscheidet,
-   Off-Actor-Task arbeitet, internes Command auf der INTERNAL-Liste),
-   Cursor-Umleitung (C2/F4).
-4. Share-Vergessen (`shared_files` fällt beim Stutzen; Download danach ⇒
-   vorhandenes ehrliches `Refused`/`FileExpired`).
-5. Doku-Abschluss (chat_bus.md-Follow-ups, Plan-Doc).
+2. ✅ **Keystone-Beweis (F9) + molt-storage-Primitive** (2026-07-25,
+   `c3fe291` + `141eb6d`).
+3. ✅ **Engine-Kompaktor** (Ticker + Clean-Close, F8) inkl. Floor/Cursor-
+   Umleitung (C2/F4) — `a386d87`.
+4. ✅ **Share-Vergessen** (`shared_files` fällt beim Stutzen, auch im
+   persistenten Sidecar).
+5. ✅ dieser Abschnitt.
+
+### Was gebaut wurde (Ist-Stand 2026-07-25)
+
+**Der F9-Beweis kam zuerst und hat zwei echte Fallen gefunden**, die sonst
+still ausgeliefert worden wären:
+
+- **Per-Sender-Ordinals verschieben sich.** Die Id einer Legacy-Nachricht ist
+  `sha256(TAG ‖ le64(sender_ordinal) ‖ from ‖ ts ‖ body)`; das Ordinal wird
+  über den Log gezählt. Wer alte Nachrichten wegwirft, zählt neu — die nächste
+  Legacy-Nachricht desselben Senders bekäme hier eine ANDERE Id als bei den
+  Peers, und ein id-adressiertes Protokoll divergiert. Gelöst durch
+  `EngineStateDump::chat_pruned_counts`: die gedroppte Anzahl pro Sender wird
+  mitgeführt und zum Ordinal addiert (eine Summe, keine Position — deckt auch
+  Out-of-Order-Ankünfte).
+- **Legacy-POSITIONS-Referenzen adressieren falsch.** Ein id-loses
+  Reaction/Delete/File-Removed (index-adressiert) und das numerische `quote`
+  würden nach einem Prune auf die Nachricht zeigen, die nachgerückt ist —
+  also eine unschuldige ÜBERLEBENDE Nachricht bereaktion/löschen. Gelöst durch
+  das klebrige `chat_pruned`-Flag (im Dump persistiert): danach verweigert
+  `chat_target` den Index-Fallback und das Quote bleibt unaufgelöst.
+  Id-adressierte Ops sind unberührt.
+
+**Ablauf einer Runde** (`compaction.rs` + `compact_once` im Storage-Writer):
+Inhalts-Cutoff = `now − (1 + F2-Karenz) × Fenster`; Live-State und Snapshot
+werden mit DEMSELBEN Aufruf gestutzt (sie können nicht auseinanderlaufen);
+dann Snapshot schreiben + fsync (R1), Floor = Snapshot-Position, gebremst vom
+Delivery-Cursor jedes Peers INNERHALB seiner Karenz (R2/F4), dann F6-Migration,
+dann Drop (Keys zuerst löschen, dann unlinken). Erster echter Drop hebt die
+Manifest-Version — ältere Binaries verweigern das Workspace höflich, statt es
+als beschädigt zu lesen.
+
+**Abweichungen von der Vorgabe (bewusst, klein):**
+- Der Tages-Trigger reitet auf dem Presence-Tick statt auf einem eigenen
+  internen `Command` — dieselbe Lösung wie die Track-C-Rotation, spart eine
+  Command-Variante und damit Co-Equality-Churn. Der Clean-Close-Trigger läuft
+  SYNCHRON, sonst verliert er das Rennen gegen den `Close` des Writers.
+- Der Floor liegt in der Key-Tabelle, nicht im Manifest: er gehört zu genau
+  den Daten, die die Tabelle beschreibt, wird mit ihr atomar geschrieben und
+  leakt nicht im Klartext-Manifest. Das Manifest trägt nur den
+  Versions-Stop.
+
+**Dabei gefundene Lücke (gefixt):** `log/keys.state` fehlte in der
+Export-Include-Tabelle und der Import-Allowlist — ein Blob eines kompaktierten
+Workspaces hätte Segmente ohne ihre Schlüssel transportiert, also ein
+unentschlüsselbares Log auf genau dem Pfad, der zur Wiederherstellung da ist.
+
+**Offen / bewusst nicht gebaut:** F7 bleibt wie entschieden (alte S3-Kopien
+altern über `s3_keep_copies` aus, kein aktives Durchgreifen) — die Karenz ist
+in §A.3 als Restrisiko benannt und gehört noch in die Settings-Hilfe.
 
 ---
 
