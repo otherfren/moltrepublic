@@ -154,6 +154,23 @@ impl LoopbackHub {
         false
     }
 
+    /// Undo [`Self::expire_queue`] (test seam, delivery guarantee E5): the
+    /// queue delivers again. Everything sent WHILE expired stays lost — that
+    /// is the point. A real SMP queue never revives; this stands in for the
+    /// leg having healed by WHATEVER means (rotation onto a fresh queue,
+    /// Stage-B resubscribe) so a test can assert the sender-side rewind
+    /// re-offers the deaf window's messages without re-running the whole
+    /// rotate machinery.
+    pub fn revive_queue(&self, id: &QueueId) -> bool {
+        if let Ok(mut hub) = self.inner.lock() {
+            if let Some(q) = hub.queues.get_mut(id) {
+                q.expired = false;
+                return true;
+            }
+        }
+        false
+    }
+
     /// A transport endpoint on this hub.
     pub fn transport(&self) -> LoopbackTransport {
         LoopbackTransport {
@@ -329,6 +346,14 @@ pub struct LoopbackTransport {
     /// cannot resume a loopback mesh; a fresh engine on the same hub
     /// (the tests' reopen seam) can.
     created: Arc<Mutex<BTreeSet<Vec<u8>>>>,
+}
+
+impl LoopbackTransport {
+    /// The hub this endpoint rides (test seam — reach `expire_queue` /
+    /// `revive_queue` from a transport handed through the engine).
+    pub fn hub(&self) -> LoopbackHub {
+        self.hub.clone()
+    }
 }
 
 impl Transport for LoopbackTransport {
