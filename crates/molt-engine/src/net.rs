@@ -1208,7 +1208,10 @@ impl State {
                                 if let Ok(a) =
                                     serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain)
                                 {
-                                    self.spawn_mesh_extension(announcer, &a);
+                                    // a nonce'd announce is a relayed Stage-3
+                                    // rotate broadcast: reaching a member it
+                                    // carries no queue for is expected
+                                    self.spawn_mesh_extension(announcer, &a, nonce.is_some());
                                 }
                             }
                         }
@@ -1542,7 +1545,9 @@ impl State {
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::MeshAnnounced { ct, nonce: None });
         self.record(env);
-        self.spawn_mesh_extension(announcer, &announce);
+        // a recovery re-announce is targeted at every survivor — no queue
+        // for us here is a real anomaly, so it stays a warn (relayed: false)
+        self.spawn_mesh_extension(announcer, &announce, false);
         Ok(Reply::Ack)
     }
 
@@ -1556,13 +1561,39 @@ impl State {
         &mut self,
         member: MemberId,
         announce: &molt_net::mesh::MeshAnnounce,
+        relayed: bool,
     ) {
+        let me = self.member();
+        // send side FIRST — before the cooldown: a broadcast rotate announce
+        // aimed at another member carries no queue for this node, and burning
+        // the announcer's cooldown slot on it would make the follow-up
+        // announce that IS for us bounce off "inside the cooldown" for a full
+        // window (delivery_guarantee.md V1 — the live 3-node deaf-leg loop).
+        // The cooldown guards the expensive path (queue mint + rebuild),
+        // which a no-queue-for-us announce never reaches.
+        // Also: the announcer's primary PLUS the redundant queues it
+        // announced for us (capped). Taking only the primary here silently
+        // collapsed our outbound to N=1 on every adopted rotate/rejoin, while
+        // our own inbound stayed N — the leg decayed to half-redundancy.
+        let (snds, wrap_out) = match molt_net::mesh::send_targets(announce, &me) {
+            Ok(t) => t,
+            Err(e) => {
+                if relayed {
+                    // a relayed (nonce'd) rotate broadcast reaches every
+                    // member but targets one — not-for-us is the normal case
+                    tracing::debug!(%member, reason = %e, "mesh announce carries no usable queue for this node");
+                } else {
+                    tracing::warn!(%member, reason = %e, "mesh announce carries no usable queue for this node");
+                }
+                return;
+            }
+        };
         // per-member cooldown: an extension costs a full supervisor
         // teardown+rebuild+fsync on THIS node, so a member re-announcing
         // within the window is ignored (its first announce always passes —
         // recovery and honest rotation are one-shot; only rapid repeats are
         // capped, bounding the churn a misbehaving member can inflict)
-        let now = crate::now_secs();
+        let now = self.presence_now();
         if let Some(last) = self.mesh_extension_at.get(&member) {
             if now.saturating_sub(*last) < MESH_EXTENSION_COOLDOWN_SECS {
                 tracing::warn!(%member, "mesh announce inside the cooldown — ignored");
@@ -1570,18 +1601,6 @@ impl State {
             }
         }
         self.mesh_extension_at.insert(member.clone(), now);
-        let me = self.member();
-        // send side: the announcer's primary PLUS the redundant queues it
-        // announced for us (capped). Taking only the primary here silently
-        // collapsed our outbound to N=1 on every adopted rotate/rejoin, while
-        // our own inbound stayed N — the leg decayed to half-redundancy.
-        let (snds, wrap_out) = match molt_net::mesh::send_targets(announce, &me) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(%member, reason = %e, "mesh announce carries no usable queue for this node");
-                return;
-            }
-        };
         let Some(net) = self.net.as_ref() else {
             return;
         };
@@ -3313,6 +3332,52 @@ mod tests {
         // if the ONLY stale leg is offline, nothing rotates
         st.established_at.insert("cid".to_string(), now - 10); // cid fresh
         assert_eq!(st.stale_leg_to_rotate(now), None, "an offline stale leg is not rotated");
+    }
+
+    /// V1 (delivery_guarantee.md): a broadcast rotate announce that carries no
+    /// queue for THIS node must not burn the announcer's extension cooldown —
+    /// the follow-up announce that IS for us (moments later) must still adopt.
+    /// A repeated VALID announce inside the window stays capped as before.
+    #[test]
+    fn an_announce_without_our_queue_does_not_burn_the_cooldown() {
+        let mut st = presence_fixture();
+        st.clock_override = Some(T);
+        let handover = |queue: &str| molt_net::mesh::QueueHandover {
+            server: String::new(),
+            queue: queue.to_string(),
+            wrap: hex::encode([7u8; 32]),
+        };
+        // bob rotates toward cid — the relayed broadcast reaches ada
+        // without any queue for ada
+        let mut queues = std::collections::BTreeMap::new();
+        queues.insert("cid".to_string(), handover("aa"));
+        let for_cid =
+            molt_net::mesh::MeshAnnounce { queues, queues_extra: Default::default() };
+        st.spawn_mesh_extension("bob".to_string(), &for_cid, true);
+        assert!(
+            !st.mesh_extension_at.contains_key("bob"),
+            "an announce carrying nothing for us must not stamp the cooldown"
+        );
+        // moments later bob's announce FOR ada arrives — it must pass the gate
+        st.clock_override = Some(T + 5);
+        let mut queues = std::collections::BTreeMap::new();
+        queues.insert("ada".to_string(), handover("bb"));
+        let for_ada =
+            molt_net::mesh::MeshAnnounce { queues, queues_extra: Default::default() };
+        st.spawn_mesh_extension("bob".to_string(), &for_ada, true);
+        assert_eq!(
+            st.mesh_extension_at.get("bob"),
+            Some(&(T + 5)),
+            "the announce for us passes the cooldown gate and stamps it"
+        );
+        // a REPEATED valid announce inside the window is still ignored (churn cap)
+        st.clock_override = Some(T + 10);
+        st.spawn_mesh_extension("bob".to_string(), &for_ada, true);
+        assert_eq!(
+            st.mesh_extension_at.get("bob"),
+            Some(&(T + 5)),
+            "a rapid repeat stays capped — the stamp is not refreshed"
+        );
     }
 
     /// Track C: the tick birth-stamps a newly-seen leg, so a just-established
