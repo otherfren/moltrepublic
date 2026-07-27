@@ -561,6 +561,7 @@ impl State {
         self.accepted.clear();
         self.accepted_dirty = false;
         self.accepted_saved_at = 0;
+        self.ack_due.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.net_unreachable.clear();

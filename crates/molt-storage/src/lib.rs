@@ -2913,11 +2913,11 @@ mod tests {
         let mut ts = TransportState::default();
         ts.outbound.insert(
             "slowpoke".to_string(),
-            molt_core::OutboundCursor { log_seq: 5, wire_seq: 1 },
+            molt_core::OutboundCursor { log_seq: 5, wire_seq: 1, ..Default::default() },
         );
         ts.outbound.insert(
             "ghost".to_string(),
-            molt_core::OutboundCursor { log_seq: 2, wire_seq: 1 },
+            molt_core::OutboundCursor { log_seq: 2, wire_seq: 1, ..Default::default() },
         );
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
@@ -2964,7 +2964,7 @@ mod tests {
         let mut ts = TransportState::default();
         ts.outbound.insert(
             "fresh-peer".to_string(),
-            molt_core::OutboundCursor { log_seq: 0, wire_seq: 0 },
+            molt_core::OutboundCursor { log_seq: 0, wire_seq: 0, ..Default::default() },
         );
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
@@ -3035,7 +3035,7 @@ mod tests {
         let mut ts = TransportState::default();
         ts.outbound.insert(
             "delivered".to_string(),
-            molt_core::OutboundCursor { log_seq: 9, wire_seq: 3 },
+            molt_core::OutboundCursor { log_seq: 9, wire_seq: 3, ..Default::default() },
         );
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
@@ -3588,7 +3588,7 @@ mod tests {
         let mut outbound = std::collections::BTreeMap::new();
         outbound.insert(
             "bob".to_string(),
-            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3 },
+            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3, ..Default::default() },
         );
         let mut inbound = std::collections::BTreeMap::new();
         inbound.insert("bob".to_string(), 5u64);
@@ -3654,7 +3654,7 @@ mod tests {
         let mut outbound = std::collections::BTreeMap::new();
         outbound.insert(
             "bob".to_string(),
-            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3 },
+            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3, ..Default::default() },
         );
         handle.save_transport_state(TransportState {
             outbound,
@@ -3723,7 +3723,7 @@ mod tests {
         let mut outbound = std::collections::BTreeMap::new();
         outbound.insert(
             "bob".to_string(),
-            molt_core::OutboundCursor { log_seq: 9, wire_seq: 4 },
+            molt_core::OutboundCursor { log_seq: 9, wire_seq: 4, ..Default::default() },
         );
         let mut inbound = std::collections::BTreeMap::new();
         inbound.insert("bob".to_string(), 6u64);

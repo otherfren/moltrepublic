@@ -138,6 +138,16 @@ impl MlsChannel {
                 if plaintext == crate::MESH_PROBE_TAG {
                     return MlsDecode::Probe;
                 }
+                // a delivery ACK (delivery guarantee §4.3): the peer reports
+                // what it has engine-accepted of OUR events. Authenticated by
+                // the MLS credential (`from`) — the recv loop additionally
+                // pins it to the link's member before applying it.
+                if let Some(payload) = plaintext.strip_prefix(crate::MESH_ACK_TAG) {
+                    return match serde_json::from_slice::<molt_core::AcceptedWindow>(payload) {
+                        Ok(win) => MlsDecode::Ack(from, Box::new(win)),
+                        Err(_) => MlsDecode::Discard,
+                    };
+                }
                 // the `\x00molt-mesh-*` space is reserved for control frames; a
                 // JSON envelope never starts with NUL. An unknown control tag (a
                 // newer control frame this build predates) is dropped as a no-op,
@@ -166,6 +176,7 @@ impl MlsChannel {
 }
 
 /// What the recv loop should do with one inbound MLS message.
+#[derive(Debug)]
 enum MlsDecode {
     /// An authenticated application envelope — deliver and ack.
     Deliver(MemberId, Box<EventEnvelope>),
@@ -178,6 +189,10 @@ enum MlsDecode {
     /// once (`probe_received`) so the prober can confirm its leg round-trips.
     /// The warm-back is a keepalive, never a probe — no echo.
     Probe,
+    /// A delivery ACK (delivery guarantee §4.3): the authenticated sender
+    /// reports its accept window over OUR events — advance that peer's
+    /// `acked_floor`, stamp presence, deliver nothing.
+    Ack(MemberId, Box<molt_core::AcceptedWindow>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     EpochAdvanced,
     /// Encrypted at an epoch this node has not reached — hold it (acks
@@ -555,6 +570,8 @@ where
             children.spawn(recv_consumer_task(
                 peer.clone(),
                 rx,
+                cfg.member.clone(),
+                log.clone(),
                 store.clone(),
                 sink.clone(),
                 state.clone(),
@@ -833,6 +850,53 @@ fn backoff_ms(cfg: &NetConfig, attempt: u32, rng: &mut u64) -> u64 {
     raw / 2 + mockrand::xorshift(rng) % raw
 }
 
+/// Delivery guarantee §4.4: compute the new acked floor for one peer from
+/// its reported accept window. `envs` is this node's log from `old_floor + 1`
+/// on, in seq order. The floor advances while each OWN envelope is accepted
+/// and stops at the first that is not; foreign envelopes never gate (the
+/// outbox only fans out our own), and `MlsCommit` seqs are exempt (§4.5 —
+/// the peer's supervisor consumes them, its engine never sees an envelope
+/// to accept, so they must not stall the floor). Anything above `win.high`
+/// is unconfirmed by definition.
+fn advance_acked_floor(
+    me: &MemberId,
+    envs: &[EventEnvelope],
+    win: &molt_core::AcceptedWindow,
+    old_floor: u64,
+) -> u64 {
+    let mut floor = old_floor;
+    for env in envs {
+        if env.by != *me || matches!(env.body, WorkspaceEvent::MlsCommit { .. }) {
+            continue;
+        }
+        if env.seq > win.high || !win.is_accepted(env.seq) {
+            break;
+        }
+        floor = env.seq;
+    }
+    floor
+}
+
+/// Record an advanced acked floor (+ the §4.8 `ack_seen` proof) for `member`
+/// and persist a snapshot. The floor is monotonic: a REGRESSED ack (the
+/// peer's own window persistence lost a beat) must not pull the floor back
+/// and trigger a resend storm of long-confirmed history.
+async fn record_acked<S: StateStore>(
+    state: &Arc<Mutex<TransportState>>,
+    store: &S,
+    member: &MemberId,
+    floor: u64,
+) {
+    let snapshot = {
+        let Ok(mut s) = state.lock() else { return };
+        let cur = s.outbound.entry(member.clone()).or_default();
+        cur.acked_floor = cur.acked_floor.max(floor);
+        cur.ack_seen = true;
+        s.clone()
+    };
+    store.save(snapshot).await;
+}
+
 /// Record outbound progress and persist a snapshot.
 async fn advance_outbound<S: StateStore>(
     state: &Arc<Mutex<TransportState>>,
@@ -931,6 +995,16 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     sink.probe_received(&peer.member).await;
                     ack_all(held);
                 }
+                MlsDecode::Ack(_, _) => {
+                    // an ack held across an epoch advance: stamp presence and
+                    // let it go — its window is stale by now, and the peer's
+                    // next debounced ack (dup-triggered resends guarantee one)
+                    // supersedes it. Floor advance needs log+state, which this
+                    // drain deliberately does not carry.
+                    progressed = true;
+                    sink.peer_seen(&peer.member).await;
+                    ack_all(held);
+                }
                 MlsDecode::EpochAdvanced => {
                     progressed = true;
                     ack_all(held);
@@ -969,18 +1043,22 @@ enum RecvEnd {
 /// merged stream of the peer's N redundant inbound queues. Resubscribe lives in
 /// the forwarders, so the merged channel closing (all forwarders gone) = engine
 /// gone; either [`RecvEnd`] is terminal here.
-async fn recv_consumer_task<S, K>(
+#[allow(clippy::too_many_arguments)]
+async fn recv_consumer_task<L, S, K>(
     peer: PeerLink,
     merged_rx: tokio::sync::mpsc::Receiver<crate::Delivery>,
+    me: MemberId,
+    log: L,
     store: S,
     sink: K,
     state: Arc<Mutex<TransportState>>,
     mls: Option<MlsChannel>,
 ) where
+    L: OutboxLog,
     S: StateStore,
     K: EngineSink,
 {
-    let _ = recv_task(peer, merged_rx, store, sink, state, mls).await;
+    let _ = recv_task(peer, merged_rx, me, log, store, sink, state, mls).await;
 }
 
 /// One inbound queue's **forwarder** (Track B Stage 2 + the Stage-B resubscribe
@@ -1099,15 +1177,18 @@ async fn recv_forwarder_task<T, K>(
 /// on acceptance; only copies of already-accepted messages ack
 /// immediately.
 #[allow(clippy::too_many_arguments)]
-async fn recv_task<S, K>(
+async fn recv_task<L, S, K>(
     peer: PeerLink,
     mut rx: tokio::sync::mpsc::Receiver<crate::Delivery>,
+    me: MemberId,
+    log: L,
     store: S,
     sink: K,
     state: Arc<Mutex<TransportState>>,
     mls: Option<MlsChannel>,
 ) -> RecvEnd
 where
+    L: OutboxLog,
     S: StateStore,
     K: EngineSink,
 {
@@ -1257,6 +1338,31 @@ where
                     // (the engine's `warm_leg`), never a probe — so no echo.
                     sink.peer_seen(&peer.member).await;
                     sink.probe_received(&peer.member).await;
+                    ack_all(acks);
+                }
+                MlsDecode::Ack(from, win) => {
+                    // only the LINK's member may move this link's floor — an
+                    // authenticated ack from anyone else is misrouted traffic
+                    if from != peer.member {
+                        tracing::warn!(peer = %peer.member, claimed = %from, "an ack's author does not match its link — dropped");
+                        ack_all(acks);
+                        continue;
+                    }
+                    tracing::debug!(peer = %peer.member, high = win.high, "MESHRX decode=ACK");
+                    // authenticated live traffic: stamps presence like a
+                    // keepalive (an acking peer is a breathing peer)
+                    sink.peer_seen(&peer.member).await;
+                    let old_floor = state
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.outbound.get(&peer.member).map(|c| c.acked_floor))
+                        .unwrap_or(0);
+                    // diff the window against OUR OWN log above the floor —
+                    // the tail is short in steady state (the floor tracks the
+                    // head), and the first-ever ack's full read happens once
+                    let envs = log.read_from(old_floor + 1).await;
+                    let floor = advance_acked_floor(&me, &envs, &win, old_floor);
+                    record_acked(&state, &store, &peer.member, floor).await;
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
@@ -1561,6 +1667,103 @@ mod tests {
             matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
             "a real envelope still classifies as Deliver"
         );
+    }
+
+    /// Delivery guarantee §4.3: an ACK frame decodes to `Ack` carrying the
+    /// MLS-authenticated sender and its window; a malformed payload after the
+    /// tag drops instead of mis-parsing.
+    #[test]
+    fn an_ack_frame_classifies_with_its_authenticated_sender() {
+        use ed25519_dalek::SigningKey;
+        let sk = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut founder = MlsMember::new(&sk(1), "founder").expect("founder");
+        let bob = MlsMember::new(&sk(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let recv = MlsChannel::new(bob);
+
+        let mut win = molt_core::AcceptedWindow::default();
+        assert!(win.accept(4));
+        assert!(win.accept(7));
+        let mut frame = crate::MESH_ACK_TAG.to_vec();
+        frame.extend_from_slice(&serde_json::to_vec(&win).expect("json"));
+        let ct = founder.encrypt(&frame).expect("encrypt ack");
+        match recv.decode(&ct) {
+            MlsDecode::Ack(from, got) => {
+                assert_eq!(from, "founder", "authenticated to the MLS credential");
+                assert_eq!(got.high, 7);
+                assert!(got.is_accepted(4) && !got.is_accepted(5));
+            }
+            other => panic!("an ack frame must classify as Ack, got {other:?}"),
+        }
+
+        // a mangled payload after the tag drops — never a mis-parse
+        let mut bad = crate::MESH_ACK_TAG.to_vec();
+        bad.extend_from_slice(b"{not json");
+        let ct = founder.encrypt(&bad).expect("encrypt bad ack");
+        assert!(
+            matches!(recv.decode(&ct), MlsDecode::Discard),
+            "a malformed ack payload is dropped"
+        );
+    }
+
+    /// §4.4: the acked floor advances over OWN accepted seqs, skips foreign
+    /// envelopes and `MlsCommit` seqs (ack-exempt), stops at the first own
+    /// unaccepted seq, and never crosses the reported high.
+    #[test]
+    fn the_acked_floor_walks_own_events_and_stops_at_the_first_gap() {
+        let win = {
+            let mut w = molt_core::AcceptedWindow::default();
+            for s in [2u64, 3, 8] {
+                assert!(w.accept(s));
+            }
+            w
+        };
+        let env = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+            seq,
+            ts: seq,
+            by: by.to_string(),
+            body,
+        };
+        let chat = |seq: u64, by: &str| {
+            env(
+                seq,
+                by,
+                WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    molt_core::MessageId([u8::try_from(seq).unwrap_or(9); 16]),
+                    by,
+                    "x",
+                    seq,
+                )),
+            )
+        };
+        // seq 2,3 = own accepted; 4 = foreign (never gates); 5 = own COMMIT
+        // (exempt, skipped); 8 = own accepted → floor lands on 8
+        let envs = vec![
+            chat(2, "me"),
+            chat(3, "me"),
+            chat(4, "peer"),
+            env(5, "me", WorkspaceEvent::MlsCommit { commit: "aa".to_string() }),
+            chat(8, "me"),
+        ];
+        assert_eq!(advance_acked_floor(&"me".to_string(), &envs, &win, 0), 8);
+
+        // an own UNACCEPTED seq stops the walk — later accepted ones wait
+        let envs = vec![chat(2, "me"), chat(6, "me"), chat(8, "me")];
+        assert_eq!(
+            advance_acked_floor(&"me".to_string(), &envs, &win, 0),
+            2,
+            "seq 6 is not accepted — the floor must not skip over it"
+        );
+
+        // nothing above the reported high ever counts
+        let envs = vec![chat(8, "me"), chat(9, "me")];
+        assert_eq!(advance_acked_floor(&"me".to_string(), &envs, &win, 5), 8);
     }
 
     /// Mesh verify-at-open: a solicited probe decodes to `Probe` (presence +

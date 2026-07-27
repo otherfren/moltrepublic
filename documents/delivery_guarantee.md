@@ -211,19 +211,23 @@ pub struct AckPayload { pub high: u64, pub bits: Vec<u64> }  // = AcceptedWindow
   (`send_ping`-Muster, net.rs:2555) — pro Paar, nie geloggt, nie relayed.
 - Der Payload beschreibt IMMER „was ich von DIR (dem Leg-Peer) akzeptiert
   habe" — pairwise, kein Map-over-Members nötig.
-- **Kadenz:** (a) debounced nach Accepts: spätestens `ACK_DEBOUNCE_SECS = 3`
-  nach dem ersten unbestätigten Accept eines Senders, höchstens einer pro
-  Debounce-Fenster; (b) huckepack auf jedem Keepalive (der ohnehin nur bei
-  Idle feuert): statt nacktem Tag `MESH_ACK_TAG`-Frame senden — ein
-  ACK-Frame IST ein Lebenszeichen (Empfänger stempelt Presence wie beim
-  Keepalive); (c) sofort bei Leg-up/Mesh-Rebuild (damit der Sender seinen
-  Resend-Umfang schnell trimmt).
-- **Decode** (supervisor.rs:121-165): neuer Arm `starts_with(MESH_ACK_TAG)` →
-  `MlsDecode::Ack(AckPayload)` → `EngineSink::ack_received(peer, payload)` →
-  neues INTERNAL `Command::NetAckReceived { from, high, bits, generation }`
-  (in die INTERNAL-Liste von `molt-mcp/src/lib.rs::tools()` — ein MCP-Agent
-  darf keine fremden ACKs fälschen; der Frame ist durch MLS-Decrypt ohnehin
-  authentifiziert, das Kommando entsteht nur netzseitig).
+- **Kadenz (BUILT, verfeinert):** (a) debounced nach JEDER Zustellung —
+  frisch ODER Duplikat (`ACK_DEBOUNCE_SECS = 3`, ein Frame pro Burst): ein
+  Dup heißt „mein voriges ACK ist verloren/spät" — das Re-ACK ist es, was
+  die Resend-Schleife des Senders beendet, darum braucht es KEINEN
+  periodischen ACK; (b) sofort-fällig bei Leg-up (Flush auf dem nächsten
+  Presence-Tick), damit ein rewindender Peer seinen Resend-Umfang trimmt,
+  bevor die Resends fließen. Das ursprünglich skizzierte Keepalive-Huckepack
+  ist GESTRICHEN: es hätte im Mixed-Mesh das Queue-Warming der Alt-Knoten
+  ersetzt (die den ACK-Tag discarden) und so falsche Deaf-Alarme erzeugt.
+- **Konsumption (BUILT, verfeinert): im SUPERVISOR, nicht in der Engine.**
+  Decode-Arm `strip_prefix(MESH_ACK_TAG)` → `MlsDecode::Ack(from, window)`;
+  der Recv-Loop pinnt `from == leg-Peer`, stempelt Presence, liest den
+  eigenen Log ab dem alten Floor (`OutboxLog::read_from` — der Supervisor
+  besitzt Log UND Cursor) und advanct `outbound[peer].acked_floor`
+  monoton (`advance_acked_floor`/`record_acked`, supervisor.rs). KEIN neues
+  `Command`, Co-Equality unberührt; ein regressiertes ACK kann den Floor
+  nie zurückziehen (kein Resend-Sturm bestätigter Historie).
 - Alt-Knoten: unbekannter Plaintext → `Discard`-Warnung, geackt — harmlos
   (G5); der Alt-Sender resendet nichts, verhält sich exakt wie heute.
 

@@ -51,6 +51,11 @@ const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 /// seconds, riding the presence tick; a clean close always flushes.
 const ACCEPT_SAVE_SECS: u64 = 5;
 
+/// Delivery-ACK debounce (§4.3): an accepted or duplicate delivery arms an
+/// ack to its sender no later than this many seconds out; a burst inside
+/// the window is answered by ONE ack frame.
+const ACK_DEBOUNCE_SECS: u64 = 3;
+
 /// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
 /// `net_link_down`) but from which **nothing** has been heard for longer than
@@ -1033,7 +1038,14 @@ impl State {
         // redelivery must never re-apply — the kind-level dedups below only
         // cover Chat and MeshAnnounced). Kind-level IGNORING further down is
         // semantics, not transport loss — it still counts as accepted.
-        if !self.accept_envelope(&from, envelope.seq) {
+        let fresh = self.accept_envelope(&from, envelope.seq);
+        // fresh OR duplicate, the sender is owed a (debounced) ACK: a dup
+        // usually means our previous ack was lost or lags, and re-acking is
+        // what stops its resend loop (§4.3). `or_insert` keeps the earliest
+        // deadline of a burst — one ack answers all of it.
+        let due = self.presence_now() + ACK_DEBOUNCE_SECS;
+        self.ack_due.entry(from.clone()).or_insert(due);
+        if !fresh {
             tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
             return Ok(Reply::Ack);
         }
@@ -2319,6 +2331,12 @@ impl State {
         if self.net_generation_current(generation) {
             self.net_link_down.remove(&member);
             self.mesh_up.insert(member.clone(), self.presence_now());
+            // delivery guarantee §4.3: a (re)established leg gets an ACK right
+            // away (the next presence tick flushes it), so a peer resuming or
+            // rewinding trims its resend range to what this node still misses
+            if self.accepted.contains_key(&member) {
+                self.ack_due.insert(member.clone(), self.presence_now());
+            }
             // verify-at-open (Fix A): probe this peer now (which also warms its
             // inbound queue so it cannot idle-expire) and arm the T_verify
             // one-shot — if the probes go unanswered the leg is re-established by
@@ -2534,9 +2552,73 @@ impl State {
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.
         self.maybe_compact(self.presence_now());
-        // delivery guarantee: persist a dirty accept window, debounced
+        // delivery guarantee: persist a dirty accept window, debounced,
+        // and flush the delivery ACKs that have come due
         self.save_accepted_if_due(self.presence_now());
+        self.flush_due_acks(self.presence_now());
         Ok(Reply::Ack)
+    }
+
+    /// Send every delivery ACK that has come due (§4.3): one control frame
+    /// per owed sender, carrying this node's accept window over THAT
+    /// sender's events. Best-effort off the actor (the send_ping path); a
+    /// lost ack is re-armed by the sender's next resend arriving as a dup.
+    pub(crate) fn flush_due_acks(&mut self, now: u64) {
+        if self.ack_due.is_empty() {
+            return;
+        }
+        let due: Vec<MemberId> = self
+            .ack_due
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(m, _)| m.clone())
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let (transport, group, peers) = {
+            let Some(net) = self.net.as_ref() else {
+                // no live mesh to ack over — drop the deadlines (the sender's
+                // resend after the mesh returns re-arms them)
+                for m in &due {
+                    self.ack_due.remove(m);
+                }
+                return;
+            };
+            if !net.is_real() {
+                for m in &due {
+                    self.ack_due.remove(m);
+                }
+                return;
+            }
+            let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc())
+            else {
+                return;
+            };
+            let peers: Vec<PeerLink> =
+                net.mesh().iter().filter_map(PeerLink::from_mesh).collect();
+            (transport, group, peers)
+        };
+        for member in due {
+            self.ack_due.remove(&member);
+            let Some(window) = self.accepted.get(&member) else {
+                continue; // nothing ever accepted — nothing to report
+            };
+            let Some(peer) = peers.iter().find(|p| p.member == member) else {
+                continue; // no leg to this member right now
+            };
+            let Ok(mut payload) = serde_json::to_vec(window) else {
+                continue;
+            };
+            let mut frame = molt_net::MESH_ACK_TAG.to_vec();
+            frame.append(&mut payload);
+            tokio::spawn(Self::send_ping(
+                transport.clone(),
+                group.clone(),
+                peer.clone(),
+                frame,
+            ));
+        }
     }
 
     /// Whether a mesh keepalive round is due: the idle gate (Stage 2). A
@@ -2586,19 +2668,21 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Encrypt one control `tag` on the SHARED group and send it onto `peer`'s
-    /// inbound queue (best-effort). The single send path for both control
-    /// frames: [`molt_net::MESH_KEEPALIVE_TAG`] (warm the queue / prove liveness)
-    /// and [`molt_net::MESH_PROBE_TAG`] (verify-at-open: also solicit a warm-back).
+    /// Encrypt one control `payload` on the SHARED group and send it onto
+    /// `peer`'s inbound queue (best-effort). The single send path for the
+    /// control frames: [`molt_net::MESH_KEEPALIVE_TAG`] (warm the queue /
+    /// prove liveness), [`molt_net::MESH_PROBE_TAG`] (verify-at-open: also
+    /// solicit a warm-back) and [`molt_net::MESH_ACK_TAG`]`‖window` (the
+    /// delivery guarantee's ACK, §4.3).
     async fn send_ping(
         transport: crate::founding::RitualTransport,
         group: Arc<Mutex<molt_net::MlsMember>>,
         peer: PeerLink,
-        tag: &'static [u8],
+        tag: Vec<u8>,
     ) {
         // one ratchet advance per ping, on the shared group (same Arc the
         // supervisor uses — locked in sequence)
-        let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(tag).ok()) else {
+        let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(&tag).ok()) else {
             tracing::debug!(member = %peer.member, "encrypting the mesh ping failed");
             return;
         };
@@ -2628,7 +2712,7 @@ impl State {
         group: Arc<Mutex<molt_net::MlsMember>>,
         peer: PeerLink,
     ) {
-        tokio::spawn(Self::send_ping(transport, group, peer, molt_net::MESH_KEEPALIVE_TAG));
+        tokio::spawn(Self::send_ping(transport, group, peer, molt_net::MESH_KEEPALIVE_TAG.to_vec()));
     }
 
     /// Warm one peer's inbound queue immediately (mesh self-heal): send a
@@ -2698,11 +2782,11 @@ impl State {
                 transport.clone(),
                 group.clone(),
                 peer.clone(),
-                molt_net::MESH_PROBE_TAG,
+                molt_net::MESH_PROBE_TAG.to_vec(),
             )
             .await;
             tokio::time::sleep(half).await;
-            Self::send_ping(transport, group, peer, molt_net::MESH_PROBE_TAG).await;
+            Self::send_ping(transport, group, peer, molt_net::MESH_PROBE_TAG.to_vec()).await;
             tokio::time::sleep(half).await;
             let (tx, _rx) = oneshot::channel();
             let _ = cmd_tx
@@ -3389,6 +3473,35 @@ mod tests {
         // if the ONLY stale leg is offline, nothing rotates
         st.established_at.insert("cid".to_string(), now - 10); // cid fresh
         assert_eq!(st.stale_leg_to_rotate(now), None, "an offline stale leg is not rotated");
+    }
+
+    /// §4.3: the ACK flush takes only DUE deadlines (future ones stay armed),
+    /// and a (re)established leg arms an immediate ack only when there is a
+    /// window to report.
+    #[test]
+    fn the_ack_flush_takes_only_due_deadlines_and_link_up_arms_one() {
+        let mut st = presence_fixture();
+        let win = {
+            let mut w = molt_core::AcceptedWindow::default();
+            assert!(w.accept(3));
+            w
+        };
+        st.accepted.insert("bob".to_string(), win);
+        st.ack_due.insert("bob".to_string(), T);
+        st.ack_due.insert("cid".to_string(), T + 100);
+        st.flush_due_acks(T + 1);
+        assert!(
+            !st.ack_due.contains_key("bob"),
+            "the due deadline is consumed (no mesh here: dropped — resends re-arm)"
+        );
+        assert!(st.ack_due.contains_key("cid"), "a future deadline stays armed");
+
+        // link-up arms an immediate ack — but only with a window to report
+        st.ack_due.clear();
+        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
+        assert!(st.ack_due.is_empty(), "no window for cid — nothing to report");
+        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
+        assert_eq!(st.ack_due.get("bob"), Some(&T), "bob's window arms a due-now ack");
     }
 
     /// V1 (delivery_guarantee.md): a broadcast rotate announce that carries no

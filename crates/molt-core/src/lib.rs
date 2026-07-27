@@ -1392,6 +1392,21 @@ pub struct OutboundCursor {
     /// Wire messages sent on this link so far (each message carries the
     /// next value — the receiver's dedup/order key).
     pub wire_seq: u64,
+    /// Delivery guarantee §4.4: every OWN wire-relevant seq at or below this
+    /// is confirmed ENGINE-accepted by the peer (advanced from its ACK
+    /// frames against our own log) — the rewind target on every leg
+    /// re-establishment. Additive; 0 until the first ack.
+    #[serde(default)]
+    pub acked_floor: u64,
+    /// Whether an ACK from this peer was ever received (the mixed-version
+    /// gate §4.8: rewind/resend semantics activate only for proven-updated
+    /// peers — an old peer keeps exactly the pre-guarantee behavior).
+    #[serde(default)]
+    pub ack_seen: bool,
+    /// Bumped on every rewind: salts the resend msg ids (§4.5) so the
+    /// receiver's completed-id ring can never swallow a resend unread.
+    #[serde(default)]
+    pub resend_epoch: u32,
 }
 
 /// The receive-side accept window (delivery guarantee, `documents/

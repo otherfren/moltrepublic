@@ -564,6 +564,12 @@ pub(crate) struct State {
     /// Whether [`Self::accepted`] changed since it was last persisted (the
     /// debounced save on the presence tick checks this).
     pub(crate) accepted_dirty: bool,
+    /// Per SENDER: when a delivery ACK to them is due (`member →
+    /// presence_now deadline`). Every accepted OR duplicate delivery arms
+    /// this (a dup means the previous ack was lost or lags — re-acking
+    /// closes that loop); the presence tick flushes what is due. Runtime-
+    /// only, workspace scope.
+    pub(crate) ack_due: std::collections::HashMap<MemberId, u64>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// Members whose sends keep failing (outbox backoff): their pill is
@@ -830,6 +836,7 @@ impl State {
             accepted: std::collections::BTreeMap::new(),
             accepted_dirty: false,
             accepted_saved_at: 0,
+            ack_due: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),

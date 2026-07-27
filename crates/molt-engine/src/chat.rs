@@ -662,6 +662,28 @@ mod tests {
         );
     }
 
+    /// §4.3: every authenticated wire delivery — fresh or duplicate — arms a
+    /// debounced ACK to its sender (a dup means the previous ack was lost;
+    /// re-acking is what stops the sender's resend loop).
+    #[test]
+    fn a_wire_delivery_arms_a_debounced_ack_even_for_duplicates() {
+        let mut st = plain_state();
+        let id = MessageId([33u8; 16]);
+        land_chat(&mut st, 1, id, "peer-1", "ack me");
+        let body = WorkspaceEvent::ChatReacted {
+            index: 0,
+            id: Some(id),
+            emoji: "👍".to_string(),
+            by: "peer-2".to_string(),
+            op: Some(molt_core::ReactOp::Add),
+        };
+        deliver(&mut st, "peer-2", 5, body.clone());
+        assert!(st.ack_due.contains_key("peer-2"), "a fresh delivery arms an ack");
+        st.ack_due.clear();
+        deliver(&mut st, "peer-2", 5, body);
+        assert!(st.ack_due.contains_key("peer-2"), "a duplicate re-arms the ack");
+    }
+
     // ---- read receipts (Lesebestätigung) ---------------------------------
 
     /// Apply a read receipt straight through the applier (the recorded path).

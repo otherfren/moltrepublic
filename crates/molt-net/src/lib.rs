@@ -89,6 +89,17 @@ pub const MESH_KEEPALIVE_TAG: &[u8] = b"\x00molt-mesh-keepalive-v1";
 /// for control frames, and an unknown one decodes to a dropped no-op.
 pub const MESH_PROBE_TAG: &[u8] = b"\x00molt-mesh-probe-v1";
 
+/// The transport-level **delivery ACK** tag (delivery guarantee §4.3). A
+/// NUL-prefixed control frame carried as an MLS application ciphertext —
+/// never a `WorkspaceEvent`, never logged or chained. The frame plaintext is
+/// this tag followed by the JSON of a [`molt_core::AcceptedWindow`]: "what I
+/// (the sender of this frame) have engine-accepted OF YOURS". The receiving
+/// supervisor advances its `acked_floor` for that peer against its OWN log
+/// and trims/rewinds resends with it; an ack also stamps presence like a
+/// keepalive. An old node drops it as an unknown control tag — harmless,
+/// the guarantee simply stays inactive toward it (§4.8).
+pub const MESH_ACK_TAG: &[u8] = b"\x00molt-mesh-ack-v1";
+
 /// Default inbound-queue redundancy for the loopback `full_mesh` and any
 /// transport that doesn't override [`Transport::redundancy`] — **1** (a
 /// single-queue leg). Real redundancy is transport-driven: a multi-server
