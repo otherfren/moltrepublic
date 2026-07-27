@@ -46,6 +46,11 @@ use crate::{Envelope, State};
 /// `State::spawn_mesh_extension`).
 const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 
+/// Debounce for persisting the receive-side accept windows (delivery
+/// guarantee §4.7): at most one `transport.state` merge per this many
+/// seconds, riding the presence tick; a clean close always flushes.
+const ACCEPT_SAVE_SECS: u64 = 5;
+
 /// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
 /// `net_link_down`) but from which **nothing** has been heard for longer than
@@ -685,6 +690,15 @@ impl State {
     /// **seals `transport.state` on the merge** and ignores any later save, so
     /// the merge is authoritative regardless of that race.
     pub(crate) fn persist_net_crypto_on_close(&mut self) {
+        // flush a dirty accept window FIRST: the writer processes messages in
+        // order, and the merge below SEALS `transport.state` against later
+        // saves — enqueued before it, this one still lands (§4.7)
+        if self.accepted_dirty {
+            if let Some(active) = self.active.as_ref() {
+                active.handle.save_accepted(self.accepted.clone());
+                self.accepted_dirty = false;
+            }
+        }
         let Some(net) = self.net.take() else {
             return;
         };
@@ -960,6 +974,35 @@ impl State {
     /// ack-and-skip (returning an error would wedge the supervisor on a
     /// poison event); T1's wire scope is [`crosses_wire`] — everything
     /// else is logged and ignored until MLS lands (T2).
+    /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
+    /// the accept point's bookkeeping). `false` = the sender's window already
+    /// held it: the envelope is a duplicate/resend and the caller drops it
+    /// (G2). Freshness dirties the window for the debounced persist.
+    pub(crate) fn accept_envelope(&mut self, from: &MemberId, seq: u64) -> bool {
+        let fresh = self.accepted.entry(from.clone()).or_default().accept(seq);
+        if fresh {
+            self.accepted_dirty = true;
+        }
+        fresh
+    }
+
+    /// Debounced accept-window persist (rides the presence tick): at most one
+    /// `transport.state` merge per [`ACCEPT_SAVE_SECS`], only when dirty.
+    /// Fire-and-forget like the supervisor's cursor saves — a lost save only
+    /// regresses the window, which resends + re-dedup absorb (§4.7).
+    pub(crate) fn save_accepted_if_due(&mut self, now: u64) {
+        if !self.accepted_dirty
+            || now.saturating_sub(self.accepted_saved_at) < ACCEPT_SAVE_SECS
+        {
+            return;
+        }
+        if let Some(active) = self.active.as_ref() {
+            active.handle.save_accepted(self.accepted.clone());
+            self.accepted_dirty = false;
+            self.accepted_saved_at = now;
+        }
+    }
+
     pub(crate) fn cmd_net_delivered(
         &mut self,
         from: MemberId,
@@ -980,6 +1023,18 @@ impl State {
         }
         if envelope.by != from {
             tracing::warn!(%from, claimed = %envelope.by, "dropping a delivery whose author does not match its link");
+            return Ok(Reply::Ack);
+        }
+        // delivery guarantee G2/G3 (delivery_guarantee.md §4.2): THE accept
+        // point. Past the generation + roster gates the envelope counts as
+        // engine-accepted — mark it in the sender's window (that mark is what
+        // the ACK frame reports back, and resends trim against it), and drop
+        // it here if the window already holds it (a mesh-rebuild resend /
+        // redelivery must never re-apply — the kind-level dedups below only
+        // cover Chat and MeshAnnounced). Kind-level IGNORING further down is
+        // semantics, not transport loss — it still counts as accepted.
+        if !self.accept_envelope(&from, envelope.seq) {
+            tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
             return Ok(Reply::Ack);
         }
         match envelope.body {
@@ -2479,6 +2534,8 @@ impl State {
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.
         self.maybe_compact(self.presence_now());
+        // delivery guarantee: persist a dirty accept window, debounced
+        self.save_accepted_if_due(self.presence_now());
         Ok(Reply::Ack)
     }
 

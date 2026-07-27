@@ -1394,6 +1394,116 @@ pub struct OutboundCursor {
     pub wire_seq: u64,
 }
 
+/// The receive-side accept window (delivery guarantee, `documents/
+/// delivery_guarantee.md` §4.2): per SENDER, which of that sender's log seqs
+/// this node's engine has accepted. It is both the envelope-level dedup (a
+/// resent envelope must never re-apply — G2) and the payload of the mesh ACK
+/// frame the sender trims its resend range with. `high` is the highest
+/// accepted seq; `bits` marks the [`ACCEPT_WINDOW_BITS`] seqs directly below
+/// it (bit offset `high - 1 - seq`, little-endian across `u64` words). Seqs
+/// below the window read as accepted (aged out — W is large against the
+/// resend cadence, so nothing legit lingers there unconfirmed). The bit
+/// positions live in the sender's LOG seq space, which contains its own
+/// events only sparsely — a zero bit is "not seen", never by itself "lost";
+/// only the sender can diff it against what it actually sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedWindow {
+    /// Highest accepted seq from this sender (0 = nothing accepted yet).
+    #[serde(default)]
+    pub high: u64,
+    /// Accept marks for the `ACCEPT_WINDOW_BITS` seqs below `high`; missing
+    /// or short vectors read as all-zero (serde-additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bits: Vec<u64>,
+}
+
+/// Width of [`AcceptedWindow`]: how many seqs below `high` keep explicit
+/// accept marks before aging out as accepted.
+pub const ACCEPT_WINDOW_BITS: u64 = 1024;
+const ACCEPT_WINDOW_WORDS: usize = 16;
+const _: () = assert!(ACCEPT_WINDOW_WORDS * 64 == 1024, "words must cover the window");
+
+/// Split an in-window bit offset into its word index and bit position.
+/// Callers guard `offset < ACCEPT_WINDOW_BITS`, so the conversion is total;
+/// the fallback only defends against a future guard slip (reads miss, writes
+/// no-op — never a panic, never a wrong bit).
+fn window_word_bit(offset: u64) -> (usize, u64) {
+    (usize::try_from(offset / 64).unwrap_or(usize::MAX), offset % 64)
+}
+
+impl AcceptedWindow {
+    /// Whether `seq` counts as accepted: the high mark, a marked bit inside
+    /// the window, or anything below the window (aged out).
+    pub fn is_accepted(&self, seq: u64) -> bool {
+        if self.high == 0 || seq > self.high {
+            return false;
+        }
+        if seq == self.high {
+            return true;
+        }
+        let offset = self.high - 1 - seq;
+        if offset >= ACCEPT_WINDOW_BITS {
+            return true; // below the window: treated accepted (aged out)
+        }
+        let (w, b) = window_word_bit(offset);
+        self.bits.get(w).is_some_and(|word| word & (1u64 << b) != 0)
+    }
+
+    /// Record `seq` as accepted. `true` = fresh (apply it), `false` = already
+    /// accepted (a duplicate — the caller drops the envelope).
+    pub fn accept(&mut self, seq: u64) -> bool {
+        if self.is_accepted(seq) {
+            return false;
+        }
+        if seq > self.high {
+            let shift = seq - self.high;
+            self.shift_up(shift);
+            // the previous high becomes a below-high mark — unless there was
+            // none (high 0) or it just aged past the window
+            if self.high > 0 && shift <= ACCEPT_WINDOW_BITS {
+                self.set(shift - 1);
+            }
+            self.high = seq;
+        } else {
+            self.set(self.high - 1 - seq);
+        }
+        true
+    }
+
+    /// Set the bit at `offset` (< [`ACCEPT_WINDOW_BITS`]).
+    fn set(&mut self, offset: u64) {
+        if self.bits.len() < ACCEPT_WINDOW_WORDS {
+            self.bits.resize(ACCEPT_WINDOW_WORDS, 0);
+        }
+        let (w, b) = window_word_bit(offset);
+        if let Some(word) = self.bits.get_mut(w) {
+            *word |= 1u64 << b;
+        }
+    }
+
+    /// Slide the window up by `by` seqs: every mark's offset grows by `by`;
+    /// marks pushed past the window edge age out (they then READ as accepted).
+    fn shift_up(&mut self, by: u64) {
+        if self.bits.len() < ACCEPT_WINDOW_WORDS {
+            self.bits.resize(ACCEPT_WINDOW_WORDS, 0);
+        }
+        if by >= ACCEPT_WINDOW_BITS {
+            self.bits.iter_mut().for_each(|w| *w = 0);
+            return;
+        }
+        let (words, bits) = window_word_bit(by);
+        for w in (0..ACCEPT_WINDOW_WORDS).rev() {
+            let lower = if w >= words { self.bits[w - words] } else { 0 };
+            let carry = if bits > 0 && w > words {
+                self.bits[w - words - 1] >> (64 - bits)
+            } else {
+                0
+            };
+            self.bits[w] = if bits > 0 { (lower << bits) | carry } else { lower };
+        }
+    }
+}
+
 /// One extra redundant queue on a [`MeshLink`] (Track B Stage 2, N-redundancy):
 /// a queue's server + id, sharing the link's single per-direction wrap key
 /// (`snd_wrap`/`rcv_wrap`). The primary (index 0) queue stays the scalar
@@ -1499,6 +1609,12 @@ pub struct TransportState {
     /// chain-aware founding.
     #[serde(default)]
     pub identity_sk: Option<Vec<u8>>,
+    /// Per SENDER: which of that sender's log seqs this node's engine has
+    /// accepted ([`AcceptedWindow`] — the delivery guarantee's envelope dedup
+    /// and ACK payload). Additive: an old `transport.state` reads as empty ⇒
+    /// everything arriving is fresh, exactly as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted: BTreeMap<MemberId, AcceptedWindow>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
@@ -4202,6 +4318,95 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- AcceptedWindow (delivery guarantee §4.2) -------------------------
+
+    /// Basics: nothing accepted at birth; a fresh seq accepts once and dups
+    /// after; a forward jump marks the previous high as accepted below it.
+    #[test]
+    fn accepted_window_accepts_once_and_marks_the_old_high() {
+        let mut w = AcceptedWindow::default();
+        assert!(!w.is_accepted(1), "nothing accepted at birth");
+        assert!(w.accept(5), "first sight is fresh");
+        assert!(!w.accept(5), "the high itself dups");
+        assert!(w.accept(9), "forward jump is fresh");
+        assert!(w.is_accepted(5), "the old high stays accepted after the jump");
+        assert!(!w.is_accepted(7), "an unseen seq between marks is not accepted");
+        assert!(w.accept(7), "an in-window fill is fresh");
+        assert!(!w.accept(7), "and dups after");
+        assert!(!w.is_accepted(6), "its neighbors stay unaccepted");
+        assert!(!w.is_accepted(10), "above the high is never accepted");
+    }
+
+    /// Aging: seqs pushed below the window read as accepted (conservative —
+    /// W is large against the resend cadence), and `accept` refuses them.
+    #[test]
+    fn accepted_window_ages_out_below_the_window() {
+        let mut w = AcceptedWindow::default();
+        assert!(w.accept(1));
+        assert!(w.accept(2 + ACCEPT_WINDOW_BITS), "jump the window forward");
+        assert!(w.is_accepted(1), "aged out reads as accepted");
+        assert!(!w.accept(1), "and cannot be re-accepted");
+        // seq 2 sits exactly at the window's edge (offset = W - 1): its mark
+        // survived the shift as a real bit — but it was never accepted
+        assert!(!w.is_accepted(2), "the oldest in-window seq is honest");
+        assert!(w.accept(2), "and still fillable");
+    }
+
+    /// Shifts across word boundaries (1, 63, 64, 65) keep every mark exact.
+    #[test]
+    fn accepted_window_shifts_keep_marks_across_word_boundaries() {
+        for step in [1u64, 63, 64, 65, 127, 128] {
+            let mut w = AcceptedWindow::default();
+            let mut expected = Vec::new();
+            let mut seq = 1;
+            for _ in 0..6 {
+                assert!(w.accept(seq), "fresh at step {step}");
+                expected.push(seq);
+                seq += step;
+            }
+            for &s in &expected {
+                assert!(w.is_accepted(s), "seq {s} survives shifting by {step}");
+            }
+            // spot-check unseen neighbors stay unaccepted (in-window only)
+            if step > 1 {
+                assert!(
+                    !w.is_accepted(expected[4] + 1),
+                    "unseen neighbor at step {step} stays unaccepted"
+                );
+            }
+        }
+    }
+
+    /// A jump wider than the whole window wipes every mark (all below read
+    /// as aged-accepted) — no stale bit may survive under a new offset.
+    #[test]
+    fn accepted_window_survives_a_jump_wider_than_itself() {
+        let mut w = AcceptedWindow::default();
+        for s in 1..=10 {
+            assert!(w.accept(s));
+        }
+        let far = 10 + 3 * ACCEPT_WINDOW_BITS;
+        assert!(w.accept(far));
+        assert_eq!(w.high, far);
+        assert!(w.is_accepted(10), "below the window: aged-accepted");
+        // everything inside the fresh window is honestly unaccepted
+        assert!(!w.is_accepted(far - 1));
+        assert!(!w.is_accepted(far - ACCEPT_WINDOW_BITS + 1));
+    }
+
+    /// Serde-additivity: an old `transport.state` (no `accepted`, empty
+    /// `bits`) deserializes to a working window.
+    #[test]
+    fn accepted_window_tolerates_missing_fields() {
+        let w: AcceptedWindow =
+            serde_json::from_str("{\"high\":7}").expect("short form parses");
+        assert!(w.is_accepted(7));
+        assert!(!w.is_accepted(6), "no bits = nothing marked below the high");
+        let ts: TransportState = serde_json::from_str("{\"version\":2}")
+            .expect("an old transport.state parses");
+        assert!(ts.accepted.is_empty(), "additive default");
+    }
 
     /// The single source of truth for the "which network am I on" display
     /// label: only a configured "tor" reads as tor; "none", the legacy

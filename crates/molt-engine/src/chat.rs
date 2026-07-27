@@ -627,6 +627,41 @@ mod tests {
         );
     }
 
+    /// Delivery guarantee G2 (delivery_guarantee.md §4.2): the wire admits
+    /// each ENVELOPE exactly once per (sender, seq) — a mesh-rebuild resend
+    /// of the same reaction must not toggle it back off (ChatReacted has no
+    /// id-level dedup of its own; only the accept window catches this).
+    /// A REAL second toggle (a new envelope, higher seq) must still work.
+    #[test]
+    fn a_resent_reaction_envelope_does_not_toggle_the_reaction_off() {
+        let mut st = plain_state();
+        let id = MessageId([31u8; 16]);
+        land_chat(&mut st, 1, id, "peer-1", "react to me");
+        let body = WorkspaceEvent::ChatReacted {
+            index: 0,
+            id: Some(id),
+            emoji: "👍".to_string(),
+            by: "peer-2".to_string(),
+            op: None,
+        };
+        deliver(&mut st, "peer-2", 7, body.clone());
+        assert_eq!(st.chat[0].reactions["👍"], vec!["peer-2".to_string()]);
+        // the SAME envelope again (a resend after a mesh rebuild)
+        deliver(&mut st, "peer-2", 7, body.clone());
+        assert_eq!(
+            st.chat[0].reactions.get("👍").map(|v| v.as_slice()),
+            Some(["peer-2".to_string()].as_slice()),
+            "a duplicate envelope must not re-toggle the reaction"
+        );
+        // a genuine second toggle arrives as a NEW envelope and still lands
+        deliver(&mut st, "peer-2", 8, body);
+        assert!(
+            st.chat[0].reactions.is_empty(),
+            "a fresh envelope still toggles off: {:?}",
+            st.chat[0].reactions
+        );
+    }
+
     // ---- read receipts (Lesebestätigung) ---------------------------------
 
     /// Apply a read receipt straight through the applier (the recorded path).

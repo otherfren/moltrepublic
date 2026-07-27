@@ -2078,6 +2078,12 @@ enum WriterMsg {
     ReadFrom(u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
     /// Persist `transport.state` (atomic rewrite).
     SaveTransport(TransportState),
+    /// Merge the engine's receive-side accept windows (delivery guarantee
+    /// §4.2/§4.7) into `transport.state`, touching nothing else. Its own
+    /// message (not part of `SaveTransport`) because the ENGINE owns the
+    /// windows while the SUPERVISOR owns the cursors — each overlays only
+    /// its own fields, so neither clobbers the other.
+    SaveAccepted(std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>),
     /// Merge the runtime crypto (MLS snapshot + queue creds) into the CURRENT
     /// `transport.state` — read-modify-write on the writer thread, so it
     /// preserves the outbox/inbound cursors the supervisor left. Acks when
@@ -2232,6 +2238,23 @@ impl StorageHandle {
     }
 
     /// Queue a `transport.state` rewrite (fire-and-forget, like prefs).
+    /// Persist the engine's receive-side accept windows (delivery guarantee
+    /// §4.7), merged into `transport.state` without touching the cursors or
+    /// crypto. Fire-and-forget like [`Self::save_transport_state`]: a lost
+    /// save only regresses the windows, which resends + re-dedup absorb.
+    pub fn save_accepted(
+        &self,
+        accepted: std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>,
+    ) {
+        match self.tx.try_send(WriterMsg::SaveAccepted(accepted)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!("writer queue full — dropping an accept-window save");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
     /// A full writer queue drops the save with a warning: stale cursors
     /// only cost resends, which the peers' dedup absorbs — better than
     /// blocking the transport on a struggling disk.
@@ -2494,6 +2517,21 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.inbound = state.inbound;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveAccepted(accepted)) => {
+                        // same posture as SaveTransport: after the clean-close
+                        // merge sealed the file, the close path's own flush has
+                        // already landed (enqueued before the merge) — ignore
+                        // stragglers rather than disturb the merged crypto
+                        if crypto_sealed {
+                            tracing::debug!("ignoring a post-merge accept-window save");
+                        } else {
+                            let mut ts = ws.read_transport_state();
+                            ts.accepted = accepted;
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "accept-window write", &e);
                             }
                         }
                     }
@@ -3588,6 +3626,62 @@ mod tests {
             "outbound cursor preserved through the merge"
         );
         assert_eq!(ts.inbound.get("bob").copied(), Some(5), "inbound cursor preserved");
+    }
+
+    /// Delivery guarantee §4.7: the ENGINE-owned accept windows and the
+    /// SUPERVISOR-owned cursors overlay only their own fields — a cursor
+    /// save never clobbers the windows, a window save never clobbers the
+    /// cursors, and the clean-close flush (enqueued before the merge) lands
+    /// while a post-seal straggler is ignored.
+    #[test]
+    fn accept_window_saves_and_cursor_saves_do_not_clobber_each_other() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+
+        // the engine persists an accept window for bob…
+        let mut win = molt_core::AcceptedWindow::default();
+        assert!(win.accept(41));
+        assert!(win.accept(43));
+        let mut accepted = std::collections::BTreeMap::new();
+        accepted.insert("bob".to_string(), win.clone());
+        handle.save_accepted(accepted.clone());
+
+        // …then the supervisor saves cursors (its clone knows no windows)
+        let mut outbound = std::collections::BTreeMap::new();
+        outbound.insert(
+            "bob".to_string(),
+            molt_core::OutboundCursor { log_seq: 7, wire_seq: 3 },
+        );
+        handle.save_transport_state(TransportState {
+            outbound,
+            ..TransportState::default()
+        });
+
+        // …the engine flushes a GROWN window right before the close merge
+        assert!(win.accept(44));
+        accepted.insert("bob".to_string(), win);
+        handle.save_accepted(accepted);
+        handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"creds".to_vec()));
+        // a straggler after the seal is ignored
+        handle.save_accepted(std::collections::BTreeMap::new());
+        handle.close(None);
+
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        let ts = ws.read_transport_state();
+        let bob = ts.accepted.get("bob").expect("bob's window survived");
+        assert_eq!(bob.high, 44, "the flushed (grown) window landed");
+        assert!(bob.is_accepted(41) && bob.is_accepted(43));
+        assert!(!bob.is_accepted(42), "unseen seq stays unaccepted");
+        assert_eq!(
+            ts.outbound.get("bob").map(|c| c.log_seq),
+            Some(7),
+            "cursor save survived the window saves"
+        );
+        assert_eq!(ts.mls.as_deref(), Some(b"mls-blob".as_slice()), "merge landed");
     }
 
     /// **A live mesh-extension merge must survive later cursor saves.** The

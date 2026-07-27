@@ -585,6 +585,13 @@ impl State {
         } else {
             molt_core::TransportState::default()
         };
+        // delivery guarantee §4.2: resume the receive-side accept windows
+        // (open_stored_workspace already reset the workspace-scoped state, so
+        // this load survives). An old transport.state reads as empty — every
+        // arriving envelope is fresh, exactly the pre-guarantee behavior.
+        self.accepted = transport_state.accepted.clone();
+        self.accepted_dirty = false;
+        self.accepted_saved_at = 0;
         // the transport context changes with the workspace: tear the old mesh
         // down and abandon any still-running founder bootstrap for the workspace
         // we are leaving (its ready would be ws-id-rejected anyway; this reaps

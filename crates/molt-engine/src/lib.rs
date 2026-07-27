@@ -555,6 +555,17 @@ pub(crate) struct State {
     /// the window is ignored — one rotation per member per minute is ample,
     /// and it caps the churn a misbehaving member can inflict.
     pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
+    /// Per SENDER: which of that sender's log seqs this engine has accepted
+    /// (delivery guarantee §4.2 — the envelope-level dedup twin of the mesh
+    /// ACK payload). Loaded from `transport.state` at open, mutated on every
+    /// authenticated wire delivery, persisted debounced + at close. Active-
+    /// workspace scope — [`State::reset_workspace_state`] clears it.
+    pub(crate) accepted: std::collections::BTreeMap<MemberId, molt_core::AcceptedWindow>,
+    /// Whether [`Self::accepted`] changed since it was last persisted (the
+    /// debounced save on the presence tick checks this).
+    pub(crate) accepted_dirty: bool,
+    /// `presence_now` of the last persisted accept-window save (debounce).
+    pub(crate) accepted_saved_at: u64,
     /// Members whose sends keep failing (outbox backoff): their pill is
     /// pinned unreachable (state 2) regardless of how fresh the last-seen
     /// stamp is, until the next real sighting clears the pin. Runtime-only,
@@ -816,6 +827,9 @@ impl State {
             recovery_tickets: std::collections::HashSet::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
+            accepted: std::collections::BTreeMap::new(),
+            accepted_dirty: false,
+            accepted_saved_at: 0,
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),

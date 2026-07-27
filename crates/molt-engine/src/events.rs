@@ -556,6 +556,11 @@ impl State {
         self.recovery_tickets.clear();
         self.recovery_mesh_window.clear();
         self.mesh_extension_at.clear();
+        // the accept windows belong to the OLD workspace's senders — leaking
+        // them would dedup-drop the NEXT workspace's fresh envelopes
+        self.accepted.clear();
+        self.accepted_dirty = false;
+        self.accepted_saved_at = 0;
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.net_unreachable.clear();
