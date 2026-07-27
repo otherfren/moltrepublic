@@ -115,6 +115,28 @@ impl MlsChannel {
         Some(c)
     }
 
+    /// Drop cached ciphertexts for every seq ABOVE `floor` (rewind eviction,
+    /// delivery guarantee §4.5): a resend must be a FRESH encryption at the
+    /// current ratchet position/epoch — resending original bytes the peer
+    /// already decrypted would be MLS-replay-rejected forever, and bytes
+    /// encrypted at a left-behind epoch can never decrypt again.
+    fn evict_above(&self, floor: u64) {
+        if let Ok(mut c) = self.cache.lock() {
+            let _ = c.split_off(&(floor + 1));
+        }
+    }
+
+    /// Drop cached ciphertexts at or BELOW `floor` (memory bound, §4.5):
+    /// once every acking peer confirmed a seq, its ciphertext can never be
+    /// needed again. A non-acking (old) peer that still needs such a seq
+    /// just pays one re-encryption — never a correctness cost.
+    fn evict_at_or_below(&self, floor: u64) {
+        if let Ok(mut c) = self.cache.lock() {
+            let keep = c.split_off(&(floor + 1));
+            *c = keep;
+        }
+    }
+
     /// Decrypt one inbound MLS message, classified for the recv loop's ack
     /// discipline. MLS itself rejects replays, so there is no separate dedup
     /// window here.
@@ -205,6 +227,19 @@ enum MlsDecode {
 /// Out-of-order inbound messages buffered per peer before the incoming
 /// excess is dropped back onto the transport's redelivery.
 const REORDER_BUFFER_MAX: usize = 512;
+
+/// Delivery guarantee §4.4: how long an unacked tail may sit (with a live,
+/// proven-acking leg) before the outbox rewinds and re-offers it.
+const RESEND_AFTER_SECS: u64 = 30;
+
+/// Cap for the per-peer resend backoff (doubling from
+/// [`RESEND_AFTER_SECS`]); resends never stop inside the horizon, they only
+/// slow down to this pace.
+const RESEND_MAX_BACKOFF_SECS: u64 = 600;
+
+/// After this many rewinds without any floor progress the stall is reported
+/// on the health surface (loud, honest — G4); resending continues.
+const RESEND_GIVEUP_REWINDS: u32 = 8;
 
 /// What one wire message carries: the per-link wire seq (the receiver's
 /// order/dedup key) and the sender's original envelope. From T2 on this
@@ -498,7 +533,15 @@ where
     let stop = Arc::new(Notify::new());
     let stopped = stop.clone();
     tokio::spawn(async move {
-        let state = Arc::new(Mutex::new(store.load().await));
+        let mut loaded = store.load().await;
+        // delivery guarantee §4.4, THE rewind rule: every supervisor build
+        // (reopen, rotate adopt, mesh extension, recovery fold) re-offers each
+        // proven-acking peer its unacked tail — the outbox then re-reads from
+        // the floor and re-encrypts (this build's MLS cache starts empty)
+        // under a fresh resend epoch (fresh msg ids, §4.5). Peers that never
+        // acked (old nodes) keep exactly the pre-guarantee cursor behavior.
+        rewind_unacked(&mut loaded);
+        let state = Arc::new(Mutex::new(loaded));
         let mut children = JoinSet::new();
         // Every outbox task first: they park on the wakeup watch and dial
         // nothing until there is something to send, so spawning them up front
@@ -690,6 +733,22 @@ async fn outbox_task<T, L, S, K>(
     K: EngineSink,
 {
     let mut rng = seed;
+    // Periodic-resend bookkeeping (delivery guarantee §4.4): while an unacked
+    // tail exists toward a proven-acking peer, rewind to the floor on a
+    // per-peer backoff (doubling, capped) until the floor moves. Escalation
+    // resets on ANY floor progress; the give-up cap only makes the stall LOUD
+    // (send_failed → honest Degraded naming the peer) — resends continue at
+    // the max backoff, because the guarantee never silently abandons a
+    // message inside the horizon (G4).
+    let mut last_floor = state
+        .lock()
+        .ok()
+        .and_then(|s| s.outbound.get(&peer.member).map(|c| c.acked_floor))
+        .unwrap_or(0);
+    let mut backoff_secs = RESEND_AFTER_SECS;
+    let mut stalled_since: Option<tokio::time::Instant> = None;
+    let mut rewinds_without_progress: u32 = 0;
+    let mut stall_reported = false;
     loop {
         // drain everything pending for this peer
         loop {
@@ -709,9 +768,19 @@ async fn outbox_task<T, L, S, K>(
                 // skipped envelope (encode/wrap failure) must not leave an
                 // unfillable hole that wedges the receiver's cursor
                 if env.by == cfg.member
-                    && send_one(&transport, &cfg, &peer, &sink, env, wire_seq + 1, &mut rng, mls.as_ref())
-                        .await
-                        .is_ok()
+                    && send_one(
+                        &transport,
+                        &cfg,
+                        &peer,
+                        &sink,
+                        env,
+                        wire_seq + 1,
+                        &mut rng,
+                        mls.as_ref(),
+                        cursor.resend_epoch,
+                    )
+                    .await
+                    .is_ok()
                 {
                     wire_seq += 1;
                 }
@@ -723,8 +792,71 @@ async fn outbox_task<T, L, S, K>(
                 break; // defensive: a log that stopped growing
             }
         }
-        if wakeup.changed().await.is_err() {
-            return; // engine gone
+        // resend condition: a tail the peer has not confirmed, and the peer
+        // has proven it acks at all (§4.8 — never resend-loop at an old node)
+        let (floor, ack_seen, tail) = state
+            .lock()
+            .ok()
+            .and_then(|s| s.outbound.get(&peer.member).copied())
+            .map(|c| (c.acked_floor, c.ack_seen, c.log_seq > c.acked_floor))
+            .unwrap_or((0, false, false));
+        if floor > last_floor {
+            // the peer confirmed progress — de-escalate entirely
+            last_floor = floor;
+            backoff_secs = RESEND_AFTER_SECS;
+            rewinds_without_progress = 0;
+            stalled_since = None;
+            if stall_reported {
+                stall_reported = false;
+                sink.send_ok(&peer.member).await;
+            }
+        }
+        if !(ack_seen && tail) {
+            stalled_since = None;
+            if wakeup.changed().await.is_err() {
+                return; // engine gone
+            }
+            continue;
+        }
+        let since = *stalled_since.get_or_insert_with(tokio::time::Instant::now);
+        let deadline = since + Duration::from_secs(backoff_secs);
+        match tokio::time::timeout_at(deadline, wakeup.changed()).await {
+            Ok(Err(_)) => return, // engine gone
+            Ok(Ok(())) => continue, // new work first; the stall clock keeps running
+            Err(_) => {
+                // the backoff elapsed with no floor progress: rewind to the
+                // floor under a fresh resend epoch and re-offer the tail as
+                // fresh encryptions with fresh msg ids (§4.4/§4.5)
+                {
+                    let Ok(mut s) = state.lock() else { return };
+                    let cur = s.outbound.entry(peer.member.clone()).or_default();
+                    cur.log_seq = cur.acked_floor;
+                    cur.resend_epoch = cur.resend_epoch.saturating_add(1);
+                }
+                if let Some(ch) = mls.as_ref() {
+                    ch.evict_above(floor);
+                }
+                rewinds_without_progress = rewinds_without_progress.saturating_add(1);
+                tracing::warn!(
+                    peer = %peer.member,
+                    floor,
+                    attempt = rewinds_without_progress,
+                    next_backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS),
+                    "unacknowledged deliveries — resending the tail"
+                );
+                if rewinds_without_progress >= RESEND_GIVEUP_REWINDS && !stall_reported {
+                    // loud, honest, and NOT a stop: the health surface names
+                    // the peer while the resends keep trying at the cap
+                    stall_reported = true;
+                    sink.send_failed(
+                        &peer.member,
+                        "deliveries keep going unacknowledged — still resending",
+                    )
+                    .await;
+                }
+                backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+                stalled_since = Some(tokio::time::Instant::now());
+            }
         }
     }
 }
@@ -744,6 +876,7 @@ async fn send_one<T, K>(
     wire_seq: u64,
     rng: &mut u64,
     mls: Option<&MlsChannel>,
+    resend_epoch: u32,
 ) -> Result<(), ()>
 where
     T: Transport,
@@ -759,7 +892,10 @@ where
                 tracing::error!(total_skipped = count_skipped(), "MLS-encrypting an envelope failed — skipping it");
                 return Err(());
             };
-            (ct, msg_id(&cfg.member, &peer.member, env.seq))
+            // the resend epoch salts the id (§4.5): a rewound tail carries
+            // fresh ids, so the receiver's completed ring can never swallow
+            // a resend of a message it discarded undecrypted (V4)
+            (ct, crate::msg_id_epoch(&cfg.member, &peer.member, env.seq, resend_epoch))
         }
         None => {
             let frame = WireFrame { v: 1, seq: wire_seq, env };
@@ -848,6 +984,21 @@ fn backoff_ms(cfg: &NetConfig, attempt: u32, rng: &mut u64) -> u64 {
         .min(cfg.retry_cap_ms)
         .max(1);
     raw / 2 + mockrand::xorshift(rng) % raw
+}
+
+/// Delivery guarantee §4.4: the build-time rewind. For every peer that has
+/// EVER acked (§4.8 — old nodes keep the plain cursor semantics), pull the
+/// outbox read position back to the acked floor and bump the resend epoch,
+/// so this incarnation re-offers the whole unacked tail with fresh msg ids.
+/// Not persisted by itself: a crash before the next cursor save simply
+/// rewinds again.
+pub(crate) fn rewind_unacked(state: &mut TransportState) {
+    for cur in state.outbound.values_mut() {
+        if cur.ack_seen && cur.log_seq > cur.acked_floor {
+            cur.log_seq = cur.acked_floor;
+            cur.resend_epoch = cur.resend_epoch.saturating_add(1);
+        }
+    }
 }
 
 /// Delivery guarantee §4.4: compute the new acked floor for one peer from
@@ -1363,6 +1514,18 @@ where
                     let envs = log.read_from(old_floor + 1).await;
                     let floor = advance_acked_floor(&me, &envs, &win, old_floor);
                     record_acked(&state, &store, &peer.member, floor).await;
+                    // memory bound (§4.5): ciphertexts every acking peer has
+                    // confirmed can never be needed again
+                    let min_floor = state.lock().ok().and_then(|s| {
+                        s.outbound
+                            .values()
+                            .filter(|c| c.ack_seen)
+                            .map(|c| c.acked_floor)
+                            .min()
+                    });
+                    if let Some(f) = min_floor {
+                        ch.evict_at_or_below(f);
+                    }
                     ack_all(acks);
                 }
                 MlsDecode::EpochAdvanced => {
@@ -1667,6 +1830,45 @@ mod tests {
             matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
             "a real envelope still classifies as Deliver"
         );
+    }
+
+    /// §4.4: the build-time rewind re-offers the unacked tail ONLY toward
+    /// peers that ever acked (old nodes keep the plain cursor), and bumps
+    /// the resend epoch so the re-offer carries fresh msg ids.
+    #[test]
+    fn the_build_rewind_touches_only_proven_acking_peers_with_a_tail() {
+        let mut ts = TransportState::default();
+        ts.outbound.insert(
+            "acker".to_string(),
+            molt_core::OutboundCursor {
+                log_seq: 9,
+                wire_seq: 4,
+                acked_floor: 6,
+                ack_seen: true,
+                resend_epoch: 1,
+            },
+        );
+        ts.outbound.insert(
+            "old-node".to_string(),
+            molt_core::OutboundCursor { log_seq: 9, wire_seq: 4, ..Default::default() },
+        );
+        ts.outbound.insert(
+            "caught-up".to_string(),
+            molt_core::OutboundCursor {
+                log_seq: 6,
+                wire_seq: 3,
+                acked_floor: 6,
+                ack_seen: true,
+                resend_epoch: 2,
+            },
+        );
+        rewind_unacked(&mut ts);
+        let acker = ts.outbound["acker"];
+        assert_eq!((acker.log_seq, acker.resend_epoch), (6, 2), "tail re-offered, epoch bumped");
+        let old = ts.outbound["old-node"];
+        assert_eq!((old.log_seq, old.resend_epoch), (9, 0), "an old node keeps plain cursors");
+        let done = ts.outbound["caught-up"];
+        assert_eq!((done.log_seq, done.resend_epoch), (6, 2), "no tail — nothing to re-offer");
     }
 
     /// Delivery guarantee §4.3: an ACK frame decodes to `Ack` carrying the

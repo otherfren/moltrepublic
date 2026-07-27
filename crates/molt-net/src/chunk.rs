@@ -47,12 +47,28 @@ pub struct MsgId(pub [u8; MSG_ID_LEN]);
 /// Deterministic on purpose — a resend after a crash reuses the id, so the
 /// receiver's dedup absorbs it.
 pub fn msg_id(sender: &str, recipient: &str, wire_seq: u64) -> MsgId {
+    msg_id_epoch(sender, recipient, wire_seq, 0)
+}
+
+/// [`msg_id`] salted with the link's **resend epoch** (delivery guarantee
+/// §4.5): epoch 0 is byte-identical to the unsalted id (compat — first
+/// sends and old nodes), while every rewind bumps the epoch so a RESEND
+/// carries a fresh id. Without the salt, the receiver's completed-id ring
+/// would classify the resend as a duplicate of the original attempt and
+/// ack it away UNREAD — even when that original was discarded undecrypted
+/// (the V4 loss path). Same-attempt fan-out copies still share one id, so
+/// copy dedup keeps working.
+pub fn msg_id_epoch(sender: &str, recipient: &str, wire_seq: u64, resend_epoch: u32) -> MsgId {
     let mut h = Sha256::new();
     h.update(b"molt-msg");
     h.update(sender.as_bytes());
     h.update([0u8]);
     h.update(recipient.as_bytes());
     h.update(wire_seq.to_le_bytes());
+    if resend_epoch > 0 {
+        h.update(b"resend");
+        h.update(resend_epoch.to_le_bytes());
+    }
     let d = h.finalize();
     let mut id = [0u8; MSG_ID_LEN];
     id.copy_from_slice(&d[..MSG_ID_LEN]);
@@ -354,5 +370,18 @@ mod tests {
         assert_ne!(msg_id("a", "b", 7), msg_id("b", "a", 7));
         // the separator prevents ("ab","c") == ("a","bc")
         assert_ne!(msg_id("ab", "c", 7), msg_id("a", "bc", 7));
+    }
+
+    /// Delivery guarantee §4.5: epoch 0 is BYTE-identical to the unsalted id
+    /// (first sends and old-node interop keep today's wire ids exactly),
+    /// while every later epoch mints a distinct id — the receiver's
+    /// completed ring can never swallow a rewound resend unread.
+    #[test]
+    fn resend_epochs_salt_the_msg_id_but_epoch_zero_is_legacy() {
+        assert_eq!(msg_id("a", "b", 7), msg_id_epoch("a", "b", 7, 0));
+        assert_ne!(msg_id_epoch("a", "b", 7, 0), msg_id_epoch("a", "b", 7, 1));
+        assert_ne!(msg_id_epoch("a", "b", 7, 1), msg_id_epoch("a", "b", 7, 2));
+        // deterministic per epoch: same-attempt fan-out copies share the id
+        assert_eq!(msg_id_epoch("a", "b", 7, 3), msg_id_epoch("a", "b", 7, 3));
     }
 }
