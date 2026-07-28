@@ -208,6 +208,16 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     let (a, hub, member_mesh, member_mls, id) = found_with_mesh(&root_a).await;
     a.execute(Command::CreateFinish).await.expect("enter");
 
+    // Settle one debounced live-ratchet beat (MLS_PERSIST_SECS = 10, riding
+    // the 1 s delivery tick): the founding fan-out ENCRYPTS after mesh-up,
+    // and a kill before the next persist regressed the resumed ratchet by
+    // those generations — the member (ack-less here, the mixed-version pin)
+    // then replay-rejected the post-resume chat under load. That
+    // seconds-after-mesh-up kill edge is covered WITH the production heal
+    // (acks + rewind-resend) by delivery_guarantee.rs's hard-kill keystone;
+    // this test pins the resume itself, deterministically.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+
     // HARD kill the founder (the loopback hub — standing in for the SMP
     // server — survives in `hub`, exactly like a real server would)
     hard_kill(a, &root_a, &id).await;
