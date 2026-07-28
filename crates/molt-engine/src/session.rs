@@ -619,7 +619,12 @@ impl State {
                     molt_net::Transport::import_creds(&seam, creds);
                     Some(seam)
                 } else {
-                    crate::founding::reopen_transport(&transport_state.mesh, creds, dialer.clone())
+                    crate::founding::reopen_transport(
+                        &transport_state.mesh,
+                        creds,
+                        dialer.clone(),
+                        &self.session.settings,
+                    )
                 };
                 // DIAGNOSTIC (MOLT_MESH_PROBE): instead of standing up the real
                 // mesh, run a raw per-leg SMP self-test to tell server-side queue

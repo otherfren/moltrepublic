@@ -112,6 +112,14 @@ fn derive_sender_key(seed: &[u8; 32], sender_id: &[u8]) -> SigningKey {
 }
 
 impl SmpTransport {
+    /// The configured server spread (rendered URLs, primary first) — where
+    /// `create_queue` hosts NEW queues. Existing queues are unaffected by
+    /// this list: they route to their own pinned birth server. Introspection
+    /// for callers/tests pinning the config-follows-migration behavior.
+    pub fn server_list(&self) -> Vec<String> {
+        self.servers.iter().map(SmpServer::render).collect()
+    }
+
     /// A transport that creates its queues on, and sends through, `server`,
     /// dialing directly (clearnet/loopback).
     pub fn new(server: SmpServer) -> SmpTransport {

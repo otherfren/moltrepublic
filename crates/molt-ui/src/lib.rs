@@ -285,7 +285,24 @@ pub fn run_app(
                 return;
             };
             let url = if ui.get_cfg_smp_custom() {
-                ui.get_cfg_smp_url().to_string()
+                let url = ui.get_cfg_smp_url().to_string();
+                // honest verdict (2026-07-29 user report): with Custom
+                // selected and no URL, the engine would fall back to the
+                // SAVED server and test THAT — a green "ok" for an empty
+                // field. Refuse instead of misleading.
+                if url.trim().is_empty() {
+                    let de = ui.get_lang_index() == 1;
+                    ui.invoke_show_toast_error(
+                        strings_pick(
+                            de,
+                            "⚠ Enter a server URL first — an empty field would test the saved server.",
+                            "⚠ Erst eine Server-URL eingeben — ein leeres Feld würde den gespeicherten Server testen.",
+                        )
+                        .into(),
+                    );
+                    return;
+                }
+                url
             } else {
                 molt_config::default_public_smp()
             };
@@ -4834,7 +4851,7 @@ lexicon! {
     smp_untested: "not tested yet", "noch nicht getestet";
     smp_testing: "testing…", "teste…";
     smp_ok: "reachable ✓", "erreichbar ✓";
-    smp_hint: "Ritual and group messages route over this server; the public default needs no setup.", "Ritual und Gruppennachrichten laufen über diesen Server; der öffentliche Standard braucht keine Einrichtung.";
+    smp_hint: "Ritual and group messages route over this server; the public default needs no setup. An open republic adopts a changed server gradually: every new queue (rotation, healing) is created there, existing ones stay reachable where they are.", "Ritual und Gruppennachrichten laufen über diesen Server; der öffentliche Standard braucht keine Einrichtung. Ein laufendes Republic übernimmt einen geänderten Server schrittweise: jede neue Queue (Rotation, Heilung) entsteht dort, bestehende bleiben erreichbar, wo sie sind.";
     field_threshold: "Threshold (m)", "Schwelle (m)";
     field_members: "Members (n)", "Mitglieder (n)";
     field_language: "Language", "Sprache";

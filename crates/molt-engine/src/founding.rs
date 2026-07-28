@@ -69,29 +69,35 @@ pub(crate) fn build_smp_transport(
     Ok(SmpTransport::with_dialer_multi(servers, dialer))
 }
 
-/// A fresh SMP transport for **resuming** a persisted mesh on reopen: build it
-/// for the mesh's server(s) and re-adopt the persisted queue credentials (recv
-/// keys so it can subscribe to our inbound queues, secured sender keys so it can
-/// keep sending without a rejected re-SKEY). `None` for a loopback mesh (empty
-/// server — its in-memory queues cannot outlive the process) or bad creds. Track
-/// B Stage 2: gathers ALL distinct servers the persisted mesh uses (primary +
-/// extra, both send and receive sides) so a resumed multi-server mesh
-/// re-subscribes on every one, not a single collapsed server. The list is
-/// truncated to the redundancy cap because it seeds `create_queue`'s spread; a
-/// leg on a server beyond the cut is NOT lost — `SmpTransport::route` dials it
-/// as a pinned dynamic server.
+/// A fresh SMP transport for **resuming** a persisted mesh on reopen,
+/// re-adopting the persisted queue credentials (recv keys so it can subscribe
+/// to our inbound queues, secured sender keys so it can keep sending without
+/// a rejected re-SKEY). `None` for a loopback mesh (empty servers — its
+/// in-memory queues cannot outlive the process).
+///
+/// **The CONFIG decides where this node's queues live** (2026-07-29 fix —
+/// "custom server wird ignoriert"): the server list seeds `create_queue`'s
+/// spread, so every NEW queue — each scheduled rotation, deaf-leg heal and
+/// mesh extension — is minted on the configured servers, the same resolution
+/// a fresh founding uses. An existing republic thereby MIGRATES to a changed
+/// server over the rotation cadence instead of being pinned to its birth
+/// servers forever. The EXISTING queues lose nothing: subscribe and send
+/// route per queue to its own pinned server (`SmpTransport::route`), in the
+/// list or not. Only a config that yields no parseable server falls back to
+/// the mesh's own servers — a broken URL must not strand the resume.
 pub(crate) fn reopen_transport(
     mesh: &[molt_core::MeshLink],
     creds: &[u8],
     dialer: Dialer,
+    settings: &molt_core::SessionSettings,
 ) -> Option<RitualTransport> {
-    let mut servers: Vec<SmpServer> = Vec::new();
+    let mut mesh_servers: Vec<SmpServer> = Vec::new();
     let mut push = |raw: &str| {
         let raw = raw.trim();
         if !raw.is_empty() {
             if let Ok(s) = SmpServer::parse(raw) {
-                if !servers.iter().any(|e| e.render() == s.render()) {
-                    servers.push(s);
+                if !mesh_servers.iter().any(|e| e.render() == s.render()) {
+                    mesh_servers.push(s);
                 }
             }
         }
@@ -106,8 +112,19 @@ pub(crate) fn reopen_transport(
             push(&x.server);
         }
     }
-    if servers.is_empty() {
+    if mesh_servers.is_empty() {
         return None; // loopback mesh (empty servers) — nothing to resume
+    }
+    let mut servers: Vec<SmpServer> = Vec::new();
+    for url in settings.smp_server_list(&molt_config::default_public_smp()) {
+        if let Ok(s) = SmpServer::parse(url.trim()) {
+            if !servers.iter().any(|e| e.render() == s.render()) {
+                servers.push(s);
+            }
+        }
+    }
+    if servers.is_empty() {
+        servers = mesh_servers;
     }
     servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
     let t = SmpTransport::with_dialer_multi(servers, dialer);
@@ -2297,6 +2314,80 @@ mod ritual_ops {
 mod tests {
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
+
+    /// The custom-server fix (2026-07-29 user report: "custom server wird
+    /// ignoriert"): a RESUMED workspace's transport must host its NEW queues
+    /// (rotation, deaf-heal, extension) on the CONFIGURED server list — the
+    /// same resolution a fresh founding uses — so an existing republic
+    /// migrates to a changed server over the rotation cadence. The mesh's
+    /// birth servers stay reachable per queue via the pinned routing and are
+    /// only the fallback when the config yields nothing parseable.
+    #[test]
+    fn a_reopened_transport_hosts_new_queues_on_the_configured_servers() {
+        const OLD: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@old.invalid";
+        const NEW: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io:5223";
+        let mesh = vec![molt_core::MeshLink {
+            member: "bob".to_string(),
+            snd_server: OLD.to_string(),
+            snd_queue: "aa".to_string(),
+            snd_wrap: "bb".to_string(),
+            rcv_server: OLD.to_string(),
+            rcv_queue: "cc".to_string(),
+            rcv_wrap: "dd".to_string(),
+            snd_extra: Vec::new(),
+            rcv_extra: Vec::new(),
+        }];
+        let custom = molt_core::SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: NEW.to_string(),
+            ..molt_core::SessionSettings::default()
+        };
+        let t = reopen_transport(&mesh, &[], Dialer::Direct, &custom)
+            .expect("an smp mesh resumes");
+        let RitualTransport::Smp(t) = t else { panic!("smp transport") };
+        let list = t.server_list();
+        assert!(
+            list[0].contains("smp.konkin.io"),
+            "new queues must be hosted on the CONFIGURED server: {list:?}"
+        );
+        assert!(
+            !list.iter().any(|s| s.contains("old.invalid")),
+            "the birth server is per-queue-pinned routing, not part of the \
+             create spread: {list:?}"
+        );
+
+        // an unparseable custom URL falls back to the mesh's own servers —
+        // a broken config must not strand the resume
+        let broken = molt_core::SessionSettings {
+            smp_server: "custom".to_string(),
+            smp_url: "smp://not a url".to_string(),
+            ..molt_core::SessionSettings::default()
+        };
+        let t = reopen_transport(&mesh, &[], Dialer::Direct, &broken)
+            .expect("resumes on the mesh servers");
+        let RitualTransport::Smp(t) = t else { panic!("smp transport") };
+        assert!(
+            t.server_list()[0].contains("old.invalid"),
+            "fallback: the mesh's birth servers"
+        );
+
+        // a LOOPBACK mesh (empty servers) still refuses a cross-process resume
+        let loopback = vec![molt_core::MeshLink {
+            member: "bob".to_string(),
+            snd_server: String::new(),
+            snd_queue: "aa".to_string(),
+            snd_wrap: "bb".to_string(),
+            rcv_server: String::new(),
+            rcv_queue: "cc".to_string(),
+            rcv_wrap: "dd".to_string(),
+            snd_extra: Vec::new(),
+            rcv_extra: Vec::new(),
+        }];
+        assert!(
+            reopen_transport(&loopback, &[], Dialer::Direct, &custom).is_none(),
+            "a loopback mesh cannot resume in a new process, config or not"
+        );
+    }
 
     #[test]
     fn recover_command_maps_the_request_and_encodes_the_reply() {
