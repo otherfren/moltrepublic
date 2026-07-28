@@ -51,6 +51,19 @@ use tls_codec::{Deserialize as _, Serialize as _};
 /// The one ciphersuite MoltRepublic speaks (RFC 9420 mandatory-to-implement).
 const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// The sender-ratchet window, set EXPLICITLY on both the create and join
+/// configs (delivery guarantee §4.6). Tolerance 5 = the openmls default
+/// (fan-out copies are per-round, cross-queue skew is small). The forward
+/// distance is widened from the default 1000: every send advances the
+/// sender ratchet whether it is delivered or not, so a deaf leg can swallow
+/// thousands of generations — the first frame after the heal then arrives
+/// with the whole gap at once, and a receiver refusing that jump kills the
+/// leg forever (V5). A forward skip costs only chain derivations, no stored
+/// keys, so the wide window is cheap.
+fn ratchet_window() -> SenderRatchetConfiguration {
+    SenderRatchetConfiguration::new(5, 100_000)
+}
+
 /// The snapshot schema version (bumped on any incompatible blob layout).
 const SNAPSHOT_VERSION: u8 = 1;
 
@@ -186,8 +199,10 @@ impl MlsMember {
             // the member, authenticated, until further re-keys (pinned by
             // `the_evicted_leaf_cannot_speak_after_the_rekey`). The price: a
             // delayed pre-re-key message crossing the commit is dropped
-            // (chat is ephemeral; chain blocks have catch-up). Forward-racing
-            // messages are covered separately by the FutureEpoch retry.
+            // (chat is ephemeral; chain blocks have catch-up; the delivery
+            // guarantee's resend re-encrypts at the current epoch). Forward-
+            // racing messages are covered separately by the FutureEpoch retry.
+            .sender_ratchet_configuration(ratchet_window())
             .build();
         let group = MlsGroup::new(&self.provider, &self.signer, &config, self.credential())
             .map_err(|e| MlsError::Mls(format!("creating group: {e:?}")))?;
@@ -302,8 +317,11 @@ impl MlsMember {
             }
         };
         // same policy as create_group: NO past-epoch receive window — the
-        // eviction property of a recovery re-key outranks delayed delivery
-        let config = MlsGroupJoinConfig::builder().build();
+        // eviction property of a recovery re-key outranks delayed delivery —
+        // and the same widened forward window (§4.6)
+        let config = MlsGroupJoinConfig::builder()
+            .sender_ratchet_configuration(ratchet_window())
+            .build();
         let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
             .map_err(|e| MlsError::Mls(format!("staging welcome: {e:?}")))?;
         let group = staged
@@ -493,6 +511,36 @@ mod tests {
             }
             other => panic!("expected an application message, got {other:?}"),
         }
+    }
+
+    /// Delivery guarantee §4.6 (V5): a receiver must survive a FORWARD jump
+    /// far beyond openmls's default `maximum_forward_distance = 1000` — a
+    /// deaf leg can swallow thousands of sender-ratchet generations (every
+    /// send advances it, delivered or not) and the first message after the
+    /// heal arrives with that whole gap at once. With the default config
+    /// this decrypt fails and the leg is dead forever.
+    #[test]
+    fn a_forward_jump_beyond_the_old_default_window_still_decrypts() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        // 3000 sends into the void (a deaf queue) — only the last arrives
+        let mut last = Vec::new();
+        for _ in 0..3000 {
+            last = founder.encrypt(b"into the void").expect("encrypt");
+        }
+        assert_app(
+            bob.decrypt(&last).expect("a >1000-generation jump must decrypt"),
+            "founder",
+            b"into the void",
+        );
     }
 
     #[test]

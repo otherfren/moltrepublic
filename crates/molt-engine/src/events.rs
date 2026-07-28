@@ -91,6 +91,11 @@ impl State {
         {
             self.last_mesh_out = self.presence_now();
         }
+        // delivery guarantee §4.6: the debounced live ratchet persist rides
+        // RECORD (traffic-coupled), because the presence tick is a 30 s beat
+        // — a hard kill between ticks would otherwise regress the ratchet by
+        // a whole burst. Early-outs on the debounce; cheap in the hot path.
+        self.persist_mls_if_due(self.presence_now());
         let Some(active) = &self.active else {
             return;
         };
@@ -561,6 +566,7 @@ impl State {
         self.accepted.clear();
         self.accepted_dirty = false;
         self.accepted_saved_at = 0;
+        self.mls_persisted_at = 0;
         self.ack_due.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next

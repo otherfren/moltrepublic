@@ -56,6 +56,11 @@ const ACCEPT_SAVE_SECS: u64 = 5;
 /// the window is answered by ONE ack frame.
 const ACK_DEBOUNCE_SECS: u64 = 3;
 
+/// Debounce for the live MLS-ratchet persist (§4.6 / E6): with mesh traffic,
+/// the current ratchet reaches `transport.state` at least this often — the
+/// hard-kill regression window.
+const MLS_PERSIST_SECS: u64 = 10;
+
 /// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
 /// `net_link_down`) but from which **nothing** has been heard for longer than
@@ -991,6 +996,43 @@ impl State {
         fresh
     }
 
+    /// Debounced MLS-ratchet persist (delivery guarantee §4.6 / E6, the
+    /// "per-drain persist" hardening in its pragmatic form): every
+    /// [`MLS_PERSIST_SECS`] with mesh traffic since the last snapshot, merge
+    /// the CURRENT ratchet into `transport.state`. A hard kill then regresses
+    /// the ratchet by seconds, not by everything since mesh-up — so the
+    /// reopen's rewind-resend re-encrypts a step or two past what the peers
+    /// consumed instead of replaying a whole session into replay rejection.
+    pub(crate) fn persist_mls_if_due(&mut self, now: u64) {
+        if now.saturating_sub(self.mls_persisted_at) < MLS_PERSIST_SECS {
+            return;
+        }
+        let Some(net) = self.net.as_ref() else { return };
+        if !net.is_real() {
+            return;
+        }
+        // only when the ratchet could have moved: something went out, or
+        // something was heard (receive ratchets advance on decrypt)
+        let heard = self
+            .roster()
+            .iter()
+            .filter(|m| **m != self.member())
+            .map(|m| self.member_last_seen(m))
+            .max()
+            .unwrap_or(0);
+        if self.last_mesh_out < self.mls_persisted_at && heard < self.mls_persisted_at {
+            return;
+        }
+        let Some((Some(mls), _creds)) = net.crypto_for_close() else {
+            return;
+        };
+        if let Some(active) = self.active.as_ref() {
+            tracing::debug!("live MLS ratchet persist (debounced)");
+            active.handle.merge_mls_async(mls);
+            self.mls_persisted_at = now;
+        }
+    }
+
     /// Debounced accept-window persist (rides the presence tick): at most one
     /// `transport.state` merge per [`ACCEPT_SAVE_SECS`], only when dirty.
     /// Fire-and-forget like the supervisor's cursor saves — a lost save only
@@ -1803,6 +1845,16 @@ impl State {
             return Ok(Reply::Ack);
         }
         let mut mesh = net.mesh().to_vec();
+        // V8 (delivery_guarantee.md §4.9): the replaced leg's OWN inbound
+        // queues die here — collect them for a best-effort server-side delete
+        // AFTER the rebuild (they are ours; their undelivered content is
+        // covered by the acked-floor rewind, so deleting loses nothing)
+        let replaced_rcvs: Vec<molt_net::RcvQueue> = mesh
+            .iter()
+            .filter(|l| l.member == link.member)
+            .filter_map(PeerLink::from_mesh)
+            .flat_map(|p| p.rcvs)
+            .collect();
         mesh.retain(|l| l.member != link.member);
         mesh.push(link);
         let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
@@ -1829,6 +1881,25 @@ impl State {
             self.session.notice = format!("mesh-extended:{member}");
             self.emit_session(SessionScope::Full);
             tracing::info!(%member, "mesh extended");
+            // V8 queue hygiene: the replaced leg's queues never carried a
+            // delete before — every rotate leaked N queues on their servers
+            // until idle expiry. Best-effort, off the actor, only after the
+            // rebuild committed to the new leg.
+            if !replaced_rcvs.is_empty() {
+                let transport = self
+                    .net
+                    .as_ref()
+                    .and_then(|n| n.runtime_transport());
+                if let Some(transport) = transport {
+                    tokio::spawn(async move {
+                        for rcv in replaced_rcvs {
+                            if let Err(e) = transport.delete_queue(&rcv).await {
+                                tracing::debug!(error = %e, "deleting a replaced mesh queue failed (best-effort)");
+                            }
+                        }
+                    });
+                }
+            }
         } else {
             tracing::warn!(%member, "mesh extension rebuild failed");
         }
@@ -2552,9 +2623,10 @@ impl State {
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.
         self.maybe_compact(self.presence_now());
-        // delivery guarantee: persist a dirty accept window, debounced,
-        // and flush the delivery ACKs that have come due
+        // delivery guarantee: persist a dirty accept window and the live
+        // ratchet, debounced, and flush the delivery ACKs that have come due
         self.save_accepted_if_due(self.presence_now());
+        self.persist_mls_if_due(self.presence_now());
         self.flush_due_acks(self.presence_now());
         Ok(Reply::Ack)
     }

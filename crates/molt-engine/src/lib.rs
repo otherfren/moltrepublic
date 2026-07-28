@@ -572,6 +572,9 @@ pub(crate) struct State {
     pub(crate) ack_due: std::collections::HashMap<MemberId, u64>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
+    /// `presence_now` of the last debounced live MLS-ratchet merge into
+    /// `transport.state` (§4.6 / E6 — bounds the hard-kill regression).
+    pub(crate) mls_persisted_at: u64,
     /// Members whose sends keep failing (outbox backoff): their pill is
     /// pinned unreachable (state 2) regardless of how fresh the last-seen
     /// stamp is, until the next real sighting clears the pin. Runtime-only,
@@ -836,6 +839,7 @@ impl State {
             accepted: std::collections::BTreeMap::new(),
             accepted_dirty: false,
             accepted_saved_at: 0,
+            mls_persisted_at: 0,
             ack_due: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),

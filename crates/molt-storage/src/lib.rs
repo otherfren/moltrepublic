@@ -2290,6 +2290,23 @@ impl StorageHandle {
         self.merge_crypto_blocking(mls, smp_queues, Some(mesh), false);
     }
 
+    /// Fire-and-forget MLS-snapshot merge (delivery guarantee §4.6 / E6, the
+    /// debounced ratchet persist): merges ONLY the MLS blob, no seal, does
+    /// not wait for the fsync. A lost merge just leaves the previous (older)
+    /// snapshot — the regression window the resend heals grows a bit, never
+    /// correctness. Uses `send` (not `try_send`): the writer queue also
+    /// carries appends, and a ratchet snapshot is worth the brief backpressure.
+    pub fn merge_mls_async(&self, mls: Vec<u8>) {
+        let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
+        let _ = self.tx.send(WriterMsg::MergeCrypto {
+            mls: Some(mls),
+            smp_queues: None,
+            mesh: None,
+            seal: false,
+            ack: ack_tx,
+        });
+    }
+
     fn merge_crypto_blocking(
         &self,
         mls: Option<Vec<u8>>,
@@ -2404,7 +2421,17 @@ fn compact_once(
     let cursors = ws.read_transport_state().outbound;
     let mut floor = snapshot.at_seq;
     for peer in holding_peers {
-        floor = floor.min(cursors.get(peer).map_or(0, |c| c.log_seq));
+        // delivery guarantee §4.9: a proven-acking peer holds the log down to
+        // its ACKED floor, not merely to the send cursor — the unacked tail
+        // must stay resendable (every rebuild rewinds to the floor). An old
+        // (never-acking) peer keeps the plain cursor gate.
+        floor = floor.min(cursors.get(peer).map_or(0, |c| {
+            if c.ack_seen {
+                c.acked_floor
+            } else {
+                c.log_seq
+            }
+        }));
     }
     if floor == 0 {
         return Ok(CompactionOutcome {
@@ -2949,6 +2976,46 @@ mod tests {
             "the surviving log starts right above the floor"
         );
         assert_eq!(ws.next_seq, at_seq + 1, "the append position is untouched");
+    }
+
+    /// Delivery guarantee §4.9: a proven-acking peer holds the log down to
+    /// its ACKED floor, not to the (further-ahead) send cursor — the unacked
+    /// tail must stay resendable across the rebuild rewind. An old peer
+    /// (never acked) keeps the plain cursor gate.
+    #[test]
+    fn an_acking_peer_holds_the_log_down_to_its_acked_floor() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(43)).expect("create");
+        rotate_n(&mut ws, 3, 3); // segments 1..4, seqs 1..=13
+        let mut ts = TransportState::default();
+        // everything SENT (cursor at the head), but only seqs ≤ 5 CONFIRMED
+        ts.outbound.insert(
+            "acker".to_string(),
+            molt_core::OutboundCursor {
+                log_seq: 13,
+                wire_seq: 9,
+                acked_floor: 5,
+                ack_seen: true,
+                resend_epoch: 1,
+            },
+        );
+        ws.write_transport_state(&ts).expect("transport state");
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+        let snap = WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq,
+            state: molt_core::EngineStateDump::default(),
+        };
+        let out = handle.compact_blocking(snap, vec!["acker".to_string()]);
+        assert_eq!(
+            out.floor, 4,
+            "the ACKED floor gates the round (send cursor 13 would have dropped \
+             three segments) — the unacked tail stays resendable"
+        );
+        assert_eq!(out.segments_dropped, 1, "only the fully-confirmed segment goes");
+        handle.close(None);
     }
 
     /// A round with no eligible terrain must be a **no-op**, not a partial
