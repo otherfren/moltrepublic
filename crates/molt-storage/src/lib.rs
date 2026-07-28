@@ -2292,19 +2292,27 @@ impl StorageHandle {
 
     /// Fire-and-forget MLS-snapshot merge (delivery guarantee §4.6 / E6, the
     /// debounced ratchet persist): merges ONLY the MLS blob, no seal, does
-    /// not wait for the fsync. A lost merge just leaves the previous (older)
-    /// snapshot — the regression window the resend heals grows a bit, never
-    /// correctness. Uses `send` (not `try_send`): the writer queue also
-    /// carries appends, and a ratchet snapshot is worth the brief backpressure.
-    pub fn merge_mls_async(&self, mls: Vec<u8>) {
+    /// not wait for the fsync. `try_send`, never `send` — this rides the
+    /// engine actor's hot path (`record`), and a writer stalled in a
+    /// compaction round or a slow fsync must cost a dropped merge (the next
+    /// debounce beat retries; a lost merge only widens the crash-regression
+    /// window the resend heals), never a frozen actor (E7 review).
+    pub fn merge_mls_async(&self, mls: Vec<u8>) -> bool {
         let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
-        let _ = self.tx.send(WriterMsg::MergeCrypto {
+        match self.tx.try_send(WriterMsg::MergeCrypto {
             mls: Some(mls),
             smp_queues: None,
             mesh: None,
             seal: false,
             ack: ack_tx,
-        });
+        }) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!("writer queue full — dropping a live MLS merge");
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        }
     }
 
     fn merge_crypto_blocking(

@@ -984,6 +984,19 @@ impl State {
     /// ack-and-skip (returning an error would wedge the supervisor on a
     /// poison event); T1's wire scope is [`crosses_wire`] — everything
     /// else is logged and ignored until MLS lands (T2).
+    /// Forget a peer's accept window (delivery guarantee, E7 finding 1): a
+    /// recovery re-key hands the seat to a NEW incarnation whose log seq
+    /// space restarts — the old window's marks would swallow every fresh
+    /// envelope as a duplicate. Called at the survivor's authenticated
+    /// recovery-announce point; the next save persists the reset.
+    pub(crate) fn reset_peer_accept_window(&mut self, member: &MemberId) {
+        if self.accepted.remove(member).is_some() {
+            self.accepted_dirty = true;
+        }
+        // any pending ack deadline refers to the OLD window — drop it too
+        self.ack_due.remove(member);
+    }
+
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
     /// the accept point's bookkeeping). `false` = the sender's window already
     /// held it: the envelope is a duplicate/resend and the caller drops it
@@ -1027,9 +1040,12 @@ impl State {
             return;
         };
         if let Some(active) = self.active.as_ref() {
-            tracing::debug!("live MLS ratchet persist (debounced)");
-            active.handle.merge_mls_async(mls);
-            self.mls_persisted_at = now;
+            // only a really-enqueued merge advances the debounce stamp — a
+            // dropped one (writer backpressure) retries on the next beat
+            if active.handle.merge_mls_async(mls) {
+                tracing::debug!("live MLS ratchet persist (debounced)");
+                self.mls_persisted_at = now;
+            }
         }
     }
 
@@ -1647,6 +1663,13 @@ impl State {
             tracing::warn!(%announcer, "mesh announce outside a recovery window — dropped");
             return Ok(Reply::Ack);
         }
+        // E7 review finding 1: the rejoiner's NEW incarnation restarts its
+        // log seq space (materialize_workspace), while our accept window for
+        // it still holds the OLD device's marks — every fresh envelope would
+        // read as already-accepted (set bit or aged) and be silently
+        // swallowed AND falsely acked. This authenticated, one-shot recovery
+        // announce IS the incarnation boundary: forget the old window.
+        self.reset_peer_accept_window(&announcer);
         // relay VERBATIM: each survivor decrypts (and thereby authenticates)
         // the announcer itself, exactly like the founding star relay. A
         // recovery re-announce is single-hop over the live mesh (no nonce —
@@ -2623,11 +2646,20 @@ impl State {
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.
         self.maybe_compact(self.presence_now());
-        // delivery guarantee: persist a dirty accept window and the live
-        // ratchet, debounced, and flush the delivery ACKs that have come due
-        self.save_accepted_if_due(self.presence_now());
-        self.persist_mls_if_due(self.presence_now());
-        self.flush_due_acks(self.presence_now());
+        Ok(Reply::Ack)
+    }
+
+    /// The delivery-guarantee beat (1 s ticker, E7 review): flush the due
+    /// delivery ACKs and run the debounced accept-window / live-ratchet
+    /// persists. Its own fast tick — riding the 30 s presence tick alone
+    /// stretched the 3 s ack debounce into a 33 s latency that lost the race
+    /// against the sender's 30 s resend timer, and widened the accept-window
+    /// crash-regression from seconds to half a minute.
+    pub(crate) fn cmd_net_delivery_tick(&mut self) -> Result<Reply, MoltError> {
+        let now = self.presence_now();
+        self.save_accepted_if_due(now);
+        self.persist_mls_if_due(now);
+        self.flush_due_acks(now);
         Ok(Reply::Ack)
     }
 

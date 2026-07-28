@@ -1465,9 +1465,12 @@ impl AcceptedWindow {
     }
 
     /// Record `seq` as accepted. `true` = fresh (apply it), `false` = already
-    /// accepted (a duplicate — the caller drops the envelope).
+    /// accepted (a duplicate — the caller drops the envelope). `seq 0` is
+    /// never valid (log seqs start at 1) and is rejected outright — a
+    /// crafted envelope must not reach the `high - 1 - seq` arithmetic
+    /// (overflow-checks would turn it into an engine-killing panic).
     pub fn accept(&mut self, seq: u64) -> bool {
-        if self.is_accepted(seq) {
+        if seq == 0 || self.is_accepted(seq) {
             return false;
         }
         if seq > self.high {
@@ -2652,6 +2655,13 @@ pub enum Command {
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.
     NetPresenceTick,
+    /// The delivery-guarantee beat (engine-internal 1 s ticker,
+    /// `documents/delivery_guarantee.md` §4.3/§4.6): flush due delivery
+    /// ACKs and run the debounced accept-window / live-ratchet persists.
+    /// Fast on purpose — riding the 30 s presence tick alone made the
+    /// "3 s" ACK debounce a 33 s latency, losing the race against the
+    /// sender's 30 s resend timer (E7 review).
+    NetDeliveryTick,
     /// Low-rate mesh keepalive (engine-internal ticker, mesh self-heal
     /// Stage 2): send an idle-only, MLS-encrypted liveness ping to each mesh
     /// peer whose leg has seen no recent traffic, so the server never
@@ -4408,6 +4418,19 @@ mod tests {
         // everything inside the fresh window is honestly unaccepted
         assert!(!w.is_accepted(far - 1));
         assert!(!w.is_accepted(far - ACCEPT_WINDOW_BITS + 1));
+    }
+
+    /// E7 review finding 2: `seq 0` is not a valid log seq (logs start at 1),
+    /// and a crafted envelope carrying it must be a plain duplicate-reject —
+    /// never the `high - 1 - seq` underflow panic that would kill the engine
+    /// actor (workspace profiles set overflow-checks).
+    #[test]
+    fn accepted_window_rejects_seq_zero_without_panicking() {
+        let mut w = AcceptedWindow::default();
+        assert!(!w.accept(0), "seq 0 on a fresh window is rejected, not a panic");
+        assert!(w.accept(1), "real seqs still work");
+        assert!(!w.accept(0), "seq 0 with a high set is still rejected");
+        assert!(!w.is_accepted(0), "and never reads as accepted");
     }
 
     /// Serde-additivity: an old `transport.state` (no `accepted`, empty

@@ -74,6 +74,11 @@ const EVENT_QUEUE: usize = 512;
 /// minutes-scale thresholds ([`molt_core::MemberInfo::ONLINE_SECS`] /
 /// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
 const PRESENCE_TICK_MS: u64 = 30_000;
+
+/// The delivery-guarantee beat (`Command::NetDeliveryTick`): due-ACK flush +
+/// debounced persists. 1 s keeps the real ack latency at debounce+1s ≈ 4 s,
+/// safely inside the sender's 30 s resend timer.
+const DELIVERY_TICK_MS: u64 = 1_000;
 /// Period of the mesh-keepalive ticker (mesh self-heal Stage 2): half the
 /// keepalive interval ([`crate::net::MESH_KEEPALIVE_SECS`]) so an idle leg is
 /// re-evaluated twice per interval and its effective keepalive cadence never
@@ -368,6 +373,10 @@ fn spawn_actor(
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
+    // the delivery-guarantee beat: due ACKs + the debounced accept-window /
+    // live-ratchet persists — fast, because the 30 s presence tick alone
+    // stretched the "3 s" ack debounce into a 33 s latency (E7 review)
+    state.spawn_ticker_every(Command::NetDeliveryTick, DELIVERY_TICK_MS);
     // the mesh-keepalive ticker keeps idle mesh queues warm on the server so
     // they never silently idle-expire (mesh self-heal Stage 2); it only pings
     // legs with no recent traffic, so an active mesh sends nothing extra
@@ -1097,6 +1106,7 @@ impl State {
                 self.cmd_net_send_ok(member, generation)
             }
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
+            Command::NetDeliveryTick => self.cmd_net_delivery_tick(),
             Command::NetMeshKeepaliveTick => self.cmd_net_mesh_keepalive_tick(),
 
             // session.rs

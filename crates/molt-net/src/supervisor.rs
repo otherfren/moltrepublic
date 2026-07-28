@@ -749,6 +749,9 @@ async fn outbox_task<T, L, S, K>(
     let mut stalled_since: Option<tokio::time::Instant> = None;
     let mut rewinds_without_progress: u32 = 0;
     let mut stall_reported = false;
+    // the (floor, head) span last verified to contain an OWN ackable event —
+    // caches the tail check's log read (invalidated by any movement)
+    let mut own_span: Option<(u64, u64)> = None;
     loop {
         // drain everything pending for this peer
         loop {
@@ -794,12 +797,31 @@ async fn outbox_task<T, L, S, K>(
         }
         // resend condition: a tail the peer has not confirmed, and the peer
         // has proven it acks at all (§4.8 — never resend-loop at an old node)
-        let (floor, ack_seen, tail) = state
+        let (floor, ack_seen, head) = state
             .lock()
             .ok()
             .and_then(|s| s.outbound.get(&peer.member).copied())
-            .map(|c| (c.acked_floor, c.ack_seen, c.log_seq > c.acked_floor))
-            .unwrap_or((0, false, false));
+            .map(|c| (c.acked_floor, c.ack_seen, c.log_seq))
+            .unwrap_or((0, false, 0));
+        let mut tail = ack_seen && head > floor;
+        // …but only an OWN, ackable event makes the tail real. A span of
+        // purely foreign/commit entries (the quiet-listener steady state)
+        // owes the peer nothing — self-advance the floor over it, WITHOUT
+        // acks, so neither the stall clock nor the compaction gate trips
+        // (E7 findings 1+2). One log read per (floor, head) span, cached.
+        if tail && own_span != Some((floor, head)) {
+            let has_own = log
+                .read_from(floor + 1)
+                .await
+                .iter()
+                .any(|e| e.seq <= head && own_ackable(&cfg.member, e));
+            if has_own {
+                own_span = Some((floor, head)); // genuine tail — remember it
+            } else {
+                record_acked(&state, &store, &peer.member, head).await;
+                tail = false;
+            }
+        }
         if floor > last_floor {
             // the peer confirmed progress — de-escalate entirely
             last_floor = floor;
@@ -1001,14 +1023,23 @@ pub(crate) fn rewind_unacked(state: &mut TransportState) {
     }
 }
 
+/// Whether `env` is something the peer's engine can ever acknowledge: an
+/// OWN envelope that is not an `MlsCommit` (commits are supervisor-consumed
+/// raw — §4.5 — and foreign envelopes are never fanned out at all).
+fn own_ackable(me: &MemberId, env: &EventEnvelope) -> bool {
+    env.by == *me && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
+}
+
 /// Delivery guarantee §4.4: compute the new acked floor for one peer from
 /// its reported accept window. `envs` is this node's log from `old_floor + 1`
-/// on, in seq order. The floor advances while each OWN envelope is accepted
-/// and stops at the first that is not; foreign envelopes never gate (the
-/// outbox only fans out our own), and `MlsCommit` seqs are exempt (§4.5 —
-/// the peer's supervisor consumes them, its engine never sees an envelope
-/// to accept, so they must not stall the floor). Anything above `win.high`
-/// is unconfirmed by definition.
+/// on, in seq order. The floor is a **log position**: it advances freely over
+/// foreign envelopes and `MlsCommit`s (nothing there is owed to the peer)
+/// and stops at the first OWN ackable seq the window does not hold. Keeping
+/// the floor in log-position space is load-bearing (E7 review findings 1+2):
+/// compared against the whole-log outbox cursor, an "own-events-only" floor
+/// read as a permanently unacked tail on every quiet listener — a perpetual
+/// rewind loop with a false Degraded, and a compaction gate pinned weeks
+/// behind on lurkers.
 fn advance_acked_floor(
     me: &MemberId,
     envs: &[EventEnvelope],
@@ -1017,10 +1048,7 @@ fn advance_acked_floor(
 ) -> u64 {
     let mut floor = old_floor;
     for env in envs {
-        if env.by != *me || matches!(env.body, WorkspaceEvent::MlsCommit { .. }) {
-            continue;
-        }
-        if env.seq > win.high || !win.is_accepted(env.seq) {
+        if own_ackable(me, env) && (env.seq > win.high || !win.is_accepted(env.seq)) {
             break;
         }
         floor = env.seq;
@@ -1028,10 +1056,12 @@ fn advance_acked_floor(
     floor
 }
 
-/// Record an advanced acked floor (+ the §4.8 `ack_seen` proof) for `member`
-/// and persist a snapshot. The floor is monotonic: a REGRESSED ack (the
-/// peer's own window persistence lost a beat) must not pull the floor back
-/// and trigger a resend storm of long-confirmed history.
+/// Record an advanced acked floor (+ the §4.8 `ack_seen` proof) for `member`.
+/// The floor is monotonic: a REGRESSED ack (the peer's own window
+/// persistence lost a beat) must not pull the floor back and trigger a
+/// resend storm of long-confirmed history. Persists a snapshot ONLY when
+/// something changed — an identical re-ack must not cost a
+/// `transport.state` rewrite (ack-spam hardening, E7 review).
 async fn record_acked<S: StateStore>(
     state: &Arc<Mutex<TransportState>>,
     store: &S,
@@ -1041,11 +1071,17 @@ async fn record_acked<S: StateStore>(
     let snapshot = {
         let Ok(mut s) = state.lock() else { return };
         let cur = s.outbound.entry(member.clone()).or_default();
-        cur.acked_floor = cur.acked_floor.max(floor);
-        cur.ack_seen = true;
-        s.clone()
+        if floor <= cur.acked_floor && cur.ack_seen {
+            None
+        } else {
+            cur.acked_floor = cur.acked_floor.max(floor);
+            cur.ack_seen = true;
+            Some(s.clone())
+        }
     };
-    store.save(snapshot).await;
+    if let Some(snap) = snapshot {
+        store.save(snap).await;
+    }
 }
 
 /// Record outbound progress and persist a snapshot.
@@ -1358,6 +1394,10 @@ where
     // needs the fact, not a command per frame.
     let raw_throttle = Duration::from_secs(2);
     let mut last_raw_signal: Option<tokio::time::Instant> = None;
+    // ack-spam hardening (E7 review): full ack processing — a log read on
+    // the writer thread + a possible state save — at most twice a second
+    // per peer; surplus frames still stamp presence and are acked away
+    let mut last_ack_processed: Option<tokio::time::Instant> = None;
     // this task is the sole writer of inbound[peer]; the shared state is
     // only the persistence snapshot
     let mut cursor = state
@@ -1503,6 +1543,13 @@ where
                     // authenticated live traffic: stamps presence like a
                     // keepalive (an acking peer is a breathing peer)
                     sink.peer_seen(&peer.member).await;
+                    if last_ack_processed
+                        .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+                    {
+                        ack_all(acks);
+                        continue;
+                    }
+                    last_ack_processed = Some(tokio::time::Instant::now());
                     let old_floor = state
                         .lock()
                         .ok()
@@ -1963,9 +2010,32 @@ mod tests {
             "seq 6 is not accepted — the floor must not skip over it"
         );
 
-        // nothing above the reported high ever counts
+        // nothing OWN above the reported high ever counts
         let envs = vec![chat(8, "me"), chat(9, "me")];
         assert_eq!(advance_acked_floor(&"me".to_string(), &envs, &win, 5), 8);
+
+        // E7 findings 1+2: the floor is a LOG position — a purely foreign /
+        // commit remainder advances it freely (even past the peer's high),
+        // so a quiet listener's floor tracks the head and neither the stall
+        // clock nor the compaction gate ever trips on nothing
+        let envs = vec![
+            chat(2, "me"),
+            chat(4, "peer"),
+            chat(9, "peer"),
+            env(11, "me", WorkspaceEvent::MlsCommit { commit: "bb".to_string() }),
+        ];
+        assert_eq!(
+            advance_acked_floor(&"me".to_string(), &envs, &win, 0),
+            11,
+            "foreign + commit tails advance the floor to the head"
+        );
+        // …but an own unacked seq still stops the walk mid-span
+        let envs = vec![chat(4, "peer"), chat(6, "me"), chat(9, "peer")];
+        assert_eq!(
+            advance_acked_floor(&"me".to_string(), &envs, &win, 0),
+            4,
+            "the own unaccepted seq 6 pins the floor below the foreign tail"
+        );
     }
 
     /// Mesh verify-at-open: a solicited probe decodes to `Probe` (presence +

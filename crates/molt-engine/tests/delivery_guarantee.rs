@@ -155,10 +155,24 @@ async fn deaf_window(root_a: &std::path::Path) -> (DeafWindow, molt_engine::Wall
         .expect("member group lock")
         .encrypt(&frame)
         .expect("encrypt ack");
+    // three spaced copies (distinct frames, idempotent floor): the founder
+    // must durably record ack_seen before the deaf window — one lost or
+    // slow frame must not turn into a hard test failure (E7 review)
     send_framed(&hub, link.snd0(), &link.wrap_out, MsgId([0xA1; 16]), &ct)
         .await
         .expect("send the ack");
-    // let the founder's recv loop process the ack and flush the cursor save
+    for (i, gap) in [(0xA2u8, 600u64), (0xA3, 600)] {
+        tokio::time::sleep(Duration::from_millis(gap)).await;
+        let ct = member_group
+            .lock()
+            .expect("member group lock")
+            .encrypt(&frame)
+            .expect("encrypt ack copy");
+        send_framed(&hub, link.snd0(), &link.wrap_out, MsgId([i; 16]), &ct)
+            .await
+            .expect("send the ack copy");
+    }
+    // let the founder's recv loop process + flush the cursor save
     tokio::time::sleep(Duration::from_millis(700)).await;
 
     // the deaf window: the member's inbound queue goes silently dead
@@ -212,13 +226,24 @@ async fn heal_and_reopen(dw: &DeafWindow, root_a: &std::path::Path) -> molt_engi
     a2
 }
 
-/// Await the resent chat at the member, or fail with what it saw.
-async fn await_resend(member_sink: &CaptureSink, secs: u64) {
+/// Send one chat through the founder engine.
+async fn dw_chat(a: &molt_engine::WalletHandle, body: &str) {
+    a.execute(Command::Chat {
+        body: body.to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("chat");
+}
+
+/// Await a resent chat at the member, or fail with what it saw.
+async fn await_resend(member_sink: &CaptureSink, body: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while !has_chat(member_sink, "zwei") {
+    while !has_chat(member_sink, body) {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the deaf window's chat was never resent; member saw {:?}",
+            "the deaf window's chat {body:?} was never resent; member saw {:?}",
             member_sink
                 .messages()
                 .iter()
@@ -260,7 +285,7 @@ async fn a_chat_lost_in_a_deaf_window_is_resent_after_reopen() {
     // the guarantee: the reopened supervisor rewound to member-b's acked
     // floor and re-offers the unacked tail — "zwei" arrives, re-encrypted at
     // the current ratchet under a fresh resend epoch
-    await_resend(&dw.member_sink, 30).await;
+    await_resend(&dw.member_sink, "zwei", 30).await;
 }
 
 /// E6's pin: the same deaf window, but the founder is HARD-killed — the
@@ -281,11 +306,18 @@ async fn a_chat_lost_in_a_deaf_window_survives_a_hard_kill() {
     let root_a = tmp.path().join("founder");
     let (dw, a) = deaf_window(&root_a).await;
 
-    // give the debounced live ratchet persist one beat past the deaf sends
-    // (MLS_PERSIST_SECS = 10, riding the ~1s presence tick), then HARD kill
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    // force a DETERMINISTIC ratchet persist covering "zwei": wait out the
+    // 10 s persist debounce, then record one more chat — persist_mls_if_due
+    // rides record(), so the snapshot provably lands (covering zwei's
+    // generation) BEFORE "drei" is even encrypted; drei joins the unacked
+    // tail behind the still-deaf queue. Then HARD kill.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    dw_chat(&a, "drei").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     hard_kill(a, &root_a, &dw.id).await;
     let _a2 = heal_and_reopen(&dw, &root_a).await;
 
-    await_resend(&dw.member_sink, 45).await;
+    await_resend(&dw.member_sink, "zwei", 45).await;
+    // the post-persist chat rides the same rewound tail
+    await_resend(&dw.member_sink, "drei", 15).await;
 }

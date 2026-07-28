@@ -684,6 +684,44 @@ mod tests {
         assert!(st.ack_due.contains_key("peer-2"), "a duplicate re-arms the ack");
     }
 
+    /// E7 finding 1, the semantic pin: a recovered seat's fresh incarnation
+    /// re-mints seqs its old device already used — without the reset the
+    /// window swallows the new envelopes as duplicates; after
+    /// `reset_peer_accept_window` (the survivor's recovery-announce point)
+    /// they land again.
+    #[test]
+    fn a_recovered_seats_reused_seqs_land_again_after_the_window_reset() {
+        let mut st = plain_state();
+        let id = MessageId([44u8; 16]);
+        land_chat(&mut st, 1, id, "peer-1", "target");
+        let react = |emoji: &str| WorkspaceEvent::ChatReacted {
+            index: 0,
+            id: Some(id),
+            emoji: emoji.to_string(),
+            by: "peer-2".to_string(),
+            op: Some(molt_core::ReactOp::Add),
+        };
+        // the OLD incarnation used seq 6
+        deliver(&mut st, "peer-2", 6, react("👍"));
+        assert!(st.chat[0].reactions.contains_key("👍"));
+        // the NEW incarnation (post-recovery) re-mints seq 6 — swallowed,
+        // so the reaction does NOT change (one reaction per member: landing
+        // would have swapped 👍 for 🎉)
+        deliver(&mut st, "peer-2", 6, react("🎉"));
+        assert!(
+            st.chat[0].reactions.contains_key("👍") && !st.chat[0].reactions.contains_key("🎉"),
+            "without a reset the window swallows the new incarnation's envelope"
+        );
+        // the survivor's recovery-announce point resets the window
+        st.reset_peer_accept_window(&"peer-2".to_string());
+        deliver(&mut st, "peer-2", 6, react("🎉"));
+        assert!(
+            st.chat[0].reactions.contains_key("🎉"),
+            "after the reset the new incarnation's envelope lands: {:?}",
+            st.chat[0].reactions
+        );
+    }
+
     // ---- read receipts (Lesebestätigung) ---------------------------------
 
     /// Apply a read receipt straight through the applier (the recorded path).

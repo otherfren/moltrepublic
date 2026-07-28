@@ -230,9 +230,35 @@ the signed SEND (the server's send verdict is authoritative). Stage B is in
 watchdog, capped backoff; a server `END` ends the stream instead of a zombie
 wait), and `net_health` is honest — `Ok` means every mesh leg's subscription
 confirmed, a dead inbound leg or a stuck outbox shows as `Degraded` naming
-peer + reason. Per-drain MLS persist (full crash-safety of the ratchet) is
-the remaining hardening: a hard-killed node's regressed-window messages are
-replay-rejected (loudly) at the peers; the leg heals from the next message.
+peer + reason. **The delivery
+guarantee (2026-07-28, `documents/delivery_guarantee.md`) sits on top of all
+of this**: every wire event is at-least-once end-to-end within the compaction
+grace. Receivers keep a per-sender `AcceptedWindow` (envelope dedup + the
+payload of `MESH_ACK_TAG` control frames, sent debounced after every delivery
+— duplicates included, a dup re-arms the ack); the supervisor consumes acks
+itself and keeps a monotonic `acked_floor`/`ack_seen` on each outbound
+cursor; EVERY supervisor build rewinds proven-acking peers to their floor
+under a bumped `resend_epoch` (fresh msg ids — epoch 0 is byte-identical to
+the legacy id), and a stalled tail rewinds itself on a 30s..600s backoff,
+going loud (send_failed) after 8 fruitless rounds but never silently giving
+up. Resends are always FRESH encryptions (cache evicted on rewind). Old
+nodes never ack → they keep exactly the plain cursor behavior. The former
+"per-drain MLS persist" gap is closed pragmatically: `persist_mls_if_due`
+merges the live ratchet every ≤10s of traffic (riding `record()` and the
+1s `NetDeliveryTick`, which also flushes due ACKs and the accept-window
+saves — the 30s presence tick alone stretched every "seconds" debounce to
+half a minute), so a hard kill regresses the ratchet by seconds and the
+rewind-resend outruns the few replay-rejects. The acked floor is a LOG
+position (it advances over foreign/commit seqs; only own unacked events
+pin it) — an "own-events-only" floor read as a permanently-unacked tail on
+every quiet listener. A recovery announce resets the survivor's accept
+window for the rejoiner (its fresh incarnation reuses seqs). Sender-ratchet windows are
+explicit (`tolerance 5, forward 100_000` — the openmls default forward=1000
+bricked any leg whose deaf window swallowed >1000 generations). WP4a's
+compaction gates a proven-acking peer on its ACKED floor (unacked tail stays
+resendable); the guarantee's horizon IS the WP4a peer grace. Keystones:
+`crates/molt-engine/tests/delivery_guarantee.rs` (clean-close + hard-kill,
+both verified red-without/green-with).
 
 ## Build, test, run
 

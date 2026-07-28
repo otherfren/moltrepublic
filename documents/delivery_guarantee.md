@@ -1,6 +1,18 @@
 # Konzept: Zustellgarantie für Mesh-Nachrichten (at-least-once, Ende-zu-Ende)
 
-Status: **BESCHLOSSEN 2026-07-28** (User-Auftrag im 3-Node-Livetest, Nodes
+Status: **GEBAUT + REVIEWED 2026-07-28, E1–E7 auf master** (E7: zwei
+unabhängige adversariale Review-Läufe, 7 Findings gefixt — §8). Umsetzungs-Verfeinerungen gegenüber
+dem Erstentwurf sind inline markiert („BUILT, verfeinert"); die wichtigsten:
+ACK-Konsumption im Supervisor statt per Command (§4.3), Dup-getriggerte
+Re-ACKs statt Keepalive-Huckepack (§4.3), und der Live-Ratchet-Persist
+(MLS_PERSIST_SECS=10) hängt an `record()` UND am Presence-Tick — der Tick
+allein ist ein 30-s-Beat, ein Hard-Kill dazwischen hätte den Ratchet um einen
+ganzen Burst regressiert. E2E-Keystones:
+`crates/molt-engine/tests/delivery_guarantee.rs` (Clean-Close- und
+Hard-Kill-Variante, beide als echte Pins verifiziert: rot ohne
+Rewind/Persist, grün mit).
+
+Ursprünglich: BESCHLOSSEN 2026-07-28 (User-Auftrag im 3-Node-Livetest, Nodes
 `classic`/`dark`/`brutal`): *„Ich will eine Garantie, dass alle Nachrichten an
 alle verschickt werden — Chatnachrichten sollen gequeued werden und dann an den
 jeweiligen Client geschickt, sobald er wieder erreichbar ist. Das gilt für alle
@@ -404,22 +416,23 @@ grün — nichts an Log-/Chain-Formaten ändert sich.
 
 ## 6. Etappen (jede endet grün + gepusht auf master)
 
-- **E1 — V1-Cooldown-Fix** (net.rs, Test 1). Klein, sofort, entschärft die
-  Live-Symptomatik der 3-Node-Session.
-- **E2 — Empfangsfenster + Envelope-Dedup** (molt-core AcceptedWindow,
-  TransportState additiv; engine Accept-Punkt; Tests 2). Noch ohne ACK-Frame
-  wirkungslos nach außen — reiner Unterbau.
-- **E3 — ACK-Frame + NetAckReceived** (molt-net Tag+Decode+Sink; engine
-  Kommando INTERNAL + Kadenz/Debounce + Keepalive-Huckepack; Tests 3, 4).
-- **E4 — Sender-Floor, Rewind, Resend-Tick, msg_id-Epoche, Cache-Eviction**
-  (supervisor + engine + core OutboundCursor; Tests 4, 5).
-- **E5 — Loopback-Test-Hebel + E2E-Suite** (Tests 6–9; hier fällt die
-  Garantie zusammenklickbar zu).
-- **E6 — Pruning-Gate + MLS-Fenster + V8-Queue-Delete** (storage, mls.rs,
-  net.rs; Tests 10, 11).
-- **E7 — Review-Runde über den Gesamt-Diff, Findings fixen, Doku-Closeout**
-  (dieses Dokument auf BUILT, CLAUDE.md-Transportabschnitt ergänzen,
-  MEMORY.md).
+- **E1 ✅ (82c27e7) — V1-Cooldown-Fix** (net.rs, Test 1).
+- **E2 ✅ (5f7198e) — Empfangsfenster + Envelope-Dedup** (molt-core
+  AcceptedWindow, TransportState additiv; engine Accept-Punkt; SaveAccepted-
+  Merge-Arm in molt-storage).
+- **E3 ✅ (6723292) — ACK-Frame** (MESH_ACK_TAG; Konsumption im SUPERVISOR —
+  kein neues Command, §4.3 verfeinert; Dup-getriggerte Re-ACKs; Leg-up-ACK).
+- **E4 ✅ (636b71e) — Sender-Floor, Build-Rewind, periodischer Resend mit
+  Backoff+Give-up-Loudness, msg_id-Epoche (Byte-Pin für Epoche 0),
+  Cache-Eviction (Rewind + Min-Floor).**
+- **E5 ✅ (0d8fc3e) — E2E-Keystone** (delivery_guarantee.rs Clean-Close;
+  Loopback revive_queue + hub()-Seam; Red-Check verifiziert).
+- **E6 ✅ (1c5aa73) — Live-Ratchet-Persist (record-gekoppelt) + Hard-Kill-
+  E2E-Pin + SenderRatchetConfiguration(5, 100k) + Pruning-Gate auf
+  Acked-Floor + V8-Queue-Delete.**
+- **E7 ✅ — Review-Runde über den Gesamt-Diff** (2 unabhängige adversariale
+  Läufe, 7 Findings gefixt inkl. 3× HIGH — §8), Doku-Closeout (dieses
+  Dokument, CLAUDE.md-Transportabschnitt, MEMORY.md).
 
 ## 7. Risiken & Grenzfälle (entschieden)
 
@@ -439,3 +452,53 @@ grün — nichts an Log-/Chain-Formaten ändert sich.
   Ein bösartiges Mitglied kann höchstens SEINE EIGENEN Acks lügen (Selbstschaden:
   es verzichtet auf Nachlieferung bzw. erzwingt Resends an sich selbst —
   gedeckelt durch Backoff-Cap).
+
+## 8. E7-Review (2026-07-28): 2 unabhängige adversariale Läufe, Findings + Auflösung
+
+Beide Reviewer bestätigten Kernmechanik, Bit-Mathematik, ACK-Authentisierung,
+msg_id-Epochen, Mixed-Version-Pfad und die Writer-Merge-Trennung als korrekt.
+Gefixt (alle mit Test):
+
+1. **Recovery-Inkarnation vs. Accept-Fenster (HIGH):** Ein Recovery-Rejoin
+   startet den Seq-Raum neu; das alte Fenster der Survivor hätte JEDEN neuen
+   Envelope als Duplikat geschluckt und falsch geackt. Fix:
+   `reset_peer_accept_window` am authentifizierten One-Shot-Punkt des
+   Recovery-Announce. Rest-Risiko dokumentiert: ein Backup-Restore auf
+   älteren Stand re-mintet Seqs OHNE authentifizierten Reset-Punkt — heute
+   teilweise durch den Detached→Recovery-Pfad gedeckt; sauberer Fix
+   (next_seq-Fast-Forward aus eingehenden ACK-Highs) ist ein Follow-up.
+2. **`seq 0`-Panik (HIGH):** u64-Underflow im Fenster (`overflow-checks`
+   gilt auch im Release) — ein craftetes Envelope eines Roster-Mitglieds
+   tötete den Actor, Redelivery = Crash-Loop. Fix: seq 0 ist nie gültig,
+   Reject im `accept`.
+3. **Seq-Raum-Verwechslung Floor↔Cursor (HIGH, beide Reviewer):** Der Floor
+   lebte im „eigene Events"-Raum, der Outbox-Cursor ist Ganz-Log-Position →
+   Dauer-Rewind-Loop + falsches Degraded für stille Zuhörer, und das
+   WP4a-Gate klemmte bei Lurker-Nodes wochenalt fest. Fix: der Floor IST
+   jetzt Log-Position (`advance_acked_floor` läuft über fremde/Commit-Seqs
+   frei hinweg; nur eigene unbestätigte ackbare Events stoppen ihn), und die
+   Outbox self-advanct über rein-fremde Spannen ohne ACK (ein gecachter
+   Log-Check pro (floor, head)-Spanne).
+4. **ACK-Kadenz hing am 30-s-Presence-Tick (MEDIUM):** Die „3 s"-Debounce
+   war real 3–33 s und verlor das Rennen gegen den 30-s-Resend-Timer. Fix:
+   eigener 1-s-`NetDeliveryTick` (INTERNAL) für ACK-Flush + die debounced
+   Persists; der Leg-up-Sofort-ACK wirkt damit wirklich sofort.
+5. **ACK-Spam-Amplification (MEDIUM):** Voll-Verarbeitung (Log-Read auf dem
+   Writer-Thread + Snapshot-Save) pro Frame. Fix: 500-ms-Drossel pro Peer,
+   Persist nur bei tatsächlichem Floor-/ack_seen-Fortschritt.
+6. **`merge_mls_async` blockte den Actor (LOW):** `send` auf vollem
+   Writer-Queue im `record()`-Hot-Path. Fix: `try_send` + Drop-Warn; der
+   Debounce-Stempel rückt nur bei wirklich enqueuetem Merge vor.
+7. **Hard-Kill-E2E war Jitter-grün (Test-Robustheit):** Der Persist-Beweis
+   hing an RNG-Timing. Fix: deterministisch — nach Ablauf der Debounce
+   erzwingt ein dritter Chat den record-gekoppelten Persist NACHWEISLICH vor
+   dem Kill; der ACK geht dreifach raus statt auf ein 700-ms-Fenster zu
+   hoffen; beide Nachlieferungen („zwei" + „drei") werden asserted.
+
+Bekannte offene Kleinigkeiten (bewusst zurückgestellt, LOW):
+- Ein per Membership entferntes Mitglied hinterlässt bis zum Reopen einen
+  `ack_seen`-Cursor, der die Min-Floor-Cache-Eviction pinnt (nur RAM).
+- Der E2E heilt per `revive_queue` (gleiche Queue); der Rotate-Adopt-Pfad
+  mit Resend auf FRISCHE Queues ist nur unit-gepinnt (`rewind_unacked`) —
+  ein voller Rotate-E2E ist ein Follow-up.
+- Restore-auf-alten-Stand: siehe Finding 1.
