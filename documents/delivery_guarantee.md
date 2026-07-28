@@ -463,10 +463,17 @@ Gefixt (alle mit Test):
    startet den Seq-Raum neu; das alte Fenster der Survivor hätte JEDEN neuen
    Envelope als Duplikat geschluckt und falsch geackt. Fix:
    `reset_peer_accept_window` am authentifizierten One-Shot-Punkt des
-   Recovery-Announce. Rest-Risiko dokumentiert: ein Backup-Restore auf
-   älteren Stand re-mintet Seqs OHNE authentifizierten Reset-Punkt — heute
-   teilweise durch den Detached→Recovery-Pfad gedeckt; sauberer Fix
-   (next_seq-Fast-Forward aus eingehenden ACK-Highs) ist ein Follow-up.
+   Recovery-Announce. Die Restore-Variante des Findings ist NACHGEPRÜFT
+   GESCHLOSSEN (2026-07-28, Branch delivery-followups): ein Backup-Blob darf
+   per §3.3-Allowlist NIE ein `transport.state` tragen (import.rs hard-
+   reject; gepinnt in `stage_and_commit_round_trip_into_a_fresh_root` —
+   „no queue credentials are ever imported"), also öffnet JEDER Produkt-
+   Restore ohne Mesh-Creds → offline → Re-Attach nur übers Recovery-Ritual
+   → genau dort feuert dieser Reset. Der ursprünglich skizzierte
+   next_seq-Fast-Forward hätte zudem den WP4a-Integritätscheck (Key-Table
+   first_seq == Positionszählung, open-scan hard-reject) aufweichen müssen —
+   verworfen. Rest-Risiko: nur manuelles Verzeichnis-Kopieren am Produkt
+   vorbei (kein Produktpfad).
 2. **`seq 0`-Panik (HIGH):** u64-Underflow im Fenster (`overflow-checks`
    gilt auch im Release) — ein craftetes Envelope eines Roster-Mitglieds
    tötete den Actor, Redelivery = Crash-Loop. Fix: seq 0 ist nie gültig,
@@ -501,4 +508,3 @@ Bekannte offene Kleinigkeiten (bewusst zurückgestellt, LOW):
 - Der E2E heilt per `revive_queue` (gleiche Queue); der Rotate-Adopt-Pfad
   mit Resend auf FRISCHE Queues ist nur unit-gepinnt (`rewind_unacked`) —
   ein voller Rotate-E2E ist ein Follow-up.
-- Restore-auf-alten-Stand: siehe Finding 1.
