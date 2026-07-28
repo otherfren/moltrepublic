@@ -244,7 +244,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     assert_eq!(b_chat.len(), 2, "the member's own two messages: {b_chat:?}");
     for (i, m) in b_chat.iter().enumerate() {
         let msg: ChatMessage = serde_json::from_value(m.clone()).expect("chat message decodes");
-        member_feed.push(EventEnvelope {
+        member_feed.push(EventEnvelope { prev_seq: 0,
             seq: 2 + u64::try_from(i).expect("tiny"),
             ts: msg.ts,
             by: "member-b".to_string(),
@@ -299,7 +299,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         .expect("the founder's patch message id")
         .parse()
         .expect("valid id");
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 4,
         ts: 1_751_000_300,
         by: "member-b".to_string(),
@@ -362,7 +362,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     };
     let share_msg: ChatMessage = serde_json::from_value(b_share).expect("share decodes");
     assert_eq!(share_msg.channel, patch, "the share is tagged before the wire");
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 5,
         ts: share_msg.ts,
         by: "member-b".to_string(),
@@ -407,7 +407,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     };
     let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 6,
         ts: 1_751_000_400,
         by: "member-b".to_string(),

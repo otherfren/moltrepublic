@@ -207,7 +207,7 @@ async fn a_2_of_3_republic_founds_and_applies_a_rename_at_threshold() {
     };
     let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
-    b_feed.push(EventEnvelope {
+    b_feed.push(EventEnvelope { prev_seq: 0,
         seq: 1,
         ts: now(),
         by: "member-b".to_string(),

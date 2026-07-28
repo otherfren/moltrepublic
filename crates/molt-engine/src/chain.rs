@@ -2378,7 +2378,7 @@ mod tests {
         let b = Builder::new(&["petra", "walter"], 2);
         let mut peer = chain_peer("walter", &b, b.blocks.clone());
         let deliver = |peer: &mut crate::State, id: u64, b64: String| {
-            let env = molt_core::EventEnvelope {
+            let env = molt_core::EventEnvelope { prev_seq: 0,
                 seq: 90 + id,
                 ts: 1_751_000_000,
                 by: "petra".to_string(),

@@ -539,7 +539,7 @@ fn genesis_from_snapshot(
             continue;
         };
         let st = snap.state;
-        return Some(EventEnvelope {
+        return Some(EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: st.founded_ts,
             by: st.member.clone(),
@@ -2718,7 +2718,7 @@ mod tests {
     }
 
     fn founded(seq_ts: u64) -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: seq_ts,
             by: "mithra".to_string(),
@@ -2744,7 +2744,7 @@ mod tests {
     }
 
     fn chat(seq: u64, body: &str) -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq,
             ts: 1_000_000 + seq,
             by: "mithra".to_string(),

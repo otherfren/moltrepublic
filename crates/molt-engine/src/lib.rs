@@ -579,6 +579,22 @@ pub(crate) struct State {
     /// closes that loop); the presence tick flushes what is due. Runtime-
     /// only, workspace scope.
     pub(crate) ack_due: std::collections::HashMap<MemberId, u64>,
+    /// The seq of this node's last OWN ackable envelope (`MlsCommit`s
+    /// excluded) — the tail of the G7 in-order chain `make_env` stamps as
+    /// `prev_seq`. Derived in `apply` (live records and the open replay),
+    /// runtime-only, workspace scope.
+    pub(crate) last_own_ackable: u64,
+    /// G7 in-order hold: per SENDER, wire envelopes whose `prev_seq` is not
+    /// yet in the accept window (`seq → (envelope, parked_at)`). Deliberately
+    /// NOT accept-marked while parked: the sender keeps them unacked and a
+    /// crash simply re-earns them via the resend machinery. Drained in seq
+    /// order as predecessors land; a stale entry (pathological chain) is
+    /// released loudly by the delivery tick after
+    /// [`crate::net::ORDERED_PARK_GIVEUP_SECS`]. Runtime-only, workspace
+    /// scope.
+    #[allow(clippy::type_complexity)]
+    pub(crate) ordered_park:
+        std::collections::HashMap<MemberId, std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// `presence_now` of the last debounced live MLS-ratchet merge into
@@ -850,6 +866,8 @@ impl State {
             accepted_saved_at: 0,
             mls_persisted_at: 0,
             ack_due: std::collections::HashMap::new(),
+            last_own_ackable: 0,
+            ordered_park: std::collections::HashMap::new(),
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
@@ -2485,7 +2503,7 @@ mod tests {
     #[test]
     fn recovery_never_applies_from_simulated_counts() {
         let mut st = plain_state(); // 2-of-3 demo config
-        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),
@@ -2527,7 +2545,7 @@ mod tests {
     fn recovery_completes_a_real_single_operator_decision() {
         let mut st = plain_state();
         st.config.threshold = 1;
-        let e = |seq: u64, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+        let e = |seq: u64, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: "me".to_string(),
@@ -2937,7 +2955,7 @@ mod tests {
         let now = now_secs();
         let stale = now - 10 * 86_400;
         let fresh = now - 3_600;
-        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope {
+        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope { prev_seq: 0,
             seq,
             ts: if ts == 0 { now } else { ts },
             by: "peer-1".to_string(),
@@ -2964,7 +2982,7 @@ mod tests {
         );
         // widening the window to 30 days via an applied org change brings
         // the stale message back — the setting is REAL state
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 4,
             ts: now,
             by: "me".to_string(),
@@ -2974,7 +2992,7 @@ mod tests {
                 payload: json!({"op": "set_chat_retention", "title": "t", "value": "30 days"}),
             },
         });
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 5,
             ts: now,
             by: "me".to_string(),
@@ -2982,7 +3000,7 @@ mod tests {
         });
         assert_eq!(st.snapshot(Surface::Chat, None, None).applied.len(), 3);
         // declined proposals age out on the same rhythm (their veto stamp)
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 6,
             ts: stale,
             by: "me".to_string(),
@@ -2992,7 +3010,7 @@ mod tests {
                 payload: json!({"op": "set_name", "title": "t", "value": "abgelehnt"}),
             },
         });
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 7,
             ts: now - 40 * 86_400,
             by: "peer-1".to_string(),
@@ -3038,7 +3056,7 @@ mod tests {
                 available: true,
                 checksum: String::new(),
             });
-            molt_core::EventEnvelope {
+            molt_core::EventEnvelope { prev_seq: 0,
                 seq,
                 ts: if ts == 0 { now } else { ts },
                 by: "peer-1".to_string(),
@@ -3086,7 +3104,7 @@ mod tests {
 
         // widening the window to 30 days via an applied org change brings
         // the stale share back — same knob as chat, REAL state
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 4,
             ts: now,
             by: "me".to_string(),
@@ -3096,7 +3114,7 @@ mod tests {
                 payload: json!({"op": "set_chat_retention", "title": "t", "value": "30 days"}),
             },
         });
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 5,
             ts: now,
             by: "me".to_string(),
@@ -3167,7 +3185,7 @@ mod tests {
         let young = now - window * 10 / 100;
         let old = now - window * 60 / 100;
         let gone = now - window * 110 / 100;
-        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope {
+        let msg = |seq: u64, ts: u64, body: &str| molt_core::EventEnvelope { prev_seq: 0,
             seq,
             ts: if ts == 0 { now } else { ts },
             by: "peer-1".to_string(),
@@ -3225,7 +3243,7 @@ mod tests {
     #[test]
     fn applied_entries_carry_their_proposal_id() {
         let mut st = plain_state();
-        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+        let e = |seq: u64, by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),

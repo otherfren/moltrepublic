@@ -959,7 +959,7 @@ mod tests {
     use molt_core::{EventEnvelope, WorkspaceEvent};
 
     fn founded() -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 42,
             by: "mithra".to_string(),

@@ -229,8 +229,12 @@ enum MlsDecode {
 const REORDER_BUFFER_MAX: usize = 512;
 
 /// Delivery guarantee §4.4: how long an unacked tail may sit (with a live,
-/// proven-acking leg) before the outbox rewinds and re-offers it.
-const RESEND_AFTER_SECS: u64 = 30;
+/// proven-acking leg) before the outbox rewinds and re-offers it. 10 s (was
+/// 30): the ack latency is ≤ ~4 s since the 1 s delivery tick, and with G7
+/// in-order holds a missing predecessor delays its successors' visibility —
+/// the first re-offer must come fast (the live evaluation saw a lost A keep
+/// B invisible for the better part of a minute).
+const RESEND_AFTER_SECS: u64 = 10;
 
 /// Cap for the per-peer resend backoff (doubling from
 /// [`RESEND_AFTER_SECS`]); resends never stop inside the horizon, they only
@@ -1859,7 +1863,7 @@ mod tests {
         );
 
         // a real envelope still delivers, authenticated to its sender
-        let env = EventEnvelope {
+        let env = EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 1,
             by: "founder".to_string(),
@@ -1973,7 +1977,7 @@ mod tests {
             }
             w
         };
-        let env = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+        let env = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope { prev_seq: 0,
             seq,
             ts: seq,
             by: by.to_string(),

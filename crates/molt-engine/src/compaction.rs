@@ -213,7 +213,7 @@ mod tests {
         let old = ChatMessage::text(molt_core::MessageId([1u8; 16]), "petra", "ancient", 100);
         let new = ChatMessage::text(molt_core::MessageId([2u8; 16]), "petra", "recent", 5_000);
         for (seq, m) in [(1u64, old.clone()), (2, new.clone())] {
-            st.apply(&molt_core::EventEnvelope {
+            st.apply(&molt_core::EventEnvelope { prev_seq: 0,
                 seq,
                 ts: m.ts,
                 by: "petra".to_string(),
@@ -254,7 +254,7 @@ mod tests {
         let seed =
             molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
                 .expect("entropy");
-        let genesis = molt_core::EventEnvelope {
+        let genesis = molt_core::EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 10,
             by: "me".to_string(),
@@ -275,14 +275,14 @@ mod tests {
         let mut st = plain_state();
         let old = ChatMessage::text(molt_core::MessageId([1u8; 16]), "me", "ancient", 100);
         let new = ChatMessage::text(molt_core::MessageId([2u8; 16]), "me", "recent", 5_000);
-        st.apply(&molt_core::EventEnvelope {
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 10,
             by: "me".to_string(),
             body: genesis.body.clone(),
         });
         for (seq, m) in [(2u64, old.clone()), (3, new.clone())] {
-            st.apply(&molt_core::EventEnvelope {
+            st.apply(&molt_core::EventEnvelope { prev_seq: 0,
                 seq,
                 ts: m.ts,
                 by: "me".to_string(),

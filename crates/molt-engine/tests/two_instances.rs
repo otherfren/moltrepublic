@@ -1046,7 +1046,7 @@ async fn reactions_and_deletes_converge_across_two_instances() {
 
     // --- the member deletes its OWN message; the founder honors it and
     // shows the tombstone (dropping reactions AND read receipts with it) ---
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: 1_751_000_003,
         by: "member-b".to_string(),
@@ -1106,7 +1106,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
         let seed_b =
             molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("gen"))
                 .expect("entropy");
-        let genesis = EventEnvelope {
+        let genesis = EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 1_751_000_000,
             by: "ben".to_string(),
@@ -1193,7 +1193,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
 
         // chi's reaction to ada's (not yet sent!) message goes out FIRST
         let target = common::test_msg_id(42);
-        chi_feed.push(EventEnvelope {
+        chi_feed.push(EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 1_751_000_001,
             by: "chi".to_string(),
@@ -1216,7 +1216,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        ada_feed.push(EventEnvelope {
+        ada_feed.push(EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: now,
             by: "ada".to_string(),
@@ -1416,7 +1416,7 @@ async fn founding_governs_over_the_direct_mesh() {
     // the first post-genesis block is height 1
     let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
-    let approval = EventEnvelope {
+    let approval = EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_200,
         by: "member-b".to_string(),
@@ -1572,7 +1572,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
 
     // --- the member asks for catch-up: the EXACT frame a reopened engine
     // records at open (request_catchup(head+1) — genesis head, so from 1) ---
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_100,
         by: "member-b".to_string(),
@@ -1623,7 +1623,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
     };
     let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: 1_751_000_200,
         by: "member-b".to_string(),
@@ -1849,7 +1849,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     let member_bytes: Vec<u8> = big_bmp(7);
     let member_b64 = base64::engine::general_purpose::STANDARD.encode(&member_bytes);
     let mut a_ev = a.subscribe();
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_300,
         by: "member-b".to_string(),
@@ -1918,7 +1918,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     // for a known id would re-ring every GUI's vote alert after each
     // rejoin. Only a genuinely new insert may emit; the next streamed
     // Proposed must therefore be the fresh id 8, never id 7 again. ---
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: 1_751_000_400,
         by: "member-b".to_string(),
@@ -1933,7 +1933,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
             }),
         },
     });
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 4,
         ts: 1_751_000_500,
         by: "member-b".to_string(),
@@ -3098,7 +3098,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         .expect("b group")
         .encrypt(&serde_json::to_vec(&announce).expect("encode"))
         .expect("encrypt announce");
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_002,
         by: "member-b".to_string(),
@@ -3227,7 +3227,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         .expect("b group")
         .encrypt(&serde_json::to_vec(&announce).expect("encode"))
         .expect("encrypt second announce");
-    feed2.push(EventEnvelope {
+    feed2.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_003,
         by: "member-b".to_string(),
@@ -3557,7 +3557,7 @@ async fn a_doctored_recovery_link_id_is_rejected() {
 }
 
 fn ev_mls_commit(by: &str, seq: u64, commit_hex: &str) -> EventEnvelope {
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq,
         ts: 1_751_000_000 + seq,
         by: by.to_string(),
@@ -4103,7 +4103,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         .expect("b group")
         .encrypt(&serde_json::to_vec(&announce).expect("encode"))
         .expect("encrypt announce");
-    b_feed.push(EventEnvelope {
+    b_feed.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: 1_751_000_002,
         by: "member-b".to_string(),

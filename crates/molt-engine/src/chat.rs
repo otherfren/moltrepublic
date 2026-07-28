@@ -566,7 +566,7 @@ mod tests {
     /// Land one peer chat message in the state (the applier path a wire
     /// arrival takes — `plain_state`'s own member is "me").
     fn land_chat(st: &mut crate::State, seq: u64, id: MessageId, from: &str, body: &str) {
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: from.to_string(),
@@ -722,11 +722,123 @@ mod tests {
         );
     }
 
+    /// G7 (the live 3-node evaluation finding): B must never become visible
+    /// before A. A successor whose stamped predecessor is not accepted yet
+    /// is parked un-marked (the sender keeps it unacked), a dup of the
+    /// parked copy is absorbed, and the predecessor's arrival drains the
+    /// park IN ORDER.
+    #[test]
+    fn a_successor_waits_for_its_predecessor_and_lands_in_order() {
+        let mut st = plain_state();
+        let chat = |seq: u64, prev: u64, id: u8, body: &str| EventEnvelope {
+            seq,
+            ts: 200 + seq,
+            by: "peer-2".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                MessageId([id; 16]),
+                "peer-2",
+                body,
+                200 + seq,
+            )),
+            prev_seq: prev,
+        };
+        let deliver_env = |st: &mut crate::State, env: EventEnvelope| {
+            st.cmd_net_delivered("peer-2".to_string(), env, None)
+                .expect("a wire delivery never errors");
+        };
+        // the chain start delivers immediately (prev 0)
+        deliver_env(&mut st, chat(5, 0, 1, "start"));
+        assert_eq!(st.chat.len(), 1);
+        // B (seq 12, prev 10) arrives BEFORE A (seq 10) — parked, invisible
+        deliver_env(&mut st, chat(12, 10, 3, "B"));
+        assert_eq!(st.chat.len(), 1, "B must not become visible before A");
+        assert!(
+            !st.accepted["peer-2"].is_accepted(12),
+            "a parked envelope is NOT accept-marked — the sender keeps resending it"
+        );
+        // a resent copy of B while parked is absorbed
+        deliver_env(&mut st, chat(12, 10, 3, "B"));
+        assert_eq!(st.chat.len(), 1);
+        // A lands → A applies, then the park drains B — in order
+        deliver_env(&mut st, chat(10, 5, 2, "A"));
+        assert_eq!(st.chat.len(), 3, "A and the drained B are both visible");
+        assert_eq!(st.chat[1].body, "A");
+        assert_eq!(st.chat[2].body, "B", "order is the sender's, not arrival");
+        assert!(st.accepted["peer-2"].is_accepted(10) && st.accepted["peer-2"].is_accepted(12));
+        assert!(st.ordered_park.is_empty(), "the park drained");
+    }
+
+    /// G7: the chain `make_env` stamps — a second own event links to the
+    /// first, an `MlsCommit` never joins the chain (receivers could never
+    /// accept it), and a re-recorded PEER event carries no chain at all.
+    #[test]
+    fn make_env_chains_own_ackable_events_and_skips_commits() {
+        let mut st = plain_state();
+        let body = |id: u8| {
+            WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                MessageId([id; 16]),
+                "me",
+                "x",
+                1,
+            ))
+        };
+        let e1 = st.make_env("me".to_string(), body(1));
+        assert_eq!(e1.prev_seq, 0, "the chain starts at zero");
+        st.apply(&e1);
+        let commit = st.make_env(
+            "me".to_string(),
+            WorkspaceEvent::MlsCommit { commit: "aa".to_string() },
+        );
+        st.apply(&commit);
+        let e2 = st.make_env("me".to_string(), body(2));
+        assert_eq!(
+            e2.prev_seq, e1.seq,
+            "the chain skips the commit — a receiver can never accept one"
+        );
+        let foreign = st.make_env("peer-1".to_string(), body(3));
+        assert_eq!(foreign.prev_seq, 0, "re-recorded peer events carry no chain");
+    }
+
+    /// G7: the recovery window reset also clears the park (its entries chain
+    /// into the OLD incarnation's seq space), and the pathology valve
+    /// releases a stale entry unordered instead of wedging the sender.
+    #[test]
+    fn the_park_clears_on_reset_and_releases_stale_entries() {
+        let mut st = plain_state();
+        st.clock_override = Some(1_750_000_000);
+        let orphan = EventEnvelope {
+            seq: 12,
+            ts: 212,
+            by: "peer-2".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                MessageId([7u8; 16]),
+                "peer-2",
+                "orphan",
+                212,
+            )),
+            prev_seq: 10,
+        };
+        st.cmd_net_delivered("peer-2".to_string(), orphan.clone(), None)
+            .expect("delivered");
+        assert!(st.chat.is_empty(), "parked, not applied");
+        // a recovery reset forgets the old incarnation's park
+        st.reset_peer_accept_window(&"peer-2".to_string());
+        assert!(st.ordered_park.is_empty(), "the reset clears the park");
+
+        // park again; the valve releases it (loudly) after the giveup window
+        st.cmd_net_delivered("peer-2".to_string(), orphan, None).expect("delivered");
+        st.release_stale_parked(1_750_000_000 + 10);
+        assert!(st.chat.is_empty(), "inside the window it stays held");
+        st.release_stale_parked(1_750_000_000 + crate::net::ORDERED_PARK_GIVEUP_SECS + 1);
+        assert_eq!(st.chat.len(), 1, "the valve releases rather than wedges");
+        assert!(st.ordered_park.is_empty());
+    }
+
     // ---- read receipts (Lesebestätigung) ---------------------------------
 
     /// Apply a read receipt straight through the applier (the recorded path).
     fn land_read(st: &mut crate::State, seq: u64, ids: Vec<MessageId>, by: &str) {
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq,
             ts: 200 + seq,
             by: by.to_string(),
@@ -742,7 +854,7 @@ mod tests {
     fn deliver(st: &mut crate::State, from: &str, seq: u64, body: WorkspaceEvent) {
         st.cmd_net_delivered(
             from.to_string(),
-            EventEnvelope {
+            EventEnvelope { prev_seq: 0,
                 seq,
                 ts: 200 + seq,
                 by: from.to_string(),
@@ -818,7 +930,7 @@ mod tests {
 
         // deleting the message (by its author) clears the receipts
         let index = st.chat_by_id(&m).expect("msg").0;
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 5,
             ts: 205,
             by: "peer-1".to_string(),

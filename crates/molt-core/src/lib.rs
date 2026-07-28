@@ -1648,6 +1648,23 @@ pub struct EventEnvelope {
     pub by: MemberId,
     /// What happened.
     pub body: WorkspaceEvent,
+    /// In-order delivery chain (delivery guarantee G7): the seq of this
+    /// author's PREVIOUS own ackable envelope (`MlsCommit`s excluded — they
+    /// never reach a peer's engine), stamped at record time. A receiver
+    /// holds this envelope until `prev_seq` is in its accept window, so a
+    /// resent predecessor can never be applied AFTER its successor. `0` =
+    /// no predecessor / a pre-G7 writer — delivered unordered, exactly the
+    /// legacy behavior (and serialized-away, so every pre-G7 byte fixture,
+    /// log frame and hash stays identical).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub prev_seq: u64,
+}
+
+/// `skip_serializing_if` helper: keeps `prev_seq: 0` (legacy/no-chain) off
+/// the wire and out of the log bytes.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn u64_is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// One member's anchored identity: the per-workspace Ed25519 public key
@@ -1704,7 +1721,7 @@ impl SealedRoster {
     /// finalize, GUI join, standalone join). `member` is this node's own local
     /// handle; `ts` the founding timestamp.
     pub fn into_genesis(&self, member: &str, ts: u64) -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts,
             by: member.to_string(),
@@ -4420,6 +4437,32 @@ mod tests {
         assert!(!w.is_accepted(far - ACCEPT_WINDOW_BITS + 1));
     }
 
+    /// G7: `prev_seq` is wire/log-ADDITIVE — zero (legacy, chain start, or a
+    /// pre-G7 writer) serializes away so every existing byte fixture, log
+    /// frame and hash stays identical; a chained value round-trips; and a
+    /// pre-G7 envelope without the field parses to the unordered default.
+    #[test]
+    fn prev_seq_is_byte_invisible_at_zero_and_roundtrips_otherwise() {
+        let env = |prev| EventEnvelope {
+            seq: 7,
+            ts: 1,
+            by: "a".to_string(),
+            body: WorkspaceEvent::MemberJoined { member: "b".to_string() },
+            prev_seq: prev,
+        };
+        let legacy = serde_json::to_string(&env(0)).expect("json");
+        assert!(
+            !legacy.contains("prev_seq"),
+            "zero serializes away — pre-G7 bytes stay identical: {legacy}"
+        );
+        let chained = serde_json::to_string(&env(5)).expect("json");
+        assert!(chained.contains("\"prev_seq\":5"), "a chain value travels: {chained}");
+        let back: EventEnvelope = serde_json::from_str(&chained).expect("parse");
+        assert_eq!(back.prev_seq, 5);
+        let old: EventEnvelope = serde_json::from_str(&legacy).expect("parse legacy");
+        assert_eq!(old.prev_seq, 0, "a pre-G7 envelope reads as unordered");
+    }
+
     /// E7 review finding 2: `seq 0` is not a valid log seq (logs start at 1),
     /// and a crafted envelope carrying it must be a plain duplicate-reject —
     /// never the `high - 1 - seq` underflow panic that would kill the engine
@@ -4548,7 +4591,7 @@ mod tests {
 
     #[test]
     fn event_envelope_roundtrips_and_unknown_variants_fall_back_raw() {
-        let env = EventEnvelope {
+        let env = EventEnvelope { prev_seq: 0,
             seq: 7,
             ts: 1_751_700_000,
             by: "mithra".to_string(),

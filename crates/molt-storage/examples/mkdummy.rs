@@ -32,7 +32,7 @@ fn chat_env(
 ) -> EventEnvelope {
     let mut msg = ChatMessage::text(id, from, body, ts);
     msg.quote_id = quote_id;
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq,
         ts,
         by: from.to_string(),
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let member = "me";
     let roster = vec!["me".to_string(), "peer-1".to_string(), "peer-2".to_string()];
 
-    let genesis = EventEnvelope {
+    let genesis = EventEnvelope { prev_seq: 0,
         seq: 1,
         ts: now - 3600,
         by: member.to_string(),
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ws.append(&chat_env(2, t, id_welcome, "me", "welcome to the dummy republic 🎉", None))?;
     ws.append(&chat_env(3, t + 60, id_here, "peer-1", "good to be here", Some(id_welcome)))?;
     ws.append(&chat_env(4, t + 120, id_survives, "peer-2", "everything in this workspace survives a restart", None))?;
-    ws.append(&EventEnvelope {
+    ws.append(&EventEnvelope { prev_seq: 0,
         seq: 5,
         ts: t + 180,
         by: "peer-1".to_string(),
@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // a dummy share has no real bytes — honestly unknown
             checksum: String::new(),
         });
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq,
             ts,
             by: from.to_string(),
@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     ws.append(&share(7, t + 300, id_charter, "peer-1", "dummy-charter.pdf", 148_480, "PDF"))?;
     ws.append(&share(8, t + 360, id_scan, "peer-2", "old-scan.jpg", 2_411_724, "Image"))?;
-    ws.append(&EventEnvelope {
+    ws.append(&EventEnvelope { prev_seq: 0,
         seq: 9,
         ts: t + 420,
         by: "peer-2".to_string(),

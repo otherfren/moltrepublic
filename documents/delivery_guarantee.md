@@ -153,6 +153,10 @@ das Entschlüsseln erlauben (Resends werden ohnehin frisch verschlüsselt, §4.5
   Control-Tag, den Alt-Knoten als Discard warnen-und-droppen; kein
   Datenpfad-Wire-Format ändert sich. Die Garantie greift erst, wenn beide
   Seiten das Update haben — vorher exakt heutiges Verhalten.
+- **G7 (in-order, nachgerüstet 2026-07-28 aus der Live-Evaluation):** Die
+  Events EINES Senders werden bei jedem Empfänger in Sende-Reihenfolge
+  sichtbar — ein nachgelieferter Vorgänger erscheint nie NACH seinem
+  Nachfolger. Reihenfolge über Sender hinweg bleibt wie bisher unversprochen.
 - **G6 (bounded):** Alle neuen Zustände sind beschränkt: Empfangsfenster W
   Bits/Peer, Resend-Backoff gedeckelt, Cache-Eviction unter dem Min-ACK,
   Horizont = Karenz. Keine unbounded Queues, keine unbounded Maps.
@@ -508,3 +512,43 @@ Bekannte offene Kleinigkeiten (bewusst zurückgestellt, LOW):
 - Der E2E heilt per `revive_queue` (gleiche Queue); der Rotate-Adopt-Pfad
   mit Resend auf FRISCHE Queues ist nur unit-gepinnt (`rewind_unacked`) —
   ein voller Rotate-E2E ist ein Follow-up.
+
+## 9. G7 — In-Order-Zustellung (Nachtrag aus der Live-Evaluation, 2026-07-28)
+
+Die Live-Validierung zeigte: at-least-once allein reicht nicht — ein per
+Resend geheiltes A erschien ~60 s NACH B. Der User-Auftrag dazu: *"Nachrichten
+dürfen nicht in der falschen Reihenfolge ankommen! Wenn A nicht an Client3
+geschickt werden kann, dann darf auch B nicht geschickt werden solange A nicht
+verschickt wurde."* Umsetzung (Branch delivery-followups):
+
+- **`prev_seq`-Kette (additiv):** Jedes selbst-authored Envelope trägt die
+  Seq des vorherigen EIGENEN ackbaren Events (`make_env` stempelt; `apply`
+  leitet die Kette her — auch beim Replay; `MlsCommit`s sind ausgenommen,
+  ein Empfänger könnte sie nie akzeptieren). `0` = Kettenstart/Alt-Writer →
+  ungeordnet wie bisher; `skip_serializing_if` hält alle Alt-Bytes
+  (Fixtures, Log-Frames, Hashes) identisch. Re-recorded Peer-Events tragen
+  keine Kette (sie werden nie gefannt).
+- **Empfänger-Hold:** `cmd_net_delivered` parkt ein Envelope, dessen
+  `prev_seq` nicht im Accept-Fenster steht — UNMARKIERT: der Sender hält es
+  für unbestätigt, Floor stallt darunter, der Resend liefert den fehlenden
+  Vorgänger; ein Crash des Empfängers kostet nur den RAM-Park, den die
+  Resend-Maschine von selbst wieder füllt. Landet der Vorgänger, drainiert
+  der Park in Seq-Reihenfolge durch denselben `deliver_gated`-Pfad.
+  Bounded (512/Sender, Überlauf shedded aufs Resend), Dup-tolerant, vom
+  Recovery-Fenster-Reset mitgeräumt.
+- **Pathologie-Ventil:** Ein Park-Eintrag, dessen Vorgänger nie kommt
+  (verlogene/kaputte Kette), wird nach 900 s LAUT ungeordnet freigegeben —
+  ehrliche Ketten erreichen das nie (Resend-Backoff-Cap 600 s), aber ein
+  Fehler darf einen Sender nicht für immer wedgen.
+- **Latenz-Flanken:** `out_of_order_tolerance` 5 → 5000 — die im Server
+  gespeicherten ORIGINALE des tauben Fensters kommen nach dem Heal mit
+  längst überholten Generationen an und wurden alle
+  `TooDistantInThePast`-verworfen (Live-Log: „292 < 415"); jetzt decrypten
+  sie sofort, der Resend ist nur noch Backstop. `RESEND_AFTER_SECS` 30 → 10
+  (die ACK-Latenz ist seit dem 1-s-Tick ≤ ~4 s), damit ein fehlender
+  Vorgänger seine Nachfolger nur Sekunden statt eine Minute verdeckt.
+- **Pins:** `a_successor_waits_for_its_predecessor_and_lands_in_order`
+  (rot-ohne-Hold verifiziert), `make_env_chains_own_ackable_events_and_
+  skips_commits`, `the_park_clears_on_reset_and_releases_stale_entries`,
+  `prev_seq_is_byte_invisible_at_zero_and_roundtrips_otherwise`,
+  `frames_far_behind_the_ratchet_still_decrypt_after_the_heal`.

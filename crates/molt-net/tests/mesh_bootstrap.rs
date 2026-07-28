@@ -51,7 +51,7 @@ fn test_msg_id(seq: u64) -> molt_core::MessageId {
 }
 
 fn chat_env(seq: u64, by: &str, body: &str) -> EventEnvelope {
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq,
         ts: 1_751_000_000,
         by: by.to_string(),

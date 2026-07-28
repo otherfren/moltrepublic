@@ -295,7 +295,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn founded() -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 42,
             by: "petra".to_string(),

@@ -329,7 +329,7 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
 }
 
 fn genesis(member: &str) -> EventEnvelope {
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq: 1,
         ts: 1_751_000_000,
         by: member.to_string(),

@@ -52,16 +52,25 @@ use tls_codec::{Deserialize as _, Serialize as _};
 const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// The sender-ratchet window, set EXPLICITLY on both the create and join
-/// configs (delivery guarantee §4.6). Tolerance 5 = the openmls default
-/// (fan-out copies are per-round, cross-queue skew is small). The forward
-/// distance is widened from the default 1000: every send advances the
-/// sender ratchet whether it is delivered or not, so a deaf leg can swallow
-/// thousands of generations — the first frame after the heal then arrives
-/// with the whole gap at once, and a receiver refusing that jump kills the
-/// leg forever (V5). A forward skip costs only chain derivations, no stored
-/// keys, so the wide window is cheap.
+/// configs (delivery guarantee §4.6). BOTH directions are widened from the
+/// openmls defaults (5 / 1000):
+///
+/// * forward 100_000 — every send advances the sender ratchet whether it is
+///   delivered or not, so a deaf leg can swallow thousands of generations;
+///   the first frame after the heal arrives with the whole gap at once, and
+///   a receiver refusing the jump kills the leg forever (V5). A forward
+///   skip costs only chain derivations, no stored keys.
+/// * backward (out-of-order tolerance) 5_000 — the deaf window's ORIGINAL
+///   frames sit in the server queue and arrive after the resubscribe/rotate
+///   heal, by which time the receiver has usually consumed the fresh
+///   RESENDS (higher generations). With the default 5, every stored
+///   original was `TooDistantInThePast`-discarded (the 2026-07-28 live
+///   validation) and content had to wait for the next resend backoff; with
+///   the window it decrypts the moment the leg heals. Cost: up to 5k
+///   retained unused ratchet keys per sender (~hundreds of KB, bounded);
+///   used keys are still deleted on first use, so replay stays rejected.
 fn ratchet_window() -> SenderRatchetConfiguration {
-    SenderRatchetConfiguration::new(5, 100_000)
+    SenderRatchetConfiguration::new(5_000, 100_000)
 }
 
 /// The snapshot schema version (bumped on any incompatible blob layout).
@@ -540,6 +549,43 @@ mod tests {
             bob.decrypt(&last).expect("a >1000-generation jump must decrypt"),
             "founder",
             b"into the void",
+        );
+    }
+
+    /// §4.6 backward window (the 2026-07-28 live validation): the deaf
+    /// window's server-stored ORIGINALS arrive after the receiver already
+    /// consumed the fresh resends — generations far BEHIND its ratchet.
+    /// The default tolerance of 5 discarded them (`TooDistantInThePast`)
+    /// and forced every late frame onto the next resend backoff.
+    #[test]
+    fn frames_far_behind_the_ratchet_still_decrypt_after_the_heal() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        // 100 originals go into the (deaf) queue; the RESEND of the last
+        // one is consumed first, advancing bob's ratchet far past them
+        let originals: Vec<Vec<u8>> =
+            (0..100).map(|i| founder.encrypt(format!("msg-{i}").as_bytes()).expect("encrypt")).collect();
+        let resend = founder.encrypt(b"resend of the tail").expect("encrypt resend");
+        assert_app(bob.decrypt(&resend).expect("the fresh resend decrypts"), "founder", b"resend of the tail");
+        // …then the queue delivers the stored originals: ~100 generations
+        // behind, every one must still decrypt (old default: discard at >5)
+        assert_app(
+            bob.decrypt(&originals[0]).expect("a 100-generation-late original decrypts"),
+            "founder",
+            b"msg-0",
+        );
+        assert_app(
+            bob.decrypt(&originals[50]).expect("mid-window late original decrypts"),
+            "founder",
+            b"msg-50",
         );
     }
 

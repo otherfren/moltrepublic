@@ -61,6 +61,15 @@ const ACK_DEBOUNCE_SECS: u64 = 3;
 /// hard-kill regression window.
 const MLS_PERSIST_SECS: u64 = 10;
 
+/// G7 in-order hold: parked out-of-order envelopes per sender, before the
+/// newest is shed onto the resend machinery.
+const ORDERED_PARK_MAX: usize = 512;
+
+/// G7 pathology valve: a parked envelope whose predecessor never arrived is
+/// released UNORDERED (loudly) after this long. The resend backoff caps at
+/// 600 s, so an honest predecessor always lands well inside the window.
+pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
+
 /// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
 /// `net_link_down`) but from which **nothing** has been heard for longer than
@@ -995,6 +1004,9 @@ impl State {
         }
         // any pending ack deadline refers to the OLD window — drop it too
         self.ack_due.remove(member);
+        // parked successors chain into the OLD incarnation's seq space; the
+        // new incarnation resends its own history anyway (G7)
+        self.ordered_park.remove(member);
     }
 
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
@@ -1088,6 +1100,114 @@ impl State {
             tracing::warn!(%from, claimed = %envelope.by, "dropping a delivery whose author does not match its link");
             return Ok(Reply::Ack);
         }
+        // G7 in-order hold (delivery guarantee): an envelope whose stamped
+        // predecessor is not in the accept window yet is PARKED, un-marked —
+        // the sender keeps it unacked (its floor stalls below it) and the
+        // resend machinery re-earns it after any crash. A resent predecessor
+        // can therefore never become visible AFTER its successor. `prev_seq
+        // == 0` (pre-G7 sender / chain start) delivers unordered as before.
+        if envelope.prev_seq != 0
+            && !self
+                .accepted
+                .get(&from)
+                .is_some_and(|w| w.is_accepted(envelope.prev_seq))
+        {
+            self.park_ordered(&from, envelope);
+            return Ok(Reply::Ack);
+        }
+        let reply = self.deliver_gated(from.clone(), envelope);
+        // successors that were waiting on what just landed drain IN ORDER;
+        // each drained envelope can itself unlock the next
+        while let Some(next) = self.take_ready_parked(&from) {
+            let _ = self.deliver_gated(from.clone(), next);
+        }
+        reply
+    }
+
+    /// G7: park an out-of-order envelope (bounded per sender, dup-tolerant),
+    /// and arm an ACK — the reported window tells the sender exactly which
+    /// predecessor is missing, so its resend closes the gap fast.
+    pub(crate) fn park_ordered(&mut self, from: &MemberId, envelope: EventEnvelope) {
+        let park = self.ordered_park.entry(from.clone()).or_default();
+        if park.len() >= ORDERED_PARK_MAX && !park.contains_key(&envelope.seq) {
+            // shed the NEWEST (furthest from deliverable) — the resend
+            // machinery re-offers it once the chain caught up
+            if let Some((&last, _)) = park.iter().next_back() {
+                if envelope.seq > last {
+                    tracing::debug!(%from, seq = envelope.seq, "ordered park full — shedding onto the resend");
+                    return;
+                }
+                park.remove(&last);
+            }
+        }
+        tracing::debug!(%from, seq = envelope.seq, prev = envelope.prev_seq, "holding an out-of-order envelope for its predecessor");
+        let now = self.presence_now();
+        self.ordered_park
+            .entry(from.clone())
+            .or_default()
+            .entry(envelope.seq)
+            .or_insert((envelope, now));
+        let due = now + ACK_DEBOUNCE_SECS;
+        self.ack_due.entry(from.clone()).or_insert(due);
+    }
+
+    /// G7: the next parked envelope from `from` whose predecessor is now
+    /// accepted (ascending seq = chain order), if any.
+    fn take_ready_parked(&mut self, from: &MemberId) -> Option<EventEnvelope> {
+        let ready = {
+            let park = self.ordered_park.get(from)?;
+            park.iter()
+                .find(|(_, (env, _))| {
+                    env.prev_seq == 0
+                        || self
+                            .accepted
+                            .get(from)
+                            .is_some_and(|w| w.is_accepted(env.prev_seq))
+                })
+                .map(|(seq, _)| *seq)?
+        };
+        let park = self.ordered_park.get_mut(from)?;
+        let (env, _) = park.remove(&ready)?;
+        if park.is_empty() {
+            self.ordered_park.remove(from);
+        }
+        Some(env)
+    }
+
+    /// G7 pathology valve (rides the delivery tick): a parked envelope whose
+    /// predecessor never arrives — a buggy or lying chain — is released
+    /// UNORDERED after [`ORDERED_PARK_GIVEUP_SECS`], loudly. Within the
+    /// valve window a real predecessor always lands first (the resend
+    /// backoff caps at 600 s), so honest chains never trip it.
+    pub(crate) fn release_stale_parked(&mut self, now: u64) {
+        let stale: Vec<(MemberId, u64)> = self
+            .ordered_park
+            .iter()
+            .flat_map(|(m, park)| {
+                park.iter()
+                    .filter(|(_, (_, at))| now.saturating_sub(*at) > ORDERED_PARK_GIVEUP_SECS)
+                    .map(|(seq, _)| (m.clone(), *seq))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (member, seq) in stale {
+            let Some(park) = self.ordered_park.get_mut(&member) else { continue };
+            let Some((env, _)) = park.remove(&seq) else { continue };
+            if park.is_empty() {
+                self.ordered_park.remove(&member);
+            }
+            tracing::warn!(%member, seq, prev = env.prev_seq, "a parked envelope's predecessor never arrived — releasing it unordered");
+            let _ = self.deliver_gated(member.clone(), env);
+        }
+    }
+
+    /// The post-gate delivery body (the accept point + the kind match) —
+    /// called for direct arrivals and for drained G7 park entries alike.
+    fn deliver_gated(
+        &mut self,
+        from: MemberId,
+        envelope: EventEnvelope,
+    ) -> Result<Reply, MoltError> {
         // delivery guarantee G2/G3 (delivery_guarantee.md §4.2): THE accept
         // point. Past the generation + roster gates the envelope counts as
         // engine-accepted — mark it in the sender's window (that mark is what
@@ -2660,6 +2780,8 @@ impl State {
         self.save_accepted_if_due(now);
         self.persist_mls_if_due(now);
         self.flush_due_acks(now);
+        // G7: release park entries whose predecessor pathologically never came
+        self.release_stale_parked(now);
         Ok(Reply::Ack)
     }
 
@@ -3165,13 +3287,13 @@ mod tests {
     fn a_wire_reaction_on_a_tombstone_records_no_event() {
         let mut st = crate::tests::plain_state();
         let id = MessageId([0x2au8; 16]);
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 101,
             by: "peer-1".to_string(),
             body: WorkspaceEvent::Chat(ChatMessage::text(id, "peer-1", "soon gone", 101)),
         });
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 2,
             ts: 102,
             by: "peer-1".to_string(),
@@ -3211,7 +3333,7 @@ mod tests {
         let mut st = crate::tests::plain_state();
         // a proposal that is proposed, then declined — replayed as events,
         // exactly like the log rebuild does it
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 100,
             by: "me".to_string(),
@@ -3221,7 +3343,7 @@ mod tests {
                 payload: serde_json::json!({ "op": "add_note", "title": "t" }),
             },
         });
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 2,
             ts: 101,
             by: "peer-2".to_string(),
@@ -3252,7 +3374,7 @@ mod tests {
         );
         st.cmd_net_delivered(
             "peer-1".to_string(),
-            EventEnvelope {
+            EventEnvelope { prev_seq: 0,
                 seq: 1,
                 ts: 102,
                 by: "peer-1".to_string(),
@@ -4109,7 +4231,7 @@ mod tests {
             available: true,
             checksum: String::new(),
         });
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 1,
             ts,
             by: "cid".to_string(),

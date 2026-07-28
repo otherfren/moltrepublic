@@ -52,13 +52,20 @@ fn legacy_message_id(ordinal: usize, from: &str, ts: u64, body: &str) -> molt_co
 
 impl State {
     /// Stamp the next envelope: seq from the workspace's monotonic counter,
-    /// ts from the engine clock — the one place a clock runs.
+    /// ts from the engine clock — the one place a clock runs. An envelope
+    /// this node AUTHORS also carries the in-order chain (G7): `prev_seq` =
+    /// the seq of our previous own ackable envelope, so a receiver can hold
+    /// it until the predecessor landed. Re-recorded PEER events (the wire
+    /// receive path) stay unstamped — they are never fanned out, and a zero
+    /// serializes away (byte-identical legacy log frames).
     pub(crate) fn make_env(&mut self, by: MemberId, body: WorkspaceEvent) -> EventEnvelope {
+        let prev_seq = if by == self.member() { self.last_own_ackable } else { 0 };
         let env = EventEnvelope {
             seq: self.next_seq,
             ts: now_secs(),
             by,
             body,
+            prev_seq,
         };
         self.next_seq += 1;
         env
@@ -352,6 +359,19 @@ impl State {
                 // none rebuilt from the log, so apply/replay is a deliberate no-op
             }
         }
+        // G7 in-order chain bookkeeping: our own ackable envelopes form the
+        // `prev_seq` chain the receivers order on. Derived HERE (the one
+        // place both live records and the open-time replay pass through), and
+        // AFTER the match so the founder's own `Founded` — which sets the
+        // replica this check reads — joins its chain. `MlsCommit`s are
+        // excluded: they never reach a peer's engine, so a chain through one
+        // would wedge every successor at the receiver.
+        if env.seq > self.last_own_ackable
+            && env.by == self.member()
+            && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
+        {
+            self.last_own_ackable = env.seq;
+        }
     }
 
     /// The **sender ordinal** the legacy id formula hashes: how many messages
@@ -568,6 +588,8 @@ impl State {
         self.accepted_saved_at = 0;
         self.mls_persisted_at = 0;
         self.ack_due.clear();
+        self.last_own_ackable = 0;
+        self.ordered_park.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.net_unreachable.clear();
@@ -627,7 +649,7 @@ mod tests {
     use crate::tests::plain_state;
 
     fn envs() -> Vec<EventEnvelope> {
-        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),
@@ -752,7 +774,7 @@ mod tests {
     #[test]
     fn a_single_decline_in_two_of_three_is_not_a_veto() {
         let mut st = plain_state();
-        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope { prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),
@@ -909,13 +931,13 @@ mod tests {
             },
         );
         msg.quote_id = None;
-        all.push(EventEnvelope {
+        all.push(EventEnvelope { prev_seq: 0,
             seq: 8,
             ts: 108,
             by: "walter".to_string(),
             body: WorkspaceEvent::Chat(msg),
         });
-        all.push(EventEnvelope {
+        all.push(EventEnvelope { prev_seq: 0,
             seq: 9,
             ts: 109,
             by: "petra".to_string(),
@@ -1031,13 +1053,13 @@ mod tests {
             let mut legacy = ChatMessage::text(molt_core::MessageId::NIL, "petra", "later", 200);
             legacy.id = molt_core::MessageId::NIL;
             vec![
-                EventEnvelope {
+                EventEnvelope { prev_seq: 0,
                     seq: from_seq,
                     ts: 200,
                     by: "petra".to_string(),
                     body: WorkspaceEvent::Chat(legacy),
                 },
-                EventEnvelope {
+                EventEnvelope { prev_seq: 0,
                     seq: from_seq + 1,
                     ts: 201,
                     by: "petra".to_string(),
@@ -1225,7 +1247,7 @@ mod tests {
                 by: "walter".to_string(),
             },
         ] {
-            st.apply(&EventEnvelope {
+            st.apply(&EventEnvelope { prev_seq: 0,
                 seq: 20,
                 ts: 210,
                 by: "walter".to_string(),
@@ -1235,7 +1257,7 @@ mod tests {
         assert_eq!(st.chat, before, "no id-less op touched a surviving message");
 
         // …while the SAME ops addressed by id still land
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 21,
             ts: 211,
             by: "walter".to_string(),
@@ -1256,7 +1278,7 @@ mod tests {
         // a legacy numeric quote is no longer resolved by position
         let mut quoting = ChatMessage::text(molt_core::MessageId([0x77; 16]), "walter", "re", 212);
         quoting.quote = Some(0);
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 22,
             ts: 212,
             by: "walter".to_string(),
@@ -1305,7 +1327,7 @@ mod tests {
     fn explicit_react_ops_are_idempotent_but_legacy_toggles() {
         let mut st = plain_state();
         let id = molt_core::MessageId([9u8; 16]);
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 101,
             by: "petra".to_string(),
@@ -1314,7 +1336,7 @@ mod tests {
         let mut seq = 1u64;
         let mut react = |st: &mut crate::State, emoji: &str, op: Option<molt_core::ReactOp>| {
             seq += 1;
-            st.apply(&EventEnvelope {
+            st.apply(&EventEnvelope { prev_seq: 0,
                 seq,
                 ts: 100 + seq,
                 by: "walter".to_string(),
@@ -1361,13 +1383,13 @@ mod tests {
     #[test]
     fn react_and_delete_commute_to_a_tombstone_without_reactions() {
         let id = molt_core::MessageId([0x0bu8; 16]);
-        let chat = EventEnvelope {
+        let chat = EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 101,
             by: "petra".to_string(),
             body: WorkspaceEvent::Chat(ChatMessage::text(id, "petra", "fleeting", 101)),
         };
-        let react = EventEnvelope {
+        let react = EventEnvelope { prev_seq: 0,
             seq: 2,
             ts: 102,
             by: "walter".to_string(),
@@ -1379,7 +1401,7 @@ mod tests {
                 op: Some(molt_core::ReactOp::Add),
             },
         };
-        let delete = EventEnvelope {
+        let delete = EventEnvelope { prev_seq: 0,
             seq: 3,
             ts: 103,
             by: "petra".to_string(),
@@ -1429,7 +1451,7 @@ mod tests {
             deleted_by: None,
             file: None,
         };
-        let env = |seq: u64, m: &ChatMessage| EventEnvelope {
+        let env = |seq: u64, m: &ChatMessage| EventEnvelope { prev_seq: 0,
             seq,
             ts: m.ts,
             by: m.from.clone(),
@@ -1466,7 +1488,7 @@ mod tests {
     #[test]
     fn out_of_range_events_are_ignored() {
         let mut st = plain_state();
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 1,
             by: "x".to_string(),
@@ -1476,7 +1498,7 @@ mod tests {
                 by: "x".to_string(),
             },
         });
-        st.apply(&EventEnvelope {
+        st.apply(&EventEnvelope { prev_seq: 0,
             seq: 2,
             ts: 2,
             by: "x".to_string(),

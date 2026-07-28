@@ -41,7 +41,7 @@ impl EngineSink for NullSink {
 }
 
 fn genesis(member: &str) -> EventEnvelope {
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq: 1,
         ts: 1_751_000_000,
         by: member.to_string(),
@@ -307,7 +307,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
     // (a) a replay of ada's message under a fresh seq — same id — must not
     // duplicate; (b) ada may not delete ben's message; (c) ada may not
     // remove ben's file; (d) positive control: ada deletes her OWN message
-    ada_feed.push(EventEnvelope {
+    ada_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: 1_751_000_003,
         by: "ada".to_string(),
@@ -318,7 +318,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
             1_751_000_002,
         )),
     });
-    ada_feed.push(EventEnvelope {
+    ada_feed.push(EventEnvelope { prev_seq: 0,
         seq: 4,
         ts: 1_751_000_004,
         by: "ada".to_string(),
@@ -328,7 +328,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
             by: "ada".to_string(),
         },
     });
-    ada_feed.push(EventEnvelope {
+    ada_feed.push(EventEnvelope { prev_seq: 0,
         seq: 5,
         ts: 1_751_000_005,
         by: "ada".to_string(),
@@ -338,7 +338,7 @@ async fn a_duplicate_message_id_is_ignored_and_a_foreign_delete_is_rejected() {
             by: "ada".to_string(),
         },
     });
-    ada_feed.push(EventEnvelope {
+    ada_feed.push(EventEnvelope { prev_seq: 0,
         seq: 6,
         ts: 1_751_000_006,
         by: "ada".to_string(),
@@ -397,7 +397,7 @@ async fn a_wire_quote_resolves_on_the_receiver() {
     let mut reply = ChatMessage::text(common::test_msg_id(3), "ada", "quoting you", ts);
     reply.quote_id = Some(common::test_msg_id(2));
     reply.quote = Some(999); // a bogus sender-local index: must not transfer
-    ada_feed.push(EventEnvelope {
+    ada_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts,
         by: "ada".to_string(),

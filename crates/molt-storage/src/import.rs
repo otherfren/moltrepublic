@@ -529,7 +529,7 @@ mod tests {
     /// The `Founded` genesis every fixture workspace is built from (member
     /// `mithra`, so the same seed always derives the same workspace id).
     fn founded_genesis() -> EventEnvelope {
-        EventEnvelope {
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts: 42,
             by: "mithra".to_string(),

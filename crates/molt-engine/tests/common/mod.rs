@@ -31,7 +31,7 @@ pub fn chat_env(seq: u64, from: &str, body: &str) -> EventEnvelope {
         .map(|d| d.as_secs())
         .unwrap_or(0)
         + seq;
-    EventEnvelope {
+    EventEnvelope { prev_seq: 0,
         seq,
         ts,
         by: from.to_string(),

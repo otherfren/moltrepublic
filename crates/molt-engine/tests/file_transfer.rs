@@ -215,7 +215,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         available: true,
         checksum: member_sha.clone(),
     });
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 1,
         ts,
         by: "member-b".to_string(),
@@ -344,7 +344,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
 
     // negative: the member removes the file → the founder's next download
     // is refused synchronously (the share is unavailable for everyone)
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 2,
         ts: now(),
         by: "member-b".to_string(),
@@ -417,7 +417,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         let mut g = member_group.lock().expect("lock");
         hex::encode(g.encrypt(&serde_json::to_vec(&req).expect("json")).expect("encrypt"))
     };
-    member_feed.push(EventEnvelope {
+    member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: now(),
         by: "member-b".to_string(),
