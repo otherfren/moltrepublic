@@ -1,6 +1,6 @@
 # Backup & Restore — design for S4/S5/S6
 
-Design doc for the security-critical storage stories of `documents/mock_todo.md`:
+Design doc for the security-critical storage stories of `docs/ui/mock_todo.md`:
 
 | Story | What | Milestone | Section |
 |---|---|---|---|

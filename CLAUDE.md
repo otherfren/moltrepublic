@@ -87,7 +87,7 @@ same pattern as the tickers.
   boundaries*: exactly one per message, filtering is engine-side on `ReadState`
   (never client-side — co-equality), tags carry no governance meaning, and the
   chat surface's byte-identity fixtures in `molt-core` mod tests pin the legacy
-  wire shape — treat a red one as a design stop. Read `documents/chat_bus.md`
+  wire shape — treat a red one as a design stop. Read `docs/chat/chat_bus.md`
   before touching chat/channel code.
 - **Drain the outbound path, don't `abort()` it.** In the mesh/bootstrap async
   plumbing a node finishes as soon as its *inbound* work is done, but its own
@@ -100,7 +100,7 @@ same pattern as the tickers.
 
 ## The founding ritual is the security-critical core
 
-Read `documents/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
+Read `docs/ritual/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
 Load-bearing invariants — do not weaken them:
 
 - **Sign-what-you-see.** A member recomputes the canonical table from the
@@ -120,7 +120,7 @@ Load-bearing invariants — do not weaken them:
 
 ## The persistent-change chain is the shared state model
 
-Read `documents/persistent_chain.md` before touching `chain.rs` (in `molt-core`
+Read `docs/chain/persistent_chain.md` before touching `chain.rs` (in `molt-core`
 and `molt-engine`). The republic's persistent state is a **single-branch,
 threshold-signed commit-block chain** ("git patches"); the founding is block 0.
 It is the state-model twin of the founding ritual — load-bearing invariants:
@@ -226,12 +226,12 @@ per-transport `sender_seed` (`derive_sender_key`, in `transport.state` from
 mesh-up on; additive V2 creds with a V1 read-fallback), so a reopened
 transport re-asserts the SAME key — and on an SKEY reject it still attempts
 the signed SEND (the server's send verdict is authoritative). Stage B is in
-(`documents/stage_b.md`): a died subscription resubscribes itself (per-peer
+(`docs/transport/mesh/stage_b.md`): a died subscription resubscribes itself (per-peer
 watchdog, capped backoff; a server `END` ends the stream instead of a zombie
 wait), and `net_health` is honest — `Ok` means every mesh leg's subscription
 confirmed, a dead inbound leg or a stuck outbox shows as `Degraded` naming
 peer + reason. **The delivery
-guarantee (2026-07-28, `documents/delivery_guarantee.md`) sits on top of all
+guarantee (2026-07-28, `docs/transport/delivery_guarantee.md`) sits on top of all
 of this**: every wire event is at-least-once end-to-end within the compaction
 grace. Receivers keep a per-sender `AcceptedWindow` (envelope dedup + the
 payload of `MESH_ACK_TAG` control frames, sent debounced after every delivery

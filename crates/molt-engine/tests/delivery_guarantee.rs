@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **The delivery guarantee, end to end** (`documents/delivery_guarantee.md`).
+//! **The delivery guarantee, end to end** (`docs/transport/delivery_guarantee.md`).
 //!
 //! The user-visible failure this pins (the 2026-07-27 3-node incident): a
 //! peer's inbound queue goes silently deaf — the server still answers `OK`

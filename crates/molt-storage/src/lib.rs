@@ -2,7 +2,7 @@
 
 //! `molt-storage`: the on-disk reality of a workspace.
 //!
-//! Implements `documents/concept-workspace-storage.md`: a workspace directory
+//! Implements `docs/storage/concept-workspace-storage.md`: a workspace directory
 //! holds a plaintext `manifest.toml` (the identity card the Open screen lists
 //! without decrypting), local `prefs.toml`, a sealed workspace key, an
 //! **encrypted, append-only event log** in framed segments, and state
@@ -85,7 +85,7 @@ const SNAPSHOT_SEGMENT: u64 = u64::MAX;
 /// AAD segment number that marks the `transport.state` frame.
 const TRANSPORT_SEGMENT: u64 = u64::MAX - 1;
 /// AAD segment number that marks the `chain.state` frame (the persistent
-/// commit-block chain — `documents/persistent_chain.md`).
+/// commit-block chain — `docs/chain/persistent_chain.md`).
 const CHAIN_SEGMENT: u64 = u64::MAX - 2;
 /// AAD segment number that marks the `log/keys.state` frame (the per-segment
 /// log key table — WP4a, [`segkeys`]).
@@ -1291,7 +1291,7 @@ impl OpenedWorkspace {
     }
 
     /// Read `chain.state`: the republic's persistent commit-block chain
-    /// (`documents/persistent_chain.md`). Absent → empty (a pre-chain or
+    /// (`docs/chain/persistent_chain.md`). Absent → empty (a pre-chain or
     /// freshly-founded-before-write workspace). A damaged file returns empty
     /// with a loud warning — unlike `transport.state`, the chain is shared
     /// history the caller must then treat as missing (its `verify_chain` will

@@ -32,7 +32,7 @@ use crate::State;
 /// compaction cut. Blocks are governance decisions — rare — so this is
 /// months of activity for a small republic, and after each cut the local
 /// chain shrinks back to the anchor + suffix. A constant, not a setting:
-/// compaction is hygiene, not policy (`documents/log_compaction.md`).
+/// compaction is hygiene, not policy (`docs/chain/log_compaction.md`).
 pub(crate) const AUTO_CHECKPOINT_MIN_LEN: usize = 32;
 
 /// The **ephemeral** signature collection for one pending proposal on a
@@ -554,7 +554,7 @@ pub(crate) fn verify_served(
 }
 
 /// WP4b: verify a SUFFIX chain — one that begins with a checkpoint block
-/// instead of the genesis (`documents/log_compaction.md` §B.5). The
+/// instead of the genesis (`docs/chain/log_compaction.md` §B.5). The
 /// checkpoint is the trust anchor: its blob must hash to the signed
 /// `state_hash`, its founding table must RECOMPUTE to the expected
 /// republic id (the genesis forgery check without the genesis), and the
@@ -697,7 +697,7 @@ impl State {
     /// workspace's chain + head, then re-project the persistent state from it.
     /// A chain that fails verification is **hard-rejected**: the head stays
     /// `None` and nothing is projected (a partially-trusted chain could fork
-    /// state — `documents/persistent_chain.md`).
+    /// state — `docs/chain/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
         match self.verify_own(&chain) {
             Ok(head) => {
@@ -1312,7 +1312,7 @@ impl State {
                 }
                 // 4) dynamic mesh membership: the rejoiner's mesh announce
                 // follows on this same recovery queue — accept it for exactly
-                // this member (documents/dynamic_mesh.md §3)
+                // this member (docs/transport/dynamic_mesh.md §3)
                 self.recovery_mesh_window.insert(member.to_string());
                 tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }
@@ -1506,7 +1506,7 @@ impl State {
     /// only on an exact hash match — nobody ever signs a foreign blob. A
     /// cut that is not our current head is skipped and NOT buffered: a
     /// lagging node simply misses this cut (v1 liveness limit, stage-5
-    /// pin in `documents/log_compaction.md`) — the proposer re-proposes
+    /// pin in `docs/chain/log_compaction.md`) — the proposer re-proposes
     /// at the then-current head; a stale cut dies on re-base anyway.
     pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str) {
         self.next_id = self.next_id.max(id + 1);

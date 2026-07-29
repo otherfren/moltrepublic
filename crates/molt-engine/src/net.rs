@@ -70,7 +70,7 @@ const ORDERED_PARK_MAX: usize = 512;
 /// 600 s, so an honest predecessor always lands well inside the window.
 pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
 
-/// Self-heal detection window (Stage 1, `documents/mesh_selfheal.md`): a mesh
+/// Self-heal detection window (Stage 1, `docs/transport/mesh/mesh_selfheal.md`): a mesh
 /// peer whose inbound subscription is live (`SUB` accepted, not in
 /// `net_link_down`) but from which **nothing** has been heard for longer than
 /// this — measured from the LATER of its mesh-up and its last real sighting
@@ -93,7 +93,7 @@ pub(crate) const MESH_DEAF_SECS: u64 = 300;
 /// keeps the full [`MESH_DEAF_SECS`] to avoid flapping on a brief quiet.
 pub(crate) const MESH_DEAF_NEW_SECS: u64 = 45;
 
-/// Mesh keepalive interval (Stage 2, `documents/mesh_selfheal.md`): the
+/// Mesh keepalive interval (Stage 2, `docs/transport/mesh/mesh_selfheal.md`): the
 /// engine sends an idle-only MLS liveness ping to a mesh peer whose leg has
 /// gone this long without any real outbound traffic, keeping the peer's
 /// inbound queue warm on the server (and stamping the peer's `last_seen` on
@@ -124,7 +124,7 @@ pub(crate) const MESH_VERIFY_SECS: u64 = 10;
 pub(crate) const MESH_RECEIVING_SECS: u64 = 30;
 
 /// Minimum seconds between self-initiated **mesh rotates** for one peer
-/// (Stage 3, `documents/mesh_selfheal.md`): the periodic deaf-leg detector
+/// (Stage 3, `docs/transport/mesh/mesh_selfheal.md`): the periodic deaf-leg detector
 /// re-evaluates every presence tick, so without a cooldown it would spawn a
 /// fresh rotate every tick while a leg stays deaf. One rotate per peer per
 /// this window is ample — it gives the announce → adopt → reply round trip
@@ -1748,7 +1748,7 @@ impl State {
     }
 
     /// A rejoiner's **mesh announce** arrived on the recovery queue (dynamic
-    /// mesh membership, `documents/dynamic_mesh.md` ❷): authenticate the
+    /// mesh membership, `docs/transport/dynamic_mesh.md` ❷): authenticate the
     /// announcer by MLS decryption and check it is the member whose re-key
     /// just completed, then relay the ciphertext **verbatim** over the runtime
     /// mesh (every survivor authenticates + extends itself) and extend this

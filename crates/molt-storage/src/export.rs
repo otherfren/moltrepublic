@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! `molt-export-v1` — the encrypted single-file workspace export (milestone
-//! S4, `documents/backup_restore_design.md` §3).
+//! S4, `docs/storage/backup_restore_design.md` §3).
 //!
 //! One `.molt.enc` file + one secret = restored **knowledge**: the manifest,
 //! the encrypted history (verbatim ciphertext — the frames stay under the

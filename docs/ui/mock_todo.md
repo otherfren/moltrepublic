@@ -20,7 +20,7 @@ entfernt (11); echtes S3-Auto-Backup (Ticker, ehrliche Stempel nur nach bestäti
 Upload, Retention) (12); echter zweiphasiger Restore aus Datei/S3 — Staging →
 Chain-Verify hard-reject vor Materialisierung → Commit, Öffnen „detached", der Weg
 zurück in die lebende Republik bleibt das Recovery-Ritual (13). Design in
-`documents/backup_restore_design.md`. Story 14 (Memory/Quests/Vault/Wallet als echte
+`docs/storage/backup_restore_design.md`. Story 14 (Memory/Quests/Vault/Wallet als echte
 Produkte) bleibt bewusst offen.
 
 **UI-Arbeiten (Nutzer-Aufträge):** die vier stillgelegten Surfaces (Memory/Quests/Vault/
@@ -117,7 +117,7 @@ molt-ui + ein Callback.
 - `crates/molt-ui-window/ui/app.slint:1570–1624` (Dropdown tor/none, Tor-Modus, Port; `:1624` übergibt nur den String `"tor"`/`"none"`)
 - `crates/molt-engine/src/lifecycles.rs:179,198` (`cmd_create_start` speichert `net` nur als Label), `:645`, `:906` (Join hartkodiert `"tor"`)
 - `crates/molt-engine/src/founding.rs:365–374`: der Ritual-Transport kommt aus `resolve_dialer()` = **globale** Settings (`crates/molt-engine/src/session.rs:256–280`)
-- Dokumentierte Entscheidung: `documents/tor_transport_implementation.md` §P8 („`CreateStart.net` stays cosmetic“)
+- Dokumentierte Entscheidung: `docs/transport/tor_transport_implementation.md` §P8 („`CreateStart.net` stays cosmetic“)
 
 **Was heute passiert:** Die Netzwerk-Wahl beim Gründen (inkl. Tor-Modus und
 Port) beeinflusst den Transport nicht; maßgeblich sind immer die globalen
@@ -308,7 +308,7 @@ hängt am S3-Client.
 > (Argon2id 64 MiB/t=3/p=1, XChaCha20-Poly1305 in 4-MiB-Chunks, Header über
 > Key-Bindung authentifiziert), atomarer Write mit fsync; MLS-Ratchets und
 > SMP-Queue-Creds werden NIE exportiert; `Command::ExportWorkspace` + MCP-Tool;
-> Design: `documents/backup_restore_design.md`. Import ist Nr. 13.
+> Design: `docs/storage/backup_restore_design.md`. Import ist Nr. 13.
 
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:5766–5795`: das Backup-Modal setzt bei „Bestätigen“ nur `root.export-note = "Exportiert (Mock): <Pfad>"` — kein Command, kein Write
@@ -320,7 +320,7 @@ Zielpfad entgegen und behauptet danach im Panel einen Export — es wird nichts
 gelesen oder geschrieben. (Der Modal-Text sagt das immerhin ehrlich dazu.)
 
 **Echte Implementierung:** Das Blob-Format ist Milestone S4 aus
-`documents/concept-workspace-storage.md` (Status-Kopf: „S4 export/import …
+`docs/storage/concept-workspace-storage.md` (Status-Kopf: „S4 export/import …
 remain open“): ein verschlüsselter Ein-Datei-Export (`.molt.enc`) des
 Workspace-Verzeichnisses inkl. Schlüssel-Story, plus Import-Gegenstück
 (Finding 13). Schichten: molt-storage (Format), molt-core (Command),
@@ -350,7 +350,7 @@ verschlüsselte Einträge) — aber es ist ein reines Session-Flag: auf der Plat
 Zustand komplett (Scan setzt wieder `false`).
 
 **Echte Implementierung:** Milestone S6 „passphrase sealing“
-(`documents/concept-workspace-storage.md`): den device-sealed Log-Key
+(`docs/storage/concept-workspace-storage.md`): den device-sealed Log-Key
 zusätzlich unter der Recovery-Phrase versiegeln, `seed.sealed` entfernen,
 Phrase beim Decrypt echt verifizieren, Zustand aus dem Verzeichnis ableiten.
 Schichten: molt-storage (Kern), molt-engine, molt-ui/mcp (nur Texte).
@@ -395,7 +395,7 @@ fehlt; ohne sie wäre auch Entfernen der Vokabel (S) ehrlich.
 - `crates/molt-engine/src/session.rs:613–633`: `cmd_set_workspace_backup` — die Pref wird **echt** persistiert (`prefs.toml`), aber der Kommentar sagt es klar: „the uploader itself is milestone S5; the stamp keeps list and prefs consistent“ — `last_backup_min = 0` wird gestempelt, ohne dass ein Backup läuft
 - Settings-Tab „Backup“: Intervall, Kopien-Retention, Endpoint/Keys/Bucket (`app.slint:5013–5133`) — alles wird real nach `config.toml` persistiert (`configstore.rs:336–342`), aber von niemandem konsumiert; kein S3-Code existiert im Workspace (grep über molt-net/molt-storage: keine Treffer)
 - MCP-Tool `set_workspace_backup` (`molt-mcp/src/lib.rs:817`)
-- Querverweis: `documents/total_review.md` (Medium-Finding: „das S3-Backend selbst bleibt die bekannte deferred-Arbeit“), `documents/concept-workspace-storage.md` (S5 offen)
+- Querverweis: `docs/reviews/total_review.md` (Medium-Finding: „das S3-Backend selbst bleibt die bekannte deferred-Arbeit“), `docs/storage/concept-workspace-storage.md` (S5 offen)
 
 **Was heute passiert:** Der Auto-Backup-Schalter, Intervall und Retention sind
 voll bedienbar und überleben Neustarts — aber es gibt keinen Uploader, keinen

@@ -506,7 +506,7 @@ pub(crate) struct State {
     /// is open (or a pre-chain workspace).
     pub(crate) identity_sk: Option<molt_storage::SigningKey>,
     /// The republic's persistent commit-block chain — the converged, verified
-    /// governance record (`documents/persistent_chain.md`). Block 0 is the
+    /// governance record (`docs/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) chain: Vec<molt_core::ChainBlock>,
     /// The verified head of [`State::chain`] (`None` = empty chain).

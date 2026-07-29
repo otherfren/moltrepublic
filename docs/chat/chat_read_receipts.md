@@ -1,8 +1,8 @@
 # Plan: per-message read receipts ("Lesebestätigung")
 
 Status: **PLANNED 2026-07-19** — design agreed, not yet built. Execution-ready,
-test-first. Read `documents/chat_bus.md` first (this rides the chat/reaction
-machinery); read `documents/persistent_chain.md` to confirm the ephemerality
+test-first. Read `docs/chat/chat_bus.md` first (this rides the chat/reaction
+machinery); read `docs/chain/persistent_chain.md` to confirm the ephemerality
 boundary this respects.
 
 ## 0. What the feature is

@@ -6,7 +6,7 @@
 //! writes (`SaveSettings` persists through here) and the watcher half that
 //! picks up external edits. One owner for the file means no cross-task file
 //! races by construction, and the engine never blocks on a disk.
-//! Design: `documents/concept-config-bidirection.md`.
+//! Design: `docs/build/concept-config-bidirection.md`.
 //!
 //! * **App → file**: the engine queues [`StoreRequest::Persist`]; bursts are
 //!   coalesced (250 ms debounce, newest wins) into one format-preserving,

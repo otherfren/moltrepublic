@@ -2,8 +2,8 @@
 
 Status: **DISCUSSION DRAFT 2026-07-21.** Grounded in a live measurement against
 the real Test12 on `smp8.simplex.im` (3 nodes classic/dark/brutal). Read
-`documents/mesh_probe.md`, `documents/mesh_selfheal.md`,
-`documents/mesh_verify_at_open.md`, and the CLAUDE.md transport section first.
+`docs/transport/mesh/mesh_probe.md`, `docs/transport/mesh/mesh_selfheal.md`,
+`docs/transport/mesh/mesh_verify_at_open.md`, and the CLAUDE.md transport section first.
 
 ## 0. What the measurement established (so we fix the RIGHT thing)
 
@@ -99,7 +99,7 @@ only not screaming about an absent friend.
   single-server transport (config is single-server) — its per-server
   construction lands with Stage 2 when the config gains a server list.
 - **Stage 2 (the feature) — MECHANISM ✅ BUILT + TESTED, activation pending.** See
-  `documents/mesh_redundancy_stage2.md` for the full record. Done + on master:
+  `docs/transport/mesh/mesh_redundancy_stage2.md` for the full record. Done + on master:
   `PeerLink.snds/rcvs`, additive `MeshLink` extra + `MeshAnnounce.queues_extra`
   (no `TRANSPORT_STATE_VERSION` bump — additive), the supervisor N-forwarder →
   merged-channel → one-recv-consumer (single Reassembler + sole-writer cursor)
@@ -118,7 +118,7 @@ only not screaming about an absent friend.
   mints + announces N** (and its own transport spans the configured servers), and
   **`route()` dials a queue's OWN pinned server** (bounded dynamic pools), which
   removes the shared-server-set constraint and `reopen_transport`'s >2-server
-  truncation. Full record in `documents/mesh_redundancy_stage2.md`.
+  truncation. Full record in `docs/transport/mesh/mesh_redundancy_stage2.md`.
 
 ---
 ### Original design
@@ -159,7 +159,7 @@ new `Command` (co-equality untouched). TDD: three pure-selection tests. The
 zero-loss overlap (old queue as `rcv_extra` a grace window) and per-queue rotation
 without a full rebuild (Option B) are follow-ups; with Stage-2 redundancy active,
 the sibling queue already carries traffic during a rotate. Full plan +
-architectural fork (Option A vs B) in `documents/mesh_rotation_trackc.md`. Original
+architectural fork (Option A vs B) in `docs/transport/mesh/mesh_rotation_trackc.md`. Original
 design below.
 
 **Problem:** a long-lived queue is a long-lived correlation handle (unlinkability)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **Mesh self-heal Stage 2: idle-queue keepalive** (`documents/mesh_selfheal.md`).
+//! **Mesh self-heal Stage 2: idle-queue keepalive** (`docs/transport/mesh/mesh_selfheal.md`).
 //!
 //! A founder with a live 2-of-2 mesh; the member side is a real supervisor
 //! whose sink records every `peer_seen` sighting and every delivery. Pinned:

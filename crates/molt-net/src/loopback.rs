@@ -72,7 +72,7 @@ struct Queue {
     /// Unacked blocks by delivery id.
     pending: HashMap<u64, PaddedBlock>,
     /// Test seam for the SMP idle-expiry / "silently deaf" failure
-    /// (`documents/mesh_selfheal.md` §6): when set, `SUB` and `SEND` still
+    /// (`docs/transport/mesh/mesh_selfheal.md` §6): when set, `SUB` and `SEND` still
     /// return `Ok` but every delivery to this queue is silently dropped —
     /// exactly the server-side state the client cannot detect. Loopback is
     /// otherwise permissive, so this is the only way to reproduce a
@@ -139,7 +139,7 @@ impl LoopbackHub {
     }
 
     /// Mark a queue **idle-expired / silently deaf** (test seam,
-    /// `documents/mesh_selfheal.md` §6): from now on `SUB`/`SEND` still return
+    /// `docs/transport/mesh/mesh_selfheal.md` §6): from now on `SUB`/`SEND` still return
     /// `Ok` but every delivery to it is silently dropped — the exact
     /// server-side state that produces a born-dead / live-but-deaf leg. The
     /// `id` is a queue's `QueueId` (a `PeerLink`'s `rcv.id`, which equals the

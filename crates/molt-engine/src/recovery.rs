@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The **recovery ritual** transport (see `documents/recovery_ritual.md`): the
+//! The **recovery ritual** transport (see `docs/ritual/recovery_ritual.md`): the
 //! total-loss twin of the founding ritual. The coordinator/crypto half already
 //! lives elsewhere (`Command::NetRecoverRequested`, `cmd_net_recover_requested`,
 //! `verify_and_propose_restore`, `coordinator_rekey`); this module builds the
@@ -342,7 +342,7 @@ pub struct RejoinOutcome {
     /// republic (no genesis to rebuild it).
     pub sealed: Option<molt_core::SealedRoster>,
     /// The re-established full-mesh handovers to the survivors (dynamic mesh
-    /// membership, `documents/dynamic_mesh.md`) — the engine stands the runtime
+    /// membership, `docs/transport/dynamic_mesh.md`) — the engine stands the runtime
     /// supervisor up over them. Empty when the mesh phase was skipped or timed
     /// out (best-effort: the recovered STATE never depends on it).
     pub mesh: Vec<molt_core::MeshLink>,
@@ -619,7 +619,7 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
 }
 
 /// Re-join the **runtime mesh** after recovery — the rejoiner side of dynamic
-/// mesh membership (`documents/dynamic_mesh.md`): open one fresh per-pair
+/// mesh membership (`docs/transport/dynamic_mesh.md`): open one fresh per-pair
 /// inbound queue per survivor, announce them MLS-encrypted over the recovery
 /// channel (the coordinator authenticates the sender and relays the ciphertext
 /// verbatim over the runtime mesh), then await each survivor's reply announce

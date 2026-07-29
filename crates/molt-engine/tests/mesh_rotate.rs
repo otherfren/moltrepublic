@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **Mesh self-heal Stage 3: self-initiated re-announce** (`documents/mesh_selfheal.md`).
+//! **Mesh self-heal Stage 3: self-initiated re-announce** (`docs/transport/mesh/mesh_selfheal.md`).
 //!
 //! The #1 missing piece the design calls out: a node that, on its own, mints a
 //! fresh inbound queue and broadcasts the new address over its still-working

@@ -4,8 +4,8 @@ Status: **OPTION A BUILT 2026-07-24.** The 4th SimpleX-reliability track (after 
 honest-status ✅, D reopen-smoothing ✅, B redundancy ✅ complete). The user chose
 **Option A** (§3) — ship the simple scheduled rotation now, accepting the brief
 whole-mesh blip. Built + green + pushed; Option B (per-queue rotation, zero blip)
-remains the follow-up. Read `documents/mesh_reliability.md` (Track C) and
-`documents/mesh_verify_at_open.md` (the rotate machinery) first.
+remains the follow-up. Read `docs/transport/mesh/mesh_reliability.md` (Track C) and
+`docs/transport/mesh/mesh_verify_at_open.md` (the rotate machinery) first.
 
 ## BUILT (Option A) — summary
 
@@ -49,7 +49,7 @@ Original design below.
 
 Status: **DESIGN DRAFT 2026-07-23.** The 4th SimpleX-reliability track (after A
 honest-status ✅, D reopen-smoothing ✅, B redundancy ✅ mechanism). Read
-`documents/mesh_reliability.md` (Track C) and `documents/mesh_verify_at_open.md`
+`docs/transport/mesh/mesh_reliability.md` (Track C) and `docs/transport/mesh/mesh_verify_at_open.md`
 (the rotate machinery) first. **This doc surfaces a genuine architectural fork —
 it is not execution-ready until that fork is decided.**
 

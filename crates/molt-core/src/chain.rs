@@ -108,7 +108,7 @@ pub enum ChainChange {
     /// CORRECTNESS of the compaction, sign-what-you-see (every signer
     /// recomputes the bytes from its own chain before signing). Once
     /// committed, blocks `<= upto` may be dropped locally; a newcomer
-    /// bootstraps from checkpoint + suffix (`documents/log_compaction.md`
+    /// bootstraps from checkpoint + suffix (`docs/chain/log_compaction.md`
     /// Teil B).
     Checkpoint {
         /// The last folded-in block: the checkpoint attests the state

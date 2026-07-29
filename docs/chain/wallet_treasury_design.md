@@ -4,7 +4,7 @@ How a republic gets — and governs — a shared Monero purse. Like
 `founding_ritual.md`, this document describes the design **abstractly**: the
 actors, the keys, the messages, and the guarantees that hold when each phase
 is over. The concrete crates and the build order live in
-`documents/multi-sig-wallet-plan.md`; the code is pointed to at the end.
+`docs/chain/multi-sig-wallet-plan.md`; the code is pointed to at the end.
 
 Status: DRAFT for discussion (2026-07-18). Nothing below is implemented yet.
 
@@ -331,7 +331,7 @@ should overlap in time. These get their own design pass before Etappe 2.
 
 Everything concrete — crates, modules, exact contract additions, storage
 format, TDD schedule, UI panes, build order, known traps — lives in
-`documents/multi-sig-wallet-plan.md`. Anchors: `crates/molt-treasury`
+`docs/chain/multi-sig-wallet-plan.md`. Anchors: `crates/molt-treasury`
 (new: roster/dkg/keys/rpc/scan), `crates/molt-core/src/wallet.rs` (new:
 read-model + op constants), `crates/molt-engine` (`wallet_ritual` next to
 `net_ritual`, round arms in `cmd_net_delivered`, checkpoint-style

@@ -106,7 +106,7 @@ Migration im `restore_dump`).
 **Definition of Done:** Ein akzeptierter Org- UND Gated-Surface-Vote ist aus
 seiner Applied-Zeile per 💬 wieder öffenbar (read-only, 🗳-Rücksprung im
 Banner funktioniert); Testsuiten + Clippy 0 + autoritativer Window-Build;
-`documents/chat_bus.md` um einen Satz zur Id-Spur ergänzt.
+`docs/chat/chat_bus.md` um einen Satz zur Id-Spur ergänzt.
 
 ---
 
@@ -144,7 +144,7 @@ schon gibt:
   positionsgebunden — Re-Gossip ändert nichts an
   `approval_bytes`/`molt-chain-change-v1`.
 - Alternativ-Falle (NICHT tun): Pending in den Log/Dump schreiben — bricht
-  die dokumentierte Ephemeral-Grenze (`documents/persistent_chain.md`).
+  die dokumentierte Ephemeral-Grenze (`docs/chain/persistent_chain.md`).
 
 **TDD:**
 1. `a_reopened_member_recovers_open_proposals_from_the_mesh`
@@ -229,7 +229,7 @@ konsistent; Tests + Clippy + Window-Build grün.
 **Auftrag:** Abgelaufenes verschwindet heute nur aus den Reads
 (`chat_view_admits`/`aged_out_at`); Log-Einträge und `shared_files`-Pfade
 bleiben auf der Platte. Ziel: nach Ablauf + Karenz ist der Inhalt lokal
-wirklich gelöscht. Referenz: `documents/chat_bus.md:266–292` (Compaction-
+wirklich gelöscht. Referenz: `docs/chat/chat_bus.md:266–292` (Compaction-
 Bullet + Uploads-Bullet — die dort genannten Constraints sind der Vertrag).
 
 **Harte Constraints (nicht verhandelbar):**
@@ -251,7 +251,7 @@ Bullet + Uploads-Bullet — die dort genannten Constraints sind der Vertrag).
   KEIN konvergenzrelevantes Ereignis — nichts davon kreuzt die Wire.
 
 **Etappe 1 ABGESCHLOSSEN (2026-07-17):** Diskussion geführt,
-`documents/log_compaction.md` ist ENTSCHIEDEN und in zwei Teile gespalten:
+`docs/chain/log_compaction.md` ist ENTSCHIEDEN und in zwei Teile gespalten:
 **WP4a** ephemeres Pruning (F1 nur größengesteuerte Rotation, F2 Karenz =
 1× Fenster, F3 Segment-Keys sofort, F4 Peer-Karenz = 2× Fenster) und
 **WP4b** Chain-Checkpoint (m-of-n signieren die Checksum des
@@ -261,7 +261,7 @@ WP4b zuerst (B.8), dann WP4a (A.5).
 
 **Etappen (jede einzeln mergebar):**
 1. **Analyse-Etappe (Design-Doc, discuss-before-push!):**
-   `documents/log_compaction.md` — Segment-/Floor-Modell, Cursor-Umleitung,
+   `docs/chain/log_compaction.md` — Segment-/Floor-Modell, Cursor-Umleitung,
    Ablauf+Karenz (Vorschlag: Karenz = 1× Retention-Fenster, damit
    Boundary-Races der Reads nie sichtbar werden), Crash-Sicherheit
    (Kompaktierung als Copy-then-Swap auf Storage-Ebene, molt-storage).

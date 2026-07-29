@@ -231,7 +231,7 @@ Having verified a chain, a member knows — not trusts — that:
   the cut). Catch-up serves `CheckpointServed { blob }` + suffix;
   recovery Welcomes carry the pruned wire shape; the first prune raises
   the manifest version so older binaries refuse the workspace instead
-  of running chainless. Design + v1 limits: `documents/log_compaction.md`
+  of running chainless. Design + v1 limits: `docs/chain/log_compaction.md`
   Teil B.
 - **Real (Phase 4).** Recovery as catch-up-from-genesis + MLS re-key: a
   `Membership{Restored}` block re-admits the seat by threshold, the coordinator

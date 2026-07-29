@@ -847,7 +847,7 @@ pub fn write(path: &Path, settings: &Settings, make_backup: bool) -> std::io::Re
 /// everything the user hand-wrote into the file: comments, key order, spacing.
 ///
 /// This is the write path of the bi-directional config (see
-/// `documents/concept-config-bidirection.md`): [`render`] produces our
+/// `docs/build/concept-config-bidirection.md`): [`render`] produces our
 /// canonical file for `--generate-config`, but a runtime save must not
 /// clobber a user-maintained file, so it edits the existing document instead.
 /// Fails only when `text` is not parseable TOML — the caller must not guess

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! S6 at-rest sealing (`documents/backup_restore_design.md` §5): the
+//! S6 at-rest sealing (`docs/storage/backup_restore_design.md` §5): the
 //! recovery phrase is the credential; **sealed = no key material on disk**.
 //!
 //! The workspace key is HKDF-derivable from the phrase + the plaintext

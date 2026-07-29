@@ -1,8 +1,8 @@
 # Design: mesh self-heal — queue liveness, honest health, auto-heal, recovery fallback
 
 Status: **PLANNED 2026-07-19** — design agreed in discussion; not yet built.
-Execution-ready, test-first. Read `documents/dynamic_mesh.md`,
-`documents/recovery_ritual.md`, `documents/stage_b.md`, and the CLAUDE.md
+Execution-ready, test-first. Read `docs/transport/dynamic_mesh.md`,
+`docs/ritual/recovery_ritual.md`, `docs/transport/mesh/stage_b.md`, and the CLAUDE.md
 transport section first — this builds directly on their machinery.
 
 ## 0. The problem this fixes (grounded in a live incident)

@@ -1,7 +1,7 @@
 # Design: mesh verify-at-open — proactive leg verification (self-heal Fix A)
 
 Status: **DISCUSSION DRAFT 2026-07-21** — design proposed, open questions in §7
-to settle before any code. Builds directly on `documents/mesh_selfheal.md` (all
+to settle before any code. Builds directly on `docs/transport/mesh/mesh_selfheal.md` (all
 four phases landed on master, 43ab06d..ff8923c). Read that + the CLAUDE.md
 transport section first; this reuses its machinery and only front-loads it.
 

@@ -2,7 +2,7 @@
 
 //! `molt-net`: the transport layer of MoltRepublic.
 //!
-//! Implements `documents/concept-transport-simplex-tor.md`, milestone **T1**:
+//! Implements `docs/transport/concept-transport-simplex-tor.md`, milestone **T1**:
 //! everything above the [`Transport`] trait runs without sockets, everything
 //! below runs without the engine. The trait models SMP-style unidirectional
 //! message queues: the *recipient* creates a queue and hands the send-side
@@ -68,7 +68,7 @@ pub use wrap::{WrapKey, CHUNK_PLAIN_LEN};
 
 /// The plaintext of a **mesh keepalive** — a transport-level MLS liveness
 /// ping that is NOT a `WorkspaceEvent` (never logged or chained, per
-/// `documents/mesh_selfheal.md` Stage 2). The engine encrypts these bytes
+/// `docs/transport/mesh/mesh_selfheal.md` Stage 2). The engine encrypts these bytes
 /// with the live group and sends the ciphertext onto an idle peer's queue to
 /// keep it warm on the server; the receiver's `MlsChannel::decode`
 /// recognizes this exact plaintext, stamps the peer's presence (`peer_seen`)

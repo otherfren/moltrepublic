@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     /// The co-equality guard: every command variant is either an MCP tool or
-    /// on the documented internal list (see documents/mcp-security.md).
+    /// on the documented internal list (see docs/security/mcp-security.md).
     #[test]
     fn co_equality_every_command_is_a_tool_or_documented_internal() {
         // engine-internal: the run tickers are the engine's own clock;
@@ -1215,7 +1215,7 @@ mod tests {
         // the node's own transport tasks speaking, not agent-forgeable;
         // reload_settings / config_notice are the config
         // watcher's mirror path — an agent that wants a reload edits via
-        // save_settings (see documents/mcp-security.md)
+        // save_settings (see docs/security/mcp-security.md)
         // net_mesh_announced is a member's post-founding mesh handover reaching
         // the founder over the star; net_mesh_ready is the founder's off-actor
         // bootstrap task reporting the assembled mesh — both are the node's own

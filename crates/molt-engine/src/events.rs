@@ -1023,7 +1023,7 @@ mod tests {
 
     /// **WP4a keystone (F9): a PRUNED snapshot + continued replay must not
     /// disturb what the log still means.** This is the proof the compaction
-    /// design stands on (`documents/log_compaction.md` §A.5/F9) — it runs
+    /// design stands on (`docs/chain/log_compaction.md` §A.5/F9) — it runs
     /// BEFORE any compactor code, and a red run is a design stop, not a bug to
     /// patch.
     ///

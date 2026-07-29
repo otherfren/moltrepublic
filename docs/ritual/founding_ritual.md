@@ -338,5 +338,5 @@ fast test; the product never uses it.
   interoperates across instances, and the ratification gate holds until the
   joiner confirms).
 
-The transport concept this realizes is `documents/concept-transport-simplex-tor.md`
+The transport concept this realizes is `docs/transport/concept-transport-simplex-tor.md`
 (§3.3).

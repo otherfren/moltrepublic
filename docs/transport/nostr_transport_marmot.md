@@ -3,11 +3,11 @@
 Status: **DRAFT 2026-07-29, DISCUSSION DOCUMENT — not an execution plan.**
 Written after the delivery-guarantee live validation (2026-07-27..29) and
 hardened by two adversarial review passes (§13, two ledgers). Read first:
-`documents/delivery_guarantee.md` (the layer this offloads),
-`documents/mesh_selfheal.md` + `mesh_reliability.md` (the machinery this
+`docs/transport/delivery_guarantee.md` (the layer this offloads),
+`docs/transport/mesh/mesh_selfheal.md` + `mesh_reliability.md` (the machinery this
 removes — and the earlier measurement that partly contradicts §0),
-`documents/recovery_ritual.md`, `documents/backup_restore_design.md`,
-`documents/founding_ritual.md` (invariants this must not weaken), and the
+`docs/ritual/recovery_ritual.md`, `docs/storage/backup_restore_design.md`,
+`docs/ritual/founding_ritual.md` (invariants this must not weaken), and the
 CLAUDE.md transport section.
 
 **Read this first — the honest state of the concept (both review passes):**
@@ -448,7 +448,7 @@ we design a 445-level chunked data plane.
 
 ## 7.5 Relay reachability: onion by default, clearnet only with a warning
 
-*Recorded as [ADR-0001](../docs/adr/0001-nostr-relay-reachability-onion-by-default.md)
+*Recorded as [ADR-0001](../adr/0001-nostr-relay-reachability-onion-by-default.md)
 (status: proposed, conditional on the §0 go/no-go).*
 
 The `h`-tag/subscription exposure of §7 is not fought at the group layer (a

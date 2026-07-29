@@ -1225,7 +1225,7 @@ pub const STORAGE_VERSION: u32 = 1;
 pub const STORAGE_VERSION_PRUNED: u32 = 2;
 
 /// The manifest version a workspace is RAISED to when it is sealed at rest
-/// under its recovery phrase (S6, `documents/backup_restore_design.md` §5.4):
+/// under its recovery phrase (S6, `docs/storage/backup_restore_design.md` §5.4):
 /// an older binary — which would trip over the keyless directory with a raw
 /// I/O error — refuses the whole workspace politely at the manifest gate
 /// instead. Unsealing recomputes the floor (pruned chain present →
@@ -1409,8 +1409,8 @@ pub struct OutboundCursor {
     pub resend_epoch: u32,
 }
 
-/// The receive-side accept window (delivery guarantee, `documents/
-/// delivery_guarantee.md` §4.2): per SENDER, which of that sender's log seqs
+/// The receive-side accept window (delivery guarantee,
+/// `docs/transport/delivery_guarantee.md` §4.2): per SENDER, which of that sender's log seqs
 /// this node's engine has accepted. It is both the envelope-level dedup (a
 /// resent envelope must never re-apply — G2) and the payload of the mesh ACK
 /// frame the sender trims its resend range with. `high` is the highest
@@ -2029,7 +2029,7 @@ pub enum WorkspaceEvent {
         commit: String,
     },
     /// A member **(re)announced its per-pair mesh queues** — the relay leg of
-    /// dynamic mesh membership (`documents/dynamic_mesh.md`): the coordinator
+    /// dynamic mesh membership (`docs/transport/dynamic_mesh.md`): the coordinator
     /// that received a rejoiner's announce over the recovery channel
     /// re-broadcasts the MLS ciphertext **verbatim**, so every survivor
     /// authenticates the announcer by decryption and extends its own mesh
@@ -2673,7 +2673,7 @@ pub enum Command {
     /// silent member ages online → stale → offline without any traffic.
     NetPresenceTick,
     /// The delivery-guarantee beat (engine-internal 1 s ticker,
-    /// `documents/delivery_guarantee.md` §4.3/§4.6): flush due delivery
+    /// `docs/transport/delivery_guarantee.md` §4.3/§4.6): flush due delivery
     /// ACKs and run the debounced accept-window / live-ratchet persists.
     /// Fast on purpose — riding the 30 s presence tick alone made the
     /// "3 s" ACK debounce a 33 s latency, losing the race against the
@@ -2828,7 +2828,7 @@ pub enum Command {
     ListProposals,
     /// WP4b: put a chain CHECKPOINT forward for threshold approval — the
     /// compaction cut at the CURRENT head (`upto` = head height, B-F1 in
-    /// `documents/log_compaction.md`). The engine computes the canonical
+    /// `docs/chain/log_compaction.md`). The engine computes the canonical
     /// state hash itself; every receiver recomputes it from its own chain
     /// before co-signing (sign-what-you-see), and the block seals at m.
     ProposeCheckpoint,

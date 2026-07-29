@@ -2,7 +2,7 @@
 
 Status: **EXECUTION-READY DESIGN 2026-07-23.** Builds on Stage 0 (`rcv_server`)
 and Stage 1 (multi-server `SmpTransport` routing), both landed + audited clean.
-Read `documents/mesh_reliability.md` (Track B) and the CLAUDE.md transport
+Read `docs/transport/mesh/mesh_reliability.md` (Track B) and the CLAUDE.md transport
 section first. N=2 chosen (the SimpleX sweet spot).
 
 ## 0. Goal & the one correctness detail
