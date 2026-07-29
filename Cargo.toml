@@ -98,6 +98,18 @@ hex                = "0.4"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
+# Nostr transport (N0+, docs/transport/nostr_transport_marmot.md). rust-nostr
+# with its C libsecp256k1 backend — the third sanctioned transport-edge C
+# exception (ADR-0002); nip44/nip59 are the NIP-EE envelope crypto. The relay
+# pool and the in-process test relay are DEV-ONLY until N2 decides the runtime
+# WS/TLS stack: nostr-relay-pool → async-wsocket hard-pins tokio-rustls with
+# the `ring` provider (audited 2026-07-30), which the default build must not
+# silently re-adopt after N-demo drops the SMP cert-pin.
+nostr               = { version = "0.44.6", default-features = false, features = ["std", "nip44", "nip59"] }
+nostr-relay-pool    = "0.44.1"
+nostr-relay-builder = "0.44.1"
+chacha20            = "0.9"    # nip44 vector pin recomputes reference ciphertexts (dev-only)
+
 # MLS group encryption (molt-net, T2). Pure-Rust provider (RustCrypto +
 # hpke-rs/libcrux + ed25519-dalek/x25519-dalek + chacha20poly1305/aes-gcm) —
 # keeps the no-C-toolchain posture. The mandatory ciphersuite

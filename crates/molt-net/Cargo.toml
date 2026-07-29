@@ -88,3 +88,14 @@ tokio = { workspace = true, features = ["test-util"] }
 # `tempfile` backs the embedded-tor config-to-state-dir unit test (feature-gated,
 # dev-only — the default non-dev graph is unchanged).
 tempfile = { workspace = true }
+# N0 Nostr spike (tests/nostr_vectors.rs, tests/nostr_relay_poc.rs). ALL
+# dev-only on purpose — nothing under src/ touches Nostr until N1 promotes
+# `nostr` to a real dependency (C libsecp256k1, ADR-0002), and the pool's WS
+# stack (async-wsocket) pins tokio-rustls/ring, which the RUNTIME only adopts
+# — or not — by the explicit N2 decision, never as an N0 side effect.
+nostr = { workspace = true }
+nostr-relay-pool = { workspace = true }
+nostr-relay-builder = { workspace = true }
+# byte-pin of the vectors' get_message_keys section: recompute the expected
+# ciphertext from the reference chacha/hmac keys (same 0.9 line nostr uses)
+chacha20 = { workspace = true }

@@ -612,14 +612,30 @@ recommended, clearnet warned** — informed choice with a private default, not
   the `ring`-removal one). N1's nostr key derivation uses secp256k1, not k256.
 - **`rust-nostr`** (v0.44, near beta): offers Event/NIP-44/NIP-59/relay-pool
   ready-made; used as the transport crate (its C secp256k1 accepted, ADR-0002).
-- **WebSocket:** `tokio-tungstenite` + rustls — N0 must still confirm it does
-  not re-introduce `ring` in a way that conflicts with the rustls-rustcrypto
-  posture, and it must ride the T4 fail-closed dialer (onion, §7.5/ADR-0001).
+- **WebSocket — AUDITED (N0, 2026-07-30):** rust-nostr's relay pool rides
+  `async-wsocket`, which hard-pins `tokio-rustls = { features = ["ring",
+  "tls12"], default-features = false }` and `tokio-tungstenite = { features =
+  ["rustls-tls-webpki-roots"] }` — i.e. the **`ring` rustls provider is
+  non-optional** in that stack (no rustcrypto path, no feature to swap it).
+  Consequence: the pool + in-process test relay are **dev-dependencies only**
+  for now; whether the N2 runtime adopts the ready-made pool (ring returns to
+  the default graph) or drives `tokio-tungstenite` directly over our existing
+  rustls-rustcrypto config (and the T4 fail-closed onion dialer, §7.5/ADR-0001)
+  is an explicit N2 decision, not an N0 side effect. `cargo tree` after N0:
+  the default no-dev graph is byte-unperturbed (every Nostr crate is dev-only
+  until N1 promotes `nostr` — then `secp256k1-sys` enters per ADR-0002);
+  `ring` only via the pre-existing `x509-parser` cert-pin (dies in N-demo);
+  no aws-lc anywhere.
+- **NIP-44 length deviation (N0 finding, pinned):** rust-nostr's `pad()` caps
+  plaintext at 65536−128 = 65408 bytes; the spec and the official vectors
+  allow 65535 (unfixed in 0.44.6 and 0.45.0-alpha.7; decrypt side has no cap,
+  so send-side only). All three official long-message vectors are over the
+  cap. Harmless for us — the 445-level chunk budget stays far below 64 KiB —
+  but `tests/nostr_vectors.rs` pins the boundary as a canary that flips on an
+  upstream fix.
 - **MDK / White Noise:** MIT, used as a REFERENCE (event layout, race
   handling to test against), not a dependency — their account/storage/runtime
   overlaps our engine entirely.
-- **WebSocket:** `tokio-tungstenite` + rustls — check compatibility with our
-  rustls-rustcrypto posture in N0 (avoid re-introducing `ring`).
 
 ## 9. Migration & coexistence
 
@@ -714,11 +730,21 @@ once. So:
   etappe DELETES; it must leave the tree green** (the remaining tests are the
   non-transport ones + whatever Nostr scaffolding exists). The `mesh_*` design
   docs become historical (why SMP was left), not deleted.
-- **N0 — Spike & audit (small):** `cargo tree` audit of rust-nostr (C secp256k1, ADR-0002)/
-  tungstenite; a PoC publishing + subscribing against rnostr (an `#[ignore]`
-  test like `ritual_over_smp`); pin NIP-44/59 against the reference vectors;
-  measure real public-relay retention + NIP-11 caps. (May run parallel to the
-  §0 self-host experiment; everything after N0 is gated on the go/no-go.)
+- **N0 — Spike & audit — ✅ DONE (2026-07-30):** `nostr 0.44.6` added to
+  molt-net (ALL Nostr crates dev-only until N1 promotes `nostr` into src/ —
+  the default no-dev graph stays byte-unperturbed; §8 WebSocket audit);
+  NIP-44 pinned byte-exactly against the official vectors incl. a fixed-nonce
+  encrypt pin, an indirect message-key-schedule pin, and the 65408-cap
+  deviation canary; NIP-59 pinned as a roundtrip + structural property
+  (`tests/nostr_vectors.rs`, 10 tests);
+  publish/subscribe PoC green over BOTH an in-process relay
+  (`nostr-relay-builder`, the future loopback seam) and a real public relay
+  (`tests/nostr_relay_poc.rs`, `#[ignore]` twin, h-tag-filtered kind-445-style
+  event with NIP-44 content). NIP-11 caps measured 2026-07-30: damus/primal
+  `max_message_length` 1 MB, nos.lol 128 KiB (the binding cap for the §4.4
+  chunk budget), `max_subscriptions` 20–200 — one pooled subscription per
+  workspace, not per peer. Long-horizon retention measurement is
+  observational and rides N2's real-relay soaks.
 - **N0.5 — Engine-side inventory & seams — ✅ DONE (2026-07-29),**
   `docs/transport/nostr_n05_engine_inventory.md`. Verdict: a real engine
   refactor, not a bolt-on — `RitualTransport` enum + queue-vs-relay dispatch at
