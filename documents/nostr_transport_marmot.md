@@ -448,6 +448,9 @@ we design a 445-level chunked data plane.
 
 ## 7.5 Relay reachability: onion by default, clearnet only with a warning
 
+*Recorded as [ADR-0001](../docs/adr/0001-nostr-relay-reachability-onion-by-default.md)
+(status: proposed, conditional on the §0 go/no-go).*
+
 The `h`-tag/subscription exposure of §7 is not fought at the group layer (a
 group needs *a* rendezvous), but at the **reachability** layer: who can see
 the relay, and whether the relay can see member IPs. Two postures exist; the
