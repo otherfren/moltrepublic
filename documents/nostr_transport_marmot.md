@@ -416,7 +416,7 @@ reuse of the mesh presence model.
 | Sender identity at server | queue credential (pseudonymous) | ephemeral key PER EVENT (stronger) |
 | Member count, publish side | derivable per queue-pair | hidden (ephemeral keys) |
 | Member count, subscribe side | server sees delivery queue | **exposed** — distinct subscriptions on `{#h}` reveal count + IPs |
-| IP protection | Tor dialer (T4) | same Tor dialer in front of the WebSockets |
+| IP protection | Tor dialer (T4) | same Tor dialer in front of the WebSockets; **onion relay by default** (§7.5) |
 | Outer-layer confidentiality | n/a | group-shared exporter key — hides frames from OUTSIDERS, not from a leaked group secret |
 | Invite metadata | queue in the link | `npub`+relays in the link; NIP-59 p-tags the recipient publicly |
 
@@ -425,7 +425,8 @@ a rotatable `h` tag and — decisively — the **subscription IPs and count** of
 members; SimpleX servers see unlinked queues and sender credentials. With a
 self-hosted relay + Tor, Nostr is at least comparable; on foreign public
 relays the `h`-tag correlation and subscription-count exposure are the price
-of the robustness. This is a genuine product decision (§10.2), not a free win.
+of the robustness. §7.5 turns this into a concrete default posture rather than
+leaving it as an open product decision.
 
 **Wire-size cliff (finding 7):** §4.1's "445 carries the whole event" is only
 safe for small events. Relays advertise `max_message_length` in NIP-11
@@ -444,6 +445,90 @@ not the mesh — it uses a dedicated queue pair with 256 KiB pieces and a
 queues, so file sharing simply does not exist there unless designed. §10.7
 decides: V1 ships file sharing OFF on Nostr (surfaced honestly in the GUI), or
 we design a 445-level chunked data plane.
+
+## 7.5 Relay reachability: onion by default, clearnet only with a warning
+
+The `h`-tag/subscription exposure of §7 is not fought at the group layer (a
+group needs *a* rendezvous), but at the **reachability** layer: who can see
+the relay, and whether the relay can see member IPs. Two postures exist; the
+default is decided here, and the settings UI enforces it.
+
+**Default (recommended, nudged in settings): the group's relay(s) are Tor
+onion services, reached over Tor — both ends hidden.** The relay is published
+as a `.onion` address; every member dials it through the existing T4
+onion-preferred dialer (the same fail-closed dialer that fronts SMP today —
+§8, "same Tor dialer in front of the WebSockets"). Properties:
+
+- The relay never sees a member's real IP (it sees the connection arriving
+  from the Tor network at its rendezvous point) → the `{#h}` subscription set
+  can no longer be tied to real-world identities.
+- No network observer sees "IP X talks to relay Y" — the traffic is inside
+  Tor end to end.
+- The relay is **location-hidden**: no clearnet address to enumerate, block,
+  seize, or censor. This is the same posture SimpleX uses for servers over Tor,
+  and the reason §7 can claim "at least comparable".
+
+This reuses infrastructure we already have (T4: fail-closed, onion-preferred,
+no-leak harness); it is not new transport work beyond pointing the WebSocket
+dialer at the onion address (N2).
+
+**Two distinct pieces — do not conflate them.** The strong posture needs
+BOTH: (a) *server-side* — the relay exposes an onion service (a Tor/arti
+process beside `rnostr`); and (b) *client-side* — the member dials over Tor
+(the external daemon, or our opt-in `embedded-arti` mode). "Embedded relay
+behind Tor" is underspecified on its own: it must also say the clients arrive
+over Tor, or the onion address buys nothing.
+
+**Optional (selectable, gated behind a clear "insecure" warning): a clearnet
+relay.** A member may point a workspace at a clearnet Nostr relay
+(`wss://…`). The settings UI presents this as the non-default choice and shows
+an explicit warning, because the posture is asymmetric:
+
+- Dialing a clearnet relay *over Tor* still hides the **client's** IP from the
+  relay and from observers — genuinely useful for members who do not want to
+  trust the relay operator (even a fellow member) with their IP. So it is not
+  worthless.
+- But the **relay itself stays exposed**: a public clearnet address that a
+  network observer can find, fingerprint, block, seize, and whose activity
+  pattern (and thus the group's) is visible. You have hidden the leaves and
+  left the trunk standing in the clearing.
+- And the degenerate case the UI warning must name: tunnelling to your **own**
+  clearnet relay over Tor to hide **your own** IP from **your own** server is
+  close to pointless — the value of a clearnet relay is only for the
+  *non-operator* members, and even then only against everything except the
+  relay's own exposure.
+
+**Residual honesty (true even for the onion default):** an onion relay still
+sees the `h`-tag correlation and the subscription set — i.e. *which* (now
+IP-less) subscribers share a group. On the group's **own** relay this is
+acceptable (the operator already knows the roster); it is only a leak on a
+*foreign* relay, which is exactly why the default steers to a self-hosted
+onion relay. And the shared rendezvous re-raises the availability point of §6:
+if the single onion relay is down or slow (onion services carry extra
+latency), the group goes dark — so the default is **two or more** onion
+relays (the native Nostr redundancy, §4.1), not one.
+
+**Settings model (drives N2 + the N6 wizard):**
+
+- The relay-list editor defaults to an onion-relay entry (with a short
+  self-host recommendation and a link to a one-command `rnostr`-as-onion
+  recipe). New Nostr foundings inherit this default.
+- Adding a `wss://` clearnet relay is allowed but flagged: an inline
+  "insecure — the relay is a visible, seizable clearnet target; only your
+  client IP is protected, and only if Tor is on" warning, and the workspace's
+  health surface carries a persistent "clearnet relay" badge so the tradeoff
+  stays visible, not just accepted once at founding.
+- If Tor is *off* while any relay is selected, fail closed exactly as the SMP
+  path does today (T4 posture) — never dial a relay in the clear silently.
+
+This resolves the reachability half of the §10.2 product question: the posture
+is **onion-by-default, clearnet-opt-in-with-warning**, not "decide later". The
+metadata-vs-usability half of §10.2 (whether to also permit *foreign* curated
+public relays at all, and whether NIP-42 AUTH is required) still stands, and
+NIP-42 AUTH interacts with this: AUTH re-identifies the member to the relay
+via a persistent key, so on the *own onion* relay it is fine (the operator
+knows the roster anyway), while on a foreign relay it would undo the ephemeral-
+key hiding — another reason the default is a self-hosted onion relay.
 
 ## 8. Dependency / pure-Rust audit
 
@@ -485,7 +570,8 @@ we design a 445-level chunked data plane.
   `TransportPolicy` migration (both transports run a WP4a-horizon grace in
   parallel) is promoted from footnote to plan.
 - **GUI:** the founding wizard gains the transport choice (default from
-  config); settings show each workspace's transport read-only.
+  config); settings show each workspace's transport read-only, plus the
+  relay-list editor (onion default, clearnet-with-warning per §7.5).
 
 ## 10. Open questions — split into design inputs vs. product taste (finding II-6)
 
@@ -496,12 +582,14 @@ decided any time before ship.
 
 **Design inputs (gate the named etappe):**
 
-- **§10.2 → N2 — Metadata posture + NIP-42 AUTH + Tor-over-WebSocket.** Public
-  relays expose subscription IP + member count (§7). If the answer is "self-
-  host-only, Tor mandatory", N2 must build NIP-42 AUTH (which itself re-
-  identifies the member to the relay via a persistent key — decide WHICH key
-  AUTHs; it must not be the anchor we hid) AND a WS twin of the T4 Tor no-leak
-  harness. Neither is currently an etappe line — this question sizes N2.
+- **§10.2 → N2 — Metadata posture (reachability half DECIDED in §7.5).** The
+  reachability posture is settled: **onion relay by default, clearnet opt-in
+  with a warning**, both over the T4 dialer (§7.5). What remains for §10.2:
+  (i) whether *foreign* curated public relays are permitted at all or the
+  product is self-host-only; (ii) NIP-42 AUTH — on the own onion relay it is
+  fine, on a foreign relay it undoes the ephemeral-key hiding (§7.5), so its
+  necessity follows from (i). N2 must build the WS twin of the T4 Tor no-leak
+  harness plus the onion-dialing path regardless; AUTH is conditional on (i).
 - **§10.3 → N3 — Interop.** Marmot compatibility vs. NIP-EE mechanics only
   decides the N3 byte layouts you are told to pin with fixtures — you cannot
   write the fixture before answering. (Recommendation: mechanics yes, interop
@@ -566,9 +654,12 @@ decided any time before ship.
 - **N2 — NostrTransport core:** relay pool (connect/backoff/health), publish
   with ≥1-OK semantics + NIP-11 size budget, per-relay cursor with clamp +
   overlap, event-id dedup, per-connection decrypt-failure circuit breaker.
-  In-process relay (like LoopbackHub) for fast tests. **Keystones:**
-  publish/subscribe/dedup across 2 relays with one dying; the +24h-cursor
-  test; the oversized-`CheckpointServed` refusal.
+  The WebSocket dialer rides the T4 onion-preferred, fail-closed path (§7.5) —
+  onion `.onion` relays over Tor by default, clearnet only via the warned
+  opt-in, never a silent clearnet dial. In-process relay (like LoopbackHub)
+  for fast tests. **Keystones:** publish/subscribe/dedup across 2 relays with
+  one dying; the +24h-cursor test; the oversized-`CheckpointServed` refusal;
+  a WS twin of the T4 no-leak harness (no clearnet dial when Tor is required).
 - **N3 — NIP-EE mapping + commit lifecycle:** 443-free 444/445 build+parse,
   exporter-NIP-44 with the ring, ephemeral keys, gift-wrap; the explicit
   stage→publish→await→merge commit state machine + prior-state slot.
