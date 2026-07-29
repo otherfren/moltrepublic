@@ -41,9 +41,15 @@ CLAUDE.md transport section.
    tells a founder *why* to pick Nostr. If it can't be written crisply, the
    answer to §10.2 is "self-host-only, Tor mandatory."
 
-Everything below §0 is the DESIGN, execution-ready in its mapping details but
-NOT in its scope until the engine inventory (N0.5) and the §10 design-input
-decisions land. Treat §10 splits (design-input vs. product-taste) as gates.
+**GATE STATUS (2026-07-29): CLEARED.** The go/no-go resolved **GO** (self-hosted
+SMP fixed nothing — the per-pair mesh churns even at 3 nodes; a structural, not
+operator, problem). All §10 design inputs are now DECIDED (see §10 + ADR-0001/
+0002/0003): C secp256k1 via rust-nostr, relay policy (any relay, curated-onion
+default, self-hosted recommended), NIP-EE-mechanics-only, `republic_id` v2,
+roster-v3 universal, file transfer off in V1, migration = archive+fresh-start.
+The engine inventory **N0.5 is DONE** (`nostr_n05_engine_inventory.md` — it is a
+real engine refactor, ~6 weeks). Next build step: **N1** (identity/roster-v3,
+TDD). Everything below §0 is the execution-ready DESIGN.
 
 ## 0. Why at all
 
@@ -147,8 +153,9 @@ forced by finding 7).
 ## 3. Identity design: one seed, three anchors
 
 Nostr signs with secp256k1 Schnorr (BIP-340); our roster/chain identity is
-Ed25519. Both stay, both derived from the SAME recovery phrase (BIP-340 key
-via pure-Rust `k256`; derivation analogous to `founding::member_identity`):
+Ed25519. Both stay, both derived from the SAME recovery phrase (BIP-340 key via
+rust-nostr's secp256k1 key types — ADR-0002, not k256; derivation analogous to
+`founding::member_identity`):
 
 - **Ed25519** stays the roster identity + MLS credential key ("one identity,
   two anchors" untouched — the MLS binding still checks Ed25519).
@@ -511,41 +518,48 @@ if the single onion relay is down or slow (onion services carry extra
 latency), the group goes dark — so the default is **two or more** onion
 relays (the native Nostr redundancy, §4.1), not one.
 
-**Settings model (drives N2 + the N6 wizard):**
+**Settings model (drives N2 + the N6 wizard) — relay CHOICE is open, the
+default is private (ADR-0003):**
 
-- The relay-list editor defaults to an onion-relay entry (with a short
-  self-host recommendation and a link to a one-command `rnostr`-as-onion
-  recipe). New Nostr foundings inherit this default.
-- Adding a `wss://` clearnet relay is allowed but flagged: an inline
-  "insecure — the relay is a visible, seizable clearnet target; only your
-  client IP is protected, and only if Tor is on" warning, and the workspace's
-  health surface carries a persistent "clearnet relay" badge so the tradeoff
-  stays visible, not just accepted once at founding.
+- **Any relay may be added** — foreign public, self-hosted, onion, or clearnet.
+  The founding wizard's list **defaults to a curated set of onion relays**, and
+  the UI **recommends self-hosted relays**, stating plainly that **only a
+  self-hosted relay avoids `h`-tag correlation** (any third-party relay, even a
+  curated onion one, still sees which subscribers share a group).
+- Adding a `wss://` clearnet relay keeps the stronger flag: an inline
+  "insecure — a visible, seizable clearnet target; only your client IP is
+  protected, and only if Tor is on" warning, and a persistent health-surface
+  badge (also shown for any non-self-hosted relay) so the tradeoff stays
+  visible, not accepted once at founding.
 - If Tor is *off* while any relay is selected, fail closed exactly as the SMP
   path does today (T4 posture) — never dial a relay in the clear silently.
+- **NIP-42 AUTH is in scope** (N2): a foreign relay may require it, and AUTH
+  re-identifies the member to that relay via a persistent key — harmless on the
+  own onion relay, a warned leak on a foreign one.
 
-This resolves the reachability half of the §10.2 product question: the posture
-is **onion-by-default, clearnet-opt-in-with-warning**, not "decide later". The
-metadata-vs-usability half of §10.2 (whether to also permit *foreign* curated
-public relays at all, and whether NIP-42 AUTH is required) still stands, and
-NIP-42 AUTH interacts with this: AUTH re-identifies the member to the relay
-via a persistent key, so on the *own onion* relay it is fine (the operator
-knows the roster anyway), while on a foreign relay it would undo the ephemeral-
-key hiding — another reason the default is a self-hosted onion relay.
+This resolves §10.2 fully (with ADR-0001 for reachability + ADR-0003 for the
+relay policy): **any relay allowed, curated-onion default, self-hosted
+recommended, clearnet warned** — informed choice with a private default, not
+"decide later" and not a prohibition.
 
 ## 8. Dependency / pure-Rust audit
 
-- **Crypto:** secp256k1/Schnorr via `k256` (pure Rust, RustCrypto); NIP-44 v2
-  = secp256k1-ECDH + ChaCha20 + HMAC-SHA256 (all RustCrypto); NIP-59 is a
-  layer above. No C. k256 scalar derivation must reject/retry out-of-range
-  hashes, never clamp (N1 note). k256 is younger than libsecp256k1 and only
-  best-effort constant-time — but it signs only transport envelopes, never
-  roster/chain, so the side-channel exposure is bounded (note in N0).
+- **Crypto — DECIDED (ADR-0002), the draft's k256 plan was wrong.** The N0
+  `cargo-tree` audit (2026-07-29) proved `rust-nostr` (`nostr` 0.44) is
+  hard-wired to the C `secp256k1`/`secp256k1-sys` crate: **non-optional** (even
+  `--no-default-features`), **no `k256` feature**, and no maintained pure-Rust
+  nostr crate exists. Nostr is fundamentally secp256k1/Schnorr (BIP-340 +
+  NIP-44 ECDH), so the curve is protocol-forced. Decision: **accept C
+  `libsecp256k1` via rust-nostr** as a third transport-edge C exception (with
+  `ring` and opt-in `libsqlite3-sys`), contained to molt-net; roster/chain stay
+  pure-Rust Ed25519. Don't-roll-your-own-crypto beats purity for the NIP-44 v2 /
+  Schnorr layer; an optional pure-Rust k256 migration is a later follow-up (like
+  the `ring`-removal one). N1's nostr key derivation uses secp256k1, not k256.
 - **`rust-nostr`** (v0.44, near beta): offers Event/NIP-44/NIP-59/relay-pool
-  ready-made — BUT its default backend can pull the `secp256k1` C binding;
-  pin the `k256` feature or take only the protocol crates. Decide in N0 via a
-  `cargo tree` audit. Fallback: a small in-house client (NIP-01 frames are
-  trivial; NIP-44/59 are the real work and exist as standalone crates).
+  ready-made; used as the transport crate (its C secp256k1 accepted, ADR-0002).
+- **WebSocket:** `tokio-tungstenite` + rustls — N0 must still confirm it does
+  not re-introduce `ring` in a way that conflicts with the rustls-rustcrypto
+  posture, and it must ride the T4 fail-closed dialer (onion, §7.5/ADR-0001).
 - **MDK / White Noise:** MIT, used as a REFERENCE (event layout, race
   handling to test against), not a dependency — their account/storage/runtime
   overlaps our engine entirely.
@@ -583,37 +597,30 @@ they change what gets built, not just how it feels; the "everything below is
 execution-ready" claim does not hold until they land. **Product taste** can be
 decided any time before ship.
 
-**Design inputs (gate the named etappe):**
+**Design inputs — ALL DECIDED 2026-07-29 (were open; the go/no-go resolved GO):**
 
-- **§10.2 → N2 — Metadata posture (reachability half DECIDED in §7.5).** The
-  reachability posture is settled: **onion relay by default, clearnet opt-in
-  with a warning**, both over the T4 dialer (§7.5). What remains for §10.2:
-  (i) whether *foreign* curated public relays are permitted at all or the
-  product is self-host-only; (ii) NIP-42 AUTH — on the own onion relay it is
-  fine, on a foreign relay it undoes the ephemeral-key hiding (§7.5), so its
-  necessity follows from (i). N2 must build the WS twin of the T4 Tor no-leak
-  harness plus the onion-dialing path regardless; AUTH is conditional on (i).
-- **§10.3 → N3 — Interop.** Marmot compatibility vs. NIP-EE mechanics only
-  decides the N3 byte layouts you are told to pin with fixtures — you cannot
-  write the fixture before answering. (Recommendation: mechanics yes, interop
-  no — our inner events are `EventEnvelope`s, not Marmot `app_data`.)
-- **§10.6 → N1 — `republic_id` v2** (§3): include `nostr_pk` (recommended) or
-  keep v1 and document the narrowed guarantee.
-- **§10.10 → N1 — roster-v3 universality (NEW, finding II-3):** is
-  `molt-roster-v3` **universal** (every future SMP founding also mints a dead
-  `nostr_pk`, forcing ticket-salted derivation on all republics) or
-  **per-transport-kind** (two canonical-byte layouts + two verify paths in
-  `verify_sealed_roster` forever)? Either answer ripples through all ~15
-  recompute sites; not choosing = choosing by accident. (Recommendation:
-  universal — one layout, `nostr_pk` optional-but-present, cheaper than two
-  verify paths.)
-- **§10.7 → N6 — File transfer on Nostr** (§7): OFF in V1 with an honest GUI
-  notice, or a 445-level chunked data plane. Interacts with §9/finding II-4:
-  restored history contains `FileShared` messages whose data plane doesn't
-  exist on the Nostr side.
-- **§10.9 → N6 — Migration outcome (NEW, finding II-4):** accept "archive +
-  fresh start", or graft chat-history-as-log into the new workspace, or
-  promote V2 in-place migration to plan.
+- **Crypto backend — DECIDED (ADR-0002):** C `libsecp256k1` via rust-nostr, a
+  third transport-edge C exception, contained to molt-net; roster/chain stay
+  pure-Rust Ed25519. (N0 audit: rust-nostr is secp256k1-only, no k256 backend.)
+- **§10.2 → N2 — Relay policy: DECIDED (ADR-0001 + ADR-0003).** Reachability =
+  onion by default, clearnet with a warning (ADR-0001). Choice = **any relay
+  allowed, curated-onion-list default, self-hosted recommended** (ADR-0003) —
+  the UI states only a self-hosted relay avoids `h`-tag correlation. Therefore
+  **N2 DOES build NIP-42 AUTH** (foreign relays may require it) + the WS twin of
+  the T4 no-leak harness + the onion-dialing path.
+- **§10.3 → N3 — Interop: DECIDED — NIP-EE mechanics only, no Marmot interop.**
+  Our inner events are `EventEnvelope`s, not Marmot `app_data`; pin our own byte
+  fixtures.
+- **§10.6 → N1 — `republic_id` v2: DECIDED — include `nostr_pk`** (so the id
+  keeps committing to the full roster content).
+- **§10.10 → N1 — roster-v3 universality: DECIDED — universal.** One
+  canonical-bytes layout, `nostr_pk` present-but-optional; cheaper than two
+  verify paths.
+- **§10.7 → N6 — File transfer on Nostr: DECIDED — OFF in V1**, surfaced
+  honestly in the GUI (the 445-chunk data plane is a separate later project).
+- **§10.9 → N6 — Migration: DECIDED — archive + fresh start.** Re-found on
+  Nostr = new empty republic; the old SMP workspace stays a read-only archive;
+  no history graft in V1 (`restore` can't — new `republic_id`). GUI says so.
 
 **Product taste (decide any time):**
 
@@ -633,23 +640,22 @@ decided any time before ship.
 
 ## 11. Etappen (each green on master, TDD)
 
-- **N0 — Spike & audit (small):** `cargo tree` audit of rust-nostr/k256/
+- **N0 — Spike & audit (small):** `cargo tree` audit of rust-nostr (C secp256k1, ADR-0002)/
   tungstenite; a PoC publishing + subscribing against rnostr (an `#[ignore]`
   test like `ritual_over_smp`); pin NIP-44/59 against the reference vectors;
   measure real public-relay retention + NIP-11 caps. (May run parallel to the
   §0 self-host experiment; everything after N0 is gated on the go/no-go.)
-- **N0.5 — Engine-side inventory & seams (NEW, finding II-1, ESSENTIAL):**
-  before any runtime code, inventory `molt-engine/src/net.rs` and adjacent:
-  which of the ~30 `Net*` internals/tickers apply per transport kind; the
-  relay-shaped `EngineSink` extension (relay health, not `MemberId` legs); the
-  `TransportState` per-workspace transport discriminator; the `RitualTransport`
-  enum split (`Loopback|Smp|Nostr`) and every dispatch site (reopen,
-  recovery's `runtime_transport`, close-persist `export_creds`, the open-path
-  "detached" mesh-evidence check); the `ChainOracle` seam (§5); the
-  credential-keyed broadcast ACK vs. today's pairwise ACK. Output: a concrete
-  refactor map + the seam trait signatures. **Deliverable is a design, not a
-  feature** — but N5's sizing is fiction until it exists.
-- **N1 — Identity:** k256 derivation from the phrase (ticket-salted);
+- **N0.5 — Engine-side inventory & seams — ✅ DONE (2026-07-29),**
+  `docs/transport/nostr_n05_engine_inventory.md`. Verdict: a real engine
+  refactor, not a bolt-on — `RitualTransport` enum + queue-vs-relay dispatch at
+  every reopen/recovery/close-persist site fork large; the `MemberId`-keyed
+  health model + `deaf_legs` fork; a NEW `ChainOracle` seam (trait signature
+  given) keeps commit-authorization synchronous without breaking layering;
+  ~⅓ of the ~49 `Net*` surface dies, ~⅓ needs relay twins, ~⅓ reuses (the
+  delivery-guarantee tick, `AcceptedWindow`, MLS, chain, co-equality). Confirms
+  the ~6-week sizing.
+- **N1 — Identity:** secp256k1 derivation from the phrase (ticket-salted, via
+  rust-nostr key types — ADR-0002, NOT k256);
   `MemberIdentity.nostr_pk` + `molt-roster-v3` bump (the ~15-site ripple, byte
   pins); MAC v2; the 3-anchor sign-what-you-see self-check; the `republic_id`
   decision. **Keystone:** roster fixture v2→v3, MAC-v2 binding, a
