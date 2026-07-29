@@ -41,15 +41,34 @@ CLAUDE.md transport section.
    tells a founder *why* to pick Nostr. If it can't be written crisply, the
    answer to §10.2 is "self-host-only, Tor mandatory."
 
-**GATE STATUS (2026-07-29): CLEARED.** The go/no-go resolved **GO** (self-hosted
-SMP fixed nothing — the per-pair mesh churns even at 3 nodes; a structural, not
-operator, problem). All §10 design inputs are now DECIDED (see §10 + ADR-0001/
-0002/0003): C secp256k1 via rust-nostr, relay policy (any relay, curated-onion
-default, self-hosted recommended), NIP-EE-mechanics-only, `republic_id` v2,
-roster-v3 universal, file transfer off in V1, migration = archive+fresh-start.
-The engine inventory **N0.5 is DONE** (`nostr_n05_engine_inventory.md` — it is a
-real engine refactor, ~6 weeks). Next build step: **N1** (identity/roster-v3,
-TDD). Everything below §0 is the execution-ready DESIGN.
+**GATE STATUS (2026-07-30): CLEARED, and this is now a FULL SMP REPLACEMENT.**
+The go/no-go resolved **GO** (self-hosted SMP fixed nothing — the per-pair mesh
+churns even at 3 nodes; structural, not operator). Every decision locked:
+
+- **Replace SMP entirely** (not a second backend) — rip out all SMP-specific
+  code incl. the mesh self-heal machinery and the SMP cert-pin, which also
+  removes the `ring` C dependency. Existing SMP republics become unopenable
+  (accepted; export first if any data matters).
+- **Crypto:** C libsecp256k1 via rust-nostr (ADR-0002), molt-net-only;
+  roster/chain stay pure-Rust Ed25519.
+- **Relays:** any relay allowed, curated-onion default, self-hosted recommended
+  (ADR-0001/0003); NIP-42 AUTH in N2 scope.
+- **h-tag rotation:** deterministic from a shared seed, **uniform W = 24h/UTC
+  for ALL DAOs** (crowd/anonymity-set — a per-group W would fingerprint the
+  cadence), per-group secret tag values, ±1h clock-skew margin (§4.4).
+- **Big chain events** (`CheckpointServed`/`ChainRequest`) over relay size caps:
+  445-level chunking (reuse the chunker), not Blossom (§7).
+- **Exporter ring K = 3** (§6); NIP-EE-mechanics-only, `republic_id` v2,
+  roster-v3 universal, file transfer off in V1, migration = archive + fresh
+  start (no history graft — `restore` can't).
+- **Presence** is traffic-derived + honestly coarse (§6.5); the delivery
+  guarantee (eventually + reliably + in-order) is the kept, non-negotiable
+  invariant.
+
+**N0.5 DONE** (`nostr_n05_engine_inventory.md` — a real engine refactor,
+~6 weeks). Next build step: **N1** (identity/roster-v3, TDD). Everything below
+§0 is the execution-ready DESIGN (some prose below still says "second backend" —
+the replacement decision above supersedes it; a full pass will align it).
 
 ## 0. Why at all
 
@@ -69,9 +88,17 @@ substrate: dumb, redundant Nostr relays with store-and-forward. White Noise
 (Rust, OpenMLS, in production since 2025/26) is the reference; NIP-EE is
 adopted into the official Nostr NIPs.
 
-**Goal:** Nostr relays as a SECOND transport backend beside SMP — chosen per
-workspace at founding. **Non-goal:** replacing SMP, or live-migrating an
-existing republic (§9).
+**Goal (REVISED 2026-07-30): Nostr relays REPLACE SMP entirely.** The user's
+decision after the go/no-go: this is not a second backend beside SMP — it is a
+full transport swap. All SMP-specific code is removed (`SmpTransport`, the mesh
+supervisor + self-heal/rotate/Stage-B/redundancy machinery, the `mesh_*`
+modules, the SMP TLS cert-pin — which also removes the `ring` C dependency, the
+long-wanted pure-Rust cleanup). One transport, not two: no `TransportKind`
+discriminator, no `RitualTransport::Smp` variant, no dual-path test surface.
+**Consequence (accepted):** once the SMP code is gone, existing SMP republics
+can no longer be opened — not even read-only. The three unusable test
+republics are disposable; any republic whose data matters must be exported
+before the removal. **Non-goal:** interop with the Marmot ecosystem (§10.3).
 
 **Honest headline from the review (§13):** the naive pitch — "relay history
 IS the catch-up, the self-heal zoo just disappears" — does not survive
@@ -280,23 +307,51 @@ until wall-clock catches up. Rules:
   the overlap. **Keystone (N2):** "a peer publishing +24h `created_at` does
   not blind the receiver after reopen."
 
-### 4.4 h-tag / relay rotation is a grace-window overlap, not a switch (finding 6)
+### 4.4 h-tag rotation is DETERMINISTIC (no announcement), relay changes are governed (DECIDED 2026-07-30)
 
-§0's whole argument is that per-pair queues make every leg a single point of
-deafness. Nostr replaces N² legs with ONE rendezvous: the `h` tag + relay
-list. Both change only via MLS commits — and the commit that says "move here"
-travels only over the channel being rotated away from. A member offline
-across the rotation wakes subscribed to the old `(h, relays)`, sees nothing,
-and (with no 443/queue fallback) is stranded.
+Two different things rotate, and they rotate differently.
 
-Therefore rotation is a **grace overlap**: publish the rotation commit and a
-following window of traffic to BOTH old and new `(h, relays)`, keep the old
-subscription alive for the whole grace, and tie the grace to the existing
-WP4a peer horizon so it matches the delivery guarantee's horizon. **Keystone
-(N5):** "a node offline across a rotation still converges when it returns
-inside the grace, and reports loudly (G4) when it returns outside it." A node
-outside the grace falls back to the recovery ritual (§4.2) — the same honest
-last resort as a total-loss rejoiner.
+**The `h`-tag rotates deterministically from a shared seed — no commit, no
+announcement, no grace.** `h_tag(window) = KDF(rotation_seed, window)`, where
+`window = floor(unix_time / W)` and `rotation_seed` is a **stable** 32-byte
+group secret set at founding (in the group founding data, delivered in the
+Welcome, re-derivable on recovery — NOT the epoch-rotating `exporter_secret`).
+Every member computes the same tag for each window independently; an offline
+member re-derives the current tag on return and re-derives every window it
+missed, so nobody is ever stranded and there is no announced-rotation to miss.
+This deviates from vanilla NIP-EE (where the group id changes only via an admin
+commit) — allowed, since we chose NIP-EE-mechanics-only, no Marmot interop
+(§10.3).
+
+Two parameters, both settled:
+
+- **`W` is a UNIFORM protocol constant — the SAME for every DAO: 24h, aligned
+  to UTC day boundaries** (`floor(unix_time / 86400)`). This is the load-bearing
+  choice (corrected 2026-07-30): a *per-group* `W` would make the rotation
+  *cadence* a fingerprint and turn each rotation into a solo, timing-linkable
+  event; a uniform `W` **synchronizes every group's rotation into one crowd** —
+  at each boundary all old tags go quiet and all new tags appear together, so an
+  observer gets a batch with no old→new mapping (anonymity-set / crowd effect).
+  The tag *values* stay per-group secret (`KDF(rotation_seed, window)`), so tags
+  remain unlinkable by value; only the *timing* is uniform. Knowing the boundary
+  time (midnight UTC) leaks nothing.
+- **Clock-skew margin `Δ = 1h`** (timezone is a non-issue — Unix time is the
+  same instant everywhere; the engine already keys on `now_secs()`). Publish to
+  your own current window; subscribe to the current window always, plus the
+  adjacent window when within `Δ` of a boundary — a skewed member that published
+  into the neighbor window is still caught. This is subscribe-only overlap (no
+  double-publish), so it leaks only N↔N+1 adjacency for ~1h/boundary, not the
+  chain. Skew beyond `Δ` is caught by the resend layer (senders re-publish their
+  unacked tail under the *current* tag) — no loss, only latency.
+
+**Relay-list changes are governed, not deterministic** (which relays the group
+uses is a policy decision, not a clock tick): a threshold chain block
+(`ChainChange::TransportPolicy`, §5) changes the relay set, and to avoid
+stranding a member offline across the change, the group keeps publishing to
+both the old and new relay set for a grace tied to the delivery-guarantee
+horizon. A member outside the grace falls back to the recovery ritual (§4.2).
+**Keystone (N5):** "a node offline across a relay change still converges when it
+returns inside the grace, and reports loudly (G4) when outside it."
 
 ## 5. Governance collision: `admin_pubkeys` vs. threshold (finding 2)
 
@@ -613,33 +668,52 @@ decided any time before ship.
   fixtures.
 - **§10.6 → N1 — `republic_id` v2: DECIDED — include `nostr_pk`** (so the id
   keeps committing to the full roster content).
-- **§10.10 → N1 — roster-v3 universality: DECIDED — universal.** One
-  canonical-bytes layout, `nostr_pk` present-but-optional; cheaper than two
-  verify paths.
+- **§10.10 → N1 — roster-v3: DECIDED — `nostr_pk` MANDATORY.** With SMP fully
+  removed there is only one founding path (Nostr), so every roster carries a
+  `nostr_pk`; roster-v3 is a single canonical-bytes layout, no per-transport
+  fork.
 - **§10.7 → N6 — File transfer on Nostr: DECIDED — OFF in V1**, surfaced
   honestly in the GUI (the 445-chunk data plane is a separate later project).
-- **§10.9 → N6 — Migration: DECIDED — archive + fresh start.** Re-found on
-  Nostr = new empty republic; the old SMP workspace stays a read-only archive;
-  no history graft in V1 (`restore` can't — new `republic_id`). GUI says so.
+- **§10.9 → N6 — Migration: DECIDED — archive + fresh start, and existing SMP
+  republics become UNOPENABLE** once SMP code is removed (not read-only — the
+  demolition deletes the opener). Export before removal if any data matters;
+  the three test republics are disposable. New republics are Nostr-only.
 
-**Product taste (decide any time):**
+**Product taste — now also decided:**
 
-- **§10.1 — Relay policy:** default relays for a new republic (recommendation:
-  2 curated public + optional self-hosted, editable in the wizard) — but see
-  §10.2: if the posture is self-host-only, the default changes.
-- **§10.4 — Exporter-ring depth K** (§6): catch-up reach vs. leaked-secret
-  window (recommendation: small, 3–5).
-- **§10.5 — h-tag rotation grace length** (§4.4): tie to the WP4a horizon so
-  guarantee-horizon and transport-horizon are one number. NOTE (finding II-8):
-  double-publishing identical traffic to old+new `h` for 14 days makes the
-  rotation trivially linkable — so `h` rotation is a relay-MIGRATION tool, not
-  a privacy tool; §7's table should say so, and the grace could be shorter if
-  we accept a harder cutover.
-- **§10.8 — Priority:** the self-host experiment runs FIRST and gates the
-  build (see §0's go/no-go). N0 audit may run in parallel.
+- **§10.1 — Relay default: DECIDED (ADR-0003)** — curated onion relays, editable
+  in the wizard, self-hosted recommended.
+- **§10.4 — Exporter-ring depth K: DECIDED — K = 3** (§6). Epochs change only on
+  membership/recovery (rare); 3 covers recent ones, the resend layer covers the
+  rest; small K bounds the leaked-secret window.
+- **§10.5 — h-tag rotation: DECIDED — deterministic + uniform, NO grace** (§4.4).
+  The old "announced rotation + 14-day grace" idea (which made rotation linkable
+  and only served relay migration) is dropped. h-tag rotates by clock
+  (`KDF(seed, floor(unix/86400))`), uniform 24h/UTC for all DAOs (crowd effect),
+  ±1h skew margin. Only the RELAY LIST change is governed + gets a grace.
+- **§10.8 — done:** the self-host experiment ran; verdict GO (§0).
 
 ## 11. Etappen (each green on master, TDD)
 
+Because this is a **full replacement** (not a parallel backend), there is a
+demolition phase. Two workable orders: (D-first) rip SMP out, then build Nostr
+on the cleared surface; or (build-then-swap) build Nostr behind the seam, then
+delete SMP. **D-first is chosen** — it removes the dual-path complexity N0.5
+flagged before it can accrete, shrinks `net.rs` before the rewrite, and the
+existing test republics are disposable so nothing needs both transports live at
+once. So:
+
+- **N-demo — Remove SMP** (after N0/N0.5, before N1's runtime pieces land):
+  delete `SmpTransport`, the mesh supervisor + self-heal/rotate/Stage-B/
+  redundancy/keepalive machinery, the mesh probe, the SMP TLS cert-pin (drops
+  `ring`), and the ~⅓ of `Net*` mesh commands N0.5 lists as dead. Collapse the
+  `RitualTransport` enum toward a single runtime. The delivery-guarantee CORE
+  (`AcceptedWindow`, ACK frames, G7 ordering, per-sender floors) stays; its
+  mesh-rebuild-rewind mechanics are replaced by the Nostr equivalent in N5.
+  Keep the loopback hub as a test seam only if it still earns its keep. **This
+  etappe DELETES; it must leave the tree green** (the remaining tests are the
+  non-transport ones + whatever Nostr scaffolding exists). The `mesh_*` design
+  docs become historical (why SMP was left), not deleted.
 - **N0 — Spike & audit (small):** `cargo tree` audit of rust-nostr (C secp256k1, ADR-0002)/
   tungstenite; a PoC publishing + subscribing against rnostr (an `#[ignore]`
   test like `ritual_over_smp`); pin NIP-44/59 against the reference vectors;
