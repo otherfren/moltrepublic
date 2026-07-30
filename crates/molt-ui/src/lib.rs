@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
 
+use molt_core::relay::{RelayBlock, RelayKind, RelayStatus, RelayUrlError};
 use molt_core::{
     ChannelInfo, ChannelRef, ChatMessage, Command, Event, MessageId, NetHealth, ProposalId,
     ProposalView, Reply, Screen, SessionScope, SessionSettings, SessionView, Surface,
@@ -309,6 +310,128 @@ pub fn run_app(
         });
     }
     {
+        // Add a relay to the pool. The URL is pre-validated with molt-core's
+        // own parser so the message under the field is localized; the engine
+        // re-validates and stays the gate. The draft is cleared only once the
+        // engine actually accepted the entry.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_add(move |url| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let pool: Vec<String> = ui
+                .get_relay_rows()
+                .iter()
+                .map(|r| r.url.to_string())
+                .collect();
+            if let Some(msg) = relay_add_error(ui.get_lang_index(), url.as_str(), &pool) {
+                ui.set_relay_error(msg.into());
+                return;
+            }
+            ui.set_relay_error("".into());
+            let w = w.clone();
+            let weak = ui.as_weak();
+            rt.spawn(async move {
+                let res = w
+                    .execute(Command::RelayAdd {
+                        url: url.to_string(),
+                    })
+                    .await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else {
+                        return;
+                    };
+                    match res {
+                        Ok(_) => {
+                            ui.set_relay_draft("".into());
+                            ui.set_relay_error("".into());
+                        }
+                        // an engine refusal the local check did not foresee
+                        // (a concurrent MCP edit, a future rule) belongs
+                        // under the field verbatim, never nowhere
+                        Err(e) => ui.set_relay_error(e.to_string().into()),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_remove(move |url| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RelayRemove {
+                    url: url.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_move(move |url, up| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RelayMove {
+                    url: url.to_string(),
+                    up,
+                },
+            );
+        });
+    }
+    {
+        // `accept_clearnet` rides in from the GUI's warning dialog — the
+        // engine enforces it either way, so an MCP agent faces the same gate.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_confirm(move |url, accept_clearnet| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RelayConfirm {
+                    url: url.to_string(),
+                    accept_clearnet,
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_revoke(move |url| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::RelayRevoke {
+                    url: url.to_string(),
+                },
+            );
+        });
+    }
+    {
+        // Session-only clearnet activation: never persisted, so a restart
+        // re-arms the gate by itself.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_relay_clearnet_session(move |unlock| {
+            issue(&rt, &w, &weak, Command::RelayClearnetSession { unlock });
+        });
+    }
+    {
         // Leaving settings is guarded: a clean draft navigates straight back;
         // a dirty one raises the unsaved-changes modal (save / discard / stay).
         let rt = rt.clone();
@@ -323,7 +446,7 @@ pub fn run_app(
                 .lock()
                 .ok()
                 .and_then(|l| l.clone())
-                .is_some_and(|s| s != read_settings_draft(&ui));
+                .is_some_and(|s| settings_draft_differs(&s, &ui));
             if dirty {
                 ui.set_confirm_leave_open(true);
             } else {
@@ -419,7 +542,7 @@ pub fn run_app(
                         .lock()
                         .ok()
                         .and_then(|l| l.clone())
-                        .is_some_and(|s| s != read_settings_draft(&ui));
+                        .is_some_and(|s| settings_draft_differs(&s, &ui));
                 if dirty {
                     ui.set_confirm_leave_open(true);
                     return slint::CloseRequestResponse::KeepWindowShown;
@@ -1910,6 +2033,20 @@ fn parse_recover_notice(notice: &str) -> RecoverNotice {
     }
 }
 
+/// Does the settings form hold unsaved edits against `stored`?
+///
+/// The relay pool is deliberately excluded: it is NOT part of the settings
+/// draft (it is edited live through the `Relay*` commands, and
+/// [`read_settings_draft`] therefore always yields an empty pool). Comparing
+/// it would make every node that has a relay look permanently "dirty" — the
+/// leave-guard would fire on every exit and an external settings change would
+/// be suppressed as "the user is editing".
+fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
+    let mut stored = stored.clone();
+    stored.relays = Vec::new();
+    stored != read_settings_draft(ui)
+}
+
 /// Gather the config-tab draft properties into a [`SessionSettings`].
 fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
     SessionSettings {
@@ -1932,6 +2069,11 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         anonymity: net_name(ui.get_cfg_network_index()),
         tor_mode: mode_name(ui.get_cfg_tor_mode_index()),
         tor_port: ui.get_cfg_tor_port() as u16,
+        // The relay pool is not part of the settings draft: it is edited live
+        // through the `Relay*` commands (URL validation + the clearnet
+        // acknowledgement live there), and the engine keeps the live pool on
+        // save regardless of what a draft carries.
+        relays: Vec::new(),
     }
 }
 
@@ -1993,7 +2135,7 @@ async fn push_session(
             // not wipe what they typed. The notice/leave-guard tells them; the
             // draft stays until they Save or discard.
             let editing = ui.get_screen() == AppScreen::Settings
-                && prev.is_some_and(|p| p != read_settings_draft(&ui));
+                && prev.is_some_and(|p| settings_draft_differs(&p, &ui));
             apply_session(&ui, &sv, changed && !editing);
         }
     });
@@ -2211,6 +2353,11 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // suppresses the mirror exactly then)
     ui.set_cw_net(molt_core::effective_net_label(&sv.settings.anonymity).into());
 
+    // the relay pool is edited LIVE through the Relay* commands, so it is not
+    // a draft field: push it on every update, even while an unsaved form edit
+    // suppresses the draft mirror
+    apply_relays(ui, sv);
+
     if !settings_changed {
         apply_strings(ui, lang);
         return;
@@ -2218,6 +2365,69 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     apply_settings_fields(ui, &sv.settings);
 
     apply_strings(ui, lang);
+}
+
+/// The relay pool as the Network panel renders it: the entries in priority
+/// order, each carrying the ENGINE's derived verdict. The GUI never
+/// re-evaluates the dial policy — it turns `blocked` into words, nothing more
+/// (`docs/transport/relay_pool.md` §3).
+fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
+    let last = relays.len().saturating_sub(1);
+    relays
+        .iter()
+        .enumerate()
+        .map(|(i, r)| RelayItem {
+            url: r.url.as_str().into(),
+            onion: r.kind == RelayKind::Onion,
+            confirmed: r.confirmed,
+            blocked: match r.blocked {
+                None => 0,
+                Some(RelayBlock::Unconfirmed) => 1,
+                Some(RelayBlock::ClearnetSessionLocked) => 2,
+            },
+            pos: i32::try_from(i.saturating_add(1)).unwrap_or(i32::MAX),
+            first: i == 0,
+            last: i == last,
+        })
+        .collect()
+}
+
+/// Mirror the relay pool into Settings → Nostr relays: the rows, how many relays
+/// are dialable right now (0 = this node is connected to nothing), whether a
+/// confirmed clearnet relay exists at all (only then is there anything for
+/// the session activation to unlock), and the session unlock itself.
+fn apply_relays(ui: &AppWindow, sv: &SessionView) {
+    sync_rows(&ui.get_relay_rows(), relay_rows(&sv.relays), |m| {
+        ui.set_relay_rows(m);
+    });
+    let dialable = sv.relays.iter().filter(|r| r.blocked.is_none()).count();
+    ui.set_relay_dialable(i32::try_from(dialable).unwrap_or(i32::MAX));
+    ui.set_relay_clearnet_confirmed(
+        sv.relays
+            .iter()
+            .any(|r| r.confirmed && r.kind == RelayKind::Clearnet),
+    );
+    ui.set_cfg_clearnet_session(sv.clearnet_session);
+    // the clearnet warning tailors its sentence to the SAVED anonymity
+    // setting — never to the unsaved dropdown draft, which would promise a
+    // Tor circuit the node does not have yet
+    ui.set_net_tor_active(sv.settings.anonymity == "tor");
+}
+
+/// The localized reason the pool would refuse this URL — `None` when it is
+/// acceptable. Validation runs through molt-core's OWN parser (the very
+/// function the engine gates on, so the field message and the gate can never
+/// disagree); the engine still re-validates and stays the authority.
+fn relay_add_error(lang: i32, raw: &str, pool: &[String]) -> Option<&'static str> {
+    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    match molt_core::relay::normalize_relay_url(raw) {
+        Err(RelayUrlError::Scheme) => Some(l.rp_err_scheme),
+        Err(RelayUrlError::Host) => Some(l.rp_err_host),
+        Err(RelayUrlError::PlaintextClearnet) => Some(l.rp_err_plain),
+        Err(RelayUrlError::Junk) => Some(l.rp_err_junk),
+        Err(RelayUrlError::OnionAddress) => Some(l.rp_err_onion),
+        Ok(url) => pool.contains(&url).then_some(l.rp_err_dup),
+    }
 }
 
 /// Push one settings value into the draft form fields (the mirror on real
@@ -4801,10 +5011,14 @@ lexicon! {
     cw_rule_c: "approvals.", "Stimmen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";
-    cw_net_label: "Network", "Netzwerk";
+    // this panel is about the ANONYMITY layer only (tor/none) — never the
+    // relay pool, which is its own settings tab. Both the label and the
+    // deep-link hint name that tab exactly, so "Netzwerk" can no longer be
+    // read as "Nostr-Relays".
+    cw_net_label: "Anonymity network", "Anonymitäts-Netzwerk";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
     cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
-    cw_net_hint_settings: "Global setting — change it under Settings → Network.", "Globale Einstellung — ändern unter Einstellungen → Netzwerk.";
+    cw_net_hint_settings: "Global setting — change it under Settings → Anonymity network.", "Globale Einstellung — ändern unter Einstellungen → Anonymitäts-Netzwerk.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
     cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";
@@ -4815,7 +5029,9 @@ lexicon! {
     cw_provisioning: "Preparing the invite link…", "Invite-Link wird vorbereitet…";
     cw_failed_title: "The founding cannot continue", "Die Gründung kann nicht fortgesetzt werden";
     cw_failed_hint: "The founding cannot continue. The reason is shown below — close this ritual and begin it again once it is resolved.", "Die Gründung kann nicht fortgesetzt werden. Der Grund steht unten — schließe dieses Ritual und beginne es neu, sobald er behoben ist.";
-    cw_open_net_settings: "Open network settings", "Netzwerk-Einstellungen öffnen";
+    // the button jumps to the anonymity tab (set-tab = 3) — it must not
+    // promise the relay settings that now live one tab further
+    cw_open_net_settings: "Open anonymity settings", "Anonymitäts-Einstellungen öffnen";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
@@ -4923,7 +5139,7 @@ lexicon! {
     ow_grp_seed: "Seed", "Seed";
     ow_seed_missing: "No seed is stored on this device — only your written-down phrase can restore this workspace.", "Auf diesem Gerät ist kein Seed gespeichert — nur deine notierte Phrase kann diesen Workspace wiederherstellen.";
     ow_members: "Members", "Mitglieder";
-    ow_backup_cfg: "Settings", "Settings";
+    ow_backup_cfg: "Settings", "Einstellungen";
     ow_export: "Manual backup", "Manuelles Backup";
     ow_export_note: "Exported:", "Exportiert:";
     ow_export_running: "Exporting…", "Exportiere…";
@@ -5011,7 +5227,10 @@ lexicon! {
     set_tab_general: "General", "Allgemein";
     set_tab_workspace: "Workspace", "Workspace";
     set_tab_backup: "Backup", "Backup";
-    set_tab_network: "Network", "Netzwerk";
+    // the former single "Network" tab is split in two: the anonymity layer
+    // (tor/none) and the Nostr relay pool — related, hence adjacent
+    set_tab_anon: "Anonymity network", "Anonymitäts-Netzwerk";
+    set_tab_relays: "Nostr relays", "Nostr-Relays";
     set_tab_mcp: "MCP", "MCP";
     set_tab_node: "Node", "Node";
     set_tab_chain: "Chain-History", "Chain-History";
@@ -5064,6 +5283,47 @@ lexicon! {
     field_sound_vote: "New vote", "Neue Abstimmung";
     sound_off: "off", "aus";
     set_tor_embedded_missing: "\"embedded\" is greyed out: this build was compiled without the embedded-tor feature (in-process Tor). Rebuild with --features embedded-tor, or use a local Tor daemon.", "\"embedded\" ist ausgegraut: dieses Binary wurde ohne das embedded-tor-Feature (In-Prozess-Tor) gebaut. Mit --features embedded-tor neu bauen oder einen lokalen Tor-Daemon nutzen.";
+    // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
+    // The copy never promises a connection the policy does not make: an
+    // added relay is idle, an onion relay connects by itself, a clearnet one
+    // needs the warning AND a per-session activation.
+    rp_title: "Relays", "Relays";
+    rp_hint: "Relays pass this node's encrypted messages on. Nothing is preset — you decide which relays this node uses, and in which order: the first one is tried first.", "Relays leiten die verschlüsselten Nachrichten dieses Knotens weiter. Nichts ist voreingestellt — du entscheidest, welche Relays dieser Knoten benutzt und in welcher Reihenfolge: Das erste wird zuerst versucht.";
+    rp_in_use: "Relays in use:", "Relays in Benutzung:";
+    rp_none_dialable: "No relay is in use — this node is not connected.", "Kein Relay ist in Benutzung — dieser Knoten ist nicht verbunden.";
+    rp_empty_title: "No relay configured yet", "Noch kein Relay eingerichtet";
+    rp_empty_body: "This node is connected to no relay, so nothing leaves your machine. Enter the address of a relay you trust below and confirm it to put it to use. Addresses ending in .onion are the private choice: they are reached through Tor and connect on their own.", "Dieser Knoten ist mit keinem Relay verbunden, es verlässt also nichts deinen Rechner. Trage unten die Adresse eines Relays ein, dem du vertraust, und bestätige es, um es zu benutzen. Adressen auf .onion sind die private Wahl: Sie werden über Tor erreicht und verbinden sich von selbst.";
+    rp_badge_onion: "ONION", "ONION";
+    rp_badge_clearnet: "CLEARNET", "CLEARNET";
+    rp_st_auto: "connects automatically", "verbindet automatisch";
+    rp_st_unconfirmed: "not in use — confirm to enable", "nicht in Benutzung — zum Aktivieren bestätigen";
+    rp_st_locked: "confirmed — needs activation this session", "bestätigt — braucht Freigabe für diese Sitzung";
+    rp_st_active: "active this session", "in dieser Sitzung aktiv";
+    rp_confirm: "Confirm", "Bestätigen";
+    rp_revoke: "Withdraw", "Zurückziehen";
+    rp_revoke_tip: "Withdraw the confirmation — the relay stays in the list but is no longer used", "Bestätigung zurückziehen — das Relay bleibt in der Liste, wird aber nicht mehr benutzt";
+    rp_up: "Higher priority", "Höhere Priorität";
+    rp_down: "Lower priority", "Niedrigere Priorität";
+    rp_remove: "Remove from the list", "Aus der Liste entfernen";
+    rp_add: "Add", "Hinzufügen";
+    rp_add_hint: "Adding never connects: a new relay starts unconfirmed. ws:// is allowed for .onion addresses only — everything else needs wss://.", "Hinzufügen verbindet nicht: Ein neues Relay ist zunächst unbestätigt. ws:// ist nur für .onion-Adressen erlaubt — alles andere braucht wss://.";
+    rp_err_scheme: "A relay address starts with wss:// (or ws:// for .onion).", "Eine Relay-Adresse beginnt mit wss:// (oder ws:// bei .onion).";
+    rp_err_host: "This address has no host.", "Diese Adresse hat keinen Host.";
+    rp_err_plain: "ws:// is unencrypted and allowed for .onion addresses only — use wss:// here.", "ws:// ist unverschlüsselt und nur für .onion-Adressen erlaubt — hier brauchst du wss://.";
+    rp_err_junk: "This address contains spaces or control characters.", "Diese Adresse enthält Leerzeichen oder Steuerzeichen.";
+    rp_err_onion: "This is not a valid .onion address — a v3 onion has 56 characters (a–z, 2–7) before .onion.", "Das ist keine gültige .onion-Adresse — eine v3-Onion hat 56 Zeichen (a–z, 2–7) vor .onion.";
+    rp_err_dup: "This relay is already in the list.", "Dieses Relay steht schon in der Liste.";
+    rp_cn_title: "Use a clearnet relay?", "Ein Clearnet-Relay benutzen?";
+    rp_cn_body_tor: "This relay is not a .onion service. Its operator sees which conversations this node subscribes to and when it is online. Tor hides your IP address from them — but the relay stays a clearnet endpoint, run by someone you do not control.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse vor ihm — aber das Relay bleibt ein Clearnet-Endpunkt in fremder Hand.";
+    rp_cn_body_plain: "This relay is not a .onion service. Its operator sees your IP address, which conversations this node subscribes to and when it is online. The anonymity network is switched off, so nothing hides where you connect from.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht deine IP-Adresse, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Das Anonymitäts-Netzwerk ist ausgeschaltet, es verbirgt also nichts, von wo aus du dich verbindest.";
+    rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
+    rp_cn_confirm: "Confirm relay", "Relay bestätigen";
+    rp_cn_note: "Even then clearnet relays are not dialed automatically: you activate them once per session.", "Auch dann werden Clearnet-Relays nicht automatisch angewählt: Du gibst sie einmal pro Sitzung frei.";
+    rp_cn_session_title: "Clearnet relays this session", "Clearnet-Relays in dieser Sitzung";
+    rp_cn_session_off: "Confirmed clearnet relays are not dialed automatically. Activate them when you need them — the activation ends when you close the app.", "Bestätigte Clearnet-Relays werden nicht automatisch angewählt. Gib sie frei, wenn du sie brauchst — die Freigabe endet, wenn du die App schließt.";
+    rp_cn_session_on: "Active: confirmed clearnet relays are in use until you close the app.", "Aktiv: Bestätigte Clearnet-Relays werden benutzt, bis du die App schließt.";
+    rp_cn_activate: "Activate for this session", "Für diese Sitzung freigeben";
+    rp_cn_deactivate: "Deactivate", "Freigabe beenden";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
     unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
     unsaved_save: "Save & continue", "Speichern & weiter";
@@ -6543,6 +6803,111 @@ mod tests {
             browse_start_dir(&format!("{dir_path}/definitely-missing")),
             None,
             "a stale/typoed draft → dialog default"
+        );
+    }
+    /// The relay panel renders the ENGINE's verdict, never its own: every
+    /// `blocked` reason becomes exactly one row state, and the position /
+    /// end-of-list flags follow the pool order (which IS the priority).
+    #[test]
+    fn relay_rows_mirror_the_engine_verdict_and_the_priority_order() {
+        let status = |url: &str, kind, confirmed, blocked| RelayStatus {
+            url: url.to_string(),
+            kind,
+            confirmed,
+            blocked,
+        };
+        let rows = relay_rows(&[
+            // in use: a confirmed onion relay dials by itself
+            status("wss://aaa.onion", RelayKind::Onion, true, None),
+            // in the pool, but the user has not confirmed it
+            status(
+                "wss://relay.example.org",
+                RelayKind::Clearnet,
+                false,
+                Some(RelayBlock::Unconfirmed),
+            ),
+            // confirmed clearnet, but this session has not activated it
+            status(
+                "wss://other.example.org",
+                RelayKind::Clearnet,
+                true,
+                Some(RelayBlock::ClearnetSessionLocked),
+            ),
+        ]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].pos, 1);
+        assert!(rows[0].onion && rows[0].confirmed);
+        assert_eq!(rows[0].blocked, 0, "no block = in use right now");
+        assert!(rows[0].first, "position 0 cannot move up");
+        assert!(!rows[0].last);
+        assert_eq!(rows[1].pos, 2);
+        assert!(!rows[1].onion);
+        assert_eq!(rows[1].blocked, 1, "unconfirmed");
+        assert!(!rows[1].first && !rows[1].last, "the middle row moves both ways");
+        assert_eq!(rows[2].pos, 3);
+        assert_eq!(rows[2].blocked, 2, "clearnet, not activated this session");
+        assert!(rows[2].confirmed, "…yet confirmed: the two are independent");
+        assert!(rows[2].last, "the bottom row cannot move down");
+        // a single relay is BOTH ends — neither arrow may promise a move
+        let one = relay_rows(&[status("wss://aaa.onion", RelayKind::Onion, false, Some(RelayBlock::Unconfirmed))]);
+        assert!(one[0].first && one[0].last);
+        assert!(relay_rows(&[]).is_empty(), "a fresh install shows no rows");
+    }
+
+    /// Every way the pool refuses a URL reaches the user as a readable line
+    /// under the field — in their language, never as a silent no-op. The
+    /// classification comes from molt-core's own parser, so the message and
+    /// the engine's gate can never drift apart.
+    #[test]
+    fn a_refused_relay_url_gets_a_localized_message_under_the_field() {
+        let pool = vec!["wss://relay.example.org".to_string()];
+        for lang in [0, 1] {
+            assert_eq!(relay_add_error(lang, "wss://fresh.example.org", &pool), None);
+            assert_eq!(
+                relay_add_error(
+                    lang,
+                    "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
+                    &pool
+                ),
+                None,
+                "plaintext to an onion service is fine — Tor encrypts it"
+            );
+            // …and every refusal names its reason
+            for bad in [
+                "https://relay.example.org",
+                "relay.example.org",
+                "wss://",
+                "ws://relay.example.org",
+                "wss://relay example.org",
+                // a .onion host that is not a real v3 address
+                "wss://aaa.onion",
+                // already in the pool (normalized: same relay, other spelling)
+                "WSS://Relay.Example.ORG/",
+            ] {
+                let msg = relay_add_error(lang, bad, &pool)
+                    .unwrap_or_else(|| panic!("{bad:?} must be refused with a message"));
+                assert!(!msg.is_empty());
+            }
+        }
+        // the five parser verdicts and the duplicate are DISTINCT messages,
+        // so the user learns what to fix
+        let msgs = [
+            relay_add_error(0, "https://relay.example.org", &pool),
+            relay_add_error(0, "wss://", &pool),
+            relay_add_error(0, "ws://relay.example.org", &pool),
+            relay_add_error(0, "wss://relay example.org", &pool),
+            relay_add_error(0, "wss://aaa.onion", &pool),
+            relay_add_error(0, "wss://relay.example.org", &pool),
+        ];
+        for (i, a) in msgs.iter().enumerate() {
+            for b in msgs.iter().skip(i + 1) {
+                assert_ne!(a, b, "each refusal reads differently");
+            }
+        }
+        // German is a real translation, not the English string
+        assert_ne!(
+            relay_add_error(0, "wss://", &pool),
+            relay_add_error(1, "wss://", &pool),
         );
     }
 }

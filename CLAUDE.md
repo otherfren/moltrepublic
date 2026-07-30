@@ -42,6 +42,29 @@ user could mistake for real.
   product/design decisions, not for choices with an obvious default.
 - Don't invent specs — fetch the real thing (e.g. exact OpenMLS APIs) and
   lock it against the compiler before building on it.
+- **Don't hand-roll what a battle-tested library already does.** Before
+  building any non-trivial mechanism — a parser, a protocol layer, a crypto
+  envelope, a transport, a retry/backoff engine — SEARCH FIRST: is there an
+  established crate, or a reference implementation of this very protocol? Look
+  it up, read its actual code and API, weigh it, and write the verdict into the
+  plan. "We'll implement it ourselves" is a decision that must be *argued*
+  (layering, dependency posture, licence, maintenance), never the default
+  because it is the fastest thing to start.
+  - This rule was written after two CRITICAL bugs shipped in a HAND-ROLLED URL
+    host parser (a backslash and a `userinfo@` component made a clearnet host
+    classify as `.onion`, defeating the entire privacy gate) — while `url`,
+    the WHATWG-correct parser every real client uses, was ALREADY in the
+    dependency tree via `nostr`. Hand-rolled parsers fail exactly where the
+    real parser disagrees, and that disagreement is the exploit.
+  - A design doc dismissing an obvious candidate in one line ("overlaps our
+    engine entirely") is NOT research. If a reference implementation exists
+    for the protocol being built (for Nostr/NIP-EE: the Marmot MDK,
+    `docs/transport/mdk_evaluation.md`), it must be read and evaluated in the
+    plan, with the take/leave decision recorded per component.
+- **Prefer asking and researching over starting.** During planning it is
+  cheaper to look again, research, think, and ask a question than to begin
+  coding the wrong thing. A plan that begins with "I'll build X" without a
+  paragraph on what already exists is not finished.
 
 ## Architecture (read the workspace `Cargo.toml` header first)
 

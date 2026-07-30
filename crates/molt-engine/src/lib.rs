@@ -579,6 +579,11 @@ pub(crate) struct State {
     /// MLS-ratchet persist (`persist_mls_if_due` — "did anything go out since
     /// the last snapshot?"). Runtime-only; reset with the workspace.
     pub(crate) last_mesh_out: u64,
+    /// Are clearnet relays activated for THIS session? Runtime-only **on
+    /// purpose** — it is never persisted, so every start re-arms the gate and
+    /// no clearnet packet leaves before the user acts again
+    /// (`docs/transport/relay_pool.md` §3). Onion relays are unaffected.
+    pub(crate) clearnet_session: bool,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -795,6 +800,7 @@ impl State {
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
+            clearnet_session: false,
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -1041,7 +1047,26 @@ impl State {
             Command::NetDeliveryTick => self.cmd_net_delivery_tick(),
 
             // session.rs
-            Command::ReadSession => Ok(Reply::Session(Box::new(self.session.clone()))),
+            Command::ReadSession => {
+                // the relay pool's DERIVED state is computed here, at the one
+                // place a session view leaves the actor, so it can never go
+                // stale against `settings.relays` / the session's clearnet lock
+                let mut view = self.session.clone();
+                view.relays = molt_core::relay::pool_status(
+                    &self.session.settings.relays,
+                    self.clearnet_session,
+                );
+                view.clearnet_session = self.clearnet_session;
+                Ok(Reply::Session(Box::new(view)))
+            }
+            Command::RelayAdd { url } => self.cmd_relay_add(url),
+            Command::RelayRemove { url } => self.cmd_relay_remove(url),
+            Command::RelayMove { url, up } => self.cmd_relay_move(url, up),
+            Command::RelayConfirm { url, accept_clearnet } => {
+                self.cmd_relay_confirm(url, accept_clearnet)
+            }
+            Command::RelayRevoke { url } => self.cmd_relay_revoke(url),
+            Command::RelayClearnetSession { unlock } => self.cmd_relay_clearnet_session(unlock),
             Command::Navigate { screen } => self.cmd_navigate(screen),
             Command::SelectSurface { surface } => self.cmd_select_surface(surface),
             Command::SelectView { surface, view } => self.cmd_select_view(surface, view),

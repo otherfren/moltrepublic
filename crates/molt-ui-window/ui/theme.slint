@@ -65,6 +65,20 @@ export struct ChainRow {
     signers: string, // "petra, walter" ("" on pre-cut entries — signatures dropped with the history)
 }
 
+// One relay of the Nostr relay pool, as Settings → Nostr relays renders it: the
+// stored facts (url, confirmed) plus what the ENGINE derived from them. The
+// GUI never re-decides the dial policy — `onion` and `blocked` arrive
+// decided (`docs/transport/relay_pool.md`), the panel only labels them.
+export struct RelayItem {
+    url: string,
+    onion: bool, // derived from the URL, never stored
+    confirmed: bool, // the user's persisted "yes, use this relay"
+    blocked: int, // 0 = in use right now · 1 = unconfirmed · 2 = clearnet, not activated this session
+    pos: int, // 1-based priority position (the list ORDER is the priority)
+    first: bool, // at the top — the "higher priority" control is dead
+    last: bool, // at the bottom — the "lower priority" control is dead
+}
+
 // One chat channel in the sidebar (chat bus): a VIEW over the one log,
 // never a boundary. Built Rust-side from the engine's channel enumeration.
 export struct ChannelItem {
@@ -665,7 +679,8 @@ export global Strings {
     in property <string> bk-refresh-tip;
     in property <string> bk-listing;
     in property <string> bk-list-ok;
-    in property <string> set-tab-network;
+    in property <string> set-tab-anon;
+    in property <string> set-tab-relays;
     in property <string> set-tab-mcp;
     in property <string> set-tab-node;
     in property <string> set-save;
@@ -676,6 +691,44 @@ export global Strings {
     in property <string> set-conflict-note;
     in property <string> set-restart-note;
     in property <string> set-tor-embedded-missing;
+    // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6)
+    in property <string> rp-title;
+    in property <string> rp-hint;
+    in property <string> rp-in-use;
+    in property <string> rp-none-dialable;
+    in property <string> rp-empty-title;
+    in property <string> rp-empty-body;
+    in property <string> rp-badge-onion;
+    in property <string> rp-badge-clearnet;
+    in property <string> rp-st-auto;
+    in property <string> rp-st-unconfirmed;
+    in property <string> rp-st-locked;
+    in property <string> rp-st-active;
+    in property <string> rp-confirm;
+    in property <string> rp-revoke;
+    in property <string> rp-revoke-tip;
+    in property <string> rp-up;
+    in property <string> rp-down;
+    in property <string> rp-remove;
+    in property <string> rp-add;
+    in property <string> rp-add-hint;
+    in property <string> rp-err-scheme;
+    in property <string> rp-err-host;
+    in property <string> rp-err-plain;
+    in property <string> rp-err-junk;
+    in property <string> rp-err-onion;
+    in property <string> rp-err-dup;
+    in property <string> rp-cn-title;
+    in property <string> rp-cn-body-tor;
+    in property <string> rp-cn-body-plain;
+    in property <string> rp-cn-ack;
+    in property <string> rp-cn-confirm;
+    in property <string> rp-cn-note;
+    in property <string> rp-cn-session-title;
+    in property <string> rp-cn-session-off;
+    in property <string> rp-cn-session-on;
+    in property <string> rp-cn-activate;
+    in property <string> rp-cn-deactivate;
     in property <string> set-panel-appearance;
     in property <string> set-panel-sounds;
     in property <string> field-sound-message;

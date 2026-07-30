@@ -22,6 +22,7 @@ use serde_json::Value;
 /// The republic's persistent-change chain: a single-branch, threshold-signed
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
 pub mod chain;
+pub mod relay;
 pub use chain::{
     approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock, ChainChange,
     CheckpointState, MembershipOp, GENESIS_PREV,
@@ -271,6 +272,13 @@ pub struct SessionSettings {
     /// receipts and hides others' from its chat view (symmetric).
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// The Nostr relay pool, in priority order (position 0 is tried first).
+    /// **Empty by default — nothing is pre-trusted.** Edited through the
+    /// `Relay*` commands (never a free-form text field), because every entry
+    /// is URL-validated and a clearnet confirmation is gated;
+    /// `docs/transport/relay_pool.md`.
+    #[serde(default)]
+    pub relays: Vec<crate::relay::RelayEntry>,
 }
 
 /// Default alert sound: silent until the operator opts in.
@@ -320,6 +328,8 @@ impl Default for SessionSettings {
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
+            // no relay ships with the app: a fresh install connects nowhere
+            relays: Vec::new(),
         }
     }
 }
@@ -2537,6 +2547,17 @@ pub struct SessionView {
     pub restart_required: Vec<String>,
     /// The editable settings.
     pub settings: SessionSettings,
+    /// The Nostr relay pool with its DERIVED state (kind, why a relay is or
+    /// is not dialed), in priority order — see `docs/transport/relay_pool.md`.
+    /// Empty on a fresh install: nothing is pre-trusted, so the node connects
+    /// to no relay until its operator adds and confirms one.
+    #[serde(default)]
+    pub relays: Vec<crate::relay::RelayStatus>,
+    /// Whether clearnet relays are activated for THIS session. Always starts
+    /// `false` — a confirmed clearnet relay still needs an explicit, in-session
+    /// act before any packet leaves, and that act does not survive a restart.
+    #[serde(default)]
+    pub clearnet_session: bool,
     /// The locally known workspaces, from the real on-disk directory scan.
     pub workspaces: Vec<WorkspaceInfo>,
     /// Backups in the S3 bucket without a local workspace, from the last
@@ -2575,6 +2596,8 @@ impl Default for SessionView {
             s3_list: String::new(),
             restart_required: Vec::new(),
             settings: SessionSettings::default(),
+            relays: Vec::new(),
+            clearnet_session: false,
             workspaces: WorkspaceInfo::demo_set(),
             backup_orphans: Vec::new(),
             active_workspace: String::new(),
@@ -2848,6 +2871,51 @@ pub enum Command {
         /// New read-receipts state.
         enabled: bool,
     },
+    /// Add a relay to the pool — validated and normalized, appended at the
+    /// LOWEST priority, and **unconfirmed**: adding never connects. See
+    /// `docs/transport/relay_pool.md`.
+    RelayAdd {
+        /// `wss://…` (or `ws://…` for a `.onion` host).
+        url: String,
+    },
+    /// Remove a relay from the pool entirely.
+    RelayRemove {
+        /// The relay URL (any spelling that normalizes to a pool entry).
+        url: String,
+    },
+    /// Move a relay one position up or down — the pool order IS the dial
+    /// priority.
+    RelayMove {
+        /// The relay to move.
+        url: String,
+        /// `true` = towards position 0 (higher priority).
+        up: bool,
+    },
+    /// Confirm a relay: the user's persisted "yes, use this one". A CLEARNET
+    /// relay is refused unless `accept_clearnet` is set — the acknowledgement
+    /// is enforced HERE, so an MCP agent faces the same gate as a human
+    /// clicking through the GUI's warning.
+    RelayConfirm {
+        /// The relay to confirm.
+        url: String,
+        /// Explicit acknowledgement of the clearnet exposure (the relay
+        /// operator sees this node's subscriptions, and its IP unless Tor is
+        /// on). Ignored for onion relays.
+        accept_clearnet: bool,
+    },
+    /// Withdraw a relay's confirmation — it stays in the pool but is no
+    /// longer dialed.
+    RelayRevoke {
+        /// The relay to un-confirm.
+        url: String,
+    },
+    /// Activate (or deactivate) clearnet relays for THIS session. Never
+    /// persisted: after a restart no clearnet packet leaves the machine until
+    /// the user acts again. Onion relays are unaffected.
+    RelayClearnetSession {
+        /// `true` = allow dialing confirmed clearnet relays until shutdown.
+        unlock: bool,
+    },
     /// Store the settings into the session and persist them to the node's
     /// `config.toml` (format-preserving, atomic). The reply does not wait for
     /// the disk; the write outcome lands in the session notice ("saved" /
@@ -3046,7 +3114,7 @@ pub enum Command {
     /// final roster (transport concept §3.3) — until then nothing exists
     /// on disk, and closing the wizard voids the links. The transport is
     /// NOT a parameter: the ritual always routes through the global
-    /// anonymity settings (`SessionSettings.anonymity`, Settings → Network).
+    /// anonymity settings (`SessionSettings.anonymity`, Settings → Anonymity network).
     CreateStart {
         /// The new republic's name.
         name: String,

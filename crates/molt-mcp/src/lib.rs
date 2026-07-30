@@ -389,6 +389,10 @@ fn screen_arg(args: &Value) -> Result<Screen, String> {
 /// Build a [`SessionSettings`] from tool arguments, defaulting any omitted field.
 /// `save_settings` replaces the session settings wholesale, so an agent reads the
 /// current session first and passes back the fields it wants changed.
+///
+/// The relay pool is deliberately NOT one of those fields: it has its own
+/// validated, gated commands (`relay_add`/`relay_confirm`/…), and the engine
+/// ignores whatever pool a `save_settings` payload carries.
 fn settings_arg(args: &Value) -> SessionSettings {
     let d = SessionSettings::default();
     let port = |key: &str, fallback: u16| {
@@ -432,6 +436,8 @@ fn settings_arg(args: &Value) -> SessionSettings {
         anonymity: text("anonymity", d.anonymity),
         tor_mode: text("tor_mode", d.tor_mode),
         tor_port: port("tor_port", d.tor_port),
+        // never taken from the payload — the engine keeps the live pool
+        relays: Vec::new(),
     }
 }
 
@@ -816,6 +822,91 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::SaveSettings {
                 settings: settings_arg(args),
             }),
+        },
+        ToolDef {
+            name: "relay_add",
+            command: "relay_add",
+            description: "Add a Nostr relay to this node's pool. NOTHING SHIPS PRE-TRUSTED: the node connects to no relay until one is added AND confirmed, so adding is safe — the entry lands unconfirmed, at the lowest priority, and nothing is dialed. The URL is validated and normalized (wss://…, or ws://… for a .onion host only — plaintext to the clearnet is refused). Read the pool back from read_session.relays, which carries each entry's derived kind (onion|clearnet) and why it is or is not dialed.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "wss://relay.example.org — or ws://…onion for an onion service" }
+                },
+                "required": ["url"]
+            }),
+            build: |args| Ok(Command::RelayAdd { url: str_arg(args, "url")? }),
+        },
+        ToolDef {
+            name: "relay_remove",
+            command: "relay_remove",
+            description: "Remove a relay from the pool entirely (to merely stop using it while keeping it listed, use relay_revoke).",
+            schema: || json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+            build: |args| Ok(Command::RelayRemove { url: str_arg(args, "url")? }),
+        },
+        ToolDef {
+            name: "relay_move",
+            command: "relay_move",
+            description: "Move a relay one position in the pool. The pool ORDER is the dial priority (position 0 is tried first). Moving past either end is a no-op, not an error.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "up": { "type": "boolean", "description": "true = towards position 0 (higher priority)" }
+                },
+                "required": ["url", "up"]
+            }),
+            build: |args| Ok(Command::RelayMove {
+                url: str_arg(args, "url")?,
+                up: bool_arg(args, "up")?,
+            }),
+        },
+        ToolDef {
+            name: "relay_confirm",
+            command: "relay_confirm",
+            description: "Confirm a relay — the operator's persisted \"yes, use this one\". An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET relay is REFUSED unless accept_clearnet is true: its operator sees this node's subscriptions, and its IP address unless Tor is on. Even once confirmed, a clearnet relay is never dialed automatically — it additionally needs relay_clearnet_session in every session.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "accept_clearnet": { "type": "boolean", "description": "explicit acknowledgement of the clearnet exposure; ignored for .onion relays" }
+                },
+                "required": ["url"]
+            }),
+            build: |args| Ok(Command::RelayConfirm {
+                url: str_arg(args, "url")?,
+                accept_clearnet: args
+                    .get("accept_clearnet")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }),
+        },
+        ToolDef {
+            name: "relay_revoke",
+            command: "relay_revoke",
+            description: "Withdraw a relay's confirmation: it stays in the pool (and keeps its priority) but is no longer dialed.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+            build: |args| Ok(Command::RelayRevoke { url: str_arg(args, "url")? }),
+        },
+        ToolDef {
+            name: "relay_clearnet_session",
+            command: "relay_clearnet_session",
+            description: "Activate (or deactivate) CLEARNET relays for this session only — never persisted, so after a restart no clearnet packet leaves the machine until it is activated again. Onion relays are unaffected and always connect on their own. Confirmed clearnet relays stay blocked (read_session.relays shows \"clearnet_session_locked\") until this is unlocked.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "unlock": { "type": "boolean", "description": "true = allow dialing confirmed clearnet relays until shutdown" }
+                },
+                "required": ["unlock"]
+            }),
+            build: |args| Ok(Command::RelayClearnetSession { unlock: bool_arg(args, "unlock")? }),
         },
         ToolDef {
             name: "net_test_s3",

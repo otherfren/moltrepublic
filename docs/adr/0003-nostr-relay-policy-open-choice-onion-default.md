@@ -1,8 +1,16 @@
 ---
-status: proposed
+status: partially superseded
 ---
 
 # Nostr relay policy: any relay allowed, curated onion default, self-hosted recommended
+
+> **PARTIALLY SUPERSEDED (2026-07-31) by
+> [ADR-0004](0004-no-preconfigured-relays-user-confirmed-pool.md).** The
+> "curated set of onion relays as the default pool" below is VOID: the app now
+> ships with an EMPTY pool and connects to nothing until the operator adds and
+> confirms a relay (a shipped list would be a shipped surveillance point).
+> The rest of this ADR — any relay allowed, self-hosting recommended, NIP-42
+> AUTH in scope, honest badges for non-self-hosted/clearnet relays — stands.
 
 **Context.** ADR-0001 settled *reachability* (onion by default, clearnet only
 with a warning). This ADR settles *which relays a workspace may use at all*.

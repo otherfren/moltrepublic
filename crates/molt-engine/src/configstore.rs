@@ -352,6 +352,14 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         mcp_token: s.mcp_token.clone(),
         lang: language.to_string(),
         theme: theme.to_string(),
+        relays: s
+            .relays
+            .iter()
+            .map(|r| molt_config::RelayConfig {
+                url: r.url.clone(),
+                confirmed: r.confirmed,
+            })
+            .collect(),
     }
 }
 
@@ -378,6 +386,17 @@ fn session_settings(s: &Settings) -> SessionSettings {
         tor_mode: s.tor_mode.clone(),
         tor_port: s.tor_port,
         download_dir: s.download_dir.clone(),
+        // the file is hand-editable and never ran ingest validation, so the
+        // pool is sanitized here — see molt_core::relay::sanitize_pool
+        relays: molt_core::relay::sanitize_pool(
+            &s.relays
+                .iter()
+                .map(|r| molt_core::relay::RelayEntry {
+                    url: r.url.clone(),
+                    confirmed: r.confirmed,
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 

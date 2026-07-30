@@ -51,7 +51,9 @@ churns even at 3 nodes; structural, not operator). Every decision locked:
   (accepted; export first if any data matters).
 - **Crypto:** C libsecp256k1 via rust-nostr (ADR-0002), molt-net-only;
   roster/chain stay pure-Rust Ed25519.
-- **Relays:** any relay allowed, curated-onion default, self-hosted recommended
+- **Relays:** any relay allowed, **NO pre-configured relay** — an empty,
+  user-confirmed pool with a clearnet gate (ADR-0004, supersedes the curated
+  default); self-hosted recommended
   (ADR-0001/0003); NIP-42 AUTH in N2 scope.
 - **h-tag rotation:** deterministic from a shared seed, **uniform W = 24h/UTC
   for ALL DAOs** (crowd/anonymity-set — a per-group W would fingerprint the
@@ -606,14 +608,21 @@ if the single onion relay is down or slow (onion services carry extra
 latency), the group goes dark — so the default is **two or more** onion
 relays (the native Nostr redundancy, §4.1), not one.
 
-**Settings model (drives N2 + the N6 wizard) — relay CHOICE is open, the
-default is private (ADR-0003):**
+**Settings model — relay CHOICE is open, but NOTHING is pre-configured
+(ADR-0004, superseding ADR-0003's curated default; built 2026-07-31, see
+`relay_pool.md`):**
 
+- **The app ships with an EMPTY pool and connects to nothing** until the
+  operator adds a relay AND confirms it. A shipped list would be a shipped
+  surveillance point that makes every node identifiable by its first packet.
 - **Any relay may be added** — foreign public, self-hosted, onion, or clearnet.
-  The founding wizard's list **defaults to a curated set of onion relays**, and
-  the UI **recommends self-hosted relays**, stating plainly that **only a
-  self-hosted relay avoids `h`-tag correlation** (any third-party relay, even a
-  curated onion one, still sees which subscribers share a group).
+  The UI **recommends self-hosted relays**, stating plainly that **only a
+  self-hosted relay avoids `h`-tag correlation** (any third-party relay, even
+  an onion one, still sees which subscribers share a group).
+- **Onion relays connect automatically once confirmed; clearnet never does** —
+  it needs an explicit acknowledgement of the exposure AND a per-session
+  activation that does not survive a restart. The pool is ordered, and the
+  order is the dial priority.
 - Adding a `wss://` clearnet relay keeps the stronger flag: an inline
   "insecure — a visible, seizable clearnet target; only your client IP is
   protected, and only if Tor is on" warning, and a persistent health-surface
@@ -625,10 +634,11 @@ default is private (ADR-0003):**
   re-identifies the member to that relay via a persistent key — harmless on the
   own onion relay, a warned leak on a foreign one.
 
-This resolves §10.2 fully (with ADR-0001 for reachability + ADR-0003 for the
-relay policy): **any relay allowed, curated-onion default, self-hosted
-recommended, clearnet warned** — informed choice with a private default, not
-"decide later" and not a prohibition.
+This resolves §10.2 fully (ADR-0001 reachability + ADR-0003 relay policy as
+amended by ADR-0004): **any relay allowed, NO relay pre-configured,
+self-hosted recommended, clearnet warned and gated** — informed choice where
+the private path is also the frictionless one, not "decide later" and not a
+prohibition.
 
 ## 8. Dependency / pure-Rust audit
 
@@ -667,9 +677,20 @@ recommended, clearnet warned** — informed choice with a private default, not
   cap. Harmless for us — the 445-level chunk budget stays far below 64 KiB —
   but `tests/nostr_vectors.rs` pins the boundary as a canary that flips on an
   upstream fix.
-- **MDK / White Noise:** MIT, used as a REFERENCE (event layout, race
-  handling to test against), not a dependency — their account/storage/runtime
-  overlaps our engine entirely.
+- **MDK / White Noise — RE-EVALUATED 2026-07-31, see
+  `docs/transport/mdk_evaluation.md`.** The old one-line dismissal below was
+  written without reading the code and is WRONG for part of the kit: it is
+  true of `marmot-account`/`marmot-app`/`storage-sqlite`/`cgka-session`, but
+  `transport-nostr-peeler` (2.2k LOC) has no account model, no storage, no
+  runtime and no `openmls` dependency, and `transport-nostr-adapter` hides its
+  relay client behind an injectable trait. Verdict: **vendor the peeler**
+  (adapted for our h-tag rotation and envelope choice), **port six specific
+  adapter behaviours**, borrow the conformance scenario design, reject the
+  engine (identity-model conflict + git-forked OpenMLS) and the app stack.
+  Adoption is by vendoring, never a git dependency (`publish = false`).
+  ~~MIT, used as a REFERENCE (event layout, race handling to test against),
+  not a dependency — their account/storage/runtime overlaps our engine
+  entirely.~~
 
 ## 9. Migration & coexistence
 
@@ -731,8 +752,11 @@ decided any time before ship.
 
 **Product taste — now also decided:**
 
-- **§10.1 — Relay default: DECIDED (ADR-0003)** — curated onion relays, editable
-  in the wizard, self-hosted recommended.
+- **§10.1 — Relay default: RE-DECIDED 2026-07-31 (ADR-0004, supersedes
+  ADR-0003's curated list)** — there is NO default relay: the pool ships empty
+  and the node connects to nothing until the operator adds and confirms one.
+  Onion connects automatically; clearnet needs an acknowledgement plus a
+  per-session activation. BUILT — `docs/transport/relay_pool.md`.
 - **§10.4 — Exporter-ring depth K: DECIDED — K = 3** (§6). Epochs change only on
   membership/recovery (rare); 3 covers recent ones, the resend layer covers the
   rest; small K bounds the leaked-secret window.
@@ -822,7 +846,10 @@ once. So:
   split-anchor attempt rejected, malformed/duplicate-anchor ingest + verify
   pins, the ratified-vs-sealed byte-comparison pin, the sk↔anchored-pk
   persistence pins (unit + `two_instances`).
-- **N2 — NostrTransport core:** relay pool (connect/backoff/health), publish
+- **N2 — NostrTransport core:** the relay POOL/policy already exists
+  (`molt_core::relay`, ADR-0004 — N2 MUST dial through
+  `relay::dialable(...)`, never read the pool directly, and must stay silent
+  while it returns empty); relay runtime (connect/backoff/health), publish
   with ≥1-OK semantics + NIP-11 size budget, per-relay cursor with clamp +
   overlap, event-id dedup, per-connection decrypt-failure circuit breaker.
   The WebSocket dialer rides the T4 onion-preferred, fail-closed path (§7.5) —

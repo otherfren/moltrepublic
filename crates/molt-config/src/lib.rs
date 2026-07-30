@@ -136,6 +136,36 @@ pub struct TransportConfig {
     /// Anonymity settings for node traffic.
     #[serde(default)]
     pub anonymity: AnonymityConfig,
+    /// The Nostr relay pool.
+    #[serde(default)]
+    pub nostr: NostrConfig,
+}
+
+/// Nostr transport settings (`[transport.nostr]`) — currently just the relay
+/// pool. **No relay ships with the app**: the node connects to nothing until
+/// its operator adds one and confirms it (`docs/transport/relay_pool.md`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NostrConfig {
+    /// The relay pool as `[[transport.nostr.relay]]` tables — **the file
+    /// order is the dial priority** (the first entry is tried first).
+    #[serde(default)]
+    pub relay: Vec<RelayConfig>,
+}
+
+/// One relay in the pool. The onion/clearnet kind is deliberately NOT a field:
+/// it is derived from the URL wherever it is needed, so a hand-edited file
+/// cannot label a clearnet relay as onion and walk through the clearnet gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    /// `wss://…` (or `ws://…` for a `.onion` host).
+    pub url: String,
+    /// The operator's persisted "yes, use this relay". Unconfirmed relays are
+    /// never dialed, so a relay pasted into the file still connects to
+    /// nothing until it is confirmed.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 /// How node traffic is anonymized: which network, plus that network's settings.
@@ -361,6 +391,9 @@ pub struct Settings {
     pub lang: String,
     /// GUI theme: `"classic" | "dark" | "brutalism"`.
     pub theme: String,
+    /// The Nostr relay pool in dial-priority order. Empty by default — the
+    /// node connects to no relay until its operator adds and confirms one.
+    pub relays: Vec<RelayConfig>,
 }
 
 impl Default for Settings {
@@ -387,6 +420,7 @@ impl Default for Settings {
             mcp_token: String::new(),
             lang: default_lang(),
             theme: default_theme(),
+            relays: Vec::new(),
         }
     }
 }
@@ -434,6 +468,7 @@ impl From<&Config> for Settings {
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
+            relays: c.transport.nostr.relay.clone(),
             mcp_port: c.mcp.port,
             mcp_allow: c.mcp.allow.clone(),
             mcp_token: c.mcp.token.clone(),
@@ -507,6 +542,8 @@ mode = {tor_mode}
 # Local tor SOCKS port. Used only when mode = "local".
 port = {tor_port}
 
+{relay_doc}[transport.nostr]
+{relays}
 [ui]
 # GUI language: "en" | "de".
 lang = {lang}
@@ -532,9 +569,30 @@ theme = {theme}
         anonymity = toml_str(&settings.anonymity),
         tor_mode = toml_str(&settings.tor_mode),
         tor_port = settings.tor_port,
+        relay_doc = RELAY_SECTION_DOC,
+        relays = render_relays(&settings.relays),
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
     )
+}
+
+/// The explanatory header of the `[transport.nostr]` section. ONE source for
+/// both writers: the generated template ([`render`]) and the retrofit that
+/// [`apply`] performs when an older config gains the section for the first
+/// time — so a hand-editing operator always finds the same instructions.
+const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically; a confirmed CLEARNET relay needs\n# an additional explicit activation in every session before a single packet\n# leaves (Settings > Nostr relays, or the relay_clearnet_session MCP tool).\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// is allowed for .onion only\n#   confirmed = false                # nothing is dialed until this is true\n";
+
+/// The `[[transport.nostr.relay]]` tables for [`render`], in pool order —
+/// empty (not even a table header) when the pool is empty, so a generated
+/// config never suggests a relay.
+fn render_relays(relays: &[RelayConfig]) -> String {
+    let mut out = String::new();
+    for r in relays {
+        out.push_str("\n[[transport.nostr.relay]]\n");
+        out.push_str(&format!("url = {}\n", toml_str(&r.url)));
+        out.push_str(&format!("confirmed = {}\n", r.confirmed));
+    }
+    out
 }
 
 /// Lenient parse: keep every field that is present and well-typed, default the
@@ -623,6 +681,33 @@ pub fn salvage(text: &str) -> Settings {
                 s.tor_port = port;
             }
         }
+    }
+    // The relay pool salvages entry by entry: one malformed table must not
+    // cost the operator the rest of the pool. A relay with no `url` is
+    // dropped; `confirmed` defaults to false, so anything salvaged from a
+    // damaged file is inert until the operator confirms it again.
+    if let Some(relays) = value
+        .get("transport")
+        .and_then(|t| t.get("nostr"))
+        .and_then(|n| n.get("relay"))
+        .and_then(toml::Value::as_array)
+    {
+        s.relays = relays
+            .iter()
+            .filter_map(|entry| {
+                let url = entry.get("url").and_then(toml::Value::as_str)?;
+                if url.trim().is_empty() {
+                    return None;
+                }
+                Some(RelayConfig {
+                    url: url.trim().to_string(),
+                    confirmed: entry
+                        .get("confirmed")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(false),
+                })
+            })
+            .collect();
     }
     if let Some(mcp) = value.get("mcp") {
         if let Some(port) = mcp
@@ -803,9 +888,60 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_str(tor, "mode", &settings.tor_mode);
     set_int(tor, "port", i64::from(settings.tor_port));
 
+    apply_relays(settings, doc);
+
     let ui = table_at(doc.as_table_mut(), &["ui"]);
     set_str(ui, "lang", &settings.lang);
     set_str(ui, "theme", &settings.theme);
+}
+
+/// Write the relay pool as `[[transport.nostr.relay]]` tables in pool order.
+///
+/// The array is rewritten WHOLESALE — unlike the scalar settings, these
+/// entries are app-managed structured data whose order carries meaning (the
+/// dial priority), and a merge would have to guess how a hand-reordered file
+/// relates to the in-app order. Comments elsewhere in the file keep their
+/// format-preserving guarantee; a comment written INSIDE the relay array does
+/// not survive a save. An empty pool removes the array entirely, so a config
+/// whose relays were all deleted does not keep stale entries.
+fn apply_relays(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
+    // A config written before the relay pool existed has no [transport.nostr]
+    // section at all, so hand-editing operators would never learn the syntax
+    // from their own file. Creating it carries the same explanation the
+    // generated template has — written ONCE, when the section first appears.
+    let fresh_section = doc
+        .as_table()
+        .get("transport")
+        .and_then(toml_edit::Item::as_table_like)
+        .map_or(true, |t| t.get("nostr").is_none());
+    {
+        let nostr = table_at(doc.as_table_mut(), &["transport", "nostr"]);
+        if settings.relays.is_empty() {
+            nostr.remove("relay");
+        } else {
+            let mut array = toml_edit::ArrayOfTables::new();
+            for r in &settings.relays {
+                let mut t = toml_edit::Table::new();
+                t.insert("url", toml_edit::value(r.url.clone()));
+                t.insert("confirmed", toml_edit::value(r.confirmed));
+                array.push(t);
+            }
+            nostr.insert("relay", toml_edit::Item::ArrayOfTables(array));
+        }
+    }
+    // the header decor is set after the table exists (a second navigation, so
+    // the mutable borrow above is already released); an inline-table config
+    // (`transport = { nostr = { … } }`) has no header to comment — skipped.
+    if fresh_section {
+        if let Some(table) = doc
+            .get_mut("transport")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .and_then(|t| t.get_mut("nostr"))
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            table.decor_mut().set_prefix(format!("\n{RELAY_SECTION_DOC}"));
+        }
+    }
 }
 
 /// Walk (and create where missing) the table at `path`. Inline tables the
@@ -962,7 +1098,120 @@ mod tests {
             mcp_token: "deadbeefcafef00d".to_string(),
             lang: "de".to_string(),
             theme: "brutalism".to_string(),
+            // two relays in a deliberate order: the round-trip must preserve
+            // BOTH the order (it is the dial priority) and each confirmation
+            relays: vec![
+                RelayConfig {
+                    url: "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion".to_string(),
+                    confirmed: true,
+                },
+                RelayConfig {
+                    url: "wss://relay.example.org".to_string(),
+                    confirmed: false,
+                },
+            ],
         }
+    }
+
+    /// The pool is app-managed data whose ORDER means something, so a save
+    /// rewrites the array wholesale — and an emptied pool must leave no stale
+    /// entry behind.
+    #[test]
+    fn the_relay_pool_round_trips_and_an_empty_pool_clears_the_array() {
+        let with_relays = non_default_settings();
+        let text = update("", &with_relays).expect("write into an empty file");
+        assert_eq!(
+            salvage(&text).relays,
+            with_relays.relays,
+            "order and confirmations survive the round-trip"
+        );
+        parse(&text).expect("the written file parses strictly");
+
+        // reordering is a plain vec swap and must land in the file
+        let mut swapped = with_relays.clone();
+        swapped.relays.swap(0, 1);
+        let text = update(&text, &swapped).expect("rewrite");
+        assert_eq!(salvage(&text).relays, swapped.relays, "the new priority order");
+
+        // deleting every relay removes the array — no stale entry survives
+        let mut empty = swapped.clone();
+        empty.relays.clear();
+        let text = update(&text, &empty).expect("rewrite empty");
+        assert!(salvage(&text).relays.is_empty());
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.trim_start().starts_with("[[transport.nostr.relay]]")),
+            "an emptied pool leaves no ACTIVE relay table behind:\n{text}"
+        );
+        parse(&text).expect("still strict-parses");
+    }
+
+    /// A config written before the relay pool existed has no `[transport.nostr]`
+    /// section, so its operator would never learn the syntax from their own
+    /// file. The first save must retrofit the section WITH the same
+    /// explanation the generated template carries — once, without disturbing
+    /// anything the operator wrote.
+    #[test]
+    fn an_older_config_gains_the_documented_relay_section_on_save() {
+        let legacy = "# my own notes\n[node]\nheadless = true\n\n[ui]\nlang = \"de\"\n";
+        assert!(!legacy.contains("transport.nostr"), "the fixture predates relays");
+        let mut settings = salvage(legacy);
+        settings.headless = true;
+
+        let once = update(legacy, &settings).expect("first save");
+        assert!(once.contains("[transport.nostr]"), "the section appears");
+        assert!(
+            once.contains("NO RELAY SHIPS WITH THE APP"),
+            "…and carries the same explanation as the template:\n{once}"
+        );
+        assert!(once.contains("# my own notes"), "the operator's own text survives");
+        parse(&once).expect("strict-parses");
+        assert!(salvage(&once).relays.is_empty(), "no relay was invented");
+
+        // saving again must NOT stack a second copy of the explanation
+        let twice = update(&once, &settings).expect("second save");
+        assert_eq!(
+            twice.matches("NO RELAY SHIPS WITH THE APP").count(),
+            1,
+            "the explanation is written exactly once:\n{twice}"
+        );
+    }
+
+    /// A generated config must not suggest, let alone activate, any relay.
+    #[test]
+    fn a_generated_config_ships_no_relay() {
+        let text = render(&Settings::default());
+        // the commented example block is documentation; what must not exist
+        // is an ACTIVE relay table
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.trim_start().starts_with("[[transport.nostr.relay]]")),
+            "the default config activates no relay:\n{text}"
+        );
+        assert!(salvage(&text).relays.is_empty());
+        assert!(parse(&text).is_ok(), "and it strict-parses");
+        // the host in the explanatory comment is a placeholder, not a relay
+        // anyone could actually reach
+        assert!(text.contains("wss://your-relay.onion"));
+    }
+
+    /// One damaged relay table must not cost the operator the whole pool, and
+    /// nothing salvaged from a damaged file is silently active.
+    #[test]
+    fn salvage_keeps_the_good_relays_and_drops_the_broken_one() {
+        let s = salvage(
+            "[[transport.nostr.relay]]\nurl = \"wss://good.onion\"\nconfirmed = true\n\
+             [[transport.nostr.relay]]\nconfirmed = true\n\
+             [[transport.nostr.relay]]\nurl = \"\"\n\
+             [[transport.nostr.relay]]\nurl = \"wss://second.example.org\"\n",
+        );
+        assert_eq!(s.relays.len(), 2, "the two url-less entries are dropped");
+        assert_eq!(s.relays[0].url, "wss://good.onion");
+        assert!(s.relays[0].confirmed);
+        assert_eq!(s.relays[1].url, "wss://second.example.org");
+        assert!(!s.relays[1].confirmed, "confirmation defaults to false");
     }
 
     #[test]

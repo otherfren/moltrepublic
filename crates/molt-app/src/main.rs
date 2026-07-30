@@ -159,6 +159,31 @@ fn main() -> anyhow::Result<()> {
         "transport anonymity configured (loopback transport active; the Nostr transport lands with N4)"
     );
 
+    // a hand-written pool may contain entries ingest would refuse; they are
+    // dropped rather than shown as relays, but never silently — the operator
+    // must be able to find out why their line vanished
+    {
+        let raw: Vec<molt_core::relay::RelayEntry> = config
+            .transport
+            .nostr
+            .relay
+            .iter()
+            .map(|r| molt_core::relay::RelayEntry {
+                url: r.url.clone(),
+                confirmed: r.confirmed,
+            })
+            .collect();
+        let kept = molt_core::relay::sanitize_pool(&raw);
+        for r in &raw {
+            if !kept.iter().any(|k| k.url == r.url) {
+                match molt_core::relay::normalize_relay_url(&r.url) {
+                    Err(e) => tracing::warn!(url = %r.url, reason = %e, "relay dropped from config"),
+                    Ok(_) => tracing::warn!(url = %r.url, "duplicate relay dropped from config"),
+                }
+            }
+        }
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -187,6 +212,22 @@ fn main() -> anyhow::Result<()> {
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
             download_dir: config.storage.download_dir.clone(),
+            // the pool as configured; nothing is dialed until an entry is
+            // confirmed, and clearnet additionally needs a per-session act
+            // hand-written entries never ran ingest validation: normalize,
+            // drop the unusable, collapse duplicates (relay_pool.md)
+            relays: molt_core::relay::sanitize_pool(
+                &config
+                    .transport
+                    .nostr
+                    .relay
+                    .iter()
+                    .map(|r| molt_core::relay::RelayEntry {
+                        url: r.url.clone(),
+                        confirmed: r.confirmed,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         },
         // the scanned on-disk workspaces replace the demo list
         workspaces,

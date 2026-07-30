@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow } from "theme.slint";
+import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow, RelayItem } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -123,7 +123,21 @@ component SoundAlertsGroup inherits DetailGroup {
     }
 }
 
-// Settings → Network: the anonymity network form group (tor mode + SOCKS
+// One button of the Settings tab bar. Factored out because the bar renders
+// the SAME eight tabs in two arrangements (one row / two rows of four), and
+// an eight-fold copy of the label+primary+clicked triple would rot apart.
+// `pad` is tighter than the default button: eight labels are a lot of width.
+component SettingsTab inherits AppButton {
+    in property <int> index;
+    in-out property <int> current;
+    pad: 10px;
+    primary: root.current == root.index;
+    clicked => {
+        root.current = root.index;
+    }
+}
+
+// Settings → Anonymity network: the anonymity network form group (tor mode + SOCKS
 // port) — factored like the General pair so the wide pane can seat it and
 // a narrow pane shows the SAME content.
 component AnonNetworkGroup inherits DetailGroup {
@@ -169,6 +183,342 @@ component AnonNetworkGroup inherits DetailGroup {
             value <=> root.tor-port;
             minimum: 1;
             maximum: 65535;
+        }
+    }
+}
+
+// The onion/clearnet badge of a relay row, derived from the URL (never
+// stored — see molt_core::relay). Onion reads as the private choice (good
+// tone), clearnet as the exposed one (warn tone); the pictogram rides in the
+// colorful Twemoji font, so a plain-text emoji never sneaks into a label.
+component RelayBadge inherits Rectangle {
+    in property <bool> onion;
+    property <color> tone: root.onion ? Theme.good : Theme.warn;
+    // sized by its own content, like StatusPill: the row must never stretch
+    // it (the padding is 8px on both sides of the x-anchored inner row)
+    width: bd-row.preferred-width + 16px;
+    height: 20px;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: root.tone;
+    background: root.tone.transparentize(0.86);
+    bd-row := HorizontalLayout {
+        x: 8px;
+        height: 100%;
+        spacing: 5px;
+        // safe `alignment: start`: every child is a Text with a real
+        // preferred width (see the collapse trap in parts.slint)
+        alignment: start;
+        Text {
+            text: root.onion ? "🧅" : "🌐";
+            font-family: "Twemoji Mozilla";
+            font-size: Theme.fs-cap;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.onion ? Strings.rp-badge-onion : Strings.rp-badge-clearnet;
+            color: Theme.text;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One relay of the pool: its priority position, the URL, the kind badge, the
+// honest status line, and the row's controls (reorder / confirm / withdraw /
+// remove). The row never decides the policy — `blocked` arrives derived from
+// the engine and is only turned into words here.
+component RelayRow inherits Rectangle {
+    in property <RelayItem> r;
+    callback moved(bool); // true = towards position 1 (higher priority)
+    callback confirm(string, bool); // url + onion: a clearnet relay must pass the warning first
+    callback revoke(string);
+    callback removed(string);
+    property <string> status: root.r.blocked == 1 ? Strings.rp-st-unconfirmed
+        : (root.r.blocked == 2 ? Strings.rp-st-locked
+        : (root.r.onion ? Strings.rp-st-auto : Strings.rp-st-active));
+    // in use = green, waiting for a decision of the user = amber, simply
+    // not in use = faint (an unconfirmed relay is not a problem)
+    property <color> tone: root.r.blocked == 1 ? Theme.faint
+        : (root.r.blocked == 2 ? Theme.warn : Theme.good);
+    height: 56px;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        Text {
+            text: "\{root.r.pos}";
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+            width: 14px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            alignment: center;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.r.url;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                RelayBadge {
+                    onion: root.r.onion;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            DotLabel {
+                tone: root.tone;
+                label: root.status;
+                label-size: Theme.fs-cap;
+            }
+        }
+        // the reorder pair is disabled (not hidden) at the ends, so the row
+        // keeps its shape wherever it sits in the list
+        AppButton {
+            label: "▲";
+            pad: 8px;
+            height: 26px;
+            enabled: !root.r.first;
+            tooltip: Strings.rp-up;
+            tooltip-left: true;
+            clicked => {
+                root.moved(true);
+            }
+        }
+        AppButton {
+            label: "▼";
+            pad: 8px;
+            height: 26px;
+            enabled: !root.r.last;
+            tooltip: Strings.rp-down;
+            tooltip-left: true;
+            clicked => {
+                root.moved(false);
+            }
+        }
+        if !root.r.confirmed: AppButton {
+            label: Strings.rp-confirm;
+            pad: 10px;
+            height: 26px;
+            primary: true;
+            clicked => {
+                root.confirm(root.r.url, root.r.onion);
+            }
+        }
+        if root.r.confirmed: AppButton {
+            label: Strings.rp-revoke;
+            pad: 10px;
+            height: 26px;
+            tooltip: Strings.rp-revoke-tip;
+            tooltip-left: true;
+            clicked => {
+                root.revoke(root.r.url);
+            }
+        }
+        AppButton {
+            label: "×";
+            pad: 9px;
+            height: 26px;
+            tooltip: Strings.rp-remove;
+            tooltip-left: true;
+            clicked => {
+                root.removed(root.r.url);
+            }
+        }
+    }
+}
+
+// Settings → Nostr relays: the relay-pool editor (docs/transport/relay_pool.md
+// §6). Nothing is preset, and nothing is dialed until the user confirms it —
+// so an empty pool is stated as a plain fact with a way forward, never as an
+// error. The clearnet session control appears only once a confirmed clearnet
+// relay exists to activate.
+component RelayPoolGroup inherits DetailGroup {
+    in property <[RelayItem]> rows;
+    in property <int> dialable; // relays in use right now (engine-derived)
+    in property <bool> clearnet-confirmed; // at least one confirmed clearnet relay
+    in property <bool> clearnet-session; // activated for THIS session only
+    in-out property <string> draft; // the add field
+    in property <string> error; // inline validation message under the field
+    callback add(string);
+    callback moved(string, bool);
+    callback confirm(string, bool);
+    callback revoke(string);
+    callback removed(string);
+    callback session(bool);
+    callback edited(); // typing clears the stale error
+    title: Strings.rp-title;
+    // with a list the panel spreads (the list claims the leftover height);
+    // with the empty state there is nothing to stretch — hug the top
+    pack: root.rows.length == 0;
+    Text {
+        text: Strings.rp-hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        // keep the long hint out of the group's preferred width — it wraps
+        // at whatever width the pane grants the panel
+        preferred-width: 0px;
+    }
+    if root.rows.length > 0: DotLabel {
+        tone: root.dialable > 0 ? Theme.good : Theme.faint;
+        label: root.dialable > 0 ? "\{Strings.rp-in-use} \{root.dialable}" : Strings.rp-none-dialable;
+        label-size: Theme.fs-cap;
+        label-color: root.dialable > 0 ? Theme.dim : Theme.faint;
+    }
+    // empty pool: the FIRST thing a new operator sees — an invitation, with
+    // the honest consequence (not connected) and what .onion buys them
+    if root.rows.length == 0: Rectangle {
+        background: Theme.accent-soft;
+        border-radius: Theme.win95 ? 0px : 6px;
+        border-width: Theme.border-w;
+        border-color: Theme.accent;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            Text {
+                text: Strings.rp-empty-title;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                wrap: word-wrap;
+                preferred-width: 0px;
+            }
+            Text {
+                text: Strings.rp-empty-body;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+                preferred-width: 0px;
+            }
+        }
+    }
+    if root.rows.length > 0: Rectangle {
+        vertical-stretch: 1;
+        // a long pool scrolls inside its own panel instead of pushing the
+        // add field out of the settings pane
+        min-height: 60px;
+        clip: true;
+        rp-fl := Flickable {
+            VerticalLayout {
+                padding-right: 8px;
+                padding-bottom: 6px;
+                spacing: 4px;
+                alignment: start;
+                for item in root.rows: RelayRow {
+                    r: item;
+                    moved(up) => {
+                        root.moved(item.url, up);
+                    }
+                    confirm(url, onion) => {
+                        root.confirm(url, onion);
+                    }
+                    revoke(url) => {
+                        root.revoke(url);
+                    }
+                    removed(url) => {
+                        root.removed(url);
+                    }
+                }
+            }
+        }
+        ScrollHint {
+            x: parent.width - 7px;
+            view-h: rp-fl.height;
+            content-h: rp-fl.viewport-height;
+            scroll-y: rp-fl.viewport-y;
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        AppField {
+            horizontal-stretch: 1;
+            // a shape example, never a reachable host
+            placeholder: "wss://your-relay.onion";
+            text <=> root.draft;
+            invalid: root.error != "";
+            edited => {
+                root.edited();
+            }
+            accepted => {
+                if (root.draft != "") {
+                    root.add(root.draft);
+                }
+            }
+        }
+        AppButton {
+            label: Strings.rp-add;
+            primary: true;
+            enabled: root.draft != "";
+            clicked => {
+                root.add(root.draft);
+            }
+        }
+    }
+    // never a silent failure: what the pool refused, right under the field
+    if root.error != "": Text {
+        text: root.error;
+        color: Theme.bad;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+    Text {
+        text: Strings.rp-add-hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+    // the per-session clearnet activation, set apart from the pool itself:
+    // shown only when there is something to activate, calm (not alarming)
+    // while it is on
+    if root.clearnet-confirmed: Rectangle {
+        background: Theme.panel;
+        border-radius: Theme.win95 ? 0px : 6px;
+        border-width: Theme.border-w;
+        border-color: root.clearnet-session ? Theme.good : Theme.line;
+        VerticalLayout {
+            padding: 10px;
+            spacing: 6px;
+            DotLabel {
+                tone: root.clearnet-session ? Theme.good : Theme.faint;
+                label: Strings.rp-cn-session-title;
+                label-color: Theme.text;
+                label-size: Theme.fs-cap;
+                label-weight: 700;
+            }
+            Text {
+                text: root.clearnet-session ? Strings.rp-cn-session-on : Strings.rp-cn-session-off;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+                preferred-width: 0px;
+            }
+            HorizontalLayout {
+                alignment: start;
+                AppButton {
+                    label: root.clearnet-session ? Strings.rp-cn-deactivate : Strings.rp-cn-activate;
+                    height: 28px;
+                    primary: !root.clearnet-session;
+                    clicked => {
+                        root.session(!root.clearnet-session);
+                    }
+                }
+            }
         }
     }
 }
@@ -425,7 +775,7 @@ export component AppWindow inherits Window {
     // founding verbs (engine-backed; the engine ticks progress + log and
     // derives the seed + invites): name, handle, threshold, members — the
     // transport is NOT a parameter: it always follows the global anonymity
-    // settings (Settings → Network)
+    // settings (Settings → Anonymity network)
     callback create-start(string, string, int, int);
     callback create-cancel();
     callback create-finish();
@@ -521,6 +871,7 @@ export component AppWindow inherits Window {
         || root.org-retention-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
+        || root.relay-clearnet-modal-open
         || root.recover-link-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
@@ -789,6 +1140,47 @@ export component AppWindow inherits Window {
     // embedded-tor feature (P3). Default matches feature-off.
     in property <[bool]> tor-mode-enabled: [true, false, true];
     in-out property <int> cfg-tor-port: 9050;
+    // ---- settings → Nostr relays: the relay pool. NOT part of the settings
+    // draft — it is edited live through the Relay* commands (the URL
+    // validation and the clearnet acknowledgement live in the engine), so
+    // every field here is a pushed mirror, never a form value. ----
+    in property <[RelayItem]> relay-rows;
+    // how many relays the engine would dial right now (0 = not connected)
+    in property <int> relay-dialable: 0;
+    // at least one CONFIRMED clearnet relay exists — only then is there
+    // anything for the session activation to unlock
+    in property <bool> relay-clearnet-confirmed: false;
+    // the in-session clearnet activation (resets on every start)
+    in property <bool> cfg-clearnet-session: false;
+    // the SAVED anonymity setting is tor — the clearnet warning names the
+    // right exposure (Tor hides the IP, never the subscriptions)
+    in property <bool> net-tor-active: false;
+    // in-out: Rust clears the field only once the engine ACCEPTED the entry,
+    // so a refused URL stays there to be corrected
+    in-out property <string> relay-draft;
+    // the add field's inline message: the localized reason the pool refused
+    // a URL, or an engine refusal verbatim — never a silent failure
+    in-out property <string> relay-error;
+    callback relay-add(string);
+    callback relay-remove(string);
+    callback relay-move(string /* url */, bool /* up */);
+    callback relay-confirm(string /* url */, bool /* accept-clearnet */);
+    callback relay-revoke(string);
+    callback relay-clearnet-session(bool /* unlock */);
+    // the clearnet warning: the ONLY path from the GUI to a confirmed
+    // clearnet relay. The acknowledgement starts unchecked on EVERY open.
+    property <bool> relay-clearnet-modal-open: false;
+    property <string> relay-clearnet-url;
+    property <bool> relay-clearnet-ack: false;
+    function open-clearnet-warning(url: string) {
+        root.relay-clearnet-url = url;
+        root.relay-clearnet-ack = false;
+        root.relay-clearnet-modal-open = true;
+    }
+    function close-clearnet-warning() {
+        root.relay-clearnet-modal-open = false;
+        root.relay-clearnet-ack = false;
+    }
     in-out property <bool> cfg-s3-backup: false;
     in-out property <string> cfg-s3-endpoint;
     in-out property <string> cfg-s3-access;
@@ -1008,6 +1400,9 @@ export component AppWindow inherits Window {
             root.org-retention-modal-open = false;
         } else if (root.decrypt-modal-open) {
             root.decrypt-modal-open = false;
+        } else if (root.relay-clearnet-modal-open) {
+            // Escape = cancel: the acknowledgement drops with it
+            root.close-clearnet-warning();
         } else if (root.screen == AppScreen.open) {
             root.navigate(AppScreen.choice);
         } else if (root.screen == AppScreen.restore && !root.restore-running) {
@@ -1692,7 +2087,7 @@ export component AppWindow inherits Window {
 
                     // how the republic's traffic travels: a READ-ONLY view of
                     // the global anonymity setting — the ritual transport
-                    // always comes from Settings → Network, never from a
+                    // always comes from Settings → Anonymity network, never from a
                     // per-republic choice (tor doc §P8)
                     RestoreWay {
                         title: Strings.cw-grp-transport;
@@ -5327,59 +5722,113 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                HorizontalLayout {
+                // The eight tabs. AppButton neither elides nor scrolls, so a
+                // single row cannot shrink below the sum of its labels — and
+                // eight labels no longer fit the pane at the window's default
+                // width (German "Anonymitäts-Netzwerk" alone runs ~145px).
+                // Below the threshold the bar therefore wraps into two rows of
+                // four; ONE predicate, so the two arrangements stay
+                // complementary — same idiom as set-pane.side-groups.
+                tab-bar := VerticalLayout {
+                    property <bool> one-row: self.width >= 900px;
                     spacing: 8px;
-                    AppButton {
-                        label: Strings.set-tab-general;
-                        primary: root.set-tab == 0;
-                        clicked => {
-                            root.set-tab = 0;
+                    if tab-bar.one-row: HorizontalLayout {
+                        spacing: 8px;
+                        SettingsTab {
+                            label: Strings.set-tab-general;
+                            index: 0;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-workspace;
+                            index: 1;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-backup;
+                            index: 2;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-anon;
+                            index: 3;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-relays;
+                            index: 4;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-mcp;
+                            index: 5;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-node;
+                            index: 6;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-chain;
+                            index: 7;
+                            current <=> root.set-tab;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
                     }
-                    AppButton {
-                        label: Strings.set-tab-workspace;
-                        primary: root.set-tab == 1;
-                        clicked => {
-                            root.set-tab = 1;
+                    if !tab-bar.one-row: HorizontalLayout {
+                        spacing: 8px;
+                        SettingsTab {
+                            label: Strings.set-tab-general;
+                            index: 0;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-workspace;
+                            index: 1;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-backup;
+                            index: 2;
+                            current <=> root.set-tab;
+                        }
+                        SettingsTab {
+                            label: Strings.set-tab-anon;
+                            index: 3;
+                            current <=> root.set-tab;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
                     }
-                    AppButton {
-                        label: Strings.set-tab-backup;
-                        primary: root.set-tab == 2;
-                        clicked => {
-                            root.set-tab = 2;
+                    if !tab-bar.one-row: HorizontalLayout {
+                        spacing: 8px;
+                        SettingsTab {
+                            label: Strings.set-tab-relays;
+                            index: 4;
+                            current <=> root.set-tab;
                         }
-                    }
-                    AppButton {
-                        label: Strings.set-tab-network;
-                        primary: root.set-tab == 3;
-                        clicked => {
-                            root.set-tab = 3;
+                        SettingsTab {
+                            label: Strings.set-tab-mcp;
+                            index: 5;
+                            current <=> root.set-tab;
                         }
-                    }
-                    AppButton {
-                        label: Strings.set-tab-mcp;
-                        primary: root.set-tab == 4;
-                        clicked => {
-                            root.set-tab = 4;
+                        SettingsTab {
+                            label: Strings.set-tab-node;
+                            index: 6;
+                            current <=> root.set-tab;
                         }
-                    }
-                    AppButton {
-                        label: Strings.set-tab-node;
-                        primary: root.set-tab == 5;
-                        clicked => {
-                            root.set-tab = 5;
+                        SettingsTab {
+                            label: Strings.set-tab-chain;
+                            index: 7;
+                            current <=> root.set-tab;
                         }
-                    }
-                    AppButton {
-                        label: Strings.set-tab-chain;
-                        primary: root.set-tab == 6;
-                        clicked => {
-                            root.set-tab = 6;
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
-                    }
-                    Rectangle {
-                        horizontal-stretch: 1;
                     }
                 }
                 set-pane := Rectangle {
@@ -5865,19 +6314,72 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        // Anonymity network: a compact form panel like the
+                        // other small form tabs — the fields hug the top and
+                        // the shared spacer below pushes them up
                         if root.set-tab == 3: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            // a single panel today (the anonymity network);
-                            // the relay settings panel joins it with N6
                             AnonNetworkGroup {
+                                vertical-stretch: 0;
                                 network-index <=> root.cfg-network-index;
                                 tor-mode-index <=> root.cfg-tor-mode-index;
                                 tor-port <=> root.cfg-tor-port;
                                 tor-modes-enabled: root.tor-mode-enabled;
                             }
                         }
+                        // Nostr relays: its own tab because the pool needs the
+                        // full pane width for the URLs and the leftover height
+                        // for the list (same idiom as the backup table)
                         if root.set-tab == 4: VerticalLayout {
+                            spacing: 14px;
+                            // only the LIST wants the leftover height. With an
+                            // empty pool `pack` merely hugs the content inside
+                            // the panel — the panel frame itself would still
+                            // stretch, leaving a big empty box under the
+                            // first-run message. So the empty pool hugs the top
+                            // and the shared spacer below pushes it up.
+                            vertical-stretch: root.relay-rows.length == 0 ? 0 : 1;
+                            RelayPoolGroup {
+                                vertical-stretch: root.relay-rows.length == 0 ? 0 : 1;
+                                rows: root.relay-rows;
+                                dialable: root.relay-dialable;
+                                clearnet-confirmed: root.relay-clearnet-confirmed;
+                                clearnet-session: root.cfg-clearnet-session;
+                                draft <=> root.relay-draft;
+                                error: root.relay-error;
+                                add(url) => {
+                                    root.relay-add(url);
+                                }
+                                edited => {
+                                    root.relay-error = "";
+                                }
+                                moved(url, up) => {
+                                    root.relay-move(url, up);
+                                }
+                                // an onion relay confirms straight through; a
+                                // clearnet one may only be confirmed after the
+                                // warning (and the engine refuses it without
+                                // the acknowledgement anyway)
+                                confirm(url, onion) => {
+                                    if (onion) {
+                                        root.relay-confirm(url, false);
+                                    } else {
+                                        root.open-clearnet-warning(url);
+                                    }
+                                }
+                                revoke(url) => {
+                                    root.relay-revoke(url);
+                                }
+                                removed(url) => {
+                                    root.relay-remove(url);
+                                }
+                                session(unlock) => {
+                                    root.relay-clearnet-session(unlock);
+                                }
+                            }
+                        }
+                        if root.set-tab == 5: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
                             FieldLabel {
@@ -5959,7 +6461,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        if root.set-tab == 5: VerticalLayout {
+                        if root.set-tab == 6: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
                             AppCheck {
@@ -5972,7 +6474,7 @@ export component AppWindow inherits Window {
                         // (compacted cuts) included; pre-cut entries a pruned
                         // holder rebuilds from its blob show without height
                         // and signatures (dropped with the history)
-                        if root.set-tab == 6: VerticalLayout {
+                        if root.set-tab == 7: VerticalLayout {
                             spacing: 8px;
                             vertical-stretch: 1;
                             if root.chain-rows.length == 0: Text {
@@ -6057,9 +6559,14 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        // the backup tab's table wants the leftover height
-                        // itself; every other tab pushes its fields up
-                        if root.set-tab != 2: Rectangle {
+                        // list tabs claim the leftover height themselves — the
+                        // backup table (2), the chain history (7) and the relay
+                        // pool (4) but only while it HAS rows; every other tab
+                        // (and the empty pool) pushes its fields up. Leaving 7
+                        // out of this list split the height 50/50 between the
+                        // chain list and this spacer.
+                        if root.set-tab != 2 && root.set-tab != 7
+                            && !(root.set-tab == 4 && root.relay-rows.length > 0): Rectangle {
                             vertical-stretch: 1;
                         }
                         // the full config.toml path in its own panel, set
@@ -6156,6 +6663,43 @@ export component AppWindow inherits Window {
             root.confirm-close-open = false;
             root.reset-open-workspace();
             root.close-workspace();
+        }
+    }
+
+    // Modal: the clearnet relay warning — the one place the GUI may reach
+    // RelayConfirm with the acknowledgement set. It names the CONCRETE
+    // exposure (tailored to whether Tor is on), the acknowledgement starts
+    // unchecked on every open, and cancelling does nothing at all.
+    if root.relay-clearnet-modal-open: ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.rp-cn-title;
+        body: root.net-tor-active ? Strings.rp-cn-body-tor : Strings.rp-cn-body-plain;
+        confirm-label: Strings.rp-cn-confirm;
+        confirm-enabled: root.relay-clearnet-ack;
+        dismissed => {
+            root.close-clearnet-warning();
+        }
+        confirmed => {
+            root.relay-clearnet-modal-open = false;
+            root.relay-clearnet-ack = false;
+            root.relay-confirm(root.relay-clearnet-url, true);
+        }
+        Text {
+            text: root.relay-clearnet-url;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        AppCheck {
+            label: Strings.rp-cn-ack;
+            checked <=> root.relay-clearnet-ack;
+        }
+        Text {
+            text: Strings.rp-cn-note;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
         }
     }
 

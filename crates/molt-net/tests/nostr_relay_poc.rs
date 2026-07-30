@@ -121,10 +121,14 @@ async fn roundtrip_over_local_relay() {
     roundtrip(url.as_str()).await;
 }
 
+/// The real-relay twin names NO relay of its own: the product ships with an
+/// empty pool (ADR-0004), and a default here would be exactly the kind of
+/// hard-coded endpoint that decision removes. Point it at a relay explicitly.
 #[tokio::test]
-#[ignore = "makes a real WebSocket connection to a public Nostr relay"]
+#[ignore = "makes a real WebSocket connection to the relay in MOLT_NOSTR_RELAY"]
 async fn roundtrip_over_real_relay() {
-    let url = std::env::var("MOLT_NOSTR_RELAY")
-        .unwrap_or_else(|_| String::from("wss://relay.damus.io"));
+    let Ok(url) = std::env::var("MOLT_NOSTR_RELAY") else {
+        panic!("set MOLT_NOSTR_RELAY=wss://… to run this test against a real relay");
+    };
     roundtrip(&url).await;
 }

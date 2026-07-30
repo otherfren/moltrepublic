@@ -191,7 +191,7 @@ Routing comes from the **global** settings, not per-workspace — and since the
 mock_todo §2 cleanup the surfaces say so. `CreateStart` no longer carries a
 `net` field (command + MCP tool param removed); the create screen's cosmetic
 dropdown/tor-mode/port inputs were replaced by a read-only display of the
-effective global network plus a "change it under Settings → Network" hint.
+effective global network plus a "change it under Settings → Anonymity network" hint.
 `CreateState.net` / `WorkspaceInfo.net` remain as pure display labels, now
 derived from the live global settings at founding/join/recovery time and at
 the startup scan (one shared normalizer, `molt_core::effective_net_label`:

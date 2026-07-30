@@ -97,12 +97,133 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Add a relay: validated + normalized, appended at the lowest priority,
+    /// unconfirmed. Adding never connects — see `docs/transport/relay_pool.md`.
+    pub(crate) fn cmd_relay_add(&mut self, url: String) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        if self.session.settings.relays.iter().any(|r| r.url == url) {
+            return Err(MoltError::Settings(format!(
+                "{url} is already in the relay pool"
+            )));
+        }
+        self.session
+            .settings
+            .relays
+            .push(molt_core::relay::RelayEntry { url, confirmed: false });
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Drop a relay from the pool entirely.
+    pub(crate) fn cmd_relay_remove(&mut self, url: String) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let before = self.session.settings.relays.len();
+        self.session.settings.relays.retain(|r| r.url != url);
+        if self.session.settings.relays.len() == before {
+            return Err(MoltError::Settings(format!("{url} is not in the relay pool")));
+        }
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Move a relay one position — the pool order IS the dial priority.
+    /// Moving past an edge is a no-op, not an error (a GUI arrow at the end
+    /// of the list should not raise).
+    pub(crate) fn cmd_relay_move(&mut self, url: String, up: bool) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let at = self
+            .session
+            .settings
+            .relays
+            .iter()
+            .position(|r| r.url == url)
+            .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
+        let to = if up { at.checked_sub(1) } else { at.checked_add(1) };
+        if let Some(to) = to.filter(|t| *t < self.session.settings.relays.len()) {
+            self.session.settings.relays.swap(at, to);
+            self.persist_settings(false);
+            self.emit_session(SessionScope::Full);
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Confirm a relay. A CLEARNET relay is refused without the explicit
+    /// acknowledgement — the gate lives here, so an MCP agent faces exactly
+    /// what a human clicking through the GUI warning faces.
+    pub(crate) fn cmd_relay_confirm(
+        &mut self,
+        url: String,
+        accept_clearnet: bool,
+    ) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        if molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Clearnet
+            && !accept_clearnet
+        {
+            return Err(MoltError::Settings(format!(
+                "{url} is a CLEARNET relay: its operator sees this node's \
+                 subscriptions, and its IP address unless Tor is on. Confirm \
+                 it explicitly (accept_clearnet) to use it"
+            )));
+        }
+        let entry = self
+            .session
+            .settings
+            .relays
+            .iter_mut()
+            .find(|r| r.url == url)
+            .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
+        entry.confirmed = true;
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Withdraw a relay's confirmation: it stays in the pool, but is no
+    /// longer dialed.
+    pub(crate) fn cmd_relay_revoke(&mut self, url: String) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let entry = self
+            .session
+            .settings
+            .relays
+            .iter_mut()
+            .find(|r| r.url == url)
+            .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
+        entry.confirmed = false;
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Activate clearnet relays for THIS session only. Deliberately never
+    /// persisted: after a restart no clearnet packet leaves the machine until
+    /// the user acts again.
+    pub(crate) fn cmd_relay_clearnet_session(&mut self, unlock: bool) -> Result<Reply, MoltError> {
+        self.clearnet_session = unlock;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_save_settings(
         &mut self,
         settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
         validate_settings(&settings)?;
         self.invalidate_backup_listing_on_target_change(&settings);
+        // The relay pool has ONE way in: the `Relay*` commands, with their URL
+        // validation and the clearnet acknowledgement. A wholesale settings
+        // replacement must not become a second door — it would let a payload
+        // inject a pre-confirmed clearnet relay past the gate, or silently
+        // drop the operator's pool while changing an unrelated field.
+        let mut settings = settings;
+        settings.relays = std::mem::take(&mut self.session.settings.relays);
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
