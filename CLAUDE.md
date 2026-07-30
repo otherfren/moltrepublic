@@ -1,8 +1,9 @@
 # Working in moltrepublic
 
 MoltRepublic is a real product (not a demo): a Rust workspace for founding and
-running small encrypted "republics"/DAOs over the SimpleX Messaging Protocol
-(SMP), with MLS group encryption and a Slint GUI. Grow the UI/UX stepwise while
+running small encrypted "republics"/DAOs over Nostr relays (NIP-EE/Marmot — in
+build, `docs/transport/nostr_transport_marmot.md`; loopback transport today),
+with MLS group encryption and a Slint GUI. Grow the UI/UX stepwise while
 implementing the real thing behind the same contract — never fake behavior a
 user could mistake for real.
 
@@ -39,7 +40,7 @@ user could mistake for real.
   of a wrong guess in the ritual/crypto/state-model is high; a quick question up
   front is cheaper than building the wrong thing. Only stop for real
   product/design decisions, not for choices with an obvious default.
-- Don't invent specs — fetch the real thing (e.g. exact OpenMLS/SMP APIs) and
+- Don't invent specs — fetch the real thing (e.g. exact OpenMLS APIs) and
   lock it against the compiler before building on it.
 
 ## Architecture (read the workspace `Cargo.toml` header first)
@@ -51,7 +52,7 @@ operator. `molt-core` holds the Command/Event/Surface contract and has **no
 I/O**. Order: core → config → storage → net → engine → mcp → ui → app.
 
 The engine is a single-owner actor: command handlers are synchronous and never
-await I/O. Off-actor work (SMP round-trips, the join ritual) runs in spawned
+await I/O. Off-actor work (transport round-trips, the join ritual) runs in spawned
 tasks that feed results back as engine-internal `Net*`/`Command` variants — the
 same pattern as the tickers.
 
@@ -160,24 +161,31 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   member handle gives the WRONG key (the ritual salts identity with a
   workspace-id string). Phases 3–4 (catch-up sync, recovery) are still open.
 
-## Pure-Rust posture — aspirational, with two known C exceptions
+## Pure-Rust posture — aspirational, with known C exceptions
 
 The crypto stack aims for **pure-Rust, no C toolchain** (rustls-rustcrypto, the
-pure-Rust Ed448/Ed25519, OpenMLS), and MLS/TLS/signatures hold to it. But the
-claim is **not literally true of the current build** — two C dependencies exist:
+pure-Rust Ed25519, OpenMLS), and MLS/TLS/signatures hold to it. Since etappe
+N-demo (2026-07-30) the **DEFAULT build graph is ring-free**: the SMP cert-pin
+verifier and its `x509-parser`-with-`ring` dependency were deleted with the SMP
+transport. The sanctioned exceptions now:
 
-- **`ring` (C + assembly, pulls `cc`) is in the DEFAULT build** via
-  `x509-parser`'s `verify = ["ring"]` feature, used by the SMP cert-pin
-  verifier (`crates/molt-net/src/smp/tls.rs`). So a C compiler is already
-  required to build `molt-net` today. (Open follow-up: swap the leaf-cert verify
-  for a rustcrypto path to remove it — not yet done.)
 - **`libsqlite3-sys` (C) rides the OPT-IN `embedded-tor` feature** only: arti's
   `tor-dirmgr` depends on `rusqlite` non-optionally, and no arti feature removes
   it. Accepted (2026-07-11 decision) for that opt-in build; the **default build
   never pulls it** (the feature is off by default). See
   `crates/molt-net/Cargo.toml` `[features]`.
+- **C `secp256k1` arrives via rust-nostr** (ADR-0002 — deliberately the
+  battle-tested C library, NOT k256). Dev-only today (the nostr crates are
+  dev-deps, so the default no-dev graph is untouched); it becomes a default-build
+  exception when N1 promotes `nostr` into src/ for the identity work.
 
-Keep new code pure-Rust where you can; these two are the sanctioned exceptions.
+Standing guard: the default build must **not silently re-adopt `ring`** —
+rust-nostr's relay pool (`nostr-relay-pool` → `async-wsocket`) hard-pins a
+ring-flavored `tokio-rustls`, and adopting it is an explicit N2 WS/TLS decision,
+never a side effect of adding a dependency.
+`cargo tree -p molt-net -e no-dev -i ring` must stay empty.
+
+Keep new code pure-Rust where you can; these are the sanctioned exceptions.
 
 ## MLS / OpenMLS reference (crates/molt-net/src/mls.rs)
 
@@ -195,44 +203,24 @@ Facts that cost time to (re)discover:
   `MlsGroup::load(storage, &group_id)`; the signer round-trips via
   `SignatureKeyPair::read`.
 
-## Transport gotchas the loopback tests can't catch
+## Transport (loopback today) + the delivery guarantee
 
-`LoopbackTransport` is **permissive** — its queues live in the shared hub, so any
-clone can subscribe to any queue. **SMP is not**: a queue's *receive* credential
-(recipient key) lives in the creating `SmpTransport`'s `Arc<Mutex<SmpState>>`, so
-only that instance (or a clone sharing the Arc) can `subscribe`. A *fresh*
-`SmpTransport::new(server)` can **send** to a queue by id but never receive on
-one it didn't create (`"subscribe to a queue this node did not create"`). So the
-runtime supervisor must **reuse the ritual transport** that created the mesh
-queues (founder: `runtime_transport`; joiner: the transport handed back through
-`join_transport`) — a fresh transport from the mesh handover is wrong, and
-loopback won't expose it. **Cross-session resume** works via a *clean-close
-persist*: on close, the engine writes the advanced MLS snapshot + the transport's
-serialized queue credentials (`Transport::export_creds`) into `transport.state`
-(`persist_crypto_blocking` — a read-modify-write that preserves the delivery
-cursors); on reopen, `reopen_transport` re-adopts the creds into a fresh
-`SmpTransport` and `cmd_open_workspace` rebuilds the real mesh. Since the
-2026-07-19 hardening the queue creds + MLS snapshot are ALSO merged live at
-every mesh-up (founder mesh-ready, join-sealed, recover-sealed,
-mesh-extension — the live `persist_mesh_crypto_blocking`, never the sealing
-close-persist), so a hard kill after the mesh came up is survivable: reopen
-resumes from the last-persisted ratchet, and a few in-flight messages may be
-replay-rejected by the peer (MLS's per-message `reuse_guard` prevents the
-worse nonce-reuse). A workspace with mesh evidence on disk that cannot
-resume opens HONESTLY offline (`notice = "detached"`, `net_health = Down`),
-never silently transport-less. **Sender keys are deterministic since the
-2026-07-19 fix**: each queue's `SKEY` key is derived from a persisted
-per-transport `sender_seed` (`derive_sender_key`, in `transport.state` from
-mesh-up on; additive V2 creds with a V1 read-fallback), so a reopened
-transport re-asserts the SAME key — and on an SKEY reject it still attempts
-the signed SEND (the server's send verdict is authoritative). Stage B is in
-(`docs/transport/mesh/stage_b.md`): a died subscription resubscribes itself (per-peer
-watchdog, capped backoff; a server `END` ends the stream instead of a zombie
-wait), and `net_health` is honest — `Ok` means every mesh leg's subscription
-confirmed, a dead inbound leg or a stuck outbox shows as `Degraded` naming
-peer + reason. **The delivery
-guarantee (2026-07-28, `docs/transport/delivery_guarantee.md`) sits on top of all
-of this**: every wire event is at-least-once end-to-end within the compaction
+The SMP transport and its machinery (the permissive-loopback-vs-SMP creds
+asymmetry, `reopen_transport`, SKEY sender seeds, the Stage-B N-queue
+redundancy, self-heal/rotate/keepalive/probe) were removed in etappe N-demo
+(2026-07-30) of the Nostr replacement
+(`docs/transport/nostr_transport_marmot.md`); the design docs under
+`docs/transport/mesh/` are historical records. What remains: the queue-shaped
+`Transport` trait, the loopback hub — now THE test transport and the only
+transport until the Nostr runtime lands (production founding/join/recover fail
+honestly until N4) — the supervisor's delivery-guarantee core with a
+single-queue inbound redial loop, and the T4 Tor dialer at
+`crates/molt-net/src/dial.rs` (S3 uses it today; N2's WebSocket relays reuse
+it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
+so any clone can subscribe to any queue; a real transport gates receive on
+credentials, so don't lean on that forgiveness. **The delivery
+guarantee (2026-07-28, `docs/transport/delivery_guarantee.md`) sits on top of
+the transport**: every wire event is at-least-once end-to-end within the compaction
 grace. Receivers keep a per-sender `AcceptedWindow` (envelope dedup + the
 payload of `MESH_ACK_TAG` control frames, sent debounced after every delivery
 — duplicates included, a dup re-arms the ack); the supervisor consumes acks
@@ -253,8 +241,8 @@ position (it advances over foreign/commit seqs; only own unacked events
 pin it) — an "own-events-only" floor read as a permanently-unacked tail on
 every quiet listener. A recovery announce resets the survivor's accept
 window for the rejoiner (its fresh incarnation reuses seqs). Sender-ratchet windows are
-explicit (`tolerance 5, forward 100_000` — the openmls default forward=1000
-bricked any leg whose deaf window swallowed >1000 generations). WP4a's
+explicit (out-of-order tolerance `5_000`, forward `100_000` — the openmls
+defaults of 5/1000 bricked any leg whose deaf window swallowed more). WP4a's
 compaction gates a proven-acking peer on its ACKED floor (unacked tail stays
 resendable); the guarantee's horizon IS the WP4a peer grace. Keystones:
 `crates/molt-engine/tests/delivery_guarantee.rs` (clean-close + hard-kill,
@@ -290,9 +278,10 @@ both verified red-without/green-with).
   authoritative pre-commit check remains one normal
   `cargo build -p molt-ui-window -p molt-ui` (once per change-set, not per
   iteration).
-- Network tests (real SMP server) are `#[ignore]`d; the founding+join+MLS flow is
-  proven fast over loopback in `crates/molt-engine/tests/two_instances.rs` and
-  end-to-end over real SMP in `ritual_engine_over_smp.rs` (`-- --ignored`).
+- Tests that need a real network are `#[ignore]`d — the Nostr real-relay PoC
+  twin (`crates/molt-net/tests/nostr_relay_poc.rs`), the live-S3 probe, and the
+  embedded-tor bootstrap; the founding+join+MLS flow is proven fast over
+  loopback in `crates/molt-engine/tests/two_instances.rs`.
 - **Never launch a GUI window on `DISPLAY=:0`** — that is the user's own X
   session. There is no headless display here, so GUI changes are validated by the
   Slint compiler (a clean `cargo build -p molt-ui-window -p molt-ui`) plus the

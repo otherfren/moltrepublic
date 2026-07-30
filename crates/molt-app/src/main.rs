@@ -151,23 +151,12 @@ fn main() -> anyhow::Result<()> {
         found = workspaces.len(),
         "workspace directory ready"
     );
-    // diagnostics: MOLT_MESH_PROBE_OPEN names the workspace to auto-open on start
-    // so the mesh transport probe (see molt-engine `probe`) can run headless.
-    // Resolved to its id here while the scanned list is in hand.
-    let probe_open_id: Option<String> = std::env::var("MOLT_MESH_PROBE_OPEN")
-        .ok()
-        .and_then(|want| {
-            workspaces
-                .iter()
-                .find(|w| w.name == want || w.id == want)
-                .map(|w| w.id.clone())
-        });
     let anonymity = &config.transport.anonymity;
     tracing::info!(
         network = ?anonymity.network,
         tor_mode = ?anonymity.tor.mode,
         tor_port = anonymity.tor.port,
-        "transport anonymity configured (loopback transport active; Tor/SMP wiring is milestone T3–T5)"
+        "transport anonymity configured (loopback transport active; the Nostr transport lands with N4)"
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -197,9 +186,6 @@ fn main() -> anyhow::Result<()> {
             anonymity: config.transport.anonymity.network.as_str().to_string(),
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
-            smp_server: config.transport.smp.server.clone(),
-            smp_url: config.transport.smp.url.clone(),
-            smp_urls: config.transport.smp.urls.clone(),
             download_dir: config.storage.download_dir.clone(),
         },
         // the scanned on-disk workspaces replace the demo list
@@ -247,14 +233,6 @@ fn main() -> anyhow::Result<()> {
         });
     }
     tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
-
-    // diagnostics: auto-open the probe target so its per-leg SMP self-test runs
-    // (headless); the probe listens ~20 s, so run_headless keeps the runtime up.
-    if let Some(id) = probe_open_id {
-        tracing::info!(target: "molt_mesh_probe", %id, "auto-opening the workspace for the mesh probe");
-        let w = wallet.clone();
-        let _ = rt.block_on(async move { w.execute(molt_core::Command::OpenWorkspace { id }).await });
-    }
 
     let shutdown_wallet = wallet.clone();
     let result = if config.node.headless {
@@ -353,17 +331,44 @@ fn discovery_candidates() -> Vec<PathBuf> {
 }
 
 /// Read and strictly parse a config file, wrapping errors with its path.
+///
+/// One legacy exception rides in front of the strict failure: files managed
+/// before the SMP transport was removed all carry a `[transport.smp]` section
+/// the strict parse now rejects — `heal_legacy` drops exactly that section
+/// (and nothing else) so existing installations keep booting. The heal is
+/// written back best-effort; a read-only file still boots from the healed
+/// in-memory text.
 fn load_config(path: &Path) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let config = parse(&text).with_context(|| {
-        format!(
-            "parsing config {} (try: moltd --repair-config {})",
-            path.display(),
-            path.display()
-        )
-    })?;
-    Ok(config)
+    match parse(&text) {
+        Ok(config) => Ok(config),
+        Err(err) => {
+            if let Some(healed) = molt_config::heal_legacy(&text) {
+                eprintln!(
+                    "config {}: healed the legacy [transport.smp] section \
+                     (the SMP transport was removed)",
+                    path.display()
+                );
+                if let Err(write_err) = std::fs::write(path, &healed) {
+                    eprintln!(
+                        "config {}: could not persist the heal ({write_err}); \
+                         booting from the healed copy in memory",
+                        path.display()
+                    );
+                }
+                return parse(&healed)
+                    .with_context(|| format!("parsing healed config {}", path.display()));
+            }
+            Err(err).with_context(|| {
+                format!(
+                    "parsing config {} (try: moltd --repair-config {})",
+                    path.display(),
+                    path.display()
+                )
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

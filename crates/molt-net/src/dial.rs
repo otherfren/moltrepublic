@@ -1,219 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Pinned-fingerprint TLS 1.3 for SMP (transport concept §3.1).
+//! The fail-closed dialer (T4): the ONE place a raw TCP socket to a remote
+//! host opens.
 //!
-//! SMP servers present a self-signed chain `[online cert, offline CA]`.
-//! We verify **against the pinned CA fingerprint only** (`smp://<fp>@…`):
-//! the CA cert in the presented chain must hash to the pin, and the online
-//! (end-entity) cert must be validly signed by that CA. No WebPKI, no CA
-//! store, no OCSP. ALPN is `smp/1`.
+//! [`Dialer::resolve`] turns the transport config into a routing decision —
+//! under `network = tor` there is **no** path to a direct (clearnet) dial —
+//! and [`Dialer::dial_host`] executes it: direct TCP, SOCKS5h through a Tor
+//! proxy (per-host stream isolation, fresh per session), or the in-process
+//! arti client on the opt-in `embedded-tor` build. The S3 backup client
+//! drives it today; N2's WebSocket relay connections reuse it unchanged.
 //!
 //! Pure-Rust posture: rustls with the RustCrypto provider (no ring/aws-lc,
 //! so no C toolchain — matches the reproducible-build envelope).
 
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::WebPkiSupportedAlgorithms;
-use rustls::pki_types::{alg_id, AlgorithmIdentifier, CertificateDer, InvalidSignature, ServerName, SignatureVerificationAlgorithm, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::{client::TlsStream, TlsConnector};
 
-use crate::smp::ed448;
-use crate::smp::server::SmpServer;
 use crate::NetError;
-
-/// ALPN protocol identifier for SMP v1.
-const ALPN_SMP: &[u8] = b"smp/1";
 
 /// Deadline for opening the raw socket (TCP connect incl. SOCKS negotiation /
 /// Tor circuit build) — sized for a cold Tor circuit (T4 §P5).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Deadline for the TLS 1.3 handshake once the socket is open (T4 §P5).
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
-/// Ed448 signature/key OID (1.3.101.113), dotted form for cert dispatch.
-const OID_ED448: &str = "1.3.101.113";
-
-/// The Ed448 signature-verification algorithm the pure-Rust rustcrypto
-/// provider is missing. Backed by our RFC-8032-validated verifier so the
-/// client advertises AND verifies Ed448 — supporting the official
-/// simplex.im servers (Ed448 certs) without a C toolchain.
-#[derive(Debug)]
-struct Ed448Sva;
-
-impl SignatureVerificationAlgorithm for Ed448Sva {
-    fn verify_signature(
-        &self,
-        public_key: &[u8],
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), InvalidSignature> {
-        if ed448::verify(public_key, message, signature) {
-            Ok(())
-        } else {
-            Err(InvalidSignature)
-        }
-    }
-
-    fn public_key_alg_id(&self) -> AlgorithmIdentifier {
-        alg_id::ED448
-    }
-
-    fn signature_alg_id(&self) -> AlgorithmIdentifier {
-        alg_id::ED448
-    }
-}
-
-static ED448_SVA: Ed448Sva = Ed448Sva;
-
-/// The rustcrypto signature-verification set, augmented with Ed448 (built
-/// once; the `'static` slices are leaked intentionally — a single small
-/// allocation for the process).
-fn sig_algs_with_ed448() -> WebPkiSupportedAlgorithms {
-    static AUGMENTED: OnceLock<WebPkiSupportedAlgorithms> = OnceLock::new();
-    *AUGMENTED.get_or_init(|| {
-        let base = rustls_rustcrypto::provider().signature_verification_algorithms;
-        let ed448: &'static dyn SignatureVerificationAlgorithm = &ED448_SVA;
-        let mut all: Vec<&'static dyn SignatureVerificationAlgorithm> = base.all.to_vec();
-        all.push(ed448);
-        let all: &'static [&'static dyn SignatureVerificationAlgorithm] =
-            Box::leak(all.into_boxed_slice());
-        let ed448_only: &'static [&'static dyn SignatureVerificationAlgorithm] =
-            Box::leak(vec![ed448].into_boxed_slice());
-        let mut mapping = base.mapping.to_vec();
-        mapping.push((SignatureScheme::ED448, ed448_only));
-        let mapping: &'static [(SignatureScheme, &'static [&'static dyn SignatureVerificationAlgorithm])] =
-            Box::leak(mapping.into_boxed_slice());
-        WebPkiSupportedAlgorithms { all, mapping }
-    })
-}
-
-/// A verifier that trusts exactly one CA — the one whose SHA-256 matches
-/// the pinned fingerprint — and checks the presented chain against it.
-#[derive(Debug)]
-struct PinnedCaVerifier {
-    pin: [u8; 32],
-    provider: Arc<rustls::crypto::CryptoProvider>,
-}
-
-impl ServerCertVerifier for PinnedCaVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        // find the pinned CA among the presented certs (end-entity or an
-        // intermediate). SimpleX presents [online, offline-CA].
-        let all: Vec<&CertificateDer<'_>> =
-            std::iter::once(end_entity).chain(intermediates).collect();
-        let ca = all
-            .iter()
-            .find(|c| Sha256::digest(c.as_ref()).as_slice() == self.pin)
-            .ok_or_else(|| {
-                rustls::Error::General(
-                    "SMP server certificate does not match the pinned fingerprint \
-                     (server downgrade or MITM) — refusing"
-                        .to_string(),
-                )
-            })?;
-
-        // the end-entity must be validly signed by the pinned CA. When the
-        // CA *is* the end-entity (single self-signed cert), the pin match
-        // already establishes trust.
-        if Sha256::digest(end_entity.as_ref()).as_slice() != self.pin {
-            verify_signed_by(end_entity, ca)?;
-        }
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-/// Verify `leaf` is signed by `ca`. SMP certs are Ed25519 (konkin and
-/// most self-hosted) or **Ed448** (official simplex.im) — x509-parser's
-/// built-in check does not do Ed448, so that case is verified with our
-/// RFC-8032 verifier over the raw TBS bytes.
-fn verify_signed_by(
-    leaf: &CertificateDer<'_>,
-    ca: &CertificateDer<'_>,
-) -> Result<(), rustls::Error> {
-    use x509_parser::prelude::FromDer;
-    let (_, leaf_c) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
-        .map_err(|_| rustls::Error::General("SMP leaf certificate is malformed".into()))?;
-    let (_, ca_c) = x509_parser::certificate::X509Certificate::from_der(ca.as_ref())
-        .map_err(|_| rustls::Error::General("SMP CA certificate is malformed".into()))?;
-
-    if leaf_c.signature_algorithm.oid().to_id_string() == OID_ED448 {
-        // Ed448: verify the CA's key over the DER-encoded TBSCertificate
-        let tbs = leaf_c.tbs_certificate.as_ref();
-        let sig = leaf_c.signature_value.as_ref();
-        let ca_key = ca_c.public_key().subject_public_key.as_ref();
-        if ed448::verify(ca_key, tbs, sig) {
-            Ok(())
-        } else {
-            Err(rustls::Error::General(
-                "SMP online certificate (Ed448) is not signed by the pinned CA".into(),
-            ))
-        }
-    } else {
-        leaf_c
-            .verify_signature(Some(ca_c.public_key()))
-            .map_err(|e| {
-                rustls::Error::General(format!(
-                    "SMP online certificate is not signed by the pinned CA: {e}"
-                ))
-            })
-    }
-}
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The rustcrypto provider with key exchange restricted to X25519 — the
-/// shared base of every TLS client in this crate (SMP and S3). Offering the
-/// alpha provider's full group set makes strict servers abort the handshake
+/// shared base of every TLS client in this crate. Offering the alpha
+/// provider's full group set makes strict servers abort the handshake
 /// (a group triggering HelloRetryRequest the provider mishandles); pinning
-/// X25519 avoids the retry entirely, and every SMP server (and current S3
-/// endpoint) negotiates it.
+/// X25519 avoids the retry entirely, and every current endpoint negotiates it.
 pub(crate) fn x25519_provider() -> rustls::crypto::CryptoProvider {
     let mut base = rustls_rustcrypto::provider();
     base.kx_groups
@@ -221,39 +39,15 @@ pub(crate) fn x25519_provider() -> rustls::crypto::CryptoProvider {
     base
 }
 
-/// Build a rustls client config that pins `server`'s CA fingerprint and
-/// offers ALPN `smp/1`.
-fn pinned_config(server: &SmpServer) -> Result<ClientConfig, NetError> {
-    let mut base = x25519_provider();
-    // add Ed448 so the client advertises it in signature_algorithms AND
-    // can verify the server's Ed448 CertificateVerify (official servers)
-    base.signature_verification_algorithms = sig_algs_with_ed448();
-    let provider = Arc::new(base);
-    let verifier = Arc::new(PinnedCaVerifier {
-        pin: server.fingerprint_raw(),
-        provider: provider.clone(),
-    });
-    // SMP mandates TLS 1.3 (offering 1.2 makes strict servers abort with
-    // HandshakeFailure).
-    let mut config = ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| NetError::Crypto(format!("rustls provider: {e}")))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![ALPN_SMP.to_vec()];
-    Ok(config)
-}
-
 /// A handle to the process-global in-process arti Tor client. Only exists under
 /// `--features embedded-tor`. Holds a shared reference to the lazily-bootstrapped
-/// [`TorClient`](arti_client::TorClient) and its per-server-host isolation-token
+/// [`TorClient`](arti_client::TorClient) and its per-host isolation-token
 /// map (`crate::tor_embedded::ArtiShared`); cloning it is cheap (an `Arc`).
 #[cfg(feature = "embedded-tor")]
 #[derive(Clone)]
 pub struct ArtiHandle {
     /// The shared, lazily-bootstrapped arti client + isolation map (§4).
-    shared: Arc<crate::tor_embedded::ArtiShared>,
+    shared: std::sync::Arc<crate::tor_embedded::ArtiShared>,
 }
 
 #[cfg(feature = "embedded-tor")]
@@ -275,12 +69,12 @@ impl ArtiHandle {
     }
 }
 
-/// A dialed byte stream to an SMP server: a direct / SOCKS5h `TcpStream`, or
-/// (only on the `embedded-tor` build) an in-process arti
+/// A dialed byte stream: a direct / SOCKS5h `TcpStream`, or (only on the
+/// `embedded-tor` build) an in-process arti
 /// [`DataStream`](arti_client::DataStream). Both concrete streams are
-/// `AsyncRead + AsyncWrite + Unpin + Send`; unifying them here lets
-/// [`connect_tls`] TLS-handshake over either without boxing, and keeps the
-/// non-Tor path byte-identical (`Tcp` is a zero-cost `TcpStream` wrapper).
+/// `AsyncRead + AsyncWrite + Unpin + Send`; unifying them here lets a caller
+/// TLS-handshake over either without boxing, and keeps the non-Tor path
+/// byte-identical (`Tcp` is a zero-cost `TcpStream` wrapper).
 #[derive(Debug)]
 pub enum DialStream {
     /// A direct or SOCKS5h-tunnelled TCP stream (clearnet / system Tor / whonix).
@@ -338,10 +132,10 @@ impl AsyncWrite for DialStream {
     }
 }
 
-/// How to reach an SMP server's TCP socket. `Direct` is clearnet/loopback;
-/// `Socks5` routes through a SOCKS5h proxy (Tor `local`/`whonix`); `Arti`
-/// (embedded build only) routes through an in-process Tor client. `Direct`
-/// is the default so the clearnet path is unchanged until Tor is configured.
+/// How to reach a remote TCP socket. `Direct` is clearnet/loopback; `Socks5`
+/// routes through a SOCKS5h proxy (Tor `local`/`whonix`); `Arti` (embedded
+/// build only) routes through an in-process Tor client. `Direct` is the
+/// default so the clearnet path is unchanged until Tor is configured.
 ///
 /// The routing decision is fail-closed and lives in exactly one place,
 /// [`Dialer::resolve`]: under `network = tor` there is **no** path to
@@ -356,7 +150,7 @@ pub enum Dialer {
         /// The proxy's `host:port` (a Tor SOCKS listener).
         proxy: String,
         /// A per-session random isolation prefix. The SOCKS username is
-        /// `molt-<session>-<host>` so each server host gets its own Tor
+        /// `molt-<session>-<host>` so each remote host gets its own Tor
         /// circuit (stream isolation) and the circuit set is fresh each run
         /// (no cross-session linkability). Minted once in [`Dialer::resolve`].
         session: String,
@@ -435,7 +229,7 @@ impl Dialer {
 
     /// Whether this dialer routes over Tor (so `.onion` alternates are
     /// preferred and local DNS never happens).
-    fn tor_on(&self) -> bool {
+    pub fn tor_on(&self) -> bool {
         match self {
             Dialer::Direct => false,
             Dialer::Socks5 { .. } => true,
@@ -444,21 +238,12 @@ impl Dialer {
         }
     }
 
-    /// Open the raw byte stream to `server` per this dialer, honouring the
-    /// onion-preferred [`SmpServer::dial_target`] and a Tor-sized connect
-    /// deadline (T4 §P5). Returns a [`DialStream`] so the caller handshakes TLS
-    /// over a `TcpStream` (Direct/Socks5) or an arti `DataStream` (embedded)
-    /// uniformly.
-    pub async fn dial(&self, server: &SmpServer) -> Result<DialStream, NetError> {
-        let (host, port) = server.dial_target(self.tor_on());
-        self.dial_host(host, port).await
-    }
-
-    /// Open the raw byte stream to an arbitrary `host:port` per this dialer —
-    /// the transport core `dial` shares, also used by non-SMP clients (the S3
-    /// backup probe). All fail-closed properties hold here: an `.onion` host
-    /// under `Direct` is refused (never a clearnet dial/DNS leak), SOCKS
-    /// circuits are per-host isolated, and the connect deadline is Tor-sized.
+    /// Open the raw byte stream to `host:port` per this dialer — the generic
+    /// dial every network client of this crate shares (the S3 backup client
+    /// today; N2's WebSocket relay connections next). All fail-closed
+    /// properties hold here: an `.onion` host under `Direct` is refused
+    /// (never a clearnet dial/DNS leak), SOCKS circuits are per-host
+    /// isolated, and the connect deadline is Tor-sized.
     pub async fn dial_host(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
         match self {
             Dialer::Direct => {
@@ -477,7 +262,7 @@ impl Dialer {
                 Ok(DialStream::Tcp(tcp))
             }
             Dialer::Socks5 { proxy, session } => {
-                // one Tor circuit per server host: molt-<session>-<host>
+                // one Tor circuit per remote host: molt-<session>-<host>
                 let isolation = format!("molt-{session}-{host}");
                 let tcp = timeout(
                     CONNECT_TIMEOUT,
@@ -505,50 +290,9 @@ impl Dialer {
     }
 }
 
-/// Dial `server` over TCP+TLS 1.3 (through `dialer`), verifying the pinned
-/// fingerprint and negotiating ALPN `smp/1`. Returns the established TLS stream.
-pub async fn connect_tls(
-    dialer: &Dialer,
-    server: &SmpServer,
-) -> Result<TlsStream<DialStream>, NetError> {
-    let config = pinned_config(server)?;
-    let connector = TlsConnector::from(Arc::new(config));
-    let stream = dialer.dial(server).await?;
-    // the SNI name is the host; cert verification ignores it (we pin), but
-    // rustls requires a valid ServerName
-    let sni = ServerName::try_from(server.host.clone())
-        .map_err(|_| NetError::Framing(format!("invalid host for SNI: {}", server.host)))?;
-    let tls = timeout(TLS_HANDSHAKE_TIMEOUT, connector.connect(sni, stream))
-        .await
-        .map_err(|_| {
-            NetError::TorUnavailable(format!("tls handshake with {} timed out", server.host))
-        })?
-        .map_err(|e| NetError::Crypto(format!("tls handshake with {}: {e}", server.host)))?;
-    // confirm the server actually spoke smp/1
-    let (_, conn) = tls.get_ref();
-    match conn.alpn_protocol() {
-        Some(p) if p == ALPN_SMP => Ok(tls),
-        other => Err(NetError::Crypto(format!(
-            "SMP server did not negotiate ALPN smp/1 (got {other:?})"
-        ))),
-    }
-}
-
-/// A one-shot connectivity check for the settings "Test connection" button:
-/// dial (through the resolved `dialer`, honouring onion-preferred routing),
-/// pin, ALPN — report success or the concrete reason. Does not run any SMP
-/// commands. An onion-only target under a `Direct` dialer fails closed with a
-/// "requires Tor" reason instead of a clearnet dial (T4 §P7).
-pub async fn test_connection(dialer: &Dialer, server: &SmpServer) -> Result<(), NetError> {
-    let _tls = connect_tls(dialer, server).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const FP: &str = "f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=";
 
     #[test]
     fn resolve_maps_every_mode_and_fails_closed() {
@@ -617,14 +361,13 @@ mod tests {
 
     #[test]
     fn direct_never_targets_onion() {
-        // an onion-only server dialed Direct fails closed (no clearnet dial,
+        // an onion-only host dialed Direct fails closed (no clearnet dial,
         // no hang) — the resolver-less path cannot reach .onion.
-        let onion = SmpServer::parse(&format!("smp://{FP}@abcd.onion")).expect("onion");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("rt");
-        let res = rt.block_on(Dialer::Direct.dial(&onion));
+        let res = rt.block_on(Dialer::Direct.dial_host("abcd.onion", 5223));
         assert!(
             matches!(res, Err(NetError::TorMisconfigured(_))),
             "got {res:?}"
@@ -647,9 +390,8 @@ mod tests {
             proxy: addr.to_string(),
             session: "test".to_string(),
         };
-        let server = SmpServer::parse(&format!("smp://{FP}@example.invalid")).expect("server");
         let started = tokio::time::Instant::now();
-        let res = dialer.dial(&server).await;
+        let res = dialer.dial_host("example.invalid", 5223).await;
         let elapsed = started.elapsed();
         // returns cleanly (never an infinite await), bounded by the deadline.
         assert!(matches!(res, Err(NetError::TorUnavailable(_))), "got {res:?}");

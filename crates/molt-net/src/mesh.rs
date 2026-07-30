@@ -30,7 +30,7 @@ use crate::{QueueId, RcvQueue, SndQueueAddr, Transport};
 /// One queue handover: a queue's address and its wrap key, as lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueHandover {
-    /// The queue's server (`smp://fingerprint@host`; empty for the loopback hub).
+    /// The queue's server (a URL later; empty for the loopback hub).
     pub server: String,
     /// The queue id, lowercase hex.
     pub queue: String,
@@ -69,34 +69,18 @@ impl QueueHandover {
 /// and its wrap key. The announcer created one queue per peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshAnnounce {
-    /// peer handle → the PRIMARY queue that peer sends to (to reach the
-    /// announcer).
+    /// peer handle → the queue that peer sends to (to reach the announcer).
     pub queues: BTreeMap<MemberId, QueueHandover>,
-    /// peer handle → the announcer's EXTRA redundant queues (1..N) for that peer
-    /// (Track B Stage 2). Additive: an old announcer omits it ⇒ a 1-queue leg;
-    /// an old receiver ignores it ⇒ a 1-queue leg. All share the primary's wrap
-    /// key (the repeated `wrap` in each handover is ignored — the receiver takes
-    /// `wrap_out` from `queues`).
-    #[serde(default)]
-    pub queues_extra: BTreeMap<MemberId, Vec<QueueHandover>>,
 }
 
 /// The send side of ONE announcement: where `me` must send to reach the
-/// announcer, and with which wrap key. The announced **primary** queue comes
-/// first, followed by the announcer's redundant `queues_extra` (Track B Stage 2)
-/// — all under the primary's wrap key, since every queue of a leg shares one.
+/// announcer, and with which wrap key.
 ///
 /// This is the single ingest point for a peer's handover, shared by every adopt
-/// path (bootstrap [`assemble_mesh`], the rotate reply fold, the mesh
-/// extension) so all of them keep the leg's redundancy AND enforce the same
-/// bound. Without it an adopter silently collapsed the send side to N=1.
-///
-/// SECURITY (Stage-2 audit finding #1): the fan-out is capped at
-/// [`crate::MESH_REDUNDANCY_CAP`]. A malicious member could otherwise announce
-/// an arbitrarily long `queues_extra[me]` and every outbound block would fan to
-/// all of them (durable egress amplification toward attacker-chosen queues).
-/// A malformed *extra* is skipped (the leg survives on the rest); a missing or
-/// malformed *primary* is an error — never a link that sends nowhere.
+/// path (bootstrap [`assemble_mesh`], the mesh extension) so all of them wire
+/// the leg the same way. A missing or malformed handover is an error — never a
+/// link that sends nowhere. Returns a Vec for the `PeerLink.snds` shape (always
+/// exactly one entry).
 pub fn send_targets(
     announce: &MeshAnnounce,
     me: &str,
@@ -108,19 +92,9 @@ pub fn send_targets(
     let wrap_out = target
         .wrap_key()
         .ok_or_else(|| format!("the announced wrap key for {me} is malformed"))?;
-    let mut snds = vec![target
+    let snds = vec![target
         .addr()
         .ok_or_else(|| format!("the announced queue for {me} is malformed"))?];
-    if let Some(extra) = announce.queues_extra.get(me) {
-        for h in extra {
-            if snds.len() >= crate::MESH_REDUNDANCY_CAP {
-                break;
-            }
-            if let Some(a) = h.addr() {
-                snds.push(a);
-            }
-        }
-    }
     Ok((snds, wrap_out))
 }
 
@@ -140,8 +114,8 @@ pub fn assemble_mesh(
         if rcvs.is_empty() {
             return Err(format!("no inbound queue for {peer}"));
         }
-        // where I send to reach `peer`: the queue(s) `peer` announced for me —
-        // primary + capped extras, via the shared ingest point.
+        // where I send to reach `peer`: the queue `peer` announced for me,
+        // via the shared ingest point.
         let announce = announces
             .get(peer)
             .ok_or_else(|| format!("no mesh announcement from {peer}"))?;
@@ -172,38 +146,22 @@ pub async fn bootstrap_mesh<T: Transport>(
     mut announce_in: tokio::sync::mpsc::Receiver<(MemberId, MeshAnnounce)>,
     timeout: std::time::Duration,
 ) -> Result<Vec<PeerLink>, String> {
-    // N per-pair inbound queues per peer (per-pair = unlinkability; N =
-    // redundancy across servers). Stage 2a mints N=1 (behaviour-neutral); Stage
-    // 2b threads the config `redundancy` here and `create_queue`'s round-robin
-    // spreads the N across servers. All N of a pair share ONE wrap key.
-    let redundancy = transport.redundancy();
+    // one per-pair inbound queue per peer (per-pair = unlinkability), each
+    // under a fresh wrap key
     let mut my_inbound: BTreeMap<MemberId, (Vec<RcvQueue>, WrapKey)> = BTreeMap::new();
     let mut queues: BTreeMap<MemberId, QueueHandover> = BTreeMap::new();
-    let mut queues_extra: BTreeMap<MemberId, Vec<QueueHandover>> = BTreeMap::new();
     for p in peers {
         let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-        let mut rcvs = Vec::with_capacity(redundancy);
-        let mut handovers = Vec::with_capacity(redundancy);
-        for _ in 0..redundancy {
-            let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
-            // the peer sends to pair.snd (wrapped with `wrap`); I receive on pair.rcv
-            handovers.push(QueueHandover::of(&pair.snd, &wrap));
-            rcvs.push(pair.rcv);
-        }
-        queues.insert(p.clone(), handovers[0].clone());
-        if handovers.len() > 1 {
-            queues_extra.insert(p.clone(), handovers[1..].to_vec());
-        }
-        my_inbound.insert(p.clone(), (rcvs, wrap));
+        let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
+        // the peer sends to pair.snd (wrapped with `wrap`); I receive on pair.rcv
+        queues.insert(p.clone(), QueueHandover::of(&pair.snd, &wrap));
+        my_inbound.insert(p.clone(), (vec![pair.rcv], wrap));
     }
     // broadcast my handovers, then wait (up to `timeout` total) until every peer
     // has announced theirs — the bootstrap is best-effort, so a peer that never
     // shows up bounds the wait instead of hanging entry forever
     announce_out
-        .send(MeshAnnounce {
-            queues,
-            queues_extra,
-        })
+        .send(MeshAnnounce { queues })
         .await
         .map_err(|_| "mesh announce channel closed".to_string())?;
     let deadline = tokio::time::Instant::now() + timeout;
@@ -357,10 +315,7 @@ mod tests {
             "bob".to_string(),
             QueueHandover::of(&snd("", &[7, 7]), &WrapKey::from_bytes([1u8; 32])),
         );
-        let a = MeshAnnounce {
-            queues,
-            queues_extra: BTreeMap::new(),
-        };
+        let a = MeshAnnounce { queues };
         let wire = serde_json::to_vec(&a).expect("encode");
         let back: MeshAnnounce = serde_json::from_slice(&wire).expect("decode");
         assert_eq!(back, a);
@@ -403,11 +358,11 @@ mod tests {
         let mut announces = BTreeMap::new();
         announces.insert(
             "bob".to_string(),
-            MeshAnnounce { queues: bob_q, queues_extra: BTreeMap::new() },
+            MeshAnnounce { queues: bob_q },
         );
         announces.insert(
             "cara".to_string(),
-            MeshAnnounce { queues: cara_q, queues_extra: BTreeMap::new() },
+            MeshAnnounce { queues: cara_q },
         );
 
         let mut links = assemble_mesh("alice", &my_inbound, &announces).expect("assembles");
@@ -430,87 +385,11 @@ mod tests {
         assert_eq!(cara.rcvs[0].id.0, vec![0xc, 0xd]);
     }
 
-    /// SECURITY (Stage-2 audit finding #1): an oversized `queues_extra` from a
-    /// (malicious) peer must NOT inflate our send fan-out — `assemble_mesh` caps
-    /// the resulting `snds` at `MESH_REDUNDANCY_CAP`.
-    #[test]
-    fn assemble_caps_an_oversized_queues_extra() {
-        let mut my_inbound = BTreeMap::new();
-        my_inbound.insert(
-            "bob".to_string(),
-            (vec![RcvQueue { server: String::new(), id: QueueId::from_bytes(vec![1]) }], WrapKey::from_bytes([1u8; 32])),
-        );
-        // bob announces the primary for alice PLUS 50 extra attacker queues
-        let mut bob_q = BTreeMap::new();
-        bob_q.insert(
-            "alice".to_string(),
-            QueueHandover::of(&snd("smp://b@srv", &[0]), &WrapKey::from_bytes([2u8; 32])),
-        );
-        let mut bob_extra = BTreeMap::new();
-        bob_extra.insert(
-            "alice".to_string(),
-            (0..50u8)
-                .map(|i| QueueHandover::of(&snd("smp://evil@srv", &[i]), &WrapKey::from_bytes([9u8; 32])))
-                .collect::<Vec<_>>(),
-        );
-        let mut announces = BTreeMap::new();
-        announces.insert(
-            "bob".to_string(),
-            MeshAnnounce { queues: bob_q, queues_extra: bob_extra },
-        );
-        let links = assemble_mesh("alice", &my_inbound, &announces).expect("assembles");
-        assert_eq!(links.len(), 1);
-        assert_eq!(
-            links[0].snds.len(),
-            crate::MESH_REDUNDANCY_CAP,
-            "the fan-out is capped at MESH_REDUNDANCY_CAP regardless of how many queues the peer announced"
-        );
-    }
-
-    /// The send side of ONE announcement, shared by every adopt path (bootstrap
-    /// assembly, the rotate reply fold, the mesh extension): primary FIRST, the
-    /// announced extras folded in behind it, capped, malformed extras skipped.
-    #[test]
-    fn send_targets_folds_the_announced_extras_capped() {
-        let mut queues = BTreeMap::new();
-        queues.insert(
-            "alice".to_string(),
-            QueueHandover::of(&snd("smp://b@srv", &[0xb, 0x1]), &WrapKey::from_bytes([11u8; 32])),
-        );
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "alice".to_string(),
-            vec![
-                // malformed (odd-length hex) — skipped, the leg survives
-                QueueHandover {
-                    server: "smp://b@srv".to_string(),
-                    queue: "abc".to_string(),
-                    wrap: "00".to_string(),
-                },
-                QueueHandover::of(&snd("smp://b2@srv", &[0xb, 0x2]), &WrapKey::from_bytes([11u8; 32])),
-                QueueHandover::of(&snd("smp://b3@srv", &[0xb, 0x3]), &WrapKey::from_bytes([11u8; 32])),
-            ],
-        );
-        let a = MeshAnnounce { queues, queues_extra: extra };
-        let (snds, wrap) = send_targets(&a, "alice").expect("a usable handover for alice");
-        assert_eq!(wrap.to_bytes(), [11u8; 32], "the wrap key comes from the PRIMARY handover");
-        assert_eq!(snds[0].id.0, vec![0xb, 0x1], "the primary is first");
-        assert_eq!(
-            snds.len(),
-            crate::MESH_REDUNDANCY_CAP,
-            "capped at MESH_REDUNDANCY_CAP however many the peer announced"
-        );
-        assert_eq!(snds[1].id.0, vec![0xb, 0x2], "the malformed extra is skipped, not fatal");
-    }
-
     /// No handover for me, or a malformed primary, is an error — never a
     /// half-wired link that sends nowhere.
     #[test]
     fn send_targets_errors_without_a_usable_primary() {
-        let empty = MeshAnnounce {
-            queues: BTreeMap::new(),
-            queues_extra: BTreeMap::new(),
-        };
+        let empty = MeshAnnounce { queues: BTreeMap::new() };
         assert!(send_targets(&empty, "alice").is_err(), "no queue for me");
 
         let mut queues = BTreeMap::new();
@@ -522,7 +401,7 @@ mod tests {
                 wrap: hex::encode([1u8; 32]),
             },
         );
-        let bad = MeshAnnounce { queues, queues_extra: BTreeMap::new() };
+        let bad = MeshAnnounce { queues };
         assert!(send_targets(&bad, "alice").is_err(), "malformed primary queue id");
     }
 
@@ -554,7 +433,7 @@ mod tests {
         let mut announces = BTreeMap::new();
         announces.insert(
             "bob".to_string(),
-            MeshAnnounce { queues: bob_q, queues_extra: BTreeMap::new() },
+            MeshAnnounce { queues: bob_q },
         );
         assert!(assemble_mesh("alice", &my_inbound, &announces).is_err());
     }

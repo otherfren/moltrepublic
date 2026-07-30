@@ -238,7 +238,7 @@ impl State {
         id: WorkspaceId,
         dir: std::path::PathBuf,
         config: molt_net::s3::S3Config,
-        dialer: molt_net::smp::tls::Dialer,
+        dialer: molt_net::dial::Dialer,
     ) {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return; // actor shutting down — no task, no inflight mark

@@ -223,8 +223,8 @@ async fn a_hard_killed_founder_resumes_the_mesh_on_reopen() {
     hard_kill(a, &root_a, &id).await;
 
     // a fresh engine "process" on the same directory; the reopen seam hands
-    // it a transport on the still-running hub (what a fresh SmpTransport +
-    // import_creds does against a real server)
+    // it a transport on the still-running hub (what a fresh transport +
+    // import_creds will do against a real relay)
     let session_a2 = SessionView {
         workspaces: molt_storage::scan_workspaces(&root_a)
             .iter()

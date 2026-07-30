@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use molt_net::s3::{S3Client, S3Config, S3Error, S3Object};
-use molt_net::smp::tls::Dialer;
+use molt_net::dial::Dialer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 

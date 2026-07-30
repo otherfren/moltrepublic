@@ -136,44 +136,6 @@ pub struct TransportConfig {
     /// Anonymity settings for node traffic.
     #[serde(default)]
     pub anonymity: AnonymityConfig,
-    /// SMP messaging server selection.
-    #[serde(default)]
-    pub smp: SmpConfig,
-}
-
-/// SMP messaging server selection (`[transport.smp]`): which SimpleX
-/// messaging server the founding ritual (and, from T3 on, all group
-/// traffic) routes over.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SmpConfig {
-    /// `"public"` = the bundled default server ([`default_public_smp`]);
-    /// `"custom"` = use `url`. Anything else is salvaged back to `"public"`.
-    #[serde(default = "default_smp_server")]
-    pub server: String,
-    /// A custom SMP server URL (`smp://<base64-fingerprint>@host[:port]`),
-    /// used when `server = "custom"`. Not validated here (molt-config has no
-    /// transport dependency) — the GUI's Test button validates it live.
-    #[serde(default)]
-    pub url: String,
-    /// OPTIONAL redundant SMP server list (Track B Stage 2 redundancy). When
-    /// non-empty it OVERRIDES `server`/`url`: the node spreads its inbound
-    /// queues across these servers (N = min(count, 2)), so one server's outage
-    /// leaves each leg alive on another. Empty (the default) = the single-server
-    /// behaviour above, unchanged. Additive; the GUI settings screen edits this
-    /// list (each entry Test-buttoned).
-    #[serde(default)]
-    pub urls: Vec<String>,
-}
-
-impl Default for SmpConfig {
-    fn default() -> Self {
-        SmpConfig {
-            server: default_smp_server(),
-            url: String::new(),
-            urls: Vec::new(),
-        }
-    }
 }
 
 /// How node traffic is anonymized: which network, plus that network's settings.
@@ -193,7 +155,7 @@ pub struct AnonymityConfig {
 #[serde(rename_all = "lowercase")]
 pub enum AnonymityNetwork {
     /// Route over Tor. Explicit opt-in — a fail-closed dialer refuses every
-    /// direct SMP dial once this is selected (transport concept §6).
+    /// direct dial once this is selected (transport concept §6).
     Tor,
     /// Route over the Nym mixnet.
     Nym,
@@ -328,19 +290,6 @@ pub fn default_lang() -> String {
     "en".to_string()
 }
 
-/// Default SMP server selection: the bundled public server.
-pub fn default_smp_server() -> String {
-    "public".to_string()
-}
-
-/// The bundled public SMP server, used when `[transport.smp].server =
-/// "public"`. An official SimpleX server (Ed448 CA), so users who cannot
-/// run their own server still have a working default. Verified reachable by
-/// the `smp_*` live tests.
-pub fn default_public_smp() -> String {
-    "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@smp8.simplex.im".to_string()
-}
-
 /// Default MCP client allowlist: loopback only.
 pub fn default_mcp_allow() -> String {
     "127.0.0.1".to_string()
@@ -402,16 +351,6 @@ pub struct Settings {
     pub tor_mode: String,
     /// Local Tor SOCKS port.
     pub tor_port: u16,
-    /// SMP server selection: `"public"` (bundled default) or `"custom"`.
-    pub smp_server: String,
-    /// Custom SMP server URL (`smp://<fp>@host[:port]`), used when
-    /// `smp_server = "custom"`.
-    pub smp_url: String,
-    /// Redundant SMP server list (Track B Stage 2). When non-empty it overrides
-    /// `smp_server`/`smp_url`; the node spreads inbound queues across these
-    /// servers for redundancy. Empty = single-server (unchanged). See
-    /// [`SessionSettings::smp_server_list`].
-    pub smp_urls: Vec<String>,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated list`).
@@ -443,44 +382,12 @@ impl Default for Settings {
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: default_tor_port(),
-            smp_server: default_smp_server(),
-            smp_url: String::new(),
-            smp_urls: Vec::new(),
             mcp_port: default_mcp_port(),
             mcp_allow: default_mcp_allow(),
             mcp_token: String::new(),
             lang: default_lang(),
             theme: default_theme(),
         }
-    }
-}
-
-impl Settings {
-    /// The effective SMP server URL list the transport builds over (Track B
-    /// Stage 2). When `smp_urls` is non-empty it wins (redundancy across those
-    /// servers, de-duplicated, order preserved); otherwise the single-server
-    /// resolution: the custom `smp_url` when `smp_server == "custom"` and it is
-    /// set, else the bundled public server. Always returns ≥1 entry. The engine
-    /// parses each into an `SmpServer` and builds a (multi-server) transport.
-    pub fn smp_server_list(&self) -> Vec<String> {
-        if !self.smp_urls.is_empty() {
-            let mut out: Vec<String> = Vec::with_capacity(self.smp_urls.len());
-            for u in &self.smp_urls {
-                let u = u.trim();
-                if !u.is_empty() && !out.iter().any(|e| e == u) {
-                    out.push(u.to_string());
-                }
-            }
-            if !out.is_empty() {
-                return out;
-            }
-        }
-        let single = if self.smp_server == "custom" && !self.smp_url.trim().is_empty() {
-            self.smp_url.trim().to_string()
-        } else {
-            default_public_smp()
-        };
-        vec![single]
     }
 }
 
@@ -527,9 +434,6 @@ impl From<&Config> for Settings {
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
-            smp_server: c.transport.smp.server.clone(),
-            smp_url: c.transport.smp.url.clone(),
-            smp_urls: c.transport.smp.urls.clone(),
             mcp_port: c.mcp.port,
             mcp_allow: c.mcp.allow.clone(),
             mcp_token: c.mcp.token.clone(),
@@ -543,13 +447,6 @@ impl From<&Config> for Settings {
 fn toml_str(s: &str) -> String {
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
-}
-
-/// Render a string slice as a TOML inline array (`["a", "b"]`), each element
-/// escaped via [`toml_str`]. An empty slice renders `[]`.
-fn toml_arr(items: &[String]) -> String {
-    let inner = items.iter().map(|s| toml_str(s)).collect::<Vec<_>>().join(", ");
-    format!("[{inner}]")
 }
 
 /// Render a fully-commented, valid `config.toml` from `settings`.
@@ -598,7 +495,7 @@ token = {mcp_token}
 
 [transport.anonymity]
 # network = "tor" | "nym" | "none" (default "none" = clearnet). "tor" routes
-# every SMP dial through Tor, fail-closed (no silent clearnet fallback).
+# every network dial through Tor, fail-closed (no silent clearnet fallback).
 network = {anonymity}
 
 [transport.anonymity.tor]
@@ -609,20 +506,6 @@ network = {anonymity}
 mode = {tor_mode}
 # Local tor SOCKS port. Used only when mode = "local".
 port = {tor_port}
-
-[transport.smp]
-# Which SimpleX messaging server the founding ritual routes over:
-#   "public" = a bundled official SimpleX server (no server to host yourself)
-#   "custom" = the `url` below (e.g. your own server)
-server = {smp_server}
-# Custom SMP server URL: smp://<base64-fingerprint>@host[:port].
-# Used only when server = "custom". Test it from the GUI settings.
-url = {smp_url}
-# Optional redundant server list. When non-empty it OVERRIDES server/url: the
-# node spreads its inbound queues across these servers (2 = full redundancy —
-# one server can go down and each connection stays alive on the other). Edit
-# this from the GUI settings (add/remove/Test each). Empty = single server.
-urls = {smp_urls}
 
 [ui]
 # GUI language: "en" | "de".
@@ -649,9 +532,6 @@ theme = {theme}
         anonymity = toml_str(&settings.anonymity),
         tor_mode = toml_str(&settings.tor_mode),
         tor_port = settings.tor_port,
-        smp_server = toml_str(&settings.smp_server),
-        smp_url = toml_str(&settings.smp_url),
-        smp_urls = toml_arr(&settings.smp_urls),
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
     )
@@ -744,23 +624,6 @@ pub fn salvage(text: &str) -> Settings {
             }
         }
     }
-    if let Some(smp) = value.get("transport").and_then(|t| t.get("smp")) {
-        if let Some(v) = smp.get("server").and_then(toml::Value::as_str) {
-            if matches!(v, "public" | "custom") {
-                s.smp_server = v.to_string();
-            }
-        }
-        if let Some(v) = smp.get("url").and_then(toml::Value::as_str) {
-            s.smp_url = v.to_string();
-        }
-        if let Some(arr) = smp.get("urls").and_then(toml::Value::as_array) {
-            s.smp_urls = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .filter(|u| !u.is_empty())
-                .collect();
-        }
-    }
     if let Some(mcp) = value.get("mcp") {
         if let Some(port) = mcp
             .get("port")
@@ -843,6 +706,33 @@ pub fn write(path: &Path, settings: &Settings, make_backup: bool) -> std::io::Re
 // Format-preserving runtime rewrite (toml_edit).
 // ---------------------------------------------------------------------------
 
+/// Load-time heal for pre-N-demo config files: every old `render()`/`apply()`
+/// wrote a `[transport.smp]` section, which the strict boot parse
+/// (`deny_unknown_fields`) now rejects — and the save-time heal in [`apply`]
+/// can never run for an app that fails to boot. Returns the healed text iff
+/// (a) `text` does NOT strict-parse today, (b) dropping `transport.smp` is
+/// format-preserving possible, and (c) the result DOES strict-parse — i.e.
+/// exactly the legacy-file class, never a general repair (that stays
+/// `--repair-config`'s job).
+pub fn heal_legacy(text: &str) -> Option<String> {
+    if parse(text).is_ok() {
+        return None;
+    }
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    let removed = doc
+        .as_table_mut()
+        .get_mut("transport")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .map(|transport| transport.remove("smp").is_some())
+        .unwrap_or(false);
+    if !removed {
+        return None;
+    }
+    let healed = doc.to_string();
+    parse(&healed).ok()?;
+    Some(healed)
+}
+
 /// Rewrite `text` so it carries exactly the values in `settings`, preserving
 /// everything the user hand-wrote into the file: comments, key order, spacing.
 ///
@@ -893,17 +783,25 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_str(mcp, "allow", &settings.mcp_allow);
     set_str(mcp, "token", &settings.mcp_token);
 
+    // Heal-once: configs written before the SMP transport was removed carry
+    // a [transport.smp] section that the deny_unknown_fields strict parse
+    // rejects — dropping it here is the ONE exception to the leave-unknown-
+    // keys-alone guarantee, or every save would re-persist a file the
+    // hot-reload watcher can never accept.
+    if let Some(transport) = doc
+        .as_table_mut()
+        .get_mut("transport")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        transport.remove("smp");
+    }
+
     let anon = table_at(doc.as_table_mut(), &["transport", "anonymity"]);
     set_str(anon, "network", &settings.anonymity);
 
     let tor = table_at(doc.as_table_mut(), &["transport", "anonymity", "tor"]);
     set_str(tor, "mode", &settings.tor_mode);
     set_int(tor, "port", i64::from(settings.tor_port));
-
-    let smp = table_at(doc.as_table_mut(), &["transport", "smp"]);
-    set_str(smp, "server", &settings.smp_server);
-    set_str(smp, "url", &settings.smp_url);
-    set_arr(smp, "urls", &settings.smp_urls);
 
     let ui = table_at(doc.as_table_mut(), &["ui"]);
     set_str(ui, "lang", &settings.lang);
@@ -958,17 +856,6 @@ fn set_int(t: &mut dyn toml_edit::TableLike, key: &str, v: i64) {
     if t.get(key).and_then(toml_edit::Item::as_integer) != Some(v) {
         set_item(t, key, toml_edit::value(v));
     }
-}
-
-/// Set `key` to a string array, replacing any existing value. Rebuilds the
-/// array unconditionally (comparing element-wise against a toml_edit array is
-/// not worth it for this small, rarely-edited list).
-fn set_arr(t: &mut dyn toml_edit::TableLike, key: &str, items: &[String]) {
-    let mut arr = toml_edit::Array::new();
-    for s in items {
-        arr.push(s.as_str());
-    }
-    set_item(t, key, toml_edit::value(arr));
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,71 +927,6 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trips_onion_and_tor_mode() {
-        // A comma-host onion smp_url and every tor_mode survive the full
-        // render -> salvage -> update round-trip (molt-config keeps `url`
-        // opaque, so the onion slot rides through unchanged).
-        for mode in ["local", "embedded", "whonix"] {
-            let original = Settings {
-                anonymity: "tor".to_string(),
-                tor_mode: mode.to_string(),
-                smp_server: "custom".to_string(),
-                smp_url: "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@\
-                     smp8.simplex.im,beccx4yfxxbvyhqypaavemqurytl6hozr47wfc7uuecacjqdvwpw2xid.onion"
-                    .to_string(),
-                ..Settings::default()
-            };
-            let salvaged = salvage(&render(&original));
-            assert_eq!(original, salvaged, "mode {mode} round-trips through salvage");
-            let updated = update(&render(&Settings::default()), &original).expect("update");
-            let config = parse(&updated).expect("updated text stays strictly parseable");
-            assert_eq!(Settings::from(&config), original, "mode {mode} round-trips through update");
-        }
-    }
-
-    #[test]
-    fn smp_server_list_resolves_redundancy_then_single() {
-        // default (public, no list) → the one bundled public server
-        let def = Settings::default();
-        assert_eq!(def.smp_server_list(), vec![default_public_smp()]);
-
-        // custom single server, no list → that one server
-        let custom = Settings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://AAAA@one".to_string(),
-            ..Settings::default()
-        };
-        assert_eq!(custom.smp_server_list(), vec!["smp://AAAA@one".to_string()]);
-
-        // a non-empty urls list WINS over server/url, de-duped, order kept
-        let redundant = Settings {
-            smp_server: "public".to_string(),
-            smp_url: String::new(),
-            smp_urls: vec![
-                "smp://AAAA@one".to_string(),
-                "smp://BBBB@two".to_string(),
-                "smp://AAAA@one".to_string(), // dup dropped
-                "   ".to_string(),            // blank dropped
-            ],
-            ..Settings::default()
-        };
-        assert_eq!(
-            redundant.smp_server_list(),
-            vec!["smp://AAAA@one".to_string(), "smp://BBBB@two".to_string()],
-            "the list wins, de-duplicated, order preserved"
-        );
-
-        // a list of only blanks falls back to the single-server path
-        let blanks = Settings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://CCCC@three".to_string(),
-            smp_urls: vec!["".to_string(), "  ".to_string()],
-            ..Settings::default()
-        };
-        assert_eq!(blanks.smp_server_list(), vec!["smp://CCCC@three".to_string()]);
-    }
-
-    #[test]
     fn settings_round_trip_through_render_and_salvage() {
         // A non-default Settings survives a render -> salvage round-trip
         // unchanged: this is the property the GUI relies on when it writes a
@@ -1134,12 +956,6 @@ mod tests {
             anonymity: "nym".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
-            smp_server: "custom".to_string(),
-            smp_url: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io".to_string(),
-            smp_urls: vec![
-                "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io".to_string(),
-                "smp://0YuTwO05YJWS8rkjn9eLJDjQhFKvIYd8d4xG8X1blIU=@smp8.simplex.im".to_string(),
-            ],
             download_dir: "/srv/molt/downloads".to_string(),
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
@@ -1203,6 +1019,73 @@ headless = false
     #[test]
     fn update_rejects_broken_toml() {
         assert!(update("this is not::: toml", &Settings::default()).is_err());
+    }
+
+    #[test]
+    fn heal_legacy_fixes_a_render_era_file_so_boot_can_strict_parse() {
+        // Every pre-demolition render()/apply() wrote [transport.smp] into the
+        // managed file, and BOOT strict-parses (deny_unknown_fields) — so
+        // without a load-time heal every existing installation fails to start
+        // and the save-time heal can never run. heal_legacy is that load-time
+        // heal: it must fix exactly this file class…
+        let legacy = "\
+[node]
+headless = true
+
+[transport.smp]
+server = \"public\"
+url = \"\"
+
+[transport.anonymity]
+network = \"none\"
+";
+        assert!(parse(legacy).is_err(), "the legacy file must fail strict parse");
+        let healed = heal_legacy(legacy).expect("healable");
+        parse(&healed).expect("healed file parses strictly");
+        assert!(healed.contains("headless = true"), "values survive");
+        // …and ONLY this file class:
+        assert!(
+            heal_legacy("[node]\nheadless = true\n").is_none(),
+            "a file that already parses is not 'healed'"
+        );
+        assert!(
+            heal_legacy("[node]\nmystery = 1\n").is_none(),
+            "an unrelated strict-parse failure is not silently rewritten"
+        );
+        assert!(heal_legacy("not::: toml").is_none(), "broken TOML is untouched");
+    }
+
+    #[test]
+    fn update_heals_a_stale_transport_smp_section() {
+        // Configs written before the SMP transport was removed carry a
+        // [transport.smp] section. `TransportConfig` is deny_unknown_fields,
+        // so the section would fail every strict parse (hot-reload watcher,
+        // post-save verify) forever — a save must drop it once, while every
+        // OTHER unknown key keeps its leave-it-alone guarantee.
+        let fixture = "\
+# keep me
+[node]
+headless = false
+
+# dies with its section
+[transport.smp]
+server = \"public\"
+url = \"smp://AAAA@host.example\"
+urls = [\"smp://BBBB@other.example\"]
+
+[transport.anonymity]
+network = \"none\"
+";
+        let settings = salvage(fixture);
+        let updated = update(fixture, &settings).expect("update");
+        assert!(
+            !updated.contains("[transport.smp]") && !updated.contains("smp://"),
+            "stale [transport.smp] must be healed away:\n{updated}"
+        );
+        // the section's own header comment goes with it; everything else stays
+        assert!(!updated.contains("# dies with its section"));
+        assert!(updated.contains("# keep me"), "unrelated comments survive");
+        parse(&updated).expect("healed file parses strictly");
     }
 
     #[test]

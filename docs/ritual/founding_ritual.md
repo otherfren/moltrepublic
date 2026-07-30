@@ -3,7 +3,9 @@
 How a MoltRepublic *republic* comes into being. This document describes the
 ritual **abstractly** — the actors, the messages they exchange, the secrets
 that bind them, and the guarantees that hold when it is over. It is transport-
-and language-agnostic; the concrete wire (SMP over TLS, per-queue wrapping) and
+and language-agnostic; the concrete wire (per-queue wrapping over the loopback
+transport today; Nostr relays in build — etappe N4 of
+`docs/transport/nostr_transport_marmot.md` re-implements the ritual wire) and
 the code are pointed to at the end.
 
 ---
@@ -232,7 +234,9 @@ sender. Two consequences shape the message flow above:
 
 The ritual is written once against this queue abstraction, so the same
 member-side and founder-side code runs over the in-process loopback hub (the
-offline test seam) and over a real SMP server unchanged.
+offline test seam) unchanged over any queue-shaped transport — it ran over
+real SMP servers until the SMP transport was removed (etappe N-demo,
+2026-07-30), and N4 carries it onto Nostr relays.
 
 ---
 
@@ -311,9 +315,9 @@ fast test; the product never uses it.
 ## 12. Implementation map
 
 - **Ritual driver & member side** — `crates/molt-engine/src/founding.rs`
-  (`start_ritual`, `spawn_smp_provisioning`, `run_ritual_member`,
-  `ritual_join_over_smp`, `FoundingInvite`, `verify_sealed_roster`,
-  `RitualRuntime`).
+  (`start_ritual`, `run_ritual_member`, `FoundingInvite`,
+  `verify_sealed_roster`, `RitualRuntime`; the over-SMP drivers were removed
+  in etappe N-demo — N4 adds the Nostr provisioning/join tasks).
 - **Lifecycles (create/join wiring, materialize)** —
   `crates/molt-engine/src/lifecycles.rs`.
 - **Crypto primitives** — `crates/molt-storage/src/lib.rs`
@@ -330,13 +334,13 @@ fast test; the product never uses it.
   identity key, founder group create, Add+Welcome, join-from-welcome, app-message
   encrypt/decrypt, snapshot/restore into `transport.state.mls`).
 - **Transport** — `crates/molt-net/` (the `Transport` trait, `wrap`, `chunk`,
-  and the SMP client under `src/smp/`).
-- **Proven end-to-end** — `crates/molt-engine/tests/ritual_engine_over_smp.rs`
-  (two engine instances found and join over a real SMP server; both end with
-  their own workspace holding the same verified constitution) and
-  `crates/molt-engine/tests/two_instances.rs` (loopback: the MLS group
+  and the loopback hub in `src/loopback.rs`; the SMP client was removed in
+  etappe N-demo, the Nostr transport is in build).
+- **Proven end-to-end** — `crates/molt-engine/tests/two_instances.rs`
+  (loopback: two engine instances found and join, the MLS group
   interoperates across instances, and the ratification gate holds until the
-  joiner confirms).
+  joiner confirms). The over-a-real-SMP-server twin was retired with the SMP
+  transport (etappe N-demo); N4's keystone is its Nostr twin.
 
 The transport concept this realizes is `docs/transport/concept-transport-simplex-tor.md`
 (§3.3).

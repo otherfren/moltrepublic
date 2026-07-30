@@ -1,5 +1,15 @@
 # T4 (Tor) — implementation plan (multi-agent, parallel)
 
+> **Scope note (2026-07-30, etappe N-demo):** the SMP transport this plan
+> targeted was removed in the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`). The dialer machinery it built
+> — the `Dialer` modes, socks5h, fail-closed resolve, session isolation,
+> circuit prebuild, opt-in embedded arti — is KEPT and now lives at
+> `crates/molt-net/src/dial.rs` (S3 backup dials through it today; N2 reuses
+> it to dial WebSocket relays, onion-preferred). The SMP-target sections
+> (`smp://` addressing, `SmpServer`/`SmpTransport` wiring, the SMP no-leak
+> harness) are historical.
+
 Status: **plan, not started.** Executes T4 of
 `concept-transport-simplex-tor.md` (§3.1 addressing, §4 modes, §5 circuit
 prebuild, §6 fail-closed). Written to be handed to several coding agents in

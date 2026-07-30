@@ -70,121 +70,6 @@ const ORDERED_PARK_MAX: usize = 512;
 /// 600 s, so an honest predecessor always lands well inside the window.
 pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
 
-/// Self-heal detection window (Stage 1, `docs/transport/mesh/mesh_selfheal.md`): a mesh
-/// peer whose inbound subscription is live (`SUB` accepted, not in
-/// `net_link_down`) but from which **nothing** has been heard for longer than
-/// this — measured from the LATER of its mesh-up and its last real sighting
-/// ([`State::deaf_legs`]) — reads as a live-but-deaf queue: the SMP server
-/// idle-expired it while `SUB`/`SEND` still answer `OK`, so it is silently
-/// non-delivering. Reported as `Degraded`, never a false `Ok`. Above the
-/// keepalive period ([`MESH_KEEPALIVE_SECS`]) with a safe margin (~2.5×) so a
-/// quiet-but-alive peer — which keepalive re-stamps every interval — never
-/// flaps; a truly dead or offline leg trips it after ~two missed keepalives.
-pub(crate) const MESH_DEAF_SECS: u64 = 300;
-
-/// Faster deaf window for a leg that has delivered **nothing** since it came
-/// up — a born-dead founding leg (its SMP queue was runtime-dead at birth) or
-/// a genuinely offline peer. With the immediate per-leg warm on link-up
-/// ([`State::warm_leg`]) an alive peer is heard within seconds, so a leg still
-/// silent this long is dead and should heal fast instead of sitting yellow for
-/// the full window. Well above the first-keepalive latency so an
-/// alive-but-not-yet-pinged leg is never falsely flagged (and a false rotate is
-/// harmless — it GCs its unused queue). A leg that delivered THEN went silent
-/// keeps the full [`MESH_DEAF_SECS`] to avoid flapping on a brief quiet.
-pub(crate) const MESH_DEAF_NEW_SECS: u64 = 45;
-
-/// Mesh keepalive interval (Stage 2, `docs/transport/mesh/mesh_selfheal.md`): the
-/// engine sends an idle-only MLS liveness ping to a mesh peer whose leg has
-/// gone this long without any real outbound traffic, keeping the peer's
-/// inbound queue warm on the server (and stamping the peer's `last_seen` on
-/// receipt, feeding Stage 1). Chosen well under the deaf window
-/// ([`MESH_DEAF_SECS`]) so a quiet-but-alive peer is proven live twice over
-/// before it could ever trip deaf, and conservatively under plausible SMP
-/// idle-expiry windows (which are unknown for public servers — a live
-/// 3-node test on `smp.simplex.im` idle-expired a queue inside the old 240 s
-/// interval, so the warming cadence is deliberately aggressive). The
-/// `NetMeshKeepaliveTick` ticker beats twice per interval so the effective
-/// cadence never drifts far past this.
-pub(crate) const MESH_KEEPALIVE_SECS: u64 = 120;
-
-/// Verify-at-open window (mesh verify-at-open, Fix A): when a leg's subscription
-/// comes up, this node probes the peer and — if nothing has been heard back
-/// after this many seconds (the probes went unanswered) — re-establishes the leg
-/// with a rotate, instead of waiting for the ~45 s born-dead deaf window and the
-/// 30 s presence-tick beat. Conservative: 1 RTT over SMP is sub-second, so 10 s
-/// tolerates a slow round-trip while still healing a born-dead leg in ~10 s. A
-/// false positive is harmless — the rotate GCs its unused queue on timeout.
-pub(crate) const MESH_VERIFY_SECS: u64 = 10;
-
-/// Track D window: a leg with RAW inbound activity (any frame at the transport,
-/// decoded or not) within this many seconds is treated as ALIVE — verify-at-open
-/// and the deaf detector must not rotate/churn it. Comfortably above the
-/// supervisor's 2 s raw-signal throttle, so a continuously-receiving leg always
-/// reads as receiving; a truly silent leg crosses it and rotates as before.
-pub(crate) const MESH_RECEIVING_SECS: u64 = 30;
-
-/// Minimum seconds between self-initiated **mesh rotates** for one peer
-/// (Stage 3, `docs/transport/mesh/mesh_selfheal.md`): the periodic deaf-leg detector
-/// re-evaluates every presence tick, so without a cooldown it would spawn a
-/// fresh rotate every tick while a leg stays deaf. One rotate per peer per
-/// this window is ample — it gives the announce → adopt → reply round trip
-/// time to complete (or the peer to prove it is simply offline) before
-/// another is tried.
-pub(crate) const MESH_ROTATE_COOLDOWN_SECS: u64 = 60;
-
-/// Track C — the cadence for the SLOW, scheduled queue rotation (unlinkability):
-/// each leg's inbound queue is proactively re-minted once it has been the same
-/// for this long, so a queue id is never a durable, weeks-long correlation
-/// handle (SimpleX rotates on a slow schedule). Well under any server retention
-/// window and slow enough to stay beaconless-ish
-/// (`concept-transport-simplex-tor.md` §3.4) — order of hours. One leg rotates
-/// per presence tick at most (the oldest reachable one), reusing the exact
-/// deaf-leg rotate machinery, sharing its per-peer cooldown.
-pub(crate) const MESH_ROTATE_CADENCE_SECS: u64 = 6 * 60 * 60;
-
-/// How long a rotate's off-actor task waits for the peer's reply announce on
-/// the freshly-minted queue before giving up (the leg stays deaf and the next
-/// detection re-triggers). Bounded so the task never lingers.
-const MESH_ROTATE_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// Cap of the self-heal re-announce seen-set FIFO. A nonce past the window
-/// would at worst cause one extra (cooldown-bounded) relay, never a storm.
-const SEEN_NONCES_CAP: usize = 512;
-
-/// Bounded FIFO of self-heal re-announce nonces already relayed (Stage 3
-/// loop-prevention seen-set): newest kept, oldest evicted past the cap.
-/// Runtime-only, like [`ParkedRefs`].
-#[derive(Default)]
-pub(crate) struct SeenNonces {
-    fifo: std::collections::VecDeque<u64>,
-    set: std::collections::HashSet<u64>,
-}
-
-impl SeenNonces {
-    /// Whether this nonce has already been relayed.
-    pub(crate) fn contains(&self, nonce: u64) -> bool {
-        self.set.contains(&nonce)
-    }
-
-    /// Mark a nonce relayed; evict the oldest past the cap.
-    pub(crate) fn insert(&mut self, nonce: u64) {
-        if self.set.insert(nonce) {
-            self.fifo.push_back(nonce);
-            if self.fifo.len() > SEEN_NONCES_CAP {
-                if let Some(old) = self.fifo.pop_front() {
-                    self.set.remove(&old);
-                }
-            }
-        }
-    }
-
-    /// Drop every remembered nonce (workspace close/switch boundary).
-    pub(crate) fn clear(&mut self) {
-        self.fifo.clear();
-        self.set.clear();
-    }
-}
-
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -439,23 +324,6 @@ impl EngineSink for CmdSink {
             .await;
     }
 
-    async fn probe_received(&self, member: &MemberId) {
-        let _ = self
-            .execute(Command::NetMeshWarm {
-                peer: member.clone(),
-                generation: self.generation,
-            })
-            .await;
-    }
-
-    async fn raw_inbound(&self, member: &MemberId) {
-        let _ = self
-            .execute(Command::NetRawInbound {
-                peer: member.clone(),
-                generation: self.generation,
-            })
-            .await;
-    }
 }
 
 /// The log-backed outbox source of a persisted workspace: reads pending
@@ -623,7 +491,7 @@ impl NetRuntime {
 
     /// A clone of the runtime transport, for minting a **dedicated recovery
     /// queue** off the actor. The clone shares the transport's `Arc`, so it can
-    /// both create the queue and later subscribe to it (an SMP queue's receive
+    /// both create the queue and later subscribe to it (a queue's receive
     /// credential lives in the creating transport's state — a fresh transport
     /// could send but never receive). `None` for the demo mesh (no real transport).
     pub(crate) fn runtime_transport(&self) -> Option<crate::founding::RitualTransport> {
@@ -862,11 +730,11 @@ impl State {
     /// `transport.state`: restore the MLS group, rebuild the full-mesh
     /// [`PeerLink`]s, and spawn a supervisor whose outbox is the encrypted
     /// workspace log ([`StorageLog`]) and whose cursors live in the state file
-    /// ([`FileStateStore`]). `transport` must reach the mesh queues — a fresh
-    /// [`SmpTransport`] to their server (reopen path), or the still-alive ritual
-    /// transport (right after founding, and the only option on the loopback hub,
-    /// whose queues can't be reconstructed). Returns `None` when there is no
-    /// mesh/group to run (nothing to build) or the group can't be restored.
+    /// ([`FileStateStore`]). `transport` must reach the mesh queues — the
+    /// still-alive ritual transport (right after founding, and the only option
+    /// on the loopback hub, whose queues can't be reconstructed) or the reopen
+    /// seam's re-adopted transport. Returns `None` when there is no mesh/group
+    /// to run (nothing to build) or the group can't be restored.
     pub(crate) fn build_real_net(
         &mut self,
         transport: crate::founding::RitualTransport,
@@ -928,23 +796,13 @@ impl State {
         // honest open: every mesh leg starts "connecting" (amber) until its
         // watchdog confirms the subscription with a link_up — from here on,
         // `Ok` means every INBOUND leg is live (outbound trouble surfaces on
-        // the first send attempt via NetSendFailed; SMP has no passive
-        // outbound probe). A stuck-send flag survives a same-workspace mesh
+        // the first send attempt via NetSendFailed; the transport has no
+        // passive outbound probe). A stuck-send flag survives a same-workspace mesh
         // REBUILD (extension) for members still in the mesh — clearing it
         // would launder a genuinely dead outbound leg back to green; only a
         // successful send (NetSendOk) clears it.
         self.net_link_down.clear();
         self.net_send_stuck.retain(|m, _| peer_names.contains(m));
-        // drop mesh-up stamps for members no longer in the mesh so a departed
-        // peer can never be flagged deaf (Stage 1); a continuing peer's stale
-        // stamp is harmless — it is masked by the `connecting` link-down below
-        // until its fresh subscription re-stamps it on `NetLinkUp`.
-        self.mesh_up.retain(|m, _| peer_names.contains(m));
-        // Track C: keep established_at only for current legs (a departed peer's
-        // stamp must not linger). A continuing leg keeps its stamp across this
-        // rebuild — that is the whole point (its rotation cadence is per-leg, not
-        // reset by an unrelated leg's rotate).
-        self.established_at.retain(|m, _| peer_names.contains(m));
         for p in &peer_names {
             self.net_link_down.insert(p.clone(), "connecting".to_string());
         }
@@ -1423,27 +1281,13 @@ impl State {
             }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
-            // relay) and extend this node's own mesh toward it
+            // relay) and extend this node's own mesh toward it. A nonce'd
+            // announce was the retired self-heal rotate-relay broadcast: the
+            // field stays parsed (additive-only rule — old logs carry it) but
+            // the announce is IGNORED; every current writer mints nonce-less,
+            // single-hop announces (recovery relay, bootstrap).
             WorkspaceEvent::MeshAnnounced { ct, nonce } if self.is_chain_governed() => {
-                // Stage 3 relay loop-prevention: a self-heal re-announce carries
-                // a nonce. The first time we see it, re-broadcast ONCE so a hub
-                // reaches members the announcer's own legs could not (each
-                // recipient dedups on the nonce; the announcer drops its own by
-                // the `announcer != me` check below). A copy already relayed is
-                // dropped. Recovery/bootstrap announces carry no nonce and are
-                // single-hop — adopt only, exactly as before.
-                let fresh = match nonce {
-                    Some(n) => !self.seen_announces.contains(n),
-                    None => true,
-                };
-                if fresh {
-                    if let Some(n) = nonce {
-                        self.seen_announces.insert(n);
-                        let me = self.member();
-                        let relay =
-                            self.make_env(me, WorkspaceEvent::MeshAnnounced { ct: ct.clone(), nonce });
-                        self.record(relay);
-                    }
+                if nonce.is_none() {
                     let me = self.member();
                     if let Ok(raw) = hex::decode(&ct) {
                         if let Some((announcer, plain)) =
@@ -1453,10 +1297,7 @@ impl State {
                                 if let Ok(a) =
                                     serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain)
                                 {
-                                    // a nonce'd announce is a relayed Stage-3
-                                    // rotate broadcast: reaching a member it
-                                    // carries no queue for is expected
-                                    self.spawn_mesh_extension(announcer, &a, nonce.is_some());
+                                    self.spawn_mesh_extension(announcer, &a);
                                 }
                             }
                         }
@@ -1723,8 +1564,8 @@ impl State {
 
     /// A recovery-link mint failed — either synchronously (no runtime mesh,
     /// from [`Self::cmd_recover_invite_start`] itself) or from the off-actor
-    /// provisioning task (`Command::NetRecoverLinkFailed`, e.g. the SMP server
-    /// was unreachable). Surface the calm `recovery-link-failed:` notice on the
+    /// provisioning task (`Command::NetRecoverLinkFailed`, e.g. the queue
+    /// mint failed). Surface the calm `recovery-link-failed:` notice on the
     /// same channel the minted link rides — the operator asked for a link, so
     /// silence would leave it waiting forever — and unregister the dead mint's
     /// ticket (it never left this node; nothing of the attempt stays armed).
@@ -1792,14 +1633,14 @@ impl State {
         self.reset_peer_accept_window(&announcer);
         // relay VERBATIM: each survivor decrypts (and thereby authenticates)
         // the announcer itself, exactly like the founding star relay. A
-        // recovery re-announce is single-hop over the live mesh (no nonce —
-        // the Stage 3 relay is only for self-initiated deaf-leg rotates).
+        // recovery re-announce is single-hop over the live mesh (nonce-less —
+        // nonce'd announces are the retired rotate relay and are ignored).
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::MeshAnnounced { ct, nonce: None });
         self.record(env);
         // a recovery re-announce is targeted at every survivor — no queue
-        // for us here is a real anomaly, so it stays a warn (relayed: false)
-        self.spawn_mesh_extension(announcer, &announce, false);
+        // for us here is a real anomaly, so spawn_mesh_extension warns
+        self.spawn_mesh_extension(announcer, &announce);
         Ok(Reply::Ack)
     }
 
@@ -1813,30 +1654,19 @@ impl State {
         &mut self,
         member: MemberId,
         announce: &molt_net::mesh::MeshAnnounce,
-        relayed: bool,
     ) {
         let me = self.member();
-        // send side FIRST — before the cooldown: a broadcast rotate announce
-        // aimed at another member carries no queue for this node, and burning
-        // the announcer's cooldown slot on it would make the follow-up
-        // announce that IS for us bounce off "inside the cooldown" for a full
-        // window (delivery_guarantee.md V1 — the live 3-node deaf-leg loop).
-        // The cooldown guards the expensive path (queue mint + rebuild),
-        // which a no-queue-for-us announce never reaches.
-        // Also: the announcer's primary PLUS the redundant queues it
-        // announced for us (capped). Taking only the primary here silently
-        // collapsed our outbound to N=1 on every adopted rotate/rejoin, while
-        // our own inbound stayed N — the leg decayed to half-redundancy.
+        // send side FIRST — before the cooldown: an announce that carries no
+        // queue for this node must not burn the announcer's cooldown slot, or
+        // the follow-up announce that IS for us would bounce off "inside the
+        // cooldown" for a full window (delivery_guarantee.md V1 — the live
+        // 3-node deaf-leg loop). The cooldown guards the expensive path
+        // (queue mint + rebuild), which a no-queue-for-us announce never
+        // reaches.
         let (snds, wrap_out) = match molt_net::mesh::send_targets(announce, &me) {
             Ok(t) => t,
             Err(e) => {
-                if relayed {
-                    // a relayed (nonce'd) rotate broadcast reaches every
-                    // member but targets one — not-for-us is the normal case
-                    tracing::debug!(%member, reason = %e, "mesh announce carries no usable queue for this node");
-                } else {
-                    tracing::warn!(%member, reason = %e, "mesh announce carries no usable queue for this node");
-                }
+                tracing::warn!(%member, reason = %e, "mesh announce carries no usable queue for this node");
                 return;
             }
         };
@@ -1867,48 +1697,24 @@ impl State {
             return;
         };
         tokio::spawn(async move {
-            // N fresh inbound queues (Track B redundancy) sharing ONE wrap_in, so
-            // replying to a peer's announce/rotate does not collapse OUR inbound
-            // leg to a single queue.
-            let redundancy = transport.redundancy();
-            let mut pairs = Vec::with_capacity(redundancy);
-            for _ in 0..redundancy.max(1) {
-                match transport.create_queue().await {
-                    Ok(p) => pairs.push(p),
-                    Err(e) => {
-                        tracing::warn!(%member, error = %e, "mesh-extension queue creation failed");
-                        for p in &pairs {
-                            let _ = transport.delete_queue(&p.rcv).await;
-                        }
-                        return;
-                    }
+            // one fresh per-pair inbound queue for the new leg
+            let pair = match transport.create_queue().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%member, error = %e, "mesh-extension queue creation failed");
+                    return;
                 }
-            }
+            };
             let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
-                for p in &pairs {
-                    let _ = transport.delete_queue(&p.rcv).await;
-                }
+                let _ = transport.delete_queue(&pair.rcv).await;
                 return;
             };
             let mut queues = std::collections::BTreeMap::new();
             queues.insert(
                 member.clone(),
-                molt_net::mesh::QueueHandover::of(&pairs[0].snd, &wrap_in),
+                molt_net::mesh::QueueHandover::of(&pair.snd, &wrap_in),
             );
-            let mut queues_extra = std::collections::BTreeMap::new();
-            if pairs.len() > 1 {
-                queues_extra.insert(
-                    member.clone(),
-                    pairs[1..]
-                        .iter()
-                        .map(|p| molt_net::mesh::QueueHandover::of(&p.snd, &wrap_in))
-                        .collect::<Vec<_>>(),
-                );
-            }
-            let reply = molt_net::mesh::MeshAnnounce {
-                queues,
-                queues_extra,
-            };
+            let reply = molt_net::mesh::MeshAnnounce { queues };
             let Ok(bytes) = serde_json::to_vec(&reply) else {
                 return;
             };
@@ -1922,8 +1728,8 @@ impl State {
             let Ok(payload) = serde_json::to_vec(&msg) else {
                 return;
             };
-            // the reply goes to the announcer's PRIMARY queue (per-queue FIFO
-            // puts it ahead of runtime traffic); the extras only widen the leg
+            // the reply goes to the announcer's queue (per-queue FIFO puts it
+            // ahead of runtime traffic)
             if let Err(e) = supervisor::send_framed(
                 &transport,
                 &snds[0],
@@ -1940,7 +1746,7 @@ impl State {
                 member: member.clone(),
                 snds,
                 wrap_out,
-                rcvs: pairs.iter().map(|p| p.rcv.clone()).collect(),
+                rcvs: vec![pair.rcv],
                 wrap_in,
             }
             .to_mesh();
@@ -1980,8 +1786,7 @@ impl State {
         // everything fallible is hoisted BEFORE the teardown: a failed
         // precondition must leave the old, working mesh standing (the rebuild
         // itself cannot start until the old supervisor is down — a second
-        // subscriber on the same SMP queues would supersede the first
-        // server-side)
+        // subscriber on the same queues would supersede the first)
         let member = link.member.clone();
         if PeerLink::from_mesh(&link).is_none() {
             tracing::warn!(%member, "mesh extension link is malformed — keeping the old mesh");
@@ -2045,357 +1850,6 @@ impl State {
             }
         } else {
             tracing::warn!(%member, "mesh extension rebuild failed");
-        }
-        Ok(Reply::Ack)
-    }
-
-    /// Self-initiated **mesh rotate** (mesh self-heal Stage 3): a leg to `peer`
-    /// went live-but-deaf (its inbound queue idle-expired on the server), so
-    /// this node mints a FRESH inbound queue for that peer, re-announces the
-    /// new address over the still-working legs, and — when the peer adopts and
-    /// replies onto the fresh queue — folds the reciprocal link back in through
-    /// the same `cmd_net_mesh_extended` path the recovery/dynamic-mesh flows
-    /// use. Debounced per peer ([`MESH_ROTATE_COOLDOWN_SECS`]) so the periodic
-    /// deaf-leg detector re-triggers at most one rotate per window. Off the
-    /// actor — queue creation + the reply round-trip are live.
-    pub(crate) fn cmd_net_mesh_rotate(
-        &mut self,
-        peer: MemberId,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if !self.net_scope_current(generation) {
-            return Ok(Reply::Ack);
-        }
-        let now = self.presence_now();
-        if let Some(last) = self.rotate_at.get(&peer) {
-            if now.saturating_sub(*last) < MESH_ROTATE_COOLDOWN_SECS {
-                return Ok(Reply::Ack);
-            }
-        }
-        let (transport, group) = {
-            let Some(net) = self.net.as_ref() else {
-                return Ok(Reply::Ack);
-            };
-            if !net.is_real() {
-                return Ok(Reply::Ack);
-            }
-            let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-                return Ok(Reply::Ack);
-            };
-            (transport, group)
-        };
-        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
-            return Ok(Reply::Ack);
-        };
-        // workspace scope (not mesh generation): a concurrent rebuild must not
-        // drop this rotate's fold-in — both fold into the live net
-        let scope = self.net_scope;
-        let me = self.member();
-        self.rotate_at.insert(peer.clone(), now);
-        tracing::info!(%peer, "mesh rotate: re-establishing a deaf inbound leg");
-        tokio::spawn(async move {
-            // 1) fresh per-pair inbound queue, SUBSCRIBED before the announce so
-            //    a fast reply cannot race the subscription (same discipline as
-            //    the recovery rejoin's reader)
-            // N fresh inbound queues (Track B redundancy) sharing ONE wrap_in,
-            // so a rotate PRESERVES the leg's redundancy instead of collapsing it
-            // to a single queue (a scheduled rotate of a healthy N=2 leg must not
-            // strip it to N=1). The reply arrives on the PRIMARY (index 0); the
-            // extras just widen our inbound.
-            let redundancy = transport.redundancy();
-            let Ok(wrap_in) = molt_net::WrapKey::fresh() else {
-                return;
-            };
-            let mut pairs = Vec::with_capacity(redundancy);
-            for _ in 0..redundancy.max(1) {
-                match transport.create_queue().await {
-                    Ok(p) => pairs.push(p),
-                    Err(e) => {
-                        tracing::warn!(%peer, error = %e, "mesh rotate: queue creation failed");
-                        for p in &pairs {
-                            let _ = transport.delete_queue(&p.rcv).await;
-                        }
-                        return;
-                    }
-                }
-            }
-            let mut rx = match transport.subscribe(&pairs[0].rcv).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(%peer, error = %e, "mesh rotate: subscribe failed");
-                    for p in &pairs {
-                        let _ = transport.delete_queue(&p.rcv).await;
-                    }
-                    return;
-                }
-            };
-            // 2) encrypt the re-announce (this peer → our new inbound queues) on
-            //    the SHARED runtime group (one ratchet, used in sequence) —
-            //    announce ALL N (primary + extras) so the peer sends to every one
-            let mut queues = std::collections::BTreeMap::new();
-            queues.insert(
-                peer.clone(),
-                molt_net::mesh::QueueHandover::of(&pairs[0].snd, &wrap_in),
-            );
-            let mut queues_extra = std::collections::BTreeMap::new();
-            if pairs.len() > 1 {
-                queues_extra.insert(
-                    peer.clone(),
-                    pairs[1..]
-                        .iter()
-                        .map(|p| molt_net::mesh::QueueHandover::of(&p.snd, &wrap_in))
-                        .collect::<Vec<_>>(),
-                );
-            }
-            let announce = molt_net::mesh::MeshAnnounce {
-                queues,
-                queues_extra,
-            };
-            let Ok(bytes) = serde_json::to_vec(&announce) else {
-                return;
-            };
-            let Some(ct) = group.lock().ok().and_then(|mut g| g.encrypt(&bytes).ok()) else {
-                tracing::warn!(%peer, "mesh rotate: encrypting the re-announce failed");
-                return;
-            };
-            // 3) mint a relay nonce and ask the actor to record + broadcast the
-            //    self-authored announce over every working leg
-            let mut nb = [0u8; 8];
-            if getrandom::getrandom(&mut nb).is_err() {
-                return;
-            }
-            let nonce = u64::from_le_bytes(nb);
-            let (rtx, _rrx) = oneshot::channel();
-            if cmd_tx
-                .send(Envelope {
-                    cmd: Command::NetMeshReAnnounce {
-                        ct: hex::encode(&ct),
-                        nonce,
-                        generation: Some(scope),
-                    },
-                    reply: rtx,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            // 4) await the peer's reply announce on our fresh queue (bounded),
-            //    authenticate it by decryption, and fold the reciprocal link in
-            let deadline = tokio::time::Instant::now() + MESH_ROTATE_REPLY_TIMEOUT;
-            let mut reasm = molt_net::Reassembler::new();
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                let d = match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(d)) => d,
-                    _ => {
-                        // no adopter replied (the peer is simply offline, or the
-                        // partition is total) — delete the unused fresh queue so
-                        // a peer that stays offline never leaks one server-side
-                        // queue per rotate cooldown; detection will retry later
-                        tracing::warn!(%peer, "mesh rotate: no reply before timeout — leg stays deaf, detection will retry");
-                        for p in &pairs {
-                            let _ = transport.delete_queue(&p.rcv).await;
-                        }
-                        return;
-                    }
-                };
-                let Ok(plain) = molt_net::wrap::unwrap_block(&wrap_in, &d.block) else {
-                    d.ack.ack();
-                    continue;
-                };
-                let outcome = reasm.push(&plain);
-                d.ack.ack();
-                let Ok(molt_net::chunk::PushOutcome::Complete(_, framed)) = outcome else {
-                    continue;
-                };
-                let Ok(molt_net::invite::RitualMsg::MeshAnnounce { ct: reply_ct }) =
-                    serde_json::from_slice::<molt_net::invite::RitualMsg>(&framed)
-                else {
-                    continue;
-                };
-                let Ok(raw) = hex::decode(&reply_ct) else {
-                    continue;
-                };
-                let decrypted = {
-                    let Ok(mut g) = group.lock() else {
-                        return;
-                    };
-                    match g.decrypt(&raw) {
-                        Ok(molt_net::MlsIncoming::Application { from, plaintext }) => {
-                            Some((from, plaintext))
-                        }
-                        _ => None,
-                    }
-                };
-                let Some((from, reply_plain)) = decrypted else {
-                    continue;
-                };
-                // only the peer we rotated toward may re-point our link to it
-                if from != peer {
-                    continue;
-                }
-                let Ok(reply_ann) =
-                    serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&reply_plain)
-                else {
-                    continue;
-                };
-                // send side: the peer's primary + any redundant queues it
-                // announced for us (capped — audit finding #1's ingest bound)
-                let Ok((snds, wrap_out)) = molt_net::mesh::send_targets(&reply_ann, &me) else {
-                    continue;
-                };
-                let link = PeerLink {
-                    member: peer.clone(),
-                    snds,
-                    wrap_out,
-                    // receive side: ALL N fresh queues we just minted — the
-                    // rotate preserves the leg's redundancy
-                    rcvs: pairs.iter().map(|p| p.rcv.clone()).collect(),
-                    wrap_in,
-                }
-                .to_mesh();
-                let (etx, _erx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(Envelope {
-                        cmd: Command::NetMeshExtended {
-                            link,
-                            generation: Some(scope),
-                        },
-                        reply: etx,
-                    })
-                    .await;
-                return;
-            }
-        });
-        Ok(Reply::Ack)
-    }
-
-    /// Record + broadcast this node's self-initiated mesh re-announce (mesh
-    /// self-heal Stage 3): the off-actor rotate task built the ciphertext for a
-    /// fresh inbound queue; recording it as a self-authored
-    /// `WorkspaceEvent::MeshAnnounced` fans it out over every working leg. The
-    /// nonce is marked seen so a relayed copy coming back is not re-broadcast.
-    pub(crate) fn cmd_net_re_announce(
-        &mut self,
-        ct: String,
-        nonce: u64,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if !self.net_scope_current(generation) {
-            return Ok(Reply::Ack);
-        }
-        self.seen_announces.insert(nonce);
-        let me = self.member();
-        let env = self.make_env(
-            me,
-            WorkspaceEvent::MeshAnnounced {
-                ct,
-                nonce: Some(nonce),
-            },
-        );
-        self.record(env);
-        Ok(Reply::Ack)
-    }
-
-    /// Trigger a debounced rotate for every leg the Stage 1 cross-check reports
-    /// live-but-deaf (mesh self-heal Stage 3). Called from the presence tick —
-    /// the periodic beat that also re-evaluates health — so a leg that has been
-    /// deaf longer than [`MESH_DEAF_SECS`] gets a self-initiated re-announce,
-    /// and the per-peer cooldown keeps it to one attempt per window.
-    fn rotate_deaf_legs(&mut self) {
-        for peer in self.deaf_legs() {
-            // Track D: a leg with recent RAW inbound activity is ALIVE (draining
-            // redelivery, holding future-epoch frames, …) — don't churn it with a
-            // rotate to a fresh queue; let it drain.
-            if !self.leg_receiving(&peer) {
-                let _ = self.cmd_net_mesh_rotate(peer, None);
-            }
-        }
-    }
-
-    /// Track C — the single leg due for a SCHEDULED rotation: the OLDEST
-    /// `established_at` among reachable legs that has been the same for at least
-    /// [`MESH_ROTATE_CADENCE_SECS`]. `None` if nothing is due (or every stale leg
-    /// is to an offline peer — its rotate can't complete, so defer it). Reachable
-    /// = [`Self::peer_present`], the same boundary Track A uses. Pure (no
-    /// mutation) so the selection is unit-testable without a live mesh.
-    fn stale_leg_to_rotate(&self, now: u64) -> Option<MemberId> {
-        self.mesh_up
-            .keys()
-            .filter(|m| self.peer_present(m))
-            .filter_map(|m| self.established_at.get(m).map(|e| (m.clone(), *e)))
-            .filter(|(_, est)| now.saturating_sub(*est) >= MESH_ROTATE_CADENCE_SECS)
-            .min_by_key(|(_, est)| *est)
-            .map(|(m, _)| m)
-    }
-
-    /// Track C — proactively rotate ONE stale leg's inbound queue for
-    /// unlinkability (a long-lived queue id is a long-lived correlation handle).
-    /// Birth-stamps any new leg, rotates the single oldest reachable stale one
-    /// via the existing [`Self::cmd_net_mesh_rotate`] (sharing its per-peer
-    /// cooldown with the deaf-leg / verify-at-open rotates so a leg is never
-    /// double-rotated), and resets that leg's `established_at` OPTIMISTICALLY so a
-    /// rotate that fails to complete cannot re-fire before a full cadence — the
-    /// 60 s `rotate_at` cooldown is the hard bound in between. One leg per tick
-    /// bounds the whole-mesh re-subscribe churn a rotate causes.
-    fn rotate_stale_legs(&mut self) {
-        let now = self.presence_now();
-        // birth-stamp every current leg so its cadence starts when first seen
-        let legs: Vec<MemberId> = self.mesh_up.keys().cloned().collect();
-        for m in &legs {
-            self.established_at.entry(m.clone()).or_insert(now);
-        }
-        if let Some(peer) = self.stale_leg_to_rotate(now) {
-            self.established_at.insert(peer.clone(), now);
-            tracing::info!(%peer, "scheduled queue rotation (unlinkability)");
-            let _ = self.cmd_net_mesh_rotate(peer, None);
-        }
-    }
-
-    /// Track D — whether a leg has RAW inbound activity within
-    /// [`MESH_RECEIVING_SECS`] (any frame delivered at the transport, decoded or
-    /// not). Such a leg's queue is demonstrably alive, so verify-at-open/deaf
-    /// rotation must not churn it; a truly dead/silent leg (nothing arriving)
-    /// still rotates. Never conflated with presence — a raw frame may be old
-    /// redelivery and does not prove the peer is online.
-    fn leg_receiving(&self, peer: &MemberId) -> bool {
-        self.last_raw_inbound
-            .get(peer)
-            .is_some_and(|t| self.presence_now().saturating_sub(*t) < MESH_RECEIVING_SECS)
-    }
-
-    /// RAW inbound activity on a leg (mesh reliability Track D): stamp when the
-    /// queue delivered a frame (throttled by the supervisor). Feeds
-    /// [`Self::leg_receiving`]; never touches presence or `last_seen`.
-    pub(crate) fn cmd_net_raw_inbound(
-        &mut self,
-        peer: MemberId,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation) {
-            self.last_raw_inbound.insert(peer, self.presence_now());
-        }
-        Ok(Reply::Ack)
-    }
-
-    /// The verify-at-open one-shot fired ([`Command::NetMeshVerify`], Fix A): if
-    /// the leg is still UNVERIFIED — its probes went unanswered, nothing heard
-    /// since mesh-up — re-establish it now with a rotate (fresh queue +
-    /// re-announce, the existing self-heal path), in ~`MESH_VERIFY_SECS` instead
-    /// of the ~45 s born-dead window and 30 s presence beat. A leg that has since
-    /// been heard is verified and this no-ops; a rebuilt mesh is dropped by the
-    /// generation guard, and the rotate's own cooldown bounds churn.
-    pub(crate) fn cmd_net_verify(
-        &mut self,
-        peer: MemberId,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation)
-            && self.leg_unverified(&peer)
-            && !self.leg_receiving(&peer)
-        {
-            let _ = self.cmd_net_mesh_rotate(peer, None);
         }
         Ok(Reply::Ack)
     }
@@ -2496,14 +1950,8 @@ impl State {
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
             self.net_unreachable.remove(&member);
-            // the leg just proved delivery: drop any pending rotate for it so it
-            // no longer reads as "reconnecting", and a later re-death can rotate
-            // immediately (no stale cooldown).
-            self.rotate_at.remove(&member);
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
-            // clears any live-but-deaf / reconnecting flag the self-heal
-            // cross-check had raised for this peer (Stage 1/3).
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -2533,10 +1981,7 @@ impl State {
     }
 
     /// The watchdog confirmed a member's inbound leg (subscription live):
-    /// clear its degraded state (Stage B) and stamp its **mesh-up** time so
-    /// the self-heal cross-check can tell a genuinely-delivering leg from a
-    /// live-but-deaf one (`recompute_net_health`, Stage 1). Each fresh
-    /// (re-)subscription restarts that peer's `MESH_DEAF_SECS` grace.
+    /// clear its degraded state (Stage B).
     pub(crate) fn cmd_net_link_up(
         &mut self,
         member: MemberId,
@@ -2544,38 +1989,13 @@ impl State {
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
             self.net_link_down.remove(&member);
-            self.mesh_up.insert(member.clone(), self.presence_now());
             // delivery guarantee §4.3: a (re)established leg gets an ACK right
             // away (the next presence tick flushes it), so a peer resuming or
             // rewinding trims its resend range to what this node still misses
             if self.accepted.contains_key(&member) {
                 self.ack_due.insert(member.clone(), self.presence_now());
             }
-            // verify-at-open (Fix A): probe this peer now (which also warms its
-            // inbound queue so it cannot idle-expire) and arm the T_verify
-            // one-shot — if the probes go unanswered the leg is re-established by
-            // a rotate in ~seconds, not the ~45 s born-dead window.
-            self.arm_verify(&member);
             self.recompute_net_health();
-        }
-        Ok(Reply::Ack)
-    }
-
-    /// Warm a peer back in answer to a solicited probe (mesh verify-at-open,
-    /// Fix A): a probe arrived from `peer`, so send it exactly one keepalive
-    /// (`warm_leg`) — the deterministic pong that lets the prober confirm its
-    /// leg round-trips. The probe's own arrival already stamped `peer_seen`
-    /// (the supervisor calls it alongside `probe_received`), so this only owes
-    /// the reciprocal warm. Best-effort and idempotent (a keepalive carries
-    /// nothing); a probe on a torn-down mesh is dropped by the generation guard,
-    /// and the warm-back is a keepalive, never a probe — so there is no echo.
-    pub(crate) fn cmd_net_mesh_warm(
-        &mut self,
-        peer: MemberId,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation) {
-            self.warm_leg(&peer);
         }
         Ok(Reply::Ack)
     }
@@ -2623,108 +2043,16 @@ impl State {
             .map_or(molt_core::MemberInfo::NEVER, |m| m.last_seen)
     }
 
-    /// Peers whose inbound subscription is live (`NetLinkUp` stamped a
-    /// mesh-up, and the leg is NOT in `net_link_down`) yet from which
-    /// nothing has been delivered for longer than [`MESH_DEAF_SECS`]
-    /// (`last_seen < mesh_up`): the live-but-deaf legs the SMP idle-expiry
-    /// bug produces (Stage 1). Returned sorted for a stable reason string.
-    fn deaf_legs(&self) -> Vec<MemberId> {
-        let now = self.presence_now();
-        self.mesh_up
-            .iter()
-            .filter(|(m, up)| {
-                // the leg is live (not already reported down) AND we have heard
-                // nothing from the peer for longer than the deaf window,
-                // measured from the LATER of mesh-up and the last real sighting.
-                // Using the max catches BOTH failure shapes: a leg that has
-                // delivered nothing since it came up (max = mesh_up), AND — the
-                // live-3-node case the earlier `last_seen < mesh_up` check
-                // missed — a leg that delivered for a while and then went silent
-                // when its queue idle-expired (max = last_seen, now stale).
-                // Keepalive re-stamps a healthy leg every interval, so only a
-                // truly dead or offline peer crosses the window.
-                if self.net_link_down.contains_key(*m) {
-                    return false;
-                }
-                let last = self.member_last_seen(m);
-                // never-delivered-since-mesh-up (born-dead / offline) heals on
-                // the SHORT window; delivered-then-silent (heard at or after
-                // mesh-up) uses the full window, so a brief quiet never flaps.
-                let window = if last < **up { MESH_DEAF_NEW_SECS } else { MESH_DEAF_SECS };
-                now.saturating_sub(last.max(**up)) > window
-            })
-            .map(|(m, _)| m.clone())
-            .collect()
-    }
-
-    /// Whether a leg is UP but still UNVERIFIED this incarnation: its
-    /// subscription is live (in `mesh_up`, not `net_link_down`) yet nothing has
-    /// been delivered over it since it came up (`last_seen < mesh_up`). The
-    /// single source of "unverified": the verify-at-open one-shot rotates such a
-    /// leg ([`Self::cmd_net_verify`]), and `recompute_net_health` shows it amber
-    /// "verifying" until a frame is heard.
-    fn leg_unverified(&self, peer: &MemberId) -> bool {
-        self.mesh_up.get(peer).is_some_and(|up| {
-            !self.net_link_down.contains_key(peer) && self.member_last_seen(peer) < *up
-        })
-    }
-
-    /// Track A — honest per-peer status: whether `peer`'s presence reads
-    /// online/stale (heard within [`molt_core::MemberInfo::STALE_SECS`]), so a
-    /// failing leg to it is a real alarm. A peer not seen in that window (or
-    /// never) is OFFLINE — a gentle presence state, aged out on its own pill,
-    /// never a "reconnecting" banner alarm. This is what stops one absent member
-    /// reading as a mesh-wide outage while the reachable peers deliver.
-    fn peer_present(&self, peer: &MemberId) -> bool {
-        molt_core::presence_state(self.presence_now(), self.member_last_seen(peer)) != 2
-    }
-
     /// Re-derive `session.net_health` (Track A — honest per-peer status). `Down`
     /// is the open/config path's fail-closed verdict and is NEVER overridden
     /// here. Otherwise a `Degraded` names only the REAL troubles: an inbound leg
-    /// the watchdog reported down, an outbox whose sends keep failing, or a leg
-    /// to a peer we have RECENT contact with (presence online/stale,
-    /// [`Self::peer_present`]) that then goes silent — live-but-deaf
-    /// ([`Self::deaf_legs`]) or rotated-toward-and-still-unheard. A NEVER- or
-    /// long-unheard peer is simply OFFLINE — aged out on its own presence pill,
-    /// never a banner alarm — so one absent member no longer reads as a mesh-wide
-    /// "Verbinde erneut…" while the reachable peers deliver. Only an honest
-    /// all-clear is `Ok`. Emits only on an actual change.
+    /// the watchdog reported down, or an outbox whose sends keep failing. Only
+    /// an honest all-clear is `Ok`. Emits only on an actual change.
     pub(crate) fn recompute_net_health(&mut self) {
         if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
             return;
         }
-        // the real inbound-silence alarm: a leg to a PRESENT peer (recent
-        // contact) that is live-but-deaf, or one we've rotated toward and still
-        // not heard since. A leg to an OFFLINE peer (never/long-unheard) is gentle
-        // — it shows on the presence pill, not the banner. `peer_seen` clears a
-        // peer's `rotate_at` the moment it is heard, and advances its presence.
-        let mut reconnecting: Vec<MemberId> = self
-            .deaf_legs()
-            .into_iter()
-            .filter(|m| self.peer_present(m))
-            .collect();
-        let now = self.presence_now();
-        for (m, at) in &self.rotate_at {
-            // "reconnecting" needs BOTH a pending rotate toward the peer AND no
-            // recent contact — a leg heard within the keepalive interval is
-            // demonstrably alive, so a PROACTIVE (Track C scheduled) rotate of a
-            // healthy leg must not flash a false "reconnecting" (audit finding
-            // #2). A genuinely deaf-rotated leg has been silent far longer than
-            // this (≥ MESH_DEAF_SECS), so it still alarms immediately.
-            if self.peer_present(m)
-                && self.member_last_seen(m) < *at
-                && now.saturating_sub(self.member_last_seen(m)) >= MESH_KEEPALIVE_SECS
-                && !self.net_link_down.contains_key(m)
-                && !reconnecting.contains(m)
-            {
-                reconnecting.push(m.clone());
-            }
-        }
-        let health = if self.net_link_down.is_empty()
-            && self.net_send_stuck.is_empty()
-            && reconnecting.is_empty()
-        {
+        let health = if self.net_link_down.is_empty() && self.net_send_stuck.is_empty() {
             molt_core::NetHealth::Ok
         } else {
             let parts: Vec<String> = self
@@ -2732,7 +2060,6 @@ impl State {
                 .iter()
                 .map(|(m, r)| format!("link to {m}: {r}"))
                 .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
-                .chain(reconnecting.iter().map(|m| format!("reconnecting to {m}")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -2749,19 +2076,10 @@ impl State {
     /// a silent member drifts online → stale → offline. The stamps only
     /// ever move on real traffic; reads additionally re-derive live, so
     /// the tick exists for the PUSHED session pills. It also re-evaluates
-    /// `net_health`: a live-but-deaf leg (Stage 1) fires no event of its
-    /// own, so this periodic beat is what lets its silence cross
-    /// [`MESH_DEAF_SECS`] into an honest `Degraded`.
+    /// `net_health` on the same periodic beat.
     pub(crate) fn cmd_net_presence_tick(&mut self) -> Result<Reply, MoltError> {
         self.refresh_member_pills();
         self.recompute_net_health();
-        // Stage 3: a leg that has stayed deaf past the window gets a debounced
-        // self-initiated rotate (the periodic tick is the detection beat).
-        self.rotate_deaf_legs();
-        // Track C: a HEALTHY leg whose queue has been the same past the rotation
-        // cadence gets a proactive rotate (unlinkability). One per tick, oldest
-        // reachable first; shares the rotate cooldown with the deaf-leg heal.
-        self.rotate_stale_legs();
         // WP4a: the DAILY compaction beat rides this tick (F8) — expired chat
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.
@@ -2847,58 +2165,9 @@ impl State {
         }
     }
 
-    /// Whether a mesh keepalive round is due: the idle gate (Stage 2). A
-    /// round fires only when nothing real has crossed to the mesh for
-    /// [`MESH_KEEPALIVE_SECS`] (`last_mesh_out` is stamped in
-    /// [`crate::State::record`]), so an actively-chatting mesh emits nothing
-    /// extra. Split out so the gate is unit-testable without a live mesh.
-    pub(crate) fn keepalive_due(&self, now: u64) -> bool {
-        now.saturating_sub(self.last_mesh_out) >= MESH_KEEPALIVE_SECS
-    }
-
-    /// The mesh-keepalive ticker (mesh self-heal Stage 2): if the mesh has
-    /// been idle for [`MESH_KEEPALIVE_SECS`], send a tiny MLS-encrypted
-    /// liveness ping onto EACH mesh peer's inbound queue — keeping that queue
-    /// warm on the server so it never silently idle-expires, and (because the
-    /// ping is authenticated inbound traffic) stamping the peer's `last_seen`
-    /// on receipt to feed the Stage 1 deaf-leg cross-check. The ping is a
-    /// transport-level frame, never a `WorkspaceEvent`: it touches neither the
-    /// event log nor the chain. Best-effort, off the actor; my pings keep the
-    /// peers' inbound queues warm, and reciprocally theirs keep mine warm.
-    pub(crate) fn cmd_net_mesh_keepalive_tick(&mut self) -> Result<Reply, MoltError> {
-        let now = self.presence_now();
-        if !self.keepalive_due(now) {
-            return Ok(Reply::Ack);
-        }
-        let (transport, group, peers) = {
-            let Some(net) = self.net.as_ref() else {
-                return Ok(Reply::Ack);
-            };
-            if !net.is_real() {
-                return Ok(Reply::Ack);
-            }
-            let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-                return Ok(Reply::Ack);
-            };
-            let peers: Vec<PeerLink> = net.mesh().iter().filter_map(PeerLink::from_mesh).collect();
-            (transport, group, peers)
-        };
-        if peers.is_empty() {
-            return Ok(Reply::Ack);
-        }
-        for peer in peers {
-            Self::spawn_keepalive(transport.clone(), group.clone(), peer);
-        }
-        // count this round as mesh traffic so the gate paces to the interval
-        self.last_mesh_out = now;
-        Ok(Reply::Ack)
-    }
-
     /// Encrypt one control `payload` on the SHARED group and send it onto
     /// `peer`'s inbound queue (best-effort). The single send path for the
-    /// control frames: [`molt_net::MESH_KEEPALIVE_TAG`] (warm the queue /
-    /// prove liveness), [`molt_net::MESH_PROBE_TAG`] (verify-at-open: also
-    /// solicit a warm-back) and [`molt_net::MESH_ACK_TAG`]`‖window` (the
+    /// control frames — today [`molt_net::MESH_ACK_TAG`]`‖window` (the
     /// delivery guarantee's ACK, §4.3).
     async fn send_ping(
         transport: crate::founding::RitualTransport,
@@ -2920,111 +2189,12 @@ impl State {
         if getrandom::getrandom(&mut idb).is_err() {
             return;
         }
-        // Stage 2a: ping the primary queue. Stage 2b fans the one ciphertext to
-        // all `peer.snds` (reusing `ct`) so a keepalive warms EVERY redundant
-        // queue, not just the primary.
         if let Err(e) =
             supervisor::send_framed(&transport, peer.snd0(), &peer.wrap_out, molt_net::MsgId(idb), &ct)
                 .await
         {
             tracing::debug!(member = %peer.member, error = %e, "mesh ping send failed");
         }
-    }
-
-    /// Spawn one keepalive ping off the actor (the periodic round and the
-    /// warm-back that answers a probe).
-    fn spawn_keepalive(
-        transport: crate::founding::RitualTransport,
-        group: Arc<Mutex<molt_net::MlsMember>>,
-        peer: PeerLink,
-    ) {
-        tokio::spawn(Self::send_ping(transport, group, peer, molt_net::MESH_KEEPALIVE_TAG.to_vec()));
-    }
-
-    /// Warm one peer's inbound queue immediately (mesh self-heal): send a
-    /// single keepalive the moment that leg's subscription confirms, so the
-    /// queue can never idle-expire in the gap between mesh-up and the first
-    /// keepalive tick — the born-dead-at-founding window. Best-effort; a leg
-    /// whose queue is genuinely dead still fails here and is healed by the
-    /// fast deaf-window rotate.
-    fn warm_leg(&self, member: &MemberId) {
-        let Some(net) = self.net.as_ref() else {
-            return;
-        };
-        if !net.is_real() {
-            return;
-        }
-        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-            return;
-        };
-        let Some(peer) = net
-            .mesh()
-            .iter()
-            .find(|l| l.member == *member)
-            .and_then(PeerLink::from_mesh)
-        else {
-            return;
-        };
-        Self::spawn_keepalive(transport, group, peer);
-    }
-
-    /// Verify-at-open (Fix A): probe `member`'s leg now and once more mid-window,
-    /// then arm the [`MESH_VERIFY_SECS`] one-shot ([`Command::NetMeshVerify`]). A
-    /// healthy peer answers a probe with a warm-back within one round trip (its
-    /// `last_seen` advances past mesh-up → the leg verifies → the one-shot
-    /// no-ops); a born-dead leg's probes go unanswered and the one-shot rotates
-    /// it in ~seconds instead of the ~45 s deaf window. The probe doubles as the
-    /// queue warm (traffic keeps the peer's inbound alive). Off the actor
-    /// (best-effort), modelled on the rotate task; a rebuilt mesh drops the stale
-    /// one-shot via the generation guard.
-    fn arm_verify(&self, member: &MemberId) {
-        let Some(net) = self.net.as_ref() else {
-            return;
-        };
-        if !net.is_real() {
-            return;
-        }
-        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-            return;
-        };
-        let Some(peer) = net
-            .mesh()
-            .iter()
-            .find(|l| l.member == *member)
-            .and_then(PeerLink::from_mesh)
-        else {
-            return;
-        };
-        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
-            return;
-        };
-        let generation = self.net_generation;
-        let half = std::time::Duration::from_secs(MESH_VERIFY_SECS) / 2;
-        let peer_name = member.clone();
-        tokio::spawn(async move {
-            // probe now, and once more mid-window — a solicited warm-back lets us
-            // confirm the leg round-trips even if the peer's own warm was lost
-            Self::send_ping(
-                transport.clone(),
-                group.clone(),
-                peer.clone(),
-                molt_net::MESH_PROBE_TAG.to_vec(),
-            )
-            .await;
-            tokio::time::sleep(half).await;
-            Self::send_ping(transport, group, peer, molt_net::MESH_PROBE_TAG.to_vec()).await;
-            tokio::time::sleep(half).await;
-            let (tx, _rx) = oneshot::channel();
-            let _ = cmd_tx
-                .send(Envelope {
-                    cmd: Command::NetMeshVerify {
-                        peer: peer_name,
-                        generation: Some(generation),
-                    },
-                    reply: tx,
-                })
-                .await;
-        });
     }
 
     /// Record a real sighting on the active workspace entry's pill. The
@@ -3160,7 +2330,6 @@ fn spawn_demo_peer(
         false,
         Some(net),
         None,
-        false,
         false,
         false,
         None,
@@ -3566,141 +2735,6 @@ mod tests {
         );
     }
 
-    // --- Stage 1 self-heal: honest health for a live-but-deaf leg ----------
-
-    /// Track A — honest per-peer status: a fresh leg to a peer we have NOT heard
-    /// (its presence is offline) is GENTLE — `net_health` stays `Ok` and the peer
-    /// shows offline on its own pill. A never-heard peer is never a "reconnecting"
-    /// banner alarm; only a peer with recent contact that then fails is. (This is
-    /// what stops one offline member reading as a mesh-wide "Verbinde erneut…".)
-    #[test]
-    fn a_fresh_live_leg_to_an_offline_peer_is_gentle() {
-        let mut st = presence_fixture();
-        // bob's leg comes live at T, but bob has never been heard (presence offline)
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "an unheard (offline) peer's fresh leg is gentle, not a banner alarm"
-        );
-    }
-
-    /// Verify-at-open decision (Phase 3): a leg is UNVERIFIED the instant its
-    /// subscription comes up (nothing heard yet) and clears the moment a frame is
-    /// delivered; a leg the watchdog reports down is NOT counted unverified (it
-    /// has its own reason), and an unknown peer is never a leg. This predicate
-    /// gates both the `NetMeshVerify` one-shot's rotate and the amber "verifying".
-    #[test]
-    fn leg_unverified_tracks_link_up_and_delivery() {
-        let mut st = presence_fixture();
-        // no mesh_up yet → not a leg at all
-        assert!(!st.leg_unverified(&"bob".to_string()), "no leg before link_up");
-        // link comes up, nothing heard over it → unverified
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert!(st.leg_unverified(&"bob".to_string()), "a fresh live leg is unverified");
-        // a frame finally lands → verified, stays verified
-        st.clock_override = Some(T + 5);
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard");
-        assert!(!st.leg_unverified(&"bob".to_string()), "a heard leg is verified");
-        // a leg the resubscribe watchdog reports down is not ALSO "unverified"
-        // (the down reason wins; verify must not rotate a leg already re-dialing)
-        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        assert!(st.leg_unverified(&"cid".to_string()), "cid is up but unheard");
-        st.cmd_net_link_down("cid".to_string(), "subscription ended".to_string(), None)
-            .expect("ack");
-        assert!(!st.leg_unverified(&"cid".to_string()), "a down leg is not 'unverified'");
-    }
-
-    /// Track D: a leg with recent RAW inbound activity (a frame at the transport,
-    /// decoded or not) reads as RECEIVING — its queue is demonstrably alive, so
-    /// the verify rotate is gated off (`leg_unverified && !leg_receiving`) even
-    /// while the leg is still UNVERIFIED. Raw activity is NOT presence: it doesn't
-    /// prove the peer is online (may be old redelivery), so the leg stays
-    /// unverified. It ages out after `MESH_RECEIVING_SECS` so a leg that goes
-    /// truly silent rotates again.
-    #[test]
-    fn a_receiving_leg_is_alive_and_gates_off_the_verify_rotate() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert!(st.leg_unverified(&"bob".to_string()), "unverified (nothing decoded)");
-        assert!(!st.leg_receiving(&"bob".to_string()), "no raw activity yet → not receiving");
-        // a raw frame lands on bob's queue (e.g. a redelivered duplicate): the
-        // queue is alive though nothing decoded → receiving, and the verify
-        // rotate's `leg_unverified && !leg_receiving` is now false
-        st.cmd_net_raw_inbound("bob".to_string(), None).expect("ack");
-        assert!(st.leg_receiving(&"bob".to_string()), "raw activity → receiving");
-        assert!(
-            st.leg_unverified(&"bob".to_string()),
-            "raw activity is not presence — the leg is still unverified"
-        );
-        // it ages out: a leg that stops receiving past the window is rotatable again
-        st.clock_override = Some(T + super::MESH_RECEIVING_SECS + 1);
-        assert!(!st.leg_receiving(&"bob".to_string()), "raw activity aged out → rotatable");
-    }
-
-    /// Track C: the scheduled-rotation selection picks the OLDEST reachable leg
-    /// whose queue has been the same past the cadence. `established_at` (queue
-    /// age) and presence (`last_seen`) are INDEPENDENT: a leg can be recently
-    /// heard (present) yet have a long-lived queue that is due to rotate.
-    #[test]
-    fn scheduled_rotation_picks_the_oldest_reachable_stale_leg() {
-        let mut st = presence_fixture();
-        let cadence = super::MESH_ROTATE_CADENCE_SECS;
-        let now = T + cadence + 5_000;
-        // both legs are UP and RECENTLY heard (present)…
-        st.clock_override = Some(now - 60);
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
-        st.cmd_net_peer_seen("cid".to_string(), None).expect("seen");
-        // …but their QUEUES were minted long ago — bob's older than cid's
-        st.established_at.insert("bob".to_string(), now - cadence - 200);
-        st.established_at.insert("cid".to_string(), now - cadence - 100);
-        st.clock_override = Some(now);
-        assert_eq!(
-            st.stale_leg_to_rotate(now),
-            Some("bob".to_string()),
-            "the oldest reachable stale leg is chosen"
-        );
-
-        // a fresh queue (well within the cadence) is NOT rotated
-        st.established_at.insert("bob".to_string(), now - 10);
-        st.established_at.insert("cid".to_string(), now - 20);
-        assert_eq!(st.stale_leg_to_rotate(now), None, "no leg is past the cadence");
-    }
-
-    /// Track C: a leg to an OFFLINE peer is NOT scheduled-rotated even when its
-    /// queue is stale — the rotate's adopt handshake can't complete, so defer it
-    /// (the same partial-availability rule as verify-at-open). A reachable stale
-    /// leg is still chosen.
-    #[test]
-    fn scheduled_rotation_defers_an_offline_leg() {
-        let mut st = presence_fixture();
-        let cadence = super::MESH_ROTATE_CADENCE_SECS;
-        let now = T + cadence + 5_000;
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        // bob was heard LONG ago (offline now); cid heard recently (present)
-        st.clock_override = Some(now - 4_000); // > STALE window → bob offline at `now`
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
-        st.clock_override = Some(now - 60);
-        st.cmd_net_peer_seen("cid".to_string(), None).expect("seen");
-        // both queues are stale
-        st.established_at.insert("bob".to_string(), now - cadence - 300);
-        st.established_at.insert("cid".to_string(), now - cadence - 100);
-        st.clock_override = Some(now);
-        assert!(!st.peer_present(&"bob".to_string()), "bob is offline");
-        assert_eq!(
-            st.stale_leg_to_rotate(now),
-            Some("cid".to_string()),
-            "the offline leg is deferred; the reachable stale leg is chosen"
-        );
-
-        // if the ONLY stale leg is offline, nothing rotates
-        st.established_at.insert("cid".to_string(), now - 10); // cid fresh
-        assert_eq!(st.stale_leg_to_rotate(now), None, "an offline stale leg is not rotated");
-    }
-
     /// §4.3: the ACK flush takes only DUE deadlines (future ones stay armed),
     /// and a (re)established leg arms an immediate ack only when there is a
     /// window to report.
@@ -3730,10 +2764,10 @@ mod tests {
         assert_eq!(st.ack_due.get("bob"), Some(&T), "bob's window arms a due-now ack");
     }
 
-    /// V1 (delivery_guarantee.md): a broadcast rotate announce that carries no
-    /// queue for THIS node must not burn the announcer's extension cooldown —
-    /// the follow-up announce that IS for us (moments later) must still adopt.
-    /// A repeated VALID announce inside the window stays capped as before.
+    /// V1 (delivery_guarantee.md): an announce that carries no queue for THIS
+    /// node must not burn the announcer's extension cooldown — the follow-up
+    /// announce that IS for us (moments later) must still adopt. A repeated
+    /// VALID announce inside the window stays capped as before.
     #[test]
     fn an_announce_without_our_queue_does_not_burn_the_cooldown() {
         let mut st = presence_fixture();
@@ -3743,13 +2777,11 @@ mod tests {
             queue: queue.to_string(),
             wrap: hex::encode([7u8; 32]),
         };
-        // bob rotates toward cid — the relayed broadcast reaches ada
-        // without any queue for ada
+        // bob's announce reaches ada without any queue for ada
         let mut queues = std::collections::BTreeMap::new();
         queues.insert("cid".to_string(), handover("aa"));
-        let for_cid =
-            molt_net::mesh::MeshAnnounce { queues, queues_extra: Default::default() };
-        st.spawn_mesh_extension("bob".to_string(), &for_cid, true);
+        let for_cid = molt_net::mesh::MeshAnnounce { queues };
+        st.spawn_mesh_extension("bob".to_string(), &for_cid);
         assert!(
             !st.mesh_extension_at.contains_key("bob"),
             "an announce carrying nothing for us must not stamp the cooldown"
@@ -3758,9 +2790,8 @@ mod tests {
         st.clock_override = Some(T + 5);
         let mut queues = std::collections::BTreeMap::new();
         queues.insert("ada".to_string(), handover("bb"));
-        let for_ada =
-            molt_net::mesh::MeshAnnounce { queues, queues_extra: Default::default() };
-        st.spawn_mesh_extension("bob".to_string(), &for_ada, true);
+        let for_ada = molt_net::mesh::MeshAnnounce { queues };
+        st.spawn_mesh_extension("bob".to_string(), &for_ada);
         assert_eq!(
             st.mesh_extension_at.get("bob"),
             Some(&(T + 5)),
@@ -3768,270 +2799,12 @@ mod tests {
         );
         // a REPEATED valid announce inside the window is still ignored (churn cap)
         st.clock_override = Some(T + 10);
-        st.spawn_mesh_extension("bob".to_string(), &for_ada, true);
+        st.spawn_mesh_extension("bob".to_string(), &for_ada);
         assert_eq!(
             st.mesh_extension_at.get("bob"),
             Some(&(T + 5)),
             "a rapid repeat stays capped — the stamp is not refreshed"
         );
-    }
-
-    /// Track C: the tick birth-stamps a newly-seen leg, so a just-established
-    /// mesh is not rotated until a full cadence has passed (no churn at open).
-    #[test]
-    fn a_fresh_leg_is_birth_stamped_not_immediately_rotated() {
-        let mut st = presence_fixture();
-        st.clock_override = Some(T);
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
-        assert!(!st.established_at.contains_key("bob"), "not stamped before the first tick");
-        // a tick shortly after open birth-stamps the leg and rotates nothing
-        st.clock_override = Some(T + 30);
-        st.cmd_net_presence_tick().expect("tick");
-        assert_eq!(st.established_at.get("bob"), Some(&(T + 30)), "birth-stamped on the tick");
-        assert!(!st.rotate_at.contains_key("bob"), "a fresh leg is not rotated");
-    }
-
-    /// Track A: a NEVER-heard leg stays GENTLE even past the deaf window — an
-    /// offline peer is not a banner alarm (contrast a HEARD-then-silent leg,
-    /// which IS one: `a_leg_that_delivered_then_went_silent_goes_degraded`). The
-    /// born-dead HEAL still fires — the leg is `deaf_legs` for the rotate trigger
-    /// — but the banner stays `Ok` while presence shows the peer offline.
-    #[test]
-    fn a_never_heard_leg_stays_gentle_past_the_deaf_window() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // never heard
-        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
-        st.cmd_net_presence_tick().expect("tick");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a never-heard (offline) peer stays gentle — no reconnecting alarm"
-        );
-        // still deaf for the HEAL path (the background rotate keeps trying)
-        assert!(
-            st.deaf_legs().contains(&"bob".to_string()),
-            "the born-dead leg is still deaf for the rotate trigger"
-        );
-    }
-
-    /// The live-3-node regression (config2 stopped receiving from config3): a
-    /// leg that delivered for a while and THEN went silent (its queue expired
-    /// on the server) MUST be flagged deaf. The earlier build measured only
-    /// `last_seen < mesh_up`, so once a leg had delivered anything its
-    /// `last_seen` moved past `mesh_up` and a later death slipped through the
-    /// detector forever — `net_health` stayed a false `Ok` and the rotate
-    /// never fired.
-    #[test]
-    fn a_leg_that_delivered_then_went_silent_goes_degraded() {
-        let mut st = presence_fixture();
-        // bob's leg comes live and delivers a frame: last_seen advances PAST
-        // mesh_up — exactly the shape the old `last_seen < mesh_up` check missed
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.clock_override = Some(T + 100);
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard once");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a leg still delivering is healthy"
-        );
-        // then the queue dies: nothing more is heard for a whole deaf window
-        st.clock_override = Some(T + 100 + super::MESH_DEAF_SECS + 1);
-        st.cmd_net_presence_tick().expect("tick");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("bob"), "names the now-deaf peer: {reason}");
-            }
-            other => panic!("expected Degraded for the died leg, got {other:?}"),
-        }
-    }
-
-    /// Fast heal: a leg that has delivered NOTHING since coming up (born-dead)
-    /// is flagged `deaf_legs` (the rotate trigger) on the SHORT window, while a
-    /// leg that delivered once and then went quiet keeps the full window (no
-    /// flapping). This drives the background HEAL, independent of the banner
-    /// (Track A: a never-heard peer is gentle on the banner, still healed here).
-    #[test]
-    fn a_never_delivered_leg_heals_on_the_fast_window() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // never heard
-        st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        st.cmd_net_peer_seen("cid".to_string(), None).expect("cid delivered at T");
-        // just past the FAST window, far under the full window
-        st.clock_override = Some(T + super::MESH_DEAF_NEW_SECS + 1);
-        let deaf = st.deaf_legs();
-        assert!(deaf.contains(&"bob".to_string()), "the born-dead leg trips the fast window");
-        assert!(
-            !deaf.contains(&"cid".to_string()),
-            "a delivered-then-quiet leg keeps the full window"
-        );
-    }
-
-    /// Honest heal state: a leg to a PRESENT peer (recent contact) that we've
-    /// rotated toward and still not heard since reads `Degraded` "reconnecting".
-    /// (A rotate toward an OFFLINE peer is gentle — Track A.) It clears to `Ok`
-    /// the moment the peer is actually heard again.
-    #[test]
-    fn a_rotated_leg_that_has_not_delivered_reads_reconnecting() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
-        // bob WAS heard (present); we rotate toward it and it then stays silent
-        // PAST the keepalive interval — a real reconnect to an online peer.
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard at T"); // present, last_seen=T
-        // audit finding #2: a rotate followed by a FRESH sighting (heard within
-        // the keepalive interval) is NOT reconnecting — the leg is demonstrably
-        // alive (a proactive Track C rotate of a healthy leg must not flash it).
-        st.clock_override = Some(T + 1);
-        st.rotate_at.insert("bob".to_string(), T + 1);
-        st.recompute_net_health();
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a just-heard leg is not 'reconnecting' merely because we rotated toward it"
-        );
-        // …but once it has been SILENT past the keepalive interval, the pending
-        // rotate reads reconnecting (a genuine reconnect to an online peer).
-        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS + 1);
-        st.recompute_net_health();
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("bob") && reason.contains("reconnecting"), "{reason}");
-            }
-            other => panic!("expected Degraded reconnecting, got {other:?}"),
-        }
-        // the peer delivers again → drops the rotate → honest Ok
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivered");
-        assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
-        assert!(!st.rotate_at.contains_key("bob"), "delivery drops the pending rotate");
-    }
-
-    /// A leg that keeps being heard from stays `Ok`: a sighting after
-    /// mesh-up advances `last_seen` past it, so the deaf cross-check never
-    /// fires — only genuinely silent legs trip it.
-    #[test]
-    fn a_leg_heard_from_since_mesh_up_stays_ok() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up = T
-        // halfway through the window bob is heard from
-        st.clock_override = Some(T + super::MESH_DEAF_SECS / 2);
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
-        // past the window: last_seen >= mesh_up, so bob is not deaf
-        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
-        st.cmd_net_presence_tick().expect("tick");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a peer heard from since mesh-up is healthy"
-        );
-    }
-
-    /// A reconnecting leg (a PRESENT peer that went silent) clears the moment an
-    /// authenticated frame finally lands: `peer_seen` advances `last_seen` and
-    /// re-derives health to `Ok`.
-    #[test]
-    fn a_deaf_leg_clears_when_a_frame_finally_lands() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        // bob was heard (present), then goes silent past the deaf window → a real
-        // reconnecting alarm (a present peer we lost contact with)
-        st.clock_override = Some(T + 10);
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("heard once");
-        st.clock_override = Some(T + 10 + super::MESH_DEAF_SECS + 1); // silent, still within STALE
-        st.cmd_net_presence_tick().expect("tick");
-        assert!(
-            matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
-            "a present peer gone silent is a reconnecting alarm"
-        );
-        // a fresh frame from bob finally arrives
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
-        assert_eq!(
-            st.session.net_health,
-            molt_core::NetHealth::Ok,
-            "a landed frame clears the reconnecting alarm"
-        );
-    }
-
-    /// A leg the resubscribe watchdog already reports `down` is not ALSO
-    /// double-counted as deaf — the cross-check only judges *live*
-    /// subscriptions, so the reason is the watchdog's, once.
-    #[test]
-    fn a_watchdog_down_leg_is_not_double_flagged_as_deaf() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack"); // mesh_up stamped
-        st.cmd_net_link_down("bob".to_string(), "subscription ended".to_string(), None)
-            .expect("ack");
-        st.clock_override = Some(T + super::MESH_DEAF_SECS + 1);
-        st.cmd_net_presence_tick().expect("tick");
-        match &st.session.net_health {
-            molt_core::NetHealth::Degraded { reason } => {
-                assert!(reason.contains("subscription ended"), "the down reason wins: {reason}");
-                assert!(
-                    !reason.contains("reconnecting"),
-                    "a down leg is not also flagged reconnecting: {reason}"
-                );
-            }
-            other => panic!("expected Degraded, got {other:?}"),
-        }
-    }
-
-    /// Stage 2 idle gate: a keepalive round is due only after
-    /// `MESH_KEEPALIVE_SECS` of no real mesh output; recent output (stamped
-    /// into `last_mesh_out` by `record`) suppresses it, so an actively
-    /// chatting mesh sends zero extra frames.
-    #[test]
-    fn the_keepalive_idle_gate_fires_only_after_the_interval() {
-        let mut st = presence_fixture();
-        // fresh: last_mesh_out is 0, so a keepalive is due immediately (the
-        // mesh has never sent — its queues need warming from the start)
-        assert!(st.keepalive_due(st.presence_now()), "an idle mesh is due");
-        // a real outbound just crossed the wire
-        st.last_mesh_out = T;
-        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS - 1);
-        assert!(
-            !st.keepalive_due(st.presence_now()),
-            "recent real output suppresses the ping"
-        );
-        st.clock_override = Some(T + super::MESH_KEEPALIVE_SECS);
-        assert!(
-            st.keepalive_due(st.presence_now()),
-            "past the interval a keepalive is due again"
-        );
-    }
-
-    /// Stage 3 relay loop-prevention: the seen-set dedups a nonce, evicts the
-    /// oldest past the cap, and clears wholesale at the workspace boundary.
-    #[test]
-    fn seen_nonces_dedups_evicts_oldest_and_clears() {
-        let mut seen = super::SeenNonces::default();
-        assert!(!seen.contains(7));
-        seen.insert(7);
-        seen.insert(7); // idempotent — still one entry
-        assert!(seen.contains(7));
-        // fill exactly to the cap with fresh nonces; 7 is now the oldest and
-        // one more insert must evict it
-        let cap = u64::try_from(super::SEEN_NONCES_CAP).expect("cap fits u64");
-        for n in 0..cap {
-            seen.insert(1000 + n);
-        }
-        assert!(!seen.contains(7), "the oldest nonce evicts once the cap is exceeded");
-        assert!(
-            seen.contains(1000 + cap - 1),
-            "the most recent nonces are kept"
-        );
-        seen.clear();
-        assert!(!seen.contains(1000), "clear drops every remembered nonce");
-    }
-
-    /// The mesh-up map is active-workspace scope: the close/switch boundary
-    /// clears it so a stale stamp never makes the next workspace's peer look
-    /// deaf.
-    #[test]
-    fn mesh_up_does_not_leak_past_a_workspace_reset() {
-        let mut st = presence_fixture();
-        st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert!(!st.mesh_up.is_empty());
-        st.reset_workspace_state();
-        assert!(st.mesh_up.is_empty(), "the boundary clears mesh-up stamps");
     }
 
     /// A send-failure pin is scoped to the workspace: closing/resetting the

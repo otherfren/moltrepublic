@@ -71,9 +71,8 @@ struct DeafWindow {
 async fn deaf_window(root_a: &std::path::Path) -> (DeafWindow, molt_engine::WalletHandle) {
     let (a, hub, member_mesh, member_mls, id) = found_with_mesh(root_a).await;
     a.execute(Command::CreateFinish).await.expect("enter");
-    let molt_engine::RitualTransport::Loopback(loopback) = &hub else {
-        panic!("found_with_mesh runs on the loopback hub");
-    };
+    // the ritual transport is loopback-only in this build (single-variant enum)
+    let molt_engine::RitualTransport::Loopback(loopback) = &hub;
     let hub_ctl = loopback.hub();
 
     // the member's runtime supervisor; the test doubles as its "engine":

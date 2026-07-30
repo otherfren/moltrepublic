@@ -1,5 +1,13 @@
 # Dynamic Mesh Membership
 
+> **Scope note (2026-07-30, etappe N-demo):** the SMP transport was removed in
+> the Nostr transport replacement (`docs/transport/nostr_transport_marmot.md`).
+> The queue-ROTATION machinery that reused this announce shape (Stage-3
+> deaf-leg rotate, Track C, the nonce'd relayed announce) is deleted and
+> historical. The mesh-extension/recovery path this document describes stays
+> LIVE behavior over the loopback transport until N4/N5 replace it with the
+> Nostr ritual/runtime.
+
 *Status: IMPLEMENTED 2026-07-09 for the recovered-seat case, end to end
 (rejoiner `rejoin_mesh`; coordinator window + relay; survivor extension +
 supervisor rebuild + grown-mesh persist; rejoiner engine standup). Proven live

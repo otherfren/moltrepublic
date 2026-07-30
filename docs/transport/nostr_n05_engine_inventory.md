@@ -1,5 +1,10 @@
 # N0.5 — Engine-side refactor map for the second transport (Nostr/NIP-EE)
 
+> **Update (2026-07-30):** etappe N-demo has executed — the DELETE/FORK
+> verdicts for the SMP machinery below are now applied (SMP is gone; the
+> loopback mesh bootstrap survives until N4/N5). The doc stays as the N1+
+> build map; re-verify anchors against the post-demolition tree.
+
 Status: **DONE 2026-07-29** (the N0.5 etappe of `nostr_transport_marmot.md`).
 Read-only inventory of how `molt-engine` must fork to carry a group-broadcast
 Nostr runtime beside the SMP per-pair-queue mesh. Verdicts: **FORK** (kind-

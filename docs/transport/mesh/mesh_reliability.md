@@ -1,5 +1,11 @@
 # Design: SimpleX-level mesh reliability — honest status, redundancy, rotation
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`). Kept as the record of the
+> per-pair-mesh reliability struggle — the measurements here are a core part
+> of why SMP was left.
+
 Status: **DISCUSSION DRAFT 2026-07-21.** Grounded in a live measurement against
 the real Test12 on `smp8.simplex.im` (3 nodes classic/dark/brutal). Read
 `docs/transport/mesh/mesh_probe.md`, `docs/transport/mesh/mesh_selfheal.md`,

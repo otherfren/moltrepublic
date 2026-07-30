@@ -21,14 +21,14 @@
 //!   [`ArtiShared::connect`] on first use ([`tokio::sync::OnceCell`]), and is
 //!   *not* cached on failure — a transient bootstrap error is retried on the
 //!   next dial.
-//! * **Per-server-host stream isolation.** Each SMP server host gets its own
+//! * **Per-host stream isolation.** Each remote host gets its own
 //!   [`IsolationToken`] (minted once, stable thereafter), so arti puts each on
-//!   its own circuit — two of our queues never share an exit / timing
+//!   its own circuit — two of our connections never share an exit / timing
 //!   fingerprint (concept §4/§5). The same host reuses one circuit.
 //! * **State dir `~/.moltrepublic/arti`** (concept §4), split into `state` and
 //!   `cache` subdirs, created on bootstrap.
 //!
-//! [`Dialer::resolve`]: crate::smp::tls::Dialer::resolve
+//! [`Dialer::resolve`]: crate::dial::Dialer::resolve
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,8 +45,8 @@ use crate::NetError;
 static SHARED: OnceLock<Arc<ArtiShared>> = OnceLock::new();
 
 /// The process-wide embedded-Tor state: one lazily-bootstrapped [`TorClient`]
-/// reused across every dial, plus a per-server-host [`IsolationToken`] map so
-/// each SMP server rides its own Tor circuit (stream isolation, concept §4/§5).
+/// reused across every dial, plus a per-host [`IsolationToken`] map so each
+/// remote host rides its own Tor circuit (stream isolation, concept §4/§5).
 pub struct ArtiShared {
     /// The bootstrapped arti client, created lazily on the first dial (bootstrap
     /// is slow, so `resolve` stays synchronous). `get_or_try_init` caches only
@@ -67,7 +67,7 @@ impl ArtiShared {
     }
 
     /// The isolation token for `host`, minted on first use and stable
-    /// thereafter — so every SMP server host gets its own Tor circuit and the
+    /// thereafter — so every remote host gets its own Tor circuit and the
     /// same host reuses one (concept §4/§5).
     pub fn token_for(&self, host: &str) -> IsolationToken {
         let mut map = self.iso.lock().expect("arti isolation map mutex poisoned");
@@ -83,8 +83,8 @@ impl ArtiShared {
 
     /// Dial `host:port` over the embedded Tor client, on the host's own circuit.
     /// The host is resolved **in-circuit** (no local DNS). The returned
-    /// [`DataStream`] is `AsyncRead + AsyncWrite + Unpin + Send`, so the SMP
-    /// TLS handshake rides straight over it.
+    /// [`DataStream`] is `AsyncRead + AsyncWrite + Unpin + Send`, so a TLS
+    /// handshake rides straight over it.
     pub async fn connect(&self, host: &str, port: u16) -> Result<DataStream, NetError> {
         let client = self.client().await?;
         let token = self.token_for(host);
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn per_server_isolation_yields_distinct_circuits() {
-        // distinct SMP server hosts get distinct isolation tokens (⇒ distinct
+        // distinct remote hosts get distinct isolation tokens (⇒ distinct
         // Tor circuits); the same host reuses one (concept §4/§5). Pure — no
         // network, no bootstrap.
         let shared = ArtiShared::new();
@@ -196,7 +196,7 @@ mod tests {
     #[ignore = "live tor: full bootstrap + dial needs the real Tor network"]
     async fn dialer_arti_dials_an_smp_host() {
         // end-to-end: bootstrap the embedded client and open a Tor circuit to a
-        // known SMP host. Ignored by default (needs live Tor + network egress).
+        // known live host. Ignored by default (needs live Tor + network egress).
         let shared = ArtiShared::new();
         let stream = shared.connect("smp.konkin.io", 5223).await;
         assert!(stream.is_ok(), "arti dial failed: {stream:?}");

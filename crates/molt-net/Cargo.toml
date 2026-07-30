@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "molt-net"
-description = "The transport layer: MLS-protected payloads over SMP-style queues. T1 scope: Transport trait, uniform-block framing (chunker, per-queue wrapping), LoopbackTransport with chaos harness, and the log-backed outbox supervisor."
+description = "The transport layer: MLS-protected payloads over queue transports (loopback today, Nostr relays in build). Transport trait, uniform-block framing (chunker, per-queue wrapping), LoopbackTransport with chaos harness, the log-backed outbox supervisor, and the fail-closed Tor dialer."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 [features]
 # Embedded in-process Tor via arti (transport concept §4, T4 §P3). Default
 # OFF so the reproducible core build stays lean and the default Cargo.lock is
-# unperturbed. The cfg-gated `Dialer::Arti` scaffolding (smp/tls.rs) + the
+# unperturbed. The cfg-gated `Dialer::Arti` scaffolding (dial.rs) + the
 # arti bootstrap (tor_embedded.rs) compile ONLY under this feature.
 #
 # **B2 RESOLVED (2026-07-11): the C dependency is ACCEPTED, opt-in only.**
@@ -33,8 +33,10 @@ workspace = true
 # features = ["tokio","rustls"] }` drops native-tls (OpenSSL) and the
 # compression codecs (zstd-sys/lzma-sys), leaving libsqlite3-sys as the only
 # C dep. Verify with `cargo tree -p molt-net --features embedded-tor -e no-dev`.
-# (Separately: `ring` — C+asm — is already in the DEFAULT graph via
-# `x509-parser`'s `verify` feature; that is pre-existing, not from arti.)
+# The DEFAULT graph is ring-free: `cargo tree -p molt-net -e no-dev -i ring`
+# must print "nothing to print" (the dev-only Nostr relay-pool crates pin a
+# ring-provider tokio-rustls, which the runtime must never silently re-adopt
+# before the explicit N2 WS/TLS decision).
 embedded-tor = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [dependencies]
@@ -50,22 +52,15 @@ sha2.workspace = true
 hmac.workspace = true
 zeroize.workspace = true
 hex.workspace = true
-# SMP transport (T3): pure-Rust TLS + cert pinning + queue crypto
+# Pure-Rust TLS (the T4 dialer + S3-over-https; N2's WebSockets reuse it)
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-rustcrypto.workspace = true
-rustls-pki-types.workspace = true
 # S3 backup probe (mock_todo §5): https endpoints verify against the public
 # WebPKI — webpki-roots is Mozilla's root store compiled in as pure-Rust data
 # (no C, no system cert store dependency).
 webpki-roots.workspace = true
-x509-parser.workspace = true
-base64.workspace = true
 ed25519-dalek.workspace = true
-x25519-dalek.workspace = true
-crypto_box.workspace = true
-ed448-goldilocks = "0.9"
-sha3 = "0.10"
 # MLS (T2): group encryption of the live traffic. See workspace manifest.
 openmls.workspace = true
 openmls_traits.workspace = true
@@ -99,3 +94,6 @@ nostr-relay-builder = { workspace = true }
 # byte-pin of the vectors' get_message_keys section: recompute the expected
 # ciphertext from the reference chacha/hmac keys (same 0.9 line nostr uses)
 chacha20 = { workspace = true }
+# the nip44 vector file carries base64 payloads (tests/nostr_vectors.rs).
+# Dev-only: nothing under src/ uses base64 — the runtime graph stays without it.
+base64 = { workspace = true }

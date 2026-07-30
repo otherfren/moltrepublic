@@ -271,56 +271,6 @@ pub fn run_app(
         });
     }
     {
-        // Test the SMP server currently in the draft (not the saved one), so
-        // the user can validate a custom URL before saving. Public mode tests
-        // the bundled default. The transport draft rides along for the same
-        // reason: a user who just flipped tor→none expects the probe to go
-        // direct, not through the still-saved tor config. The result streams
-        // back into `cfg-smp-test`.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        ui.on_test_smp_server(move || {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let url = if ui.get_cfg_smp_custom() {
-                let url = ui.get_cfg_smp_url().to_string();
-                // honest verdict (2026-07-29 user report): with Custom
-                // selected and no URL, the engine would fall back to the
-                // SAVED server and test THAT — a green "ok" for an empty
-                // field. Refuse instead of misleading.
-                if url.trim().is_empty() {
-                    let de = ui.get_lang_index() == 1;
-                    ui.invoke_show_toast_error(
-                        strings_pick(
-                            de,
-                            "⚠ Enter a server URL first — an empty field would test the saved server.",
-                            "⚠ Erst eine Server-URL eingeben — ein leeres Feld würde den gespeicherten Server testen.",
-                        )
-                        .into(),
-                    );
-                    return;
-                }
-                url
-            } else {
-                molt_config::default_public_smp()
-            };
-            let draft = read_settings_draft(&ui);
-            issue(
-                &rt,
-                &w,
-                &ui.as_weak(),
-                Command::NetTestServer {
-                    url,
-                    anonymity: draft.anonymity,
-                    tor_mode: draft.tor_mode,
-                    tor_port: draft.tor_port,
-                },
-            );
-        });
-    }
-    {
         // Probe the S3 backup target in the draft (not the saved settings),
         // so the user can validate endpoint + credentials before saving.
         // The engine runs a real SigV4-signed HEAD over the configured
@@ -1982,18 +1932,6 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         anonymity: net_name(ui.get_cfg_network_index()),
         tor_mode: mode_name(ui.get_cfg_tor_mode_index()),
         tor_port: ui.get_cfg_tor_port() as u16,
-        smp_server: if ui.get_cfg_smp_custom() { "custom" } else { "public" }.to_string(),
-        smp_url: ui.get_cfg_smp_url().to_string(),
-        // redundant server list (Track B Stage 2): one server per line — trim
-        // blanks so a trailing newline / empty line never becomes a "" server
-        smp_urls: ui
-            .get_cfg_smp_urls()
-            .to_string()
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect(),
     }
 }
 
@@ -2253,10 +2191,9 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     }
     // persistent restart warning: which changed keys only apply on restart
     ui.set_restart_keys(sv.restart_required.join(", ").into());
-    // the SMP connection-test status is transient and lives outside the
-    // settings draft, so push it on every update — even while the user has
-    // an unsaved URL open and `settings_changed` is suppressed
-    ui.set_cfg_smp_test(sv.smp_test.clone().into());
+    // the S3 test status is transient and lives outside the settings draft,
+    // so push it on every update — even while the user has an unsaved field
+    // open and `settings_changed` is suppressed
     ui.set_cfg_s3_test(sv.s3_test.clone().into());
     ui.set_cfg_bk_list(sv.s3_list.clone().into());
 
@@ -2305,10 +2242,6 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
-    ui.set_cfg_smp_custom(s.smp_server == "custom");
-    ui.set_cfg_smp_url(s.smp_url.clone().into());
-    // redundant server list (Track B Stage 2): one server per line
-    ui.set_cfg_smp_urls(s.smp_urls.join("\n").into());
 }
 
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
@@ -4840,18 +4773,7 @@ lexicon! {
     not_implemented_yet: "not yet", "noch nicht";
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
-    field_smp_server: "SMP messaging server", "SMP-Nachrichtenserver";
-    smp_public: "Public default", "Öffentlicher Standard";
-    smp_custom: "Custom server", "Eigener Server";
-    field_smp_url: "Server URL", "Server-URL";
-    field_smp_redundant: "Redundant servers (one per line)", "Redundante Server (einer pro Zeile)";
-    smp_redundant_hint: "Optional. When set, connections spread across these servers instead of the single one above — if one server goes down, each connection stays alive on another. Two is a good default.", "Optional. Wenn gesetzt, verteilen sich die Verbindungen über diese Server statt über den einzelnen oben — fällt ein Server aus, bleibt jede Verbindung über einen anderen bestehen. Zwei ist ein guter Standard.";
-    smp_test: "Test connection", "Verbindung testen";
-    smp_test_tip: "Dials over the configured transport — Tor when it is enabled, the server's onion host if it advertises one.", "Verbindet über den konfigurierten Transport — via Tor, wenn aktiviert, und über den Onion-Host des Servers, falls vorhanden.";
-    smp_untested: "not tested yet", "noch nicht getestet";
     smp_testing: "testing…", "teste…";
-    smp_ok: "reachable ✓", "erreichbar ✓";
-    smp_hint: "Ritual and group messages route over this server; the public default needs no setup. An open republic adopts a changed server gradually: every new queue (rotation, healing) is created there, existing ones stay reachable where they are.", "Ritual und Gruppennachrichten laufen über diesen Server; der öffentliche Standard braucht keine Einrichtung. Ein laufendes Republic übernimmt einen geänderten Server schrittweise: jede neue Queue (Rotation, Heilung) entsteht dort, bestehende bleiben erreichbar, wo sie sind.";
     field_threshold: "Threshold (m)", "Schwelle (m)";
     field_members: "Members (n)", "Mitglieder (n)";
     field_language: "Language", "Sprache";
@@ -4890,11 +4812,11 @@ lexicon! {
     cw_sealed_word: "sealed", "versiegelt";
     cw_sim_badge: "SIMULATION", "SIMULATION";
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
-    cw_provisioning: "Preparing the invite link on the SMP server…", "Invite-Link wird auf dem SMP-Server vorbereitet…";
+    cw_provisioning: "Preparing the invite link…", "Invite-Link wird vorbereitet…";
     cw_failed_title: "The founding cannot continue", "Die Gründung kann nicht fortgesetzt werden";
-    cw_failed_hint: "The SMP server could not be reached, so no invite links exist. Check the network settings (anonymity / Tor) and your internet connection, then close this ritual and begin it again.", "Der SMP-Server war nicht erreichbar, es gibt daher keine Invite-Links. Prüfe die Netzwerk-Einstellungen (Anonymisierung / Tor) und die Internetverbindung; schließe dieses Ritual und beginne es danach neu.";
+    cw_failed_hint: "The founding cannot continue. The reason is shown below — close this ritual and begin it again once it is resolved.", "Die Gründung kann nicht fortgesetzt werden. Der Grund steht unten — schließe dieses Ritual und beginne es neu, sobald er behoben ist.";
     cw_open_net_settings: "Open network settings", "Netzwerk-Einstellungen öffnen";
-    cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members over SMP arrive with T3.", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder über SMP kommen mit T3.";
+    cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
     cw_charter_step: "Next step: agree on the charter — your input is needed", "Nächster Schritt: Einigt euch auf die Satzung — deine Eingabe ist gefragt";

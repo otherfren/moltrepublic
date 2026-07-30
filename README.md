@@ -43,7 +43,7 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 
 ## Technologies:
 - rust (slint)
-- SimpleX (smp protocol)
+- Nostr (NIP-EE/Marmot, in build — loopback transport today)
 - Tor (embedded arti)
 - Nym (planned)
 - Monero (FROST/LASS Multi-Signatures)
@@ -67,12 +67,13 @@ slower. The feature is declared on `molt-net`, so build the node with:
 cargo build -p molt-app --features molt-net/embedded-tor
 ```
 
-Test — the network / Tor tiers hit a real SMP server and are `#[ignore]`d; the
-fast suite proves founding + join + MLS over loopback:
+Test — tiers that need a real network are `#[ignore]`d (the Nostr real-relay
+PoC, the live-S3 probe, the embedded-tor bootstrap); the fast suite proves
+founding + join + MLS over loopback:
 
 ```sh
 cargo test                  # fast suite (loopback)
-cargo test -- --ignored     # live-SMP / Tor tiers (need a reachable SMP server)
+cargo test -- --ignored     # real-network tiers (Nostr relay / S3 / Tor)
 ```
 
 Run — `moltd` is the only binary, so a bare `cargo run` resolves to it. It needs

@@ -1,5 +1,11 @@
 # Design: mesh verify-at-open — proactive leg verification (self-heal Fix A)
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`), and the verify-at-open
+> machinery with it. Kept as the design record of the deleted machinery and
+> of why SMP was left.
+
 Status: **DISCUSSION DRAFT 2026-07-21** — design proposed, open questions in §7
 to settle before any code. Builds directly on `docs/transport/mesh/mesh_selfheal.md` (all
 four phases landed on master, 43ab06d..ff8923c). Read that + the CLAUDE.md

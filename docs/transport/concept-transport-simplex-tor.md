@@ -1,5 +1,11 @@
 # Concept: communication — SimpleX (SMP) over Tor
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`). Kept as the design record of
+> the SMP era (T1–T5) — the T4 Tor dialer it specified survives at
+> `crates/molt-net/src/dial.rs`.
+
 Status: **T1 + founding ritual + T2 (MLS, incl. the live runtime mesh) + T3
 (real SMP) + T4 (Tor)** (T4: 2026-07-11). MLS (OpenMLS 0.8) is integrated into
 the founding ritual AND the **running post-founding traffic is real MLS

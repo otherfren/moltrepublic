@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The in-process transport: an SMP-shaped hub of unidirectional queues.
+//! The in-process transport: a hub of unidirectional store-and-forward queues.
 //!
 //! [`LoopbackHub`] plays the server side — store-and-forward queues,
 //! at-least-once delivery with redelivery of unacked blocks, and an
@@ -45,7 +45,7 @@ pub struct ChaosPolicy {
     /// out of unequal delays).
     pub delay_ms: (u64, u64),
     /// Percent chance to *not* deliver a block's first attempt (the
-    /// redelivery timer picks it up — at-least-once, like an SMP server
+    /// redelivery timer picks it up — at-least-once, like a real server
     /// redelivering unacked messages).
     pub drop_pct: u8,
     /// Percent chance to deliver a block twice.
@@ -71,7 +71,7 @@ struct Queue {
     sub: Option<mpsc::Sender<Delivery>>,
     /// Unacked blocks by delivery id.
     pending: HashMap<u64, PaddedBlock>,
-    /// Test seam for the SMP idle-expiry / "silently deaf" failure
+    /// Test seam for the server-side idle-expiry / "silently deaf" failure
     /// (`docs/transport/mesh/mesh_selfheal.md` §6): when set, `SUB` and `SEND` still
     /// return `Ok` but every delivery to this queue is silently dropped —
     /// exactly the server-side state the client cannot detect. Loopback is
@@ -127,7 +127,7 @@ impl LoopbackHub {
 
     /// Sever every queue's live subscription (test seam for the resubscribe
     /// watchdog): each subscriber's channel sender is dropped, so its
-    /// receiver ends — exactly how a died SMP recv loop looks to the
+    /// receiver ends — exactly how a died server-side recv loop looks to the
     /// supervisor. Unacked blocks stay pending and redeliver to the NEXT
     /// subscriber, like a real server's store-and-forward.
     pub fn sever_subscriptions(&self) {
@@ -156,7 +156,7 @@ impl LoopbackHub {
 
     /// Undo [`Self::expire_queue`] (test seam, delivery guarantee E5): the
     /// queue delivers again. Everything sent WHILE expired stays lost — that
-    /// is the point. A real SMP queue never revives; this stands in for the
+    /// is the point. A real server queue never revives; this stands in for the
     /// leg having healed by WHATEVER means (rotation onto a fresh queue,
     /// Stage-B resubscribe) so a test can assert the sender-side rewind
     /// re-offers the deaf window's messages without re-running the whole
@@ -283,33 +283,16 @@ impl LoopbackHub {
         &self,
         members: &[MemberId],
     ) -> Result<BTreeMap<MemberId, Vec<PeerLink>>, NetError> {
-        self.full_mesh_n(members, crate::MESH_REDUNDANCY)
-    }
-
-    /// Like [`full_mesh`](LoopbackHub::full_mesh) but with an explicit redundancy
-    /// factor `n` (≥1): each directed pair gets `n` inbound queues sharing one
-    /// wrap key. Lets tests exercise the N-recv-merge / dedup / send-fan logic
-    /// over loopback independent of the production `MESH_REDUNDANCY`.
-    pub fn full_mesh_n(
-        &self,
-        members: &[MemberId],
-        n: usize,
-    ) -> Result<BTreeMap<MemberId, Vec<PeerLink>>, NetError> {
-        let n = n.max(1);
-        // N inbound queues of (recipient, sender), sharing one wrap key
-        // (Track B Stage 2 redundancy; N=1 == the former single-queue mesh)
-        let mut queues: BTreeMap<(MemberId, MemberId), (Vec<QueuePair>, WrapKey)> = BTreeMap::new();
+        // one inbound queue of (recipient, sender), under one wrap key
+        let mut queues: BTreeMap<(MemberId, MemberId), (QueuePair, WrapKey)> = BTreeMap::new();
         for recipient in members {
             for sender in members {
                 if sender == recipient {
                     continue;
                 }
                 let key = WrapKey::fresh()?;
-                let mut pairs = Vec::with_capacity(n);
-                for _ in 0..n {
-                    pairs.push(self.create_queue_blocking()?);
-                }
-                queues.insert((recipient.clone(), sender.clone()), (pairs, key));
+                let pair = self.create_queue_blocking()?;
+                queues.insert((recipient.clone(), sender.clone()), (pair, key));
             }
         }
         let mut mesh = BTreeMap::new();
@@ -318,13 +301,13 @@ impl LoopbackHub {
                 .iter()
                 .filter(|p| *p != me)
                 .map(|peer| {
-                    let (out_pairs, out_key) = &queues[&(peer.clone(), me.clone())];
-                    let (in_pairs, in_key) = &queues[&(me.clone(), peer.clone())];
+                    let (out_pair, out_key) = &queues[&(peer.clone(), me.clone())];
+                    let (in_pair, in_key) = &queues[&(me.clone(), peer.clone())];
                     PeerLink {
                         member: peer.clone(),
-                        snds: out_pairs.iter().map(|p| p.snd.clone()).collect(),
+                        snds: vec![out_pair.snd.clone()],
                         wrap_out: out_key.clone(),
-                        rcvs: in_pairs.iter().map(|p| p.rcv.clone()).collect(),
+                        rcvs: vec![in_pair.rcv.clone()],
                         wrap_in: in_key.clone(),
                     }
                 })
@@ -340,11 +323,11 @@ impl LoopbackHub {
 pub struct LoopbackTransport {
     hub: LoopbackHub,
     /// Queue ids this endpoint created (= receives on): the loopback
-    /// analogue of SMP's receive credentials. Shared across clones (like
-    /// `SmpTransport`'s state Arc) so ritual/runtime clones export ONE
-    /// credential set. Only meaningful while the hub lives — a new PROCESS
-    /// cannot resume a loopback mesh; a fresh engine on the same hub
-    /// (the tests' reopen seam) can.
+    /// analogue of a server transport's receive credentials. Shared across
+    /// clones so ritual/runtime clones export ONE credential set. Only
+    /// meaningful while the hub lives — a new PROCESS cannot resume a
+    /// loopback mesh; a fresh engine on the same hub (the tests' reopen
+    /// seam) can.
     created: Arc<Mutex<BTreeSet<Vec<u8>>>>,
 }
 

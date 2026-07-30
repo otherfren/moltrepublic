@@ -1,5 +1,11 @@
 # Design: Track C — regular queue rotation (unlinkability)
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`), and the Track C rotation with
+> it. Kept as the design record of the deleted machinery; the unlinkability
+> goal lives on as the Nostr h-tag rotation (that document, §4.4).
+
 Status: **OPTION A BUILT 2026-07-24.** The 4th SimpleX-reliability track (after A
 honest-status ✅, D reopen-smoothing ✅, B redundancy ✅ complete). The user chose
 **Option A** (§3) — ship the simple scheduled rotation now, accepting the brief

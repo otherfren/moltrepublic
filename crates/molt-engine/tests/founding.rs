@@ -50,8 +50,9 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
         ..SessionView::default()
     };
     // offline sim seam: simulated members seal the ritual so the founder-side
-    // genesis-on-disk can be tested without a network (the product founds over
-    // SMP; see ritual_engine_over_smp.rs for the real two-instance path)
+    // genesis-on-disk can be tested without a network (a production founding
+    // fails honestly until N4's Nostr transport lands; two_instances.rs is
+    // the real two-instance path over loopback)
     let w = molt_engine::__spawn_sim_founding(molt_core::GroupConfig::demo(), session, true);
 
     // found a 2-of-4 republic: founder + 3 simulated members

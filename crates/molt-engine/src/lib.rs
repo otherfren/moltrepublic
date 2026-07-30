@@ -36,7 +36,6 @@ mod events;
 mod founding;
 mod lifecycles;
 mod net;
-mod probe;
 mod proposals;
 mod recovery;
 mod session;
@@ -51,11 +50,11 @@ pub use chain::{verify_chain, ChainHead};
 #[doc(hidden)]
 pub use recovery::RecoveryInvite;
 #[doc(hidden)]
-pub use recovery::{rejoin_over_smp, run_rejoin, RejoinOutcome};
+pub use recovery::{run_rejoin, RejoinOutcome};
 #[doc(hidden)]
 pub use founding::{
-    join_founding_over_smp, make_seat_proof, ritual_join_over_smp, run_ritual_member,
-    verify_seat_proof, FoundingInvite, InviteMaterial, Ratifier, RitualTransport,
+    make_seat_proof, run_ritual_member, verify_seat_proof, FoundingInvite, InviteMaterial,
+    Ratifier, RitualTransport,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
@@ -79,11 +78,13 @@ const PRESENCE_TICK_MS: u64 = 30_000;
 /// debounced persists. 1 s keeps the real ack latency at debounce+1s ≈ 4 s,
 /// safely inside the sender's 30 s resend timer.
 const DELIVERY_TICK_MS: u64 = 1_000;
-/// Period of the mesh-keepalive ticker (mesh self-heal Stage 2): half the
-/// keepalive interval ([`crate::net::MESH_KEEPALIVE_SECS`]) so an idle leg is
-/// re-evaluated twice per interval and its effective keepalive cadence never
-/// drifts far past the interval. Only idle legs actually emit a ping.
-const NET_MESH_KEEPALIVE_TICK_MS: u64 = crate::net::MESH_KEEPALIVE_SECS * 1000 / 2;
+
+/// The honest N-demo→N4 gap error: SMP is demolished and the Nostr transport
+/// is not built yet, so a production founding/join/recovery has no network to
+/// run over. One string, surfaced through each flow's EXISTING failure path
+/// (create `Err`, join run log, recovery notice) — never a fake success.
+pub(crate) const NO_TRANSPORT_YET: &str = "no network transport in this build yet — the Nostr \
+     transport lands with N4 (founding/join) — loopback seams remain for tests";
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {
@@ -154,7 +155,7 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, false, None, false, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, None, false, None);
     (handle, rx)
 }
 
@@ -170,7 +171,7 @@ pub fn __spawn_manual_founding_bootstrap(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, None, false, None);
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, true, None, false, None);
     (handle, rx)
 }
 
@@ -193,7 +194,7 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
     let (rtx, rrx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let handle = spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, true, Some(rtx), false, None,
+        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, true, Some(rtx), false, None,
     );
     (handle, rx, rrx)
 }
@@ -208,15 +209,15 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
 pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, false, None, true, None,
+        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, None, true, None,
     )
 }
 
 /// Storage-backed engine that resumes a persisted mesh over the GIVEN
-/// transport instead of a fresh `SmpTransport` — the loopback reopen seam
-/// for the hard-kill tests (their hub survives in the test process, like a
-/// real SMP server would). The product never uses it: the real reopen path
-/// builds `reopen_transport` from the persisted mesh + creds.
+/// transport — the loopback reopen seam for the hard-kill tests (their hub
+/// survives in the test process, like a real server would). The product
+/// never uses it: a production reopen has no transport to rebuild in this
+/// build and opens honestly detached.
 #[doc(hidden)]
 pub fn __spawn_with_reopen_transport(
     config: GroupConfig,
@@ -235,7 +236,6 @@ pub fn __spawn_with_reopen_transport(
         None,
         false,
         false,
-        false,
         None,
         false,
         Some(transport),
@@ -245,43 +245,12 @@ pub fn __spawn_with_reopen_transport(
 /// Storage-backed engine whose founding runs in the offline **sim** seam:
 /// the founder's node simulates the other members over the loopback hub
 /// (fast, deterministic, no network) — for founder-side sealing tests. The
-/// product never uses this; the in-app founding is always real over SMP.
+/// product never uses this: a production founding fails honestly until N4's
+/// Nostr transport lands.
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, false, true, false, None, false, None)
-}
-
-/// Like [`__spawn_manual_founding`], but the founding runs over the **real
-/// SMP server** configured in `session.settings` (custom url or the public
-/// default) instead of the loopback hub. The founder's queues live on the
-/// server; a genuinely separate instance joins over its own SMP transport.
-/// This is the seam the two-instance-over-SMP dev test uses.
-#[doc(hidden)]
-pub fn __spawn_manual_founding_over_smp(
-    config: GroupConfig,
-    session: SessionView,
-) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, false, None, false, None);
-    (handle, rx)
-}
-
-/// Like [`__spawn_manual_founding_over_smp`], but the founder ALSO runs the
-/// post-founding **mesh bootstrap** — the production configuration
-/// (`spawn_with_config` founds with the bootstrap on). The multi-node
-/// restart-over-SMP test needs the real direct mesh, not just the sealed
-/// founding.
-#[doc(hidden)]
-pub fn __spawn_manual_founding_over_smp_bootstrap(
-    config: GroupConfig,
-    session: SessionView,
-) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), true, false, true, None, false, None);
-    (handle, rx)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, true, false, None, false, None)
 }
 
 /// Storage-backed engine with the post-founding **mesh bootstrap** ON — the
@@ -291,7 +260,7 @@ pub fn __spawn_manual_founding_over_smp_bootstrap(
 #[doc(hidden)]
 pub fn __spawn_with_storage_bootstrap(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, None, false, false, true, None, false, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, None, false, true, None, false, None)
 }
 
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
@@ -318,7 +287,6 @@ pub fn spawn_with_config(
         None,
         None,
         false,
-        false,
         // the real product runs the post-founding mesh bootstrap: the founder
         // (here) and the joiner (cmd_join_start) exchange announcements, then
         // each stands its runtime supervisor up over the direct mesh — live
@@ -340,7 +308,7 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, false, None, false, None)
+    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, None, false, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -353,7 +321,6 @@ fn spawn_actor(
     persist: bool,
     net: Option<net::NetRuntime>,
     ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
-    ritual_over_smp: bool,
     ritual_sim: bool,
     ritual_bootstrap: bool,
     recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
@@ -364,7 +331,6 @@ fn spawn_actor(
 
     let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
     state.ritual_material_sink = ritual_material_sink;
-    state.ritual_over_smp = ritual_over_smp;
     state.ritual_sim = ritual_sim;
     state.ritual_bootstrap = ritual_bootstrap;
     state.recovery_material_sink = recovery_material_sink;
@@ -377,10 +343,6 @@ fn spawn_actor(
     // live-ratchet persists — fast, because the 30 s presence tick alone
     // stretched the "3 s" ack debounce into a 33 s latency (E7 review)
     state.spawn_ticker_every(Command::NetDeliveryTick, DELIVERY_TICK_MS);
-    // the mesh-keepalive ticker keeps idle mesh queues warm on the server so
-    // they never silently idle-expire (mesh self-heal Stage 2); it only pings
-    // legs with no recent traffic, so an active mesh sends nothing extra
-    state.spawn_ticker_every(Command::NetMeshKeepaliveTick, NET_MESH_KEEPALIVE_TICK_MS);
     // the backup ticker lives as long as the actor: its synchronous decide
     // pass spawns real upload tasks for due workspaces (backup.rs; story 12)
     state.spawn_ticker_every(Command::BackupTick, backup::BACKUP_TICK_MS);
@@ -612,47 +574,11 @@ pub(crate) struct State {
     /// Outbound legs whose sends keep failing (member → reason) — set by
     /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
     pub(crate) net_send_stuck: std::collections::BTreeMap<MemberId, String>,
-    /// Per-peer **mesh-up** timestamp (`member → presence_now of when this
-    /// peer's inbound subscription last went live this incarnation`), stamped
-    /// by `NetLinkUp`. The self-heal liveness cross-check
-    /// (`recompute_net_health`): a leg whose subscription is live but from
-    /// which NOTHING has been heard (`MemberInfo.last_seen < mesh_up`) for
-    /// longer than [`crate::net::MESH_DEAF_SECS`] is a live-but-deaf queue
-    /// (the server idle-expired it while `SUB`/`SEND` still return `OK`) →
-    /// honest `Degraded`, not a false `Ok`. Runtime-only, active-workspace
-    /// scope — [`State::reset_workspace_state`] clears it.
-    pub(crate) mesh_up: std::collections::BTreeMap<MemberId, u64>,
     /// `presence_now` of the last wire-crossing frame the engine emitted to a
-    /// real mesh (stamped in [`State::record`]). The mesh-keepalive idle gate
-    /// (Stage 2): a keepalive round fires only when nothing real has gone out
-    /// for [`crate::net::MESH_KEEPALIVE_SECS`], so an actively-chatting mesh
-    /// sends zero extra frames. Runtime-only; reset with the workspace.
+    /// real mesh (stamped in [`State::record`]). Read by the debounced live
+    /// MLS-ratchet persist (`persist_mls_if_due` — "did anything go out since
+    /// the last snapshot?"). Runtime-only; reset with the workspace.
     pub(crate) last_mesh_out: u64,
-    /// Per-peer cooldown for self-initiated **mesh rotates** (mesh self-heal
-    /// Stage 3): `member → presence_now of the last rotate we started`, so the
-    /// periodic deaf-leg detector re-triggers at most one rotate per peer per
-    /// [`crate::net::MESH_ROTATE_COOLDOWN_SECS`] while the heal completes (or
-    /// the peer stays offline). Runtime-only; reset with the workspace.
-    pub(crate) rotate_at: std::collections::HashMap<MemberId, u64>,
-    /// Track C — per-leg establishment time (`member → presence_now when this
-    /// leg's queue was last (re-)minted`), driving the SLOW scheduled queue
-    /// rotation for unlinkability. Unlike [`mesh_up`](Self::mesh_up) (refreshed
-    /// on every whole-mesh rebuild), this is reset ONLY for the leg that actually
-    /// rotates, so each leg rotates on its own cadence
-    /// ([`crate::net::MESH_ROTATE_CADENCE_SECS`]) independent of the others.
-    /// Lazily birth-stamped on the first tick a leg is seen. Runtime-only.
-    pub(crate) established_at: std::collections::HashMap<MemberId, u64>,
-    /// Track D — last RAW inbound activity per leg (any frame delivered at the
-    /// transport, decoded or not; stamped by [`Command::NetRawInbound`],
-    /// throttled by the supervisor). A leg with recent raw activity is ALIVE, so
-    /// verify-at-open must not rotate/churn it even before a frame decodes.
-    /// Runtime-only; reset with the workspace. Never advances presence.
-    pub(crate) last_raw_inbound: std::collections::HashMap<MemberId, u64>,
-    /// Bounded FIFO of self-heal re-announce nonces already relayed
-    /// (`WorkspaceEvent::MeshAnnounced.nonce`) — the Stage 3 loop-prevention
-    /// seen-set: a nonce'd re-announce is adopted+relayed once, and copies of
-    /// it arriving later (the hub fan-out) are dropped. Runtime-only.
-    pub(crate) seen_announces: net::SeenNonces,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -718,14 +644,10 @@ pub(crate) struct State {
     /// the link to the operator instead.
     pub(crate) recovery_material_sink:
         Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
-    /// Forces the SMP transport for a founding in manual mode (the
-    /// manual-over-SMP dev seam). The in-app founding uses SMP regardless;
-    /// only the loopback dev seams leave this off.
-    pub(crate) ritual_over_smp: bool,
     /// Offline **test seam only** ([`__spawn_sim_founding`]): found over the
-    /// loopback hub with simulated members. The product never sets it — the
-    /// in-app founding is always real over SMP; this keeps the founder-side
-    /// sealing a fast, deterministic, offline test.
+    /// loopback hub with simulated members. The product never sets it — a
+    /// production founding fails honestly until N4's Nostr transport lands;
+    /// this keeps the founder-side sealing a fast, deterministic, offline test.
     pub(crate) ritual_sim: bool,
     /// Loopback demo-mesh **test seam only** ([`__spawn_demo_mesh`]): when
     /// set, a session-only context (and a workspace flagged
@@ -735,10 +657,11 @@ pub(crate) struct State {
     /// the prefs stays parsed but inert.
     pub(crate) demo_mesh: bool,
     /// Reopen **test seam only** ([`__spawn_with_reopen_transport`]): resume a
-    /// persisted mesh over THIS transport instead of building a fresh
-    /// `SmpTransport` from the mesh links. Lets the loopback tests drive a
+    /// persisted mesh over THIS transport. Lets the loopback tests drive a
     /// literal hard-kill + reopen of a full engine (their hub survives in the
-    /// test, like a real SMP server would). The product never sets it.
+    /// test, like a real server would). The product never sets it — and until
+    /// N4's Nostr transport lands, a production reopen has no transport to
+    /// rebuild, so a mesh-bearing workspace opens honestly detached.
     pub(crate) reopen_seam: Option<founding::RitualTransport>,
     /// Opt-in: after sealing, the founder runs the post-founding **mesh
     /// bootstrap** over the star (exchanges [`molt_net::mesh::MeshAnnounce`]s
@@ -755,9 +678,9 @@ pub(crate) struct State {
     pub(crate) founder_mesh_in: Option<FounderMeshIn>,
     /// The founder keeps a clone of the ritual transport across its mesh
     /// bootstrap so the runtime supervisor can reuse it once the mesh is
-    /// assembled (on the loopback hub the queues can't be reconstructed; over
-    /// SMP it is simply the founder's own server transport). Consumed when the
-    /// real net is built (`NetMeshReady`); cleared on teardown.
+    /// assembled (on the loopback hub the queues can't be reconstructed).
+    /// Consumed when the real net is built (`NetMeshReady`); cleared on
+    /// teardown.
     pub(crate) runtime_transport: Option<founding::RitualTransport>,
     /// The **joiner's** equivalent: the off-actor join task hands its ritual
     /// transport (which owns the bootstrap queues' receive credentials) back
@@ -777,13 +700,13 @@ pub(crate) struct State {
     /// `net_generation` mid-recovery and must not orphan an outstanding
     /// recovery link or a concurrent extension — only a workspace switch may.
     pub(crate) net_scope: u64,
-    /// A separate incarnation counter for the **join** flow (an off-actor SMP
+    /// A separate incarnation counter for the **join** flow (an off-actor
     /// join, possibly long-running). Kept apart from `net_generation` so a
     /// concurrent founding/mesh change can neither be mistaken for a stale
     /// join nor silently drop a live one.
     pub(crate) join_generation: u64,
     /// A separate incarnation counter for the **recovery** flow (an off-actor
-    /// rejoin over SMP) — the twin of [`State::join_generation`].
+    /// rejoin) — the twin of [`State::join_generation`].
     pub(crate) recover_generation: u64,
     /// While a recovery is in flight: the parsed recovery link + the phrase
     /// the rejoin task runs with. `cmd_net_recover_sealed` re-derives the seat
@@ -793,7 +716,7 @@ pub(crate) struct State {
     pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, String)>,
     /// The **rejoiner's** transport slot — the twin of
     /// [`State::join_transport`]: the off-actor rejoin task parks a clone of
-    /// its SMP transport here (its `Arc` owns the re-established mesh queues'
+    /// its transport here (its `Arc` owns the re-established mesh queues'
     /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
     /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
     pub(crate) recover_transport:
@@ -871,12 +794,7 @@ impl State {
             net_unreachable: std::collections::HashSet::new(),
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
-            mesh_up: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
-            rotate_at: std::collections::HashMap::new(),
-            established_at: std::collections::HashMap::new(),
-            last_raw_inbound: std::collections::HashMap::new(),
-            seen_announces: net::SeenNonces::default(),
             clock_override: None,
             s3_list_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -892,7 +810,6 @@ impl State {
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
             recovery_material_sink: None,
-            ritual_over_smp: false,
             ritual_sim: false,
             demo_mesh: false,
             reopen_seam: None,
@@ -1104,9 +1021,6 @@ impl State {
             Command::NetPeerSeen { member, generation } => {
                 self.cmd_net_peer_seen(member, generation)
             }
-            Command::NetRawInbound { peer, generation } => {
-                self.cmd_net_raw_inbound(peer, generation)
-            }
             Command::NetSendFailed {
                 member,
                 reason,
@@ -1125,7 +1039,6 @@ impl State {
             }
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
             Command::NetDeliveryTick => self.cmd_net_delivery_tick(),
-            Command::NetMeshKeepaliveTick => self.cmd_net_mesh_keepalive_tick(),
 
             // session.rs
             Command::ReadSession => Ok(Reply::Session(Box::new(self.session.clone()))),
@@ -1237,18 +1150,6 @@ impl State {
             Command::NetMeshExtended { link, generation } => {
                 self.cmd_net_mesh_extended(link, generation)
             }
-            Command::NetMeshWarm { peer, generation } => {
-                self.cmd_net_mesh_warm(peer, generation)
-            }
-            Command::NetMeshVerify { peer, generation } => {
-                self.cmd_net_verify(peer, generation)
-            }
-            Command::NetMeshRotate { peer, generation } => {
-                self.cmd_net_mesh_rotate(peer, generation)
-            }
-            Command::NetMeshReAnnounce { ct, nonce, generation } => {
-                self.cmd_net_re_announce(ct, nonce, generation)
-            }
             Command::NetRecoverRequested {
                 member,
                 identity_pk,
@@ -1277,13 +1178,6 @@ impl State {
                 ticket,
                 generation,
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
-            Command::NetTestServer {
-                url,
-                anonymity,
-                tor_mode,
-                tor_port,
-            } => self.cmd_net_test_server(url, anonymity, tor_mode, tor_port),
-            Command::NetTestResult { result } => self.cmd_net_test_result(result),
             Command::NetTestS3 {
                 endpoint,
                 access_key,
@@ -3719,12 +3613,35 @@ mod tests {
         });
     }
 
+    /// The N-demo gap: a PRODUCTION founding (no test seam) has no network
+    /// transport and fails honestly — never a loopback republic that looks
+    /// reachable by real remote members.
+    #[test]
+    fn create_start_without_a_transport_fails_honestly() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let err = w
+                .execute(Command::CreateStart {
+                    name: "Gap".to_string(),
+                    member: "petra".to_string(),
+                    threshold: 2,
+                    members: 3,
+                })
+                .await
+                .expect_err("no transport → no founding");
+            assert!(
+                err.to_string().contains(NO_TRANSPORT_YET),
+                "the honest N-demo gap error surfaces: {err}"
+            );
+        });
+    }
+
     #[test]
     fn create_lifecycle_founds_a_republic() {
         rt().block_on(async {
             // the offline sim seam (session-only): simulated members seal the
             // ritual so the founder-side lifecycle can be tested without a
-            // network — the product founds over SMP instead
+            // network — a production founding fails honestly until N4
             let w = __spawn_sim_founding(GroupConfig::demo(), SessionView::default(), false);
 
             // invalid configurations are rejected up front
@@ -3864,7 +3781,7 @@ mod tests {
 
             // empty, plain text, and a bare preview link (no transport
             // handover) are all rejected — a real join needs a link that
-            // carries the SMP address
+            // carries the transport handover
             for bad in [
                 "  ",
                 "not-an-invite",
@@ -3887,10 +3804,10 @@ mod tests {
                 other => panic!("unexpected: {other:?}"),
             }
 
-            // a real founding link (with the transport handover) starts the
-            // join: the joiner's own recovery phrase is shown and the run is in
-            // progress (the background ritual over a bogus host will fail, but
-            // we cancel before that lands)
+            // a real founding link (with the transport handover) arms the
+            // wizard — and then fails HONESTLY: this build has no network
+            // transport (SMP demolished, Nostr lands with N4), so the run
+            // reports exactly that instead of waiting forever
             let link = crate::FoundingInvite {
                 info: molt_core::InviteInfo {
                     republic: "Chess Club".to_string(),
@@ -3911,24 +3828,29 @@ mod tests {
                 member: "petra".to_string(),
             })
             .await
-            .expect("a joinable link starts the join");
+            .expect("a joinable link arms the wizard");
             match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Join);
                     assert_eq!(s.join.republic, "Chess Club");
                     assert_eq!((s.join.rule_m, s.join.rule_n), (2, 2));
                     assert!(!s.join.seed.is_empty(), "the joiner's recovery phrase is shown");
-                    assert_eq!(s.join.run.outcome, 0, "still joining");
+                    assert_eq!(s.join.run.outcome, 2, "no transport → the run fails honestly");
+                    assert!(
+                        s.join.run.log.iter().any(|l| l.contains(crate::NO_TRANSPORT_YET)),
+                        "the honest N-demo gap error is in the run log: {:?}",
+                        s.join.run.log
+                    );
                 }
                 other => panic!("unexpected: {other:?}"),
             }
-            // cancel stops the run and invalidates the background task's result
+            // cancel still clears the failed run
             w.execute(Command::JoinCancel).await.expect("cancel");
         });
     }
 
-    /// A joinable link with a bogus host (the background ritual task will fail,
-    /// but our directly-injected commands are processed first, in-process).
+    /// A joinable link with a bogus host — parseable, so `cmd_join_start`
+    /// arms the wizard before it fails honestly (no transport in this build).
     fn joinable_link() -> String {
         crate::FoundingInvite {
             info: molt_core::InviteInfo {
@@ -3973,72 +3895,108 @@ mod tests {
         }
     }
 
+    /// The honest N-demo gap failure rides the join run's EXISTING failure
+    /// surface (`cmd_net_join_failed`), and that surface keeps its gates: a
+    /// report after the run already failed is dropped, not double-appended.
     #[test]
-    fn join_failure_surfaces_into_the_run_and_drops_stale_reports() {
+    fn join_fails_honestly_and_late_reports_stay_dropped() {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string() })
                 .await
                 .expect("start");
-            // a stale-generation failure is ignored
-            w.execute(Command::NetJoinFailed { error: "old".to_string(), generation: Some(999) })
-                .await
-                .expect("stale");
             match w.execute(Command::ReadSession).await.expect("read") {
-                Reply::Session(s) => assert_eq!(s.join.run.outcome, 0, "stale failure ignored"),
+                Reply::Session(s) => {
+                    assert_eq!(s.join.run.outcome, 2, "no transport → honest failure");
+                    assert!(s.join.run.log.iter().any(|l| l.contains(crate::NO_TRANSPORT_YET)));
+                }
                 other => panic!("unexpected: {other:?}"),
             }
-            // the current-generation failure surfaces into the run
+            // a late failure report (any generation) is dropped — the run is
+            // already settled, its log must not grow a second failure line
             w.execute(Command::NetJoinFailed { error: "boom".to_string(), generation: Some(1) })
                 .await
-                .expect("fail");
+                .expect("late");
             match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
-                    assert_eq!(s.join.run.outcome, 2);
-                    assert!(s.join.run.log.iter().any(|l| l.contains("boom")));
+                    assert!(
+                        !s.join.run.log.iter().any(|l| l.contains("boom")),
+                        "a settled run drops late failure reports: {:?}",
+                        s.join.run.log
+                    );
                 }
                 other => panic!("unexpected: {other:?}"),
             }
         });
     }
 
+    /// The GENERATION clause of the join gates (`cmd_join_cancel` bumps the
+    /// generation to invalidate in-flight tasks): a report from a superseded
+    /// generation is dropped even while a run is LIVE, and the sealed handler
+    /// shares the clause — a stale-generation seal materializes nothing.
+    #[test]
+    fn join_reports_from_a_stale_generation_are_dropped_while_live() {
+        let mut st = plain_state();
+        st.join_generation = 2;
+        assert_eq!(st.session.join.run.outcome, 0, "run starts live");
+        st.cmd_net_join_failed("boom".to_string(), Some(1)).expect("stale gen");
+        assert_eq!(st.session.join.run.outcome, 0, "stale-generation report ignored");
+        st.cmd_net_join_failed("boom".to_string(), None).expect("no gen");
+        assert_eq!(st.session.join.run.outcome, 0, "generation-less report ignored");
+        st.cmd_net_join_failed("boom".to_string(), Some(2)).expect("current gen");
+        assert_eq!(st.session.join.run.outcome, 2, "matching generation lands");
+        assert!(st.session.join.run.log.iter().any(|l| l.contains("boom")));
+
+        let mut st2 = plain_state();
+        st2.join_generation = 2;
+        let before = st2.session.workspaces.len();
+        let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
+        st2.cmd_net_join_sealed(sealed, String::new(), Vec::new(), Some(1))
+            .expect("stale seal");
+        assert_eq!(
+            st2.session.workspaces.len(),
+            before,
+            "a stale-generation seal materializes nothing"
+        );
+    }
+
+    /// `NetJoinSealed` stays on the surface (dormant — N4's Nostr join task
+    /// re-emits it), so its materialization is pinned by arming the join
+    /// context DIRECTLY: `cmd_join_start` fails honestly without a transport
+    /// (its run settles at outcome 2, which gates the sealed handler off).
     #[test]
     fn join_seals_into_the_republic_from_a_valid_roster() {
-        rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
-            w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string() })
-                .await
-                .expect("start");
-            let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-            w.execute(Command::NetJoinSealed { sealed, mls: String::new(), mesh: Vec::new(), generation: Some(1) })
-                .await
-                .expect("sealed");
-            match w.execute(Command::ReadSession).await.expect("read") {
-                Reply::Session(s) => {
-                    assert_eq!(s.screen, Screen::Main, "entered the republic");
-                    assert_eq!(s.join, molt_core::JoinState::default(), "join reset");
-                    let ws =
-                        s.workspaces.iter().find(|ws| ws.name == "R").expect("workspace added");
-                    // the net label mirrors the joiner's own global anonymity
-                    // setting ("none" by default) — never a hardcoded "tor"
-                    assert_eq!(ws.net, "none", "label = the effective global setting");
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
+        let rt = rt();
+        let _guard = rt.enter();
+        // a verified sealed roster materializes the republic
+        let mut st = plain_state();
+        st.join_generation = 1;
+        st.session.join = molt_core::JoinState {
+            member: "petra".to_string(),
+            seed: "wombat lattice orbit".to_string(),
+            ..molt_core::JoinState::default()
+        };
+        let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
+        st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), Some(1)).expect("sealed");
+        assert_eq!(st.session.screen, Screen::Main, "entered the republic");
+        assert_eq!(st.session.join, molt_core::JoinState::default(), "join reset");
+        let ws = st.session.workspaces.iter().find(|ws| ws.name == "R").expect("workspace added");
+        // the net label mirrors the joiner's own global anonymity setting
+        // ("none" by default) — never a hardcoded "tor"
+        assert_eq!(ws.net, "none", "label = the effective global setting");
 
-            // a garbage roster fails the join rather than materialising anything
-            let w2 = spawn(GroupConfig::demo(), SessionView::default());
-            w2.execute(Command::JoinStart { invite: joinable_link(), member: "x".to_string() })
-                .await
-                .expect("start2");
-            w2.execute(Command::NetJoinSealed { sealed: "{".to_string(), mls: String::new(), mesh: Vec::new(), generation: Some(1) })
-                .await
-                .expect("bad");
-            match w2.execute(Command::ReadSession).await.expect("read2") {
-                Reply::Session(s) => assert_eq!(s.join.run.outcome, 2, "garbage roster fails"),
-                other => panic!("unexpected: {other:?}"),
-            }
-        });
+        // a garbage roster fails the join rather than materialising anything
+        let mut st2 = plain_state();
+        st2.join_generation = 1;
+        st2.session.join = molt_core::JoinState {
+            member: "x".to_string(),
+            ..molt_core::JoinState::default()
+        };
+        let before = st2.session.workspaces.len();
+        st2.cmd_net_join_sealed("{".to_string(), String::new(), Vec::new(), Some(1))
+            .expect("bad");
+        assert_eq!(st2.session.join.run.outcome, 2, "garbage roster fails");
+        assert_eq!(st2.session.workspaces.len(), before, "nothing materialized");
     }
 
     /// A real, threshold-signed **two-block chain** for the recovery tests: a
@@ -4098,9 +4056,11 @@ mod tests {
         (vec![genesis, block1], republic_id)
     }
 
-    /// An actionable recovery link with a bogus host (the background rejoin
-    /// task will fail, but the directly-injected commands are processed
-    /// in-process — the same seam as [`joinable_link`]).
+    /// An actionable recovery link with a bogus host — parseable, so
+    /// `cmd_recover_start` arms the context (generation + link + phrase)
+    /// before its honest no-transport failure; the injected
+    /// `NetRecoverSealed` then materializes against that context (the same
+    /// seam the two-instance tests drive).
     fn recover_link(member: &str, republic_id: &str) -> String {
         crate::recovery::RecoveryInvite {
             republic: "Guild".to_string(),
@@ -4171,6 +4131,14 @@ mod tests {
             })
             .await
             .expect("recover start");
+            // the production path fails honestly (no transport in this build)
+            // on the recovery notice channel — the armed context survives it
+            let s = read_session(&w).await;
+            assert_eq!(
+                s.notice,
+                format!("recover-failed:{}", crate::NO_TRANSPORT_YET),
+                "the honest N-demo gap error rides the recovery notice"
+            );
 
             // a stale-generation result is dropped without a trace
             let chain_json = serde_json::to_string(&chain).expect("chain json");

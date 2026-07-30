@@ -624,8 +624,9 @@ recommended, clearnet warned** — informed choice with a private default, not
   is an explicit N2 decision, not an N0 side effect. `cargo tree` after N0:
   the default no-dev graph is byte-unperturbed (every Nostr crate is dev-only
   until N1 promotes `nostr` — then `secp256k1-sys` enters per ADR-0002);
-  `ring` only via the pre-existing `x509-parser` cert-pin (dies in N-demo);
-  no aws-lc anywhere.
+  `ring` only via the pre-existing `x509-parser` cert-pin (died in N-demo,
+  2026-07-30 — the default graph is now ring-free and must stay so until the
+  explicit N2 decision); no aws-lc anywhere.
 - **NIP-44 length deviation (N0 finding, pinned):** rust-nostr's `pad()` caps
   plaintext at 65536−128 = 65408 bytes; the spec and the official vectors
   allow 65535 (unfixed in 0.44.6 and 0.45.0-alpha.7; decrypt side has no cap,
@@ -719,7 +720,8 @@ flagged before it can accrete, shrinks `net.rs` before the rewrite, and the
 existing test republics are disposable so nothing needs both transports live at
 once. So:
 
-- **N-demo — Remove SMP** (after N0/N0.5, before N1's runtime pieces land):
+- **N-demo — Remove SMP — ✅ DONE (2026-07-30)** (after N0/N0.5, before N1's
+  runtime pieces land):
   delete `SmpTransport`, the mesh supervisor + self-heal/rotate/Stage-B/
   redundancy/keepalive machinery, the mesh probe, the SMP TLS cert-pin (drops
   `ring`), and the ~⅓ of `Net*` mesh commands N0.5 lists as dead. Collapse the
@@ -730,6 +732,12 @@ once. So:
   etappe DELETES; it must leave the tree green** (the remaining tests are the
   non-transport ones + whatever Nostr scaffolding exists). The `mesh_*` design
   docs become historical (why SMP was left), not deleted.
+  **Executed 2026-07-30:** `SmpTransport` + the cert-pin (`ring` dropped from
+  the default graph) + mesh self-heal/rotate/Stage-B/redundancy/keepalive/probe
+  + 8 dead `Net*` commands deleted; `RitualTransport` collapsed to loopback;
+  the delivery-guarantee core (+ a single-queue inbound redial loop), the
+  rituals, and the T4 dialer (`crates/molt-net/src/dial.rs`) survive;
+  production founding/join/recover fail honestly until N4.
 - **N0 — Spike & audit — ✅ DONE (2026-07-30):** `nostr 0.44.6` added to
   molt-net (ALL Nostr crates dev-only until N1 promotes `nostr` into src/ —
   the default no-dev graph stays byte-unperturbed; §8 WebSocket audit);
@@ -782,14 +790,21 @@ once. So:
   ~6k engine lines, pinned by ~4.5k test lines) — "only the envelopes change"
   is true of the flow, not the implementation. Consider splitting into
   N4a (founding+join) and N4b (recovery). **Keystone:** the Nostr twin of the
-  `two_instances` founding + the recovery suite.
+  `two_instances` founding + the recovery suite. **Coverage debt to repay
+  here (N-demo review):** the actor-level `NetJoinSealed` path (dispatch +
+  the parked `join_transport` reuse + the persist-side branch of
+  materialization) went dark when the SMP join e2e died — N4's join keystone
+  must run it end-to-end again; the handler core stays pinned state-level
+  meanwhile (`join_seals_into_the_republic_from_a_valid_roster`).
 - **N5 — Runtime + guarantee + presence:** NostrGroupRuntime on
   EngineSink/OutboxLog; AcceptedWindow/ACK/G7 over it with min-floor
   single-publish resend and amplification counting; traffic-derived presence
   (§6.5); net_health = relay status; the rotation grace. **Keystones:** the
   Nostr twin of `delivery_guarantee.rs` (a relay dies/prunes → rewind-resend
   delivers, ordering holds); the offline-across-rotation convergence test;
-  an idle-republic presence-honesty test.
+  an idle-republic presence-honesty test. The E2E choreography of the deleted
+  `scripts/dev_2of3_smp.py` (a 2-of-3 founding plus the Organization/Status
+  flows against running nodes) is worth resurrecting as a Nostr twin here.
 - **N6 — Governance bridge + GUI:** `ChainChange::TransportPolicy` filling in
   the N3 block-hash-bound commit gate; wizard transport choice + the migration
   outcome (§10.9); file-transfer GUI gating (§10.7); relay-shaped health copy

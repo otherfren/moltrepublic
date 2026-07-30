@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! A minimal, pure-Rust S3 client (mock_todo §5): SigV4-signed requests over
-//! the engine's fail-closed [`Dialer`] (so S3 traffic routes exactly like SMP
-//! traffic — through Tor when Tor is configured, never a silent clearnet
-//! fallback), TLS 1.3 via rustls + the RustCrypto provider with the public
-//! WebPKI roots (`webpki-roots`, Mozilla's store as data).
+//! the engine's fail-closed [`Dialer`] (through Tor when Tor is configured,
+//! never a silent clearnet fallback), TLS 1.3 via rustls + the RustCrypto
+//! provider with the public WebPKI roots (`webpki-roots`, Mozilla's store as
+//! data).
 //!
 //! Supported today: custom endpoints (MinIO & friends, `http://…` onion
 //! services included), path-style addressing, region inference from AWS
@@ -15,9 +15,8 @@
 //!
 //! Honest limits: virtual-hosted addressing and custom/self-signed TLS CAs
 //! are not supported yet (a MinIO with a private CA fails the TLS class with
-//! a clear reason). TLS mirrors the SMP client's posture: TLS 1.3 with
-//! X25519 — the same rustcrypto-alpha constraint documented in
-//! `smp/tls.rs::pinned_config`.
+//! a clear reason). TLS 1.3 with X25519 only — the rustcrypto-alpha
+//! constraint documented at `dial.rs::x25519_provider`.
 
 pub mod http;
 pub mod list;
@@ -32,7 +31,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
-use crate::smp::tls::Dialer;
+use crate::dial::Dialer;
 pub use http::HttpResponse;
 pub use list::S3Object;
 
@@ -563,7 +562,7 @@ impl S3Client {
     }
 
     /// Dial the endpoint through the fail-closed dialer.
-    async fn dial(&self) -> Result<crate::smp::tls::DialStream, S3Error> {
+    async fn dial(&self) -> Result<crate::dial::DialStream, S3Error> {
         self.dialer
             .dial_host(&self.config.endpoint.host, self.config.endpoint.port)
             .await
@@ -573,8 +572,8 @@ impl S3Client {
     /// Run the TLS 1.3 handshake against the public WebPKI.
     async fn tls_handshake(
         &self,
-        stream: crate::smp::tls::DialStream,
-    ) -> Result<tokio_rustls::client::TlsStream<crate::smp::tls::DialStream>, S3Error> {
+        stream: crate::dial::DialStream,
+    ) -> Result<tokio_rustls::client::TlsStream<crate::dial::DialStream>, S3Error> {
         let connector = TlsConnector::from(public_tls_config()?);
         let host = &self.config.endpoint.host;
         let sni = ServerName::try_from(host.clone())
@@ -587,7 +586,7 @@ impl S3Client {
 }
 
 /// A rustls config verifying against the public WebPKI (`webpki-roots`).
-/// Shares the SMP client's provider posture ([`crate::smp::tls::x25519_provider`]):
+/// Shares the dialer's provider posture ([`crate::dial::x25519_provider`]):
 /// pure-Rust rustcrypto, TLS 1.3, X25519. Built once and cached — the root
 /// store holds every Mozilla trust anchor, and `request` is the shared core
 /// the backup upload/download stories will drive per object.
@@ -598,7 +597,7 @@ fn public_tls_config() -> Result<Arc<ClientConfig>, S3Error> {
     }
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(crate::smp::tls::x25519_provider()))
+    let config = ClientConfig::builder_with_provider(Arc::new(crate::dial::x25519_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| S3Error::Tls(format!("rustls provider: {e}")))?
         .with_root_certificates(roots)

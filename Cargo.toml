@@ -12,7 +12,7 @@
 #   molt-core    domain types, Command/Event/Surface contract, errors — no I/O
 #   molt-config  config.toml schema, render, salvage, round-trip write (no I/O deps)
 #   molt-storage encrypted append-only workspace storage: event log, snapshots, keys
-#   molt-net     the transport: SMP-style queues behind a Transport trait (loopback today)
+#   molt-net     the transport: MLS-protected payloads over queue transports (loopback today, Nostr relays in build)
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
 #   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
@@ -76,21 +76,17 @@ hkdf               = "0.12"   # seed -> workspace id/key derivations
 sha2               = "0.10"
 hmac               = "0.12"   # invite ticket -> JoinRequest MAC binding (molt-net)
 ed25519-dalek      = { version = "2", default-features = false, features = ["std", "rand_core"] }  # member identity keys (derived, never random)
+crc32c             = "0.6"    # molt-storage: torn-write/bitrot detection over the ciphertext
 
-# SMP transport (molt-net, T3). Pure-Rust TLS: rustls with the RustCrypto
-# provider keeps the no-C-toolchain / reproducible posture (rustls-rustcrypto
-# instead of ring/aws-lc). Custom cert pinning verifies the server's offline
-# CA fingerprint (`smp://<fp>@host`), never WebPKI.
+# TLS + dialing (molt-net). Pure-Rust: rustls with the RustCrypto provider
+# keeps the no-C-toolchain / reproducible posture (rustls-rustcrypto instead
+# of ring/aws-lc). The stack serves S3-over-https (WebPKI verify) and the T4
+# fail-closed Tor dialer; N2's WebSocket relay connections reuse both.
 rustls             = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 tokio-rustls       = { version = "0.26", default-features = false, features = ["tls12"] }
 rustls-rustcrypto  = "0.0.2-alpha"
-rustls-pki-types   = "1"
 webpki-roots       = "1"      # Mozilla CA roots as pure-Rust data (S3-over-https verify)
-x509-parser        = { version = "0.18", features = ["verify"] }   # parse the chain, verify leaf ⟵ pinned CA
-base64             = "0.22"   # smp:// fingerprint is base64url(sha256(CA DER))
-x25519-dalek       = { version = "2", features = ["static_secrets"] }  # queue DH keys
-crypto_box         = "0.9"    # NaCl crypto_box for SMP message-body encryption
-crc32c             = "0.6"    # torn-write/bitrot detection over the ciphertext
+base64             = "0.22"   # binary-in-text blobs (proposal images, backup/export payloads)
 argon2             = "0.5"    # passphrase KDF of the export blob (RustCrypto, pure Rust)
 unicode-normalization = "0.1" # NFC of export passphrases before the KDF
 getrandom          = "0.2"    # OS CSPRNG: seeds, nonces, device key

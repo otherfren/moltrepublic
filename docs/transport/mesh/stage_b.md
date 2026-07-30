@@ -1,5 +1,12 @@
 # Stage B — Selbstheilende Leitungen + ehrliche Transport-Health
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`), and with it the SKEY fix and
+> the N-queue redundancy machinery. Kept as the record of why SMP was left.
+> The per-peer resubscribe watchdog itself SURVIVES, reduced to a
+> single-queue redial loop in the supervisor (`recv_watchdog_task`).
+
 Status: **UMGESETZT** (2026-07-19, zusammen mit dem SKEY-Restart-Fix).
 Dieses Dokument ist der Design-Record; die Historie des Vorfalls und der
 Diagnose steht im Abschlussteil.

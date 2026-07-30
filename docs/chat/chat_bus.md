@@ -30,7 +30,7 @@ change, it is the honest continuation of what the transport already does:
 
 - There is **one MLS group per republic**. Every event that crosses the wire is
   the same serialized `EventEnvelope`, MLS-encrypted **once per log seq** and
-  fanned out over the per-pair SMP mesh (`molt-net/src/supervisor.rs`,
+  fanned out over the per-pair queue mesh (`molt-net/src/supervisor.rs`,
   `MlsChannel::ciphertext_for`). The per-pair queues exist for unlinkability,
   not for separating message kinds.
 - Message kinds are **not** multiplexed by queue or topic. The discriminator is

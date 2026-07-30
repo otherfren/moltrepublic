@@ -1,5 +1,18 @@
 # Konzept: Zustellgarantie für Mesh-Nachrichten (at-least-once, Ende-zu-Ende)
 
+> **Scope note (2026-07-30, etappe N-demo):** the SMP transport was removed in
+> the Nostr transport replacement (`docs/transport/nostr_transport_marmot.md`).
+> The delivery-guarantee CORE this document designs — `AcceptedWindow` dedup,
+> `MESH_ACK_TAG` frames, the log-position acked floor, rewind-resend with
+> fresh encryptions, the live-ratchet persist, G7 in-order delivery (§3,
+> §4.1–4.8, §9) — stays load-bearing over the loopback transport and will
+> carry the Nostr runtime in N5. The §4.9 V1/V8 fixes ALSO survive: they live
+> in the mesh-extension path (`net.rs`), which stays live for recovery until
+> N4/N5, and the hard-kill keystone (§5 item 8) still runs over the loopback
+> `expire_queue` seam. Historical are only the SMP-specific triggers: the
+> Stage-B/rotate rebuild machinery and the server-queue mechanics behind the
+> V1/V2-rotation/V8 loss paths in §2, replaced by the relay equivalents in N5.
+
 Status: **GEBAUT + REVIEWED 2026-07-28, E1–E7 auf master** (E7: zwei
 unabhängige adversariale Review-Läufe, 7 Findings gefixt — §8). Umsetzungs-Verfeinerungen gegenüber
 dem Erstentwurf sind inline markiert („BUILT, verfeinert"); die wichtigsten:

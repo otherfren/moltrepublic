@@ -432,17 +432,6 @@ fn settings_arg(args: &Value) -> SessionSettings {
         anonymity: text("anonymity", d.anonymity),
         tor_mode: text("tor_mode", d.tor_mode),
         tor_port: port("tor_port", d.tor_port),
-        smp_server: text("smp_server", d.smp_server),
-        smp_url: text("smp_url", d.smp_url),
-        smp_urls: args
-            .get("smp_urls")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or(d.smp_urls),
     }
 }
 
@@ -821,40 +810,12 @@ pub fn tools() -> Vec<ToolDef> {
                     "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },
                     "anonymity": { "type": "string", "enum": ["tor", "nym", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
-                    "tor_port": { "type": "integer" },
-                    "smp_server": { "type": "string", "enum": ["public", "custom"], "description": "SMP messaging server: bundled public default, or the custom smp_url" },
-                    "smp_url": { "type": "string", "description": "custom SMP server URL (smp://<fingerprint>@host), used when smp_server = custom" }
+                    "tor_port": { "type": "integer" }
                 }
             }),
             build: |args| Ok(Command::SaveSettings {
                 settings: settings_arg(args),
             }),
-        },
-        ToolDef {
-            name: "test_smp_server",
-            command: "net_test_server",
-            description: "Test connectivity to an SMP messaging server (a live TLS handshake, the settings panel's Test button). The result lands in session.smp_test (\"ok\" or \"error: …\"). Pass an explicit url, or omit it to test the configured server. Pass anonymity/tor_mode/tor_port to probe with draft transport settings; omit them to probe with the saved ones.",
-            schema: || json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "smp://<fingerprint>@host to test; omit to test the configured server" },
-                    "anonymity": { "type": "string", "description": "draft anonymity network (none | tor | nym); omit to use the saved setting" },
-                    "tor_mode": { "type": "string", "description": "draft tor mode (local | embedded | whonix); omit to use the saved setting" },
-                    "tor_port": { "type": "integer", "description": "draft tor SOCKS port; omit/0 to use the saved setting" }
-                }
-            }),
-            build: |args| {
-                let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-                Ok(Command::NetTestServer {
-                    url: s("url"),
-                    anonymity: s("anonymity"),
-                    tor_mode: s("tor_mode"),
-                    tor_port: u16::try_from(
-                        args.get("tor_port").and_then(Value::as_u64).unwrap_or(0),
-                    )
-                    .unwrap_or(0),
-                })
-            },
         },
         ToolDef {
             name: "net_test_s3",
@@ -1040,7 +1001,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
-            description: "Begin founding a new republic over the configured transport (SMP). The transport routing (tor/none) always follows the GLOBAL anonymity settings (save_settings / Settings → Network) — it is not a per-republic choice. The engine derives the founder's identity, mints one-time invite links per member, and runs the real ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose.",
+            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose. NOTE: this build has no network transport yet (the Nostr transport lands with N4), so create_start currently fails honestly with exactly that message instead of starting a run.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1083,7 +1044,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_start",
             command: "recover_start",
-            description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally.",
+            description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally. NOTE: this build has no network transport yet (the Nostr transport lands with N4) — the link parses and the context arms, then the run fails honestly with exactly that reason.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1124,7 +1085,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_start",
             command: "join_start",
-            description: "Begin joining a republic from a real molt://invite/… link (must carry the SMP transport handover — a bare preview link is rejected). The engine shows the joiner's own recovery phrase, runs the real SMP join off the actor, and — when the founder proposes the charter — surfaces it for join_confirm_charter; on success it enters the republic on its own.",
+            description: "Begin joining a republic from a real molt://invite/… link (must carry the transport handover — a bare preview link is rejected). The engine shows the joiner's own recovery phrase and runs the join off the actor; when the founder proposes the charter it is surfaced for join_confirm_charter. NOTE: this build has no network transport yet (the Nostr transport lands with N4), so the join run currently fails honestly with exactly that message in its log.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1195,8 +1156,7 @@ mod tests {
         // net_delivered / net_peer_seen / net_send_failed and the founding
         // ritual's net_join_requested / net_seal_signed are the node's own
         // transport/ritual tasks speaking (exposing them would let an agent
-        // forge network peers or ritual members); net_test_result is the
-        // node's own SMP probe reporting back (net_test_server is the tool);
+        // forge network peers or ritual members);
         // net_test_s3_result is the node's own S3 probe reporting back
         // (net_test_s3 is the tool); net_list_backups_result is the node's
         // own bucket-listing task reporting back (net_list_backups is the
@@ -1234,15 +1194,10 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 51] = [
+        const INTERNAL: [&str; 44] = [
             "net_test_s3_result",
             "net_presence_tick",
             "net_delivery_tick",
-            "net_mesh_keepalive_tick",
-            "net_mesh_warm",
-            "net_mesh_verify",
-            "net_mesh_rotate",
-            "net_mesh_re_announce",
             "net_list_backups_result",
             "backup_tick",
             "net_backup_done",
@@ -1260,7 +1215,6 @@ mod tests {
             "net_file_failed",
             "net_delivered",
             "net_peer_seen",
-            "net_raw_inbound",
             "net_send_failed",
             "net_link_up",
             "net_link_down",
@@ -1270,7 +1224,6 @@ mod tests {
             "net_recover_requested",
             "net_recover_link_ready",
             "net_recover_link_failed",
-            "net_test_result",
             "net_ritual_link_ready",
             "net_ritual_failed",
             "net_join_sealed",

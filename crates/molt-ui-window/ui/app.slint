@@ -123,10 +123,9 @@ component SoundAlertsGroup inherits DetailGroup {
     }
 }
 
-// Settings → Network: the two form groups — the anonymity network (tor
-// mode + SOCKS port) and the SMP messaging server (public/custom, URL,
-// live test) — factored like the General pair so the wide pane can seat
-// them side by side and a narrow pane stacks the SAME content.
+// Settings → Network: the anonymity network form group (tor mode + SOCKS
+// port) — factored like the General pair so the wide pane can seat it and
+// a narrow pane shows the SAME content.
 component AnonNetworkGroup inherits DetailGroup {
     in-out property <int> network-index;
     in-out property <int> tor-mode-index;
@@ -171,107 +170,6 @@ component AnonNetworkGroup inherits DetailGroup {
             minimum: 1;
             maximum: 65535;
         }
-    }
-}
-
-component SmpServerGroup inherits DetailGroup {
-    in-out property <bool> smp-custom;
-    in-out property <string> smp-url;
-    // Redundant server list (Track B Stage 2), one `smp://…@host` per line. When
-    // non-empty it OVERRIDES the single server above and spreads inbound queues
-    // across these servers for redundancy (2 = a server can go down and each
-    // connection stays alive on the other).
-    in-out property <string> smp-urls;
-    in property <string> smp-test;
-    callback test();
-    title: Strings.field-smp-server;
-    // form panel: content hugs the top, the panel takes its content height
-    pack: true;
-    // wrap room for the URL field, the test verdict and the hint when
-    // the wide pane seats this panel beside the network one
-    min-width: 340px;
-    // mode picker — the same selection control the anonymity panel uses;
-    // choosing "custom" reveals the URL field below. The bool stays the
-    // single source of truth: clicking a row breaks the dropdown's own
-    // declarative current-index binding (AppDropdown assigns it), so this
-    // change-callback re-imposes the bool on the display when the draft is
-    // re-seeded externally (config reload / MCP save with a clean draft —
-    // the buttons this replaces re-rendered from the bool too)
-    changed smp-custom => {
-        mode-dd.current-index = root.smp-custom ? 1 : 0;
-    }
-    mode-dd := AppDropdown {
-        width: 200px;
-        model: [Strings.smp-public, Strings.smp-custom];
-        current-index: root.smp-custom ? 1 : 0;
-        changed(i) => {
-            root.smp-custom = i == 1;
-        }
-    }
-    if root.smp-custom: FieldLabel {
-        label: Strings.field-smp-url;
-        AppField {
-            text <=> root.smp-url;
-            placeholder: "smp://<fingerprint>@host";
-        }
-    }
-    // Redundancy (Track B Stage 2): one server per line overrides the single
-    // server above and spreads inbound queues across them.
-    FieldLabel {
-        label: Strings.field-smp-redundant;
-        AppArea {
-            height: 84px;
-            text <=> root.smp-urls;
-            placeholder: "smp://<fingerprint>@host-1\nsmp://<fingerprint>@host-2";
-        }
-    }
-    Text {
-        text: Strings.smp-redundant-hint;
-        color: Theme.faint;
-        font-size: Theme.fs-cap;
-        wrap: word-wrap;
-        preferred-width: 0px;
-    }
-    HorizontalLayout {
-        spacing: 12px;
-        // NO alignment:start here — with the verdict text's zeroed
-        // preferred width it would collapse to 0px (the documented
-        // trap); explicit stretches keep the button at its size and
-        // hand the verdict the rest
-        AppButton {
-            horizontal-stretch: 0;
-            label: Strings.smp-test;
-            // honest copy (P7): the probe dials over the configured
-            // transport — Tor when enabled, an onion host if the server
-            // advertises one
-            tooltip: Strings.smp-test-tip;
-            tooltip-below: true;
-            clicked => {
-                root.test();
-            }
-        }
-        Text {
-            horizontal-stretch: 1;
-            vertical-alignment: center;
-            text: root.smp-test == "" ? Strings.smp-untested
-                : root.smp-test == "testing" ? Strings.smp-testing
-                : root.smp-test == "ok" ? Strings.smp-ok
-                : root.smp-test;
-            color: root.smp-test == "ok" ? Theme.good
-                : (root.smp-test != "" && root.smp-test != "testing")
-                    ? Theme.bad
-                    : Theme.faint;
-            font-size: Theme.fs-cap;
-            wrap: word-wrap;
-            preferred-width: 0px;
-        }
-    }
-    Text {
-        text: Strings.smp-hint;
-        color: Theme.faint;
-        font-size: Theme.fs-cap;
-        wrap: word-wrap;
-        preferred-width: 0px;
     }
 }
 
@@ -534,7 +432,7 @@ export component AppWindow inherits Window {
     // deliberation step: the founder proposes the final name + charter (agenda)
     // once every member has joined; every member then ratifies it
     callback create-propose(string, string);
-    // join verbs (engine-backed; the real SMP join runs off the actor and
+    // join verbs (engine-backed; the real join runs off the actor and
     // enters the republic on its own once the founder seals)
     callback join-start(string, string);
     callback join-cancel();
@@ -891,15 +789,6 @@ export component AppWindow inherits Window {
     // embedded-tor feature (P3). Default matches feature-off.
     in property <[bool]> tor-mode-enabled: [true, false, true];
     in-out property <int> cfg-tor-port: 9050;
-    // SMP messaging server: false = bundled public server, true = custom url.
-    in-out property <bool> cfg-smp-custom: false;
-    in-out property <string> cfg-smp-url;
-    // Redundant SMP server list, one `smp://…@host` per line (Track B Stage 2).
-    in-out property <string> cfg-smp-urls;
-    // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
-    in property <string> cfg-smp-test;
-    // run a live connectivity test against the SMP server in the draft
-    callback test-smp-server();
     in-out property <bool> cfg-s3-backup: false;
     in-out property <string> cfg-s3-endpoint;
     in-out property <string> cfg-s3-access;
@@ -2057,9 +1946,9 @@ export component AppWindow inherits Window {
                                                         root.show-toast(Strings.toast-copied);
                                                     }
                                                 }
-                                                // no link yet: the queue is being
-                                                // provisioned on the SMP server —
-                                                // show that work, never a blank row
+                                                // no link yet: the seat's transport
+                                                // is being provisioned — show that
+                                                // work, never a blank row
                                                 if seat.state == 0 && seat.detail == "" && root.cw-outcome == 0: HorizontalLayout {
                                                     spacing: 8px;
                                                     padding-right: 6px;
@@ -2952,7 +2841,7 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                 }
 
-                // step 2: the real SMP join. The joiner's own recovery phrase
+                // step 2: the real join run. The joiner's own recovery phrase
                 // is shown once (record it now), then the live log while it
                 // waits for every member to seal. On success the engine enters
                 // the republic on its own — no finish button, no fake progress.
@@ -5498,11 +5387,6 @@ export component AppWindow inherits Window {
                     // groups sit side by side; below it they stack. ONE
                     // predicate, so the two arrangements stay complementary.
                     property <bool> side-groups: self.width >= 560px;
-                    // the Network pair needs more room than the General
-                    // one: ~220px anon panel + 14px gap + the SMP panel's
-                    // 340px min-width + 2×20px pane padding ≈ 614px — below
-                    // that, side-by-side would overflow the pane border
-                    property <bool> side-groups-net: self.width >= 620px;
                     vertical-stretch: 1;
                     background: Theme.panel;
                     border-radius: Theme.radius;
@@ -5984,63 +5868,13 @@ export component AppWindow inherits Window {
                         if root.set-tab == 3: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            // two visual panels (anonymity network | SMP
-                            // messaging server), seated like the General
-                            // tab's pair: side by side when wide, stacked
-                            // when narrow — one set of bindings either way
-                            if set-pane.side-groups-net: HorizontalLayout {
-                                spacing: 14px;
-                                // no alignment:start — the two panels SHARE
-                                // the pane width (Backup-tab posture) instead
-                                // of floating at preferred size in the empty
-                                // pane; surplus splits evenly, except near
-                                // the 620px threshold where SMP's 340px
-                                // min-width pins it and anon takes the rest.
-                                // Each panel sits in its own top-aligned
-                                // column so it is exactly as tall as its
-                                // content — the row's surplus height stays
-                                // blank instead of inflating a panel.
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: start;
-                                    AnonNetworkGroup {
-                                        network-index <=> root.cfg-network-index;
-                                        tor-mode-index <=> root.cfg-tor-mode-index;
-                                        tor-port <=> root.cfg-tor-port;
-                                        tor-modes-enabled: root.tor-mode-enabled;
-                                    }
-                                }
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: start;
-                                    SmpServerGroup {
-                                        smp-custom <=> root.cfg-smp-custom;
-                                        smp-url <=> root.cfg-smp-url;
-                                        smp-urls <=> root.cfg-smp-urls;
-                                        smp-test: root.cfg-smp-test;
-                                        test => {
-                                            root.test-smp-server();
-                                        }
-                                    }
-                                }
-                            }
-                            if !set-pane.side-groups-net: VerticalLayout {
-                                spacing: 14px;
-                                AnonNetworkGroup {
-                                    network-index <=> root.cfg-network-index;
-                                    tor-mode-index <=> root.cfg-tor-mode-index;
-                                    tor-port <=> root.cfg-tor-port;
-                                    tor-modes-enabled: root.tor-mode-enabled;
-                                }
-                                SmpServerGroup {
-                                    smp-custom <=> root.cfg-smp-custom;
-                                    smp-url <=> root.cfg-smp-url;
-                                    smp-urls <=> root.cfg-smp-urls;
-                                    smp-test: root.cfg-smp-test;
-                                    test => {
-                                        root.test-smp-server();
-                                    }
-                                }
+                            // a single panel today (the anonymity network);
+                            // the relay settings panel joins it with N6
+                            AnonNetworkGroup {
+                                network-index <=> root.cfg-network-index;
+                                tor-mode-index <=> root.cfg-tor-mode-index;
+                                tor-port <=> root.cfg-tor-port;
+                                tor-modes-enabled: root.tor-mode-enabled;
                             }
                         }
                         if root.set-tab == 4: VerticalLayout {

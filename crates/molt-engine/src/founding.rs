@@ -4,25 +4,24 @@
 //! constituted *before* any workspace touches the disk.
 //!
 //! The founder mints one single-use invite per future member and provisions a
-//! transport queue per seat. Each member — a real remote node over SMP, or a
-//! simulated loopback node in the offline test seam — derives its own identity
-//! key from its own recovery phrase, activates the link (`JoinRequest`,
-//! MAC-bound to the ticket), and later signs the final canonical roster table
-//! (`SealSigned`). Only when every seat is sealed does the founder write the
-//! `Founded` genesis — carrying the complete identity table and all n
-//! attestations — and distribute the sealed roster so every member writes its
-//! own workspace. The roster is salted by a neutral, content-derived
-//! [`molt_storage::republic_id`], so no member's seed privileges the founder.
+//! transport queue per seat. Each member — a loopback node in the dev seams
+//! today, a real remote node once the Nostr transport (N4) lands — derives its
+//! own identity key from its own recovery phrase, activates the link
+//! (`JoinRequest`, MAC-bound to the ticket), and later signs the final
+//! canonical roster table (`SealSigned`). Only when every seat is sealed does
+//! the founder write the `Founded` genesis — carrying the complete identity
+//! table and all n attestations — and distribute the sealed roster so every
+//! member writes its own workspace. The roster is salted by a neutral,
+//! content-derived [`molt_storage::republic_id`], so no member's seed
+//! privileges the founder.
 //!
 //! Every leg lands in the wizard's live log as a real event.
 
 use molt_core::{Command, MemberId, MemberIdentity, RosterAttestation};
-use molt_net::smp::tls::Dialer;
-use molt_net::smp::{SmpServer, SmpTransport};
 use molt_net::supervisor;
 use molt_net::{
-    invite, msg_id, Delivery, LoopbackHub, LoopbackTransport, NetError, PaddedBlock, QueueId,
-    QueuePair, RcvQueue, SndQueueAddr, Transport, WrapKey,
+    invite, msg_id, Delivery, LoopbackHub, LoopbackTransport, NetError, PaddedBlock, QueuePair,
+    RcvQueue, SndQueueAddr, Transport, WrapKey,
 };
 use molt_storage::SigningKey;
 use std::sync::{Arc, Mutex};
@@ -36,105 +35,9 @@ use crate::{Envelope, State};
 /// normally completes in well under a second; this only bounds a failed peer.
 pub(crate) const MESH_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Build the runtime SMP transport from settings (Track B Stage 2 redundancy):
-/// spread inbound queues across the configured server list. `prepend` is a server
-/// that MUST be reachable first (a joiner/recovery invite server the ritual talks
-/// to); it is placed first and de-duplicated against the config list. The result
-/// is capped at [`molt_net::MESH_REDUNDANCY_CAP`] servers.
-///
-/// The list is this node's OWN redundancy — not a requirement on the others:
-/// `SmpTransport::route` dials a queue's own (pinned) server even when it is not
-/// in this list, so every member picks its inbound servers independently and a
-/// leg keeps both copies either way.
-pub(crate) fn build_smp_transport(
-    settings: &molt_core::SessionSettings,
-    dialer: Dialer,
-    prepend: Option<SmpServer>,
-) -> Result<SmpTransport, String> {
-    let mut servers: Vec<SmpServer> = Vec::new();
-    if let Some(s) = prepend {
-        servers.push(s);
-    }
-    for url in settings.smp_server_list(&molt_config::default_public_smp()) {
-        if let Ok(s) = SmpServer::parse(url.trim()) {
-            if !servers.iter().any(|e| e.render() == s.render()) {
-                servers.push(s);
-            }
-        }
-    }
-    if servers.is_empty() {
-        return Err("no SMP server configured".to_string());
-    }
-    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
-    Ok(SmpTransport::with_dialer_multi(servers, dialer))
-}
-
-/// A fresh SMP transport for **resuming** a persisted mesh on reopen,
-/// re-adopting the persisted queue credentials (recv keys so it can subscribe
-/// to our inbound queues, secured sender keys so it can keep sending without
-/// a rejected re-SKEY). `None` for a loopback mesh (empty servers — its
-/// in-memory queues cannot outlive the process).
-///
-/// **The CONFIG decides where this node's queues live** (2026-07-29 fix —
-/// "custom server wird ignoriert"): the server list seeds `create_queue`'s
-/// spread, so every NEW queue — each scheduled rotation, deaf-leg heal and
-/// mesh extension — is minted on the configured servers, the same resolution
-/// a fresh founding uses. An existing republic thereby MIGRATES to a changed
-/// server over the rotation cadence instead of being pinned to its birth
-/// servers forever. The EXISTING queues lose nothing: subscribe and send
-/// route per queue to its own pinned server (`SmpTransport::route`), in the
-/// list or not. Only a config that yields no parseable server falls back to
-/// the mesh's own servers — a broken URL must not strand the resume.
-pub(crate) fn reopen_transport(
-    mesh: &[molt_core::MeshLink],
-    creds: &[u8],
-    dialer: Dialer,
-    settings: &molt_core::SessionSettings,
-) -> Option<RitualTransport> {
-    let mut mesh_servers: Vec<SmpServer> = Vec::new();
-    let mut push = |raw: &str| {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            if let Ok(s) = SmpServer::parse(raw) {
-                if !mesh_servers.iter().any(|e| e.render() == s.render()) {
-                    mesh_servers.push(s);
-                }
-            }
-        }
-    };
-    for l in mesh {
-        push(&l.snd_server);
-        push(&l.rcv_server);
-        for x in &l.snd_extra {
-            push(&x.server);
-        }
-        for x in &l.rcv_extra {
-            push(&x.server);
-        }
-    }
-    if mesh_servers.is_empty() {
-        return None; // loopback mesh (empty servers) — nothing to resume
-    }
-    let mut servers: Vec<SmpServer> = Vec::new();
-    for url in settings.smp_server_list(&molt_config::default_public_smp()) {
-        if let Ok(s) = SmpServer::parse(url.trim()) {
-            if !servers.iter().any(|e| e.render() == s.render()) {
-                servers.push(s);
-            }
-        }
-    }
-    if servers.is_empty() {
-        servers = mesh_servers;
-    }
-    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
-    let t = SmpTransport::with_dialer_multi(servers, dialer);
-    t.import_creds(creds);
-    Some(RitualTransport::Smp(t))
-}
-
-/// The transport a founding ritual runs over. The in-app demo founds over
-/// the in-process loopback hub (with simulated members); a real founding
-/// runs over the configured SMP server. One enum so the founder side — the
+/// The transport a founding ritual runs over. Today only the in-process
+/// loopback hub (dev seams and simulated members); the Nostr relay transport
+/// (N4) adds the real-network arm back. One enum so the founder side — the
 /// recv loops, `maybe_seal`, teardown — is written once and dispatches at
 /// runtime, and so [`InviteMaterial`] and [`RitualRuntime`] have a single
 /// concrete transport type.
@@ -144,70 +47,50 @@ pub enum RitualTransport {
     /// In-process hub (the demo's simulated members). The held transport
     /// keeps the hub's Arc alive, so the ritual's queues live with it.
     Loopback(LoopbackTransport),
-    /// A real SMP server.
-    Smp(SmpTransport),
 }
 
 impl Transport for RitualTransport {
     async fn create_queue(&self) -> Result<QueuePair, NetError> {
         match self {
             RitualTransport::Loopback(t) => t.create_queue().await,
-            RitualTransport::Smp(t) => t.create_queue().await,
         }
     }
 
     async fn send(&self, addr: &SndQueueAddr, block: PaddedBlock) -> Result<(), NetError> {
         match self {
             RitualTransport::Loopback(t) => t.send(addr, block).await,
-            RitualTransport::Smp(t) => t.send(addr, block).await,
         }
     }
 
     async fn subscribe(&self, q: &RcvQueue) -> Result<mpsc::Receiver<Delivery>, NetError> {
         match self {
             RitualTransport::Loopback(t) => t.subscribe(q).await,
-            RitualTransport::Smp(t) => t.subscribe(q).await,
         }
     }
 
     async fn delete_queue(&self, q: &RcvQueue) -> Result<(), NetError> {
         match self {
             RitualTransport::Loopback(t) => t.delete_queue(q).await,
-            RitualTransport::Smp(t) => t.delete_queue(q).await,
         }
     }
 
     fn export_creds(&self) -> Option<Vec<u8>> {
         match self {
             RitualTransport::Loopback(t) => t.export_creds(),
-            RitualTransport::Smp(t) => t.export_creds(),
         }
     }
 
     fn import_creds(&self, creds: &[u8]) {
         match self {
             RitualTransport::Loopback(t) => t.import_creds(creds),
-            RitualTransport::Smp(t) => t.import_creds(creds),
-        }
-    }
-
-    fn redundancy(&self) -> usize {
-        // delegate to the inner transport (an SmpTransport spread across N
-        // servers returns N) — WITHOUT this, RitualTransport would use the
-        // trait default (1) and every rotate/bootstrap would mint a single
-        // queue, silently stripping Track B redundancy.
-        match self {
-            RitualTransport::Loopback(t) => t.redundancy(),
-            RitualTransport::Smp(t) => t.redundancy(),
         }
     }
 }
 
 /// One seat's transport material, held by the founder for the ritual's
 /// lifetime: the ticket it verifies against, the reply queue the member
-/// advertised (learned from its JoinRequest — in SMP the member owns the
-/// queue it receives on), and (once collected) the member's anchored
-/// identity.
+/// advertised (learned from its JoinRequest — the member owns the queue it
+/// receives on), and (once collected) the member's anchored identity.
 struct SeatRuntime {
     ticket: String,
     /// founder → member: where the canonical table goes. Learned from the
@@ -251,7 +134,7 @@ pub(crate) struct RitualRuntime {
     generation: u64,
     /// Keepalives for the simulated members of the offline **test seam**
     /// ([`crate::__spawn_sim_founding`]); dropping the runtime stops them.
-    /// Empty for a real (SMP) founding.
+    /// Empty for a manual founding.
     _sim: Vec<mpsc::Sender<()>>,
     /// The founder's own recv tasks live on the transport; kept alive by it.
     seq: std::sync::atomic::AtomicU64,
@@ -408,8 +291,7 @@ impl State {
         let manual = self.ritual_material_sink.is_some();
 
         // tickets, links and seats are set up synchronously — the ticket is
-        // the link's secret, minted without any I/O. Queue creation is the
-        // only async part (real on SMP), handled per transport below.
+        // the link's secret, minted without any I/O.
         let mut seats = Vec::with_capacity(seat_count);
         let mut links = Vec::with_capacity(seat_count);
         let mut seat_setup = Vec::with_capacity(seat_count);
@@ -439,83 +321,49 @@ impl State {
             });
         }
 
-        // A real founding runs over the configured SMP server: the in-app
-        // founding (no test sink, no sim flag) always does, and so does the
-        // manual-over-SMP dev seam. Real remote members join over it. Only the
-        // offline dev seams — loopback simulated members, or loopback manual —
-        // stay on the in-process hub.
-        let use_smp = self.ritual_over_smp || (!manual && !self.ritual_sim);
+        // A production founding (no test seam) has no network to run over in
+        // this build: the SMP transport is gone and the Nostr transport is
+        // not built yet. Fail honestly — never pretend a loopback republic is
+        // reachable by real remote members.
+        if !manual && !self.ritual_sim {
+            return Err(crate::NO_TRANSPORT_YET.to_string());
+        }
         let mut sim = Vec::new();
-        let transport = if use_smp {
-            // fail-closed: resolve the dialer from settings; a TorMisconfigured
-            // aborts the founding with the reason and sets the health pill.
-            let dialer = match self.resolve_dialer() {
-                Ok(dialer) => dialer,
-                Err(reason) => {
-                    self.emit_session(molt_core::SessionScope::Full);
-                    return Err(reason);
-                }
-            };
-            // Track B Stage 2: the founder's runtime transport spans the
-            // configured server list, so the founding mesh mints its inbound
-            // queues across N servers (N=1 for a single-server config, unchanged).
-            let transport = RitualTransport::Smp(build_smp_transport(
-                &self.session.settings,
-                dialer,
-                None,
-            )?);
-            // SMP queue creation is async: provision off the actor, wire each
-            // seat's recv loop, then hand the material out
-            spawn_smp_provisioning(
+        // loopback dev seams: the hub creates queues synchronously. The
+        // manual seam hands the per-seat material to the waiting
+        // instance(s); the sim seam spawns simulated members.
+        let hub = LoopbackHub::calm();
+        let transport = RitualTransport::Loopback(hub.transport());
+        let mut materials = Vec::with_capacity(seat_count);
+        for (seat_u32, ticket, invite_wrap) in &seat_setup {
+            let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
+            spawn_founder_recv(
                 transport.clone(),
-                seat_setup,
+                invite_q.rcv.clone(),
+                invite_wrap.clone(),
+                *seat_u32,
                 generation,
-                cmd_tx.clone(),
-                self.ritual_material_sink.clone(),
-                name.to_string(),
-                founder_name.to_string(),
-                rule_m,
-                rule_n,
+                cmd_tx.downgrade(),
             );
-            transport
-        } else {
-            // loopback dev seams: the hub creates queues synchronously. The
-            // manual seam hands the per-seat material to the waiting
-            // instance(s); the sim seam spawns simulated members.
-            let hub = LoopbackHub::calm();
-            let transport = RitualTransport::Loopback(hub.transport());
-            let mut materials = Vec::with_capacity(seat_count);
-            for (seat_u32, ticket, invite_wrap) in &seat_setup {
-                let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
-                spawn_founder_recv(
-                    transport.clone(),
-                    invite_q.rcv.clone(),
-                    invite_wrap.clone(),
-                    *seat_u32,
-                    generation,
-                    cmd_tx.downgrade(),
-                );
-                let material = InviteMaterial {
-                    seat: *seat_u32,
-                    transport: transport.clone(),
-                    invite_snd: invite_q.snd.clone(),
-                    invite_wrap: invite_wrap.clone(),
-                    ticket: ticket.clone(),
-                };
-                if self.ritual_sim {
-                    sim.push(spawn_sim_member(material)?);
-                } else {
-                    materials.push(material);
-                }
+            let material = InviteMaterial {
+                seat: *seat_u32,
+                transport: transport.clone(),
+                invite_snd: invite_q.snd.clone(),
+                invite_wrap: invite_wrap.clone(),
+                ticket: ticket.clone(),
+            };
+            if self.ritual_sim {
+                sim.push(spawn_sim_member(material)?);
+            } else {
+                materials.push(material);
             }
-            if let Some(sink) = &self.ritual_material_sink {
-                let _ = sink.send(materials);
-            }
-            // `hub` drops here; `transport` (and its task clones) hold the
-            // shared Arc, so every ritual queue stays alive until the runtime
-            // is dropped
-            transport
-        };
+        }
+        if let Some(sink) = &self.ritual_material_sink {
+            let _ = sink.send(materials);
+        }
+        // `hub` drops here; `transport` (and its task clones) hold the
+        // shared Arc, so every ritual queue stays alive until the runtime
+        // is dropped
 
         self.net_ritual = Some(RitualRuntime {
             transport,
@@ -720,97 +568,6 @@ pub(crate) fn spawn_coordinator_recv(
     });
 }
 
-/// Provision the founder's per-seat invite queues over SMP **off the actor**
-/// — SMP `create_queue` is a live NEW round-trip, which the synchronous
-/// command handler must not block on. Each seat gets its recv loop wired,
-/// and the full per-seat material is handed to the waiting instance once
-/// every queue is up. Manual mode only: a real founding invites real remote
-/// members, so there are no simulated joiners here.
-#[allow(clippy::too_many_arguments)]
-fn spawn_smp_provisioning(
-    transport: RitualTransport,
-    seat_setup: Vec<(u32, String, WrapKey)>,
-    generation: u64,
-    cmd_tx: mpsc::Sender<Envelope>,
-    sink: Option<std::sync::mpsc::Sender<Vec<InviteMaterial>>>,
-    republic: String,
-    inviter: String,
-    rule_m: u8,
-    rule_n: u8,
-) {
-    tokio::spawn(async move {
-        tracing::debug!(seats = seat_setup.len(), "SMP invite-queue provisioning started");
-        let mut materials = Vec::with_capacity(seat_setup.len());
-        for (seat, ticket, invite_wrap) in seat_setup {
-            let invite_q = match transport.create_queue().await {
-                Ok(q) => q,
-                Err(e) => {
-                    tracing::warn!(seat, error = %e, "SMP invite-queue provisioning failed");
-                    // tell the founder the founding cannot proceed instead of
-                    // leaving the create wizard stuck with no links, forever
-                    let (reply, _rx) = tokio::sync::oneshot::channel();
-                    let _ = cmd_tx
-                        .send(Envelope {
-                            cmd: Command::NetRitualFailed {
-                                error: format!("could not reach the SMP server: {e}"),
-                                generation: Some(generation),
-                            },
-                            reply,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            spawn_founder_recv(
-                transport.clone(),
-                invite_q.rcv.clone(),
-                invite_wrap.clone(),
-                seat,
-                generation,
-                cmd_tx.downgrade(),
-            );
-            // the real, joinable link: now that the queue exists, it carries
-            // the full transport handover. Report it so the founder's session
-            // (its GUI) shows a link a separate node can actually use.
-            let link = FoundingInvite {
-                info: molt_core::InviteInfo {
-                    republic: republic.clone(),
-                    threshold: rule_m,
-                    members: rule_n,
-                    inviter: inviter.clone(),
-                    ticket: ticket.clone(),
-                },
-                server: invite_q.snd.server.clone(),
-                queue_id: hex::encode(&invite_q.snd.id.0),
-                wrap: hex::encode(invite_wrap.to_bytes()),
-                seat,
-            }
-            .render();
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx
-                .send(Envelope {
-                    cmd: Command::NetRitualLinkReady {
-                        seat,
-                        link,
-                        generation: Some(generation),
-                    },
-                    reply,
-                })
-                .await;
-            materials.push(InviteMaterial {
-                seat,
-                transport: transport.clone(),
-                invite_snd: invite_q.snd,
-                invite_wrap,
-                ticket,
-            });
-        }
-        if let Some(sink) = sink {
-            let _ = sink.send(materials);
-        }
-    });
-}
-
 /// One founding invite's full transport handover — everything a member's
 /// node needs to activate and seal (transport concept §3.3: the payload
 /// the `molt://invite/…` link will carry in-band once T3 encodes it).
@@ -822,9 +579,9 @@ pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
     /// The seat this invite fills (0-based).
     pub seat: u32,
     /// The transport the founder reached the member over — the loopback hub
-    /// for the demo mesh, the SMP server for a real founding. A genuinely
-    /// separate instance uses its *own* transport and only reads the address
-    /// / wrap / ticket below; `run_ritual_member` is generic over `T`.
+    /// today, a real relay once N4 lands. A genuinely separate instance uses
+    /// its *own* transport and only reads the address / wrap / ticket below;
+    /// `run_ritual_member` is generic over `T`.
     pub transport: T,
     /// member → founder queue (JoinRequest, then SealSigned).
     pub invite_snd: SndQueueAddr,
@@ -835,14 +592,14 @@ pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
 
 /// A full founding-invite link: the [`molt_core::InviteInfo`] display preview
 /// plus the transport handover a *separate node* (a second moltd, the GUI
-/// join flow) needs to join a founding over SMP. Rendered as the preview link
-/// with one extra hex-wrapped segment, so `InviteInfo::parse` still reads the
-/// preview and a joining node reads the whole thing here.
+/// join flow) needs to join a founding. Rendered as the preview link with one
+/// extra hex-wrapped segment, so `InviteInfo::parse` still reads the preview
+/// and a joining node reads the whole thing here.
 #[doc(hidden)]
 pub struct FoundingInvite {
     /// The display preview (republic, m/n, inviter, ticket).
     pub info: molt_core::InviteInfo,
-    /// The founder's SMP server (`smp://fingerprint@host`).
+    /// The founder's server (opaque transport address; empty on loopback).
     pub server: String,
     /// The invite queue's send-side id (where the member sends its join), hex.
     pub queue_id: String,
@@ -1005,148 +762,6 @@ pub(crate) fn verify_seal_proposal(
     ))
 }
 
-/// The verified outcome of joining a founding: the sealed roster to write, and
-/// the joiner's own MLS group snapshot to seal into its `transport.state`.
-#[doc(hidden)]
-pub struct JoinResult {
-    /// The verified sealed roster the founder distributed.
-    pub sealed: molt_core::SealedRoster,
-    /// The joiner's MLS group snapshot (after processing the Welcome, and — if
-    /// the bootstrap ran — after the announcement exchange), or `None` on a
-    /// pre-MLS founding.
-    pub mls_snapshot: Option<Vec<u8>>,
-    /// The joiner's assembled direct-mesh handovers, when the (best-effort)
-    /// post-founding bootstrap completed; empty otherwise.
-    pub mesh: Vec<molt_core::MeshLink>,
-    /// The transport the joiner ran the ritual over, to REUSE for the runtime
-    /// supervisor. It shares the created queues' **receive credentials** (over
-    /// SMP the recipient keys live in a per-instance `Arc`, unreconstructable
-    /// from the mesh handover) — a fresh transport to the same server could send
-    /// but never subscribe to the joiner's own inbound queues.
-    pub transport: RitualTransport,
-}
-
-/// Run the member side of a founding **over SMP** from its real invite link,
-/// and return the verified sealed roster + own MLS snapshot: parse the handover,
-/// build our *own* [`SmpTransport`] for the founder's server, run the ritual
-/// (`cancel` ends the wait early), ratify the proposed charter (via `ratify`,
-/// or automatically when `None`), wait for the founder to distribute the sealed
-/// roster, and verify it. Writing the workspace is the caller's job (the engine
-/// materialises it into its state; [`join_founding_over_smp`] writes it
-/// standalone).
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub async fn ritual_join_over_smp(
-    link: &str,
-    name: String,
-    phrase: String,
-    bootstrap: bool,
-    ratify: Option<Ratifier>,
-    cancel: Option<mpsc::Receiver<()>>,
-    dialer: Dialer,
-    extra_server_urls: Vec<String>,
-) -> Result<JoinResult, String> {
-    let inv = FoundingInvite::parse(link).ok_or("not a joinable founding link")?;
-    let server = SmpServer::parse(inv.server.trim()).map_err(|e| e.to_string())?;
-    let wrap_bytes: [u8; 32] = hex::decode(&inv.wrap)
-        .map_err(|e| e.to_string())?
-        .try_into()
-        .map_err(|_| "bad wrap key length".to_string())?;
-    let queue_id = hex::decode(&inv.queue_id).map_err(|e| e.to_string())?;
-    // our OWN transport to the founder's server — not the founder's, routed
-    // through the resolved `dialer` (Tor when configured). Keep a clone (SMP
-    // clones share the recipient-key store) to hand back for the runtime
-    // supervisor: it must reuse THIS instance to subscribe to the inbound
-    // queues the bootstrap created.
-    //
-    // Track B Stage 2: the invite server is the primary (the ritual reaches the
-    // founder there); this node's own configured redundancy servers
-    // (`extra_server_urls` = settings.smp_urls) are added so the joiner mints its
-    // inbound queues across N servers too. Capped at MESH_REDUNDANCY_CAP; an
-    // empty list is the former single-server joiner exactly.
-    let mut servers = vec![server.clone()];
-    for url in &extra_server_urls {
-        if let Ok(s) = SmpServer::parse(url.trim()) {
-            if !servers.iter().any(|e| e.render() == s.render()) {
-                servers.push(s);
-            }
-        }
-    }
-    servers.truncate(molt_net::MESH_REDUNDANCY_CAP.max(1));
-    let transport = RitualTransport::Smp(SmpTransport::with_dialer_multi(servers, dialer));
-    let material = InviteMaterial {
-        seat: inv.seat,
-        transport: transport.clone(),
-        invite_snd: SndQueueAddr {
-            server: server.render(),
-            id: QueueId::from_bytes(queue_id),
-        },
-        invite_wrap: WrapKey::from_bytes(wrap_bytes),
-        ticket: inv.info.ticket.clone(),
-    };
-    // `bootstrap` runs the (best-effort) post-founding mesh bootstrap after the
-    // group is joined; the caller enables it for the real product flow.
-    let outcome =
-        run_ritual_member(material, name.clone(), phrase, true, bootstrap, ratify, cancel).await?;
-    let sealed = outcome
-        .sealed
-        .ok_or_else(|| "founder never distributed the sealed roster".to_string())?;
-    verify_sealed_roster(&sealed)?;
-    // refuse a roster that does not anchor our own (name, key) pair: a founder
-    // that excluded us — or anchored our key under a different name — must not
-    // leave us holding a workspace whose own acting member is not in its roster
-    if !sealed
-        .identities
-        .iter()
-        .any(|i| i.member == name && i.identity_pk == outcome.pk)
-    {
-        return Err("the sealed roster does not anchor our own (name, key)".to_string());
-    }
-    Ok(JoinResult {
-        sealed,
-        mls_snapshot: outcome.mls_snapshot,
-        mesh: outcome.mesh.unwrap_or_default(),
-        transport,
-    })
-}
-
-/// Join a founding from its real link over SMP and write our **own** workspace
-/// under `root` from our **own** seed (own local id + keys; the shared
-/// republic id rides in the genesis). Returns the local workspace id. The
-/// standalone entry (a second moltd, tests); the GUI join uses
-/// [`ritual_join_over_smp`] and materialises into engine state instead.
-#[doc(hidden)]
-pub async fn join_founding_over_smp(
-    link: &str,
-    name: String,
-    phrase: String,
-    root: &std::path::Path,
-    dialer: Dialer,
-) -> Result<molt_core::WorkspaceId, String> {
-    // bootstrap=false: this standalone one-shot writes a workspace and returns
-    // (no running engine to host a runtime supervisor); the live product join is
-    // cmd_join_start, which bootstraps. A future CLI that keeps a node running
-    // would pass true and persist the mesh (the plumbing below already handles it).
-    let result =
-        // standalone one-shot: single-server (no running node / config list here)
-        ritual_join_over_smp(link, name.clone(), phrase.clone(), false, None, None, dialer, Vec::new())
-            .await?;
-    let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
-    let genesis = result.sealed.into_genesis(&name, molt_storage::now_secs());
-    let opened = molt_storage::create_workspace(root, &entropy, &genesis).map_err(|e| e.to_string())?;
-    let id = opened.manifest.workspace.id.clone();
-    // seal our own MLS group state + assembled mesh into transport.state
-    if result.mls_snapshot.is_some() || !result.mesh.is_empty() {
-        let mut ts = opened.read_transport_state();
-        if let Some(blob) = result.mls_snapshot {
-            ts.mls = Some(blob);
-        }
-        ts.mesh = result.mesh;
-        opened.write_transport_state(&ts).map_err(|e| e.to_string())?;
-    }
-    Ok(id)
-}
-
 /// What the member side produced: its anchored identity pk, and — when it
 /// waited for it (`collect_genesis`) — the sealed roster the founder
 /// distributed at the end, from which the member writes its **own** workspace.
@@ -1211,7 +826,7 @@ async fn next_ritual_msg(
 /// members pass `false`; a real joining node passes `true`.
 ///
 /// `cancel` (if any) ends the wait early (ritual teardown). This is the exact
-/// code path a remote member's node runs over SMP.
+/// code path a remote member's node will run once a real transport is back.
 /// The joiner's human **ratification gate**: `run_ritual_member` surfaces the
 /// founder's proposed charter (final name, agenda) on `proposal` and blocks on
 /// `confirm` before signing — signing *is* the ratification (concept §3.3).
@@ -1446,8 +1061,8 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
 
     // create the reply queue we (the member) receive the canonical table
     // on, and subscribe *before* announcing it — so the founder's table can
-    // never race ahead of our subscription. In SMP each party owns the
-    // queue it receives on; this is exactly that queue.
+    // never race ahead of our subscription. Each party owns the queue it
+    // receives on; this is exactly that queue.
     let reply_q = m.transport.create_queue().await.map_err(|e| e.to_string())?;
     let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
     let mut rx = m
@@ -1730,10 +1345,10 @@ mod ritual_ops {
     use super::*;
 
     impl State {
-        /// A founding seat's real invite link became available (its SMP
-        /// queue is now provisioned). Replace the seat's preview link with
-        /// the joinable one, so the founder's GUI shows a link a separate
-        /// node can use.
+        /// A founding seat's real invite link became available (its invite
+        /// queue is now provisioned — dormant until N4's Nostr provisioning
+        /// re-emits it). Replace the seat's preview link with the joinable
+        /// one, so the founder's GUI shows a link a separate node can use.
         pub(crate) fn cmd_net_ritual_link_ready(
             &mut self,
             seat: u32,
@@ -1751,9 +1366,10 @@ mod ritual_ops {
             Ok(molt_core::Reply::Ack)
         }
 
-        /// The founder's SMP provisioning failed (e.g. server unreachable):
-        /// fail the create run and tear the ritual down, so the wizard shows
-        /// the error instead of waiting for links that will never come.
+        /// The founder's off-actor queue provisioning failed (dormant until
+        /// N4's Nostr provisioning re-emits it): fail the create run and tear
+        /// the ritual down, so the wizard shows the error instead of waiting
+        /// for links that will never come.
         pub(crate) fn cmd_net_ritual_failed(
             &mut self,
             error: String,
@@ -1897,7 +1513,7 @@ mod ritual_ops {
                 );
             }
             // stand the runtime supervisor up over the direct mesh, reusing the
-            // ritual transport (the loopback hub / the founder's SMP server), so
+            // ritual transport (it owns the mesh queues' receive credentials), so
             // the founder can chat peer-to-peer the moment the mesh is assembled
             if let Some(transport) = transport {
                 if let Some(net) = self.build_real_net(transport, &mesh, &mls_snapshot) {
@@ -2314,80 +1930,6 @@ mod ritual_ops {
 mod tests {
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
-
-    /// The custom-server fix (2026-07-29 user report: "custom server wird
-    /// ignoriert"): a RESUMED workspace's transport must host its NEW queues
-    /// (rotation, deaf-heal, extension) on the CONFIGURED server list — the
-    /// same resolution a fresh founding uses — so an existing republic
-    /// migrates to a changed server over the rotation cadence. The mesh's
-    /// birth servers stay reachable per queue via the pinned routing and are
-    /// only the fallback when the config yields nothing parseable.
-    #[test]
-    fn a_reopened_transport_hosts_new_queues_on_the_configured_servers() {
-        const OLD: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@old.invalid";
-        const NEW: &str = "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.konkin.io:5223";
-        let mesh = vec![molt_core::MeshLink {
-            member: "bob".to_string(),
-            snd_server: OLD.to_string(),
-            snd_queue: "aa".to_string(),
-            snd_wrap: "bb".to_string(),
-            rcv_server: OLD.to_string(),
-            rcv_queue: "cc".to_string(),
-            rcv_wrap: "dd".to_string(),
-            snd_extra: Vec::new(),
-            rcv_extra: Vec::new(),
-        }];
-        let custom = molt_core::SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: NEW.to_string(),
-            ..molt_core::SessionSettings::default()
-        };
-        let t = reopen_transport(&mesh, &[], Dialer::Direct, &custom)
-            .expect("an smp mesh resumes");
-        let RitualTransport::Smp(t) = t else { panic!("smp transport") };
-        let list = t.server_list();
-        assert!(
-            list[0].contains("smp.konkin.io"),
-            "new queues must be hosted on the CONFIGURED server: {list:?}"
-        );
-        assert!(
-            !list.iter().any(|s| s.contains("old.invalid")),
-            "the birth server is per-queue-pinned routing, not part of the \
-             create spread: {list:?}"
-        );
-
-        // an unparseable custom URL falls back to the mesh's own servers —
-        // a broken config must not strand the resume
-        let broken = molt_core::SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://not a url".to_string(),
-            ..molt_core::SessionSettings::default()
-        };
-        let t = reopen_transport(&mesh, &[], Dialer::Direct, &broken)
-            .expect("resumes on the mesh servers");
-        let RitualTransport::Smp(t) = t else { panic!("smp transport") };
-        assert!(
-            t.server_list()[0].contains("old.invalid"),
-            "fallback: the mesh's birth servers"
-        );
-
-        // a LOOPBACK mesh (empty servers) still refuses a cross-process resume
-        let loopback = vec![molt_core::MeshLink {
-            member: "bob".to_string(),
-            snd_server: String::new(),
-            snd_queue: "aa".to_string(),
-            snd_wrap: "bb".to_string(),
-            rcv_server: String::new(),
-            rcv_queue: "cc".to_string(),
-            rcv_wrap: "dd".to_string(),
-            snd_extra: Vec::new(),
-            rcv_extra: Vec::new(),
-        }];
-        assert!(
-            reopen_transport(&loopback, &[], Dialer::Direct, &custom).is_none(),
-            "a loopback mesh cannot resume in a new process, config or not"
-        );
-    }
 
     #[test]
     fn recover_command_maps_the_request_and_encodes_the_reply() {

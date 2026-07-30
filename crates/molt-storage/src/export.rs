@@ -7,7 +7,7 @@
 //! the encrypted history (verbatim ciphertext — the frames stay under the
 //! workspace key, whose AAD already binds them to this workspace), the
 //! threshold-signed chain, the newest snapshot and the logo. Live protocol
-//! state — the MLS ratchet and the SMP queue credentials in
+//! state — the MLS ratchet and the transport queue credentials in
 //! `transport.state` — is **hard-excluded** (design §3.3): restoring it would
 //! fork the ratchet (nonce reuse), freeze forward secrecy and fight the
 //! original for its queues. Membership comes back via the recovery ritual,
@@ -295,7 +295,7 @@ impl std::fmt::Debug for ExportArchive {
 /// The include/exclude table is design §3.2: manifest, prefs, every log
 /// segment (verbatim ciphertext — crash-consistent even while a writer
 /// appends), the newest snapshot, `chain.state`, the logo. `transport.state`
-/// (MLS ratchet + SMP queue credentials) is **never** exported; unknown extra
+/// (MLS ratchet + transport queue credentials) is **never** exported; unknown extra
 /// files are skipped and named in the outcome. Blocking (Argon2 + I/O) —
 /// call off-actor only.
 pub fn export_dir(

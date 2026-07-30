@@ -181,92 +181,6 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Test connectivity to an SMP server (the settings panel's Test button).
-    /// Resolves the target (explicit `url`, else the configured custom or
-    /// public server), marks the test in flight, and runs the real TLS
-    /// handshake **off the actor** — the outcome returns as
-    /// [`molt_core::Command::NetTestResult`] so the actor never blocks on the
-    /// network.
-    pub(crate) fn cmd_net_test_server(
-        &mut self,
-        url: String,
-        anonymity: String,
-        tor_mode: String,
-        tor_port: u16,
-    ) -> Result<Reply, MoltError> {
-        let url = if url.trim().is_empty() {
-            if self.session.settings.smp_server == "custom" {
-                self.session.settings.smp_url.clone()
-            } else {
-                molt_config::default_public_smp()
-            }
-        } else {
-            url
-        };
-        // parse in-actor so an obviously malformed URL fails fast
-        let server = match molt_net::smp::SmpServer::parse(url.trim()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.session.smp_test = format!("error: {e}");
-                self.emit_session(SessionScope::Full);
-                return Ok(Reply::Ack);
-            }
-        };
-        // route the probe through the resolved dialer (T4 §P7): over Tor it
-        // uses the same routing the app will, and an onion-only target under a
-        // Direct dialer reports "requires Tor" instead of leaking a clearnet
-        // dial. A misconfigured Tor setting is itself the test failure.
-        // Draft overrides (the settings form's live values) win over the
-        // saved config, field-by-field — empty/0 falls back to saved, so a
-        // bare MCP `test_smp_server` still probes the configured transport.
-        let s = &self.session.settings;
-        let anonymity = if anonymity.trim().is_empty() {
-            s.anonymity.clone()
-        } else {
-            anonymity.trim().to_string()
-        };
-        let tor_mode = if tor_mode.trim().is_empty() {
-            s.tor_mode.clone()
-        } else {
-            tor_mode.trim().to_string()
-        };
-        let tor_port = if tor_port == 0 { s.tor_port } else { tor_port };
-        let dialer = match molt_net::smp::tls::Dialer::resolve(&anonymity, &tor_mode, tor_port) {
-            Ok(dialer) => dialer,
-            Err(e) => {
-                self.session.smp_test = format!("error: {e}");
-                self.emit_session(SessionScope::Full);
-                return Ok(Reply::Ack);
-            }
-        };
-        self.session.smp_test = "testing".to_string();
-        self.emit_session(SessionScope::Full);
-        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
-            tokio::spawn(async move {
-                let result = match molt_net::smp::test_connection(&dialer, &server).await {
-                    Ok(()) => "ok".to_string(),
-                    Err(e) => format!("error: {e}"),
-                };
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx
-                    .send(crate::Envelope {
-                        cmd: molt_core::Command::NetTestResult { result },
-                        reply,
-                    })
-                    .await;
-            });
-        }
-        Ok(Reply::Ack)
-    }
-
-    /// Record an SMP connection-test outcome into the session (fed back from
-    /// the off-actor probe task).
-    pub(crate) fn cmd_net_test_result(&mut self, result: String) -> Result<Reply, MoltError> {
-        self.session.smp_test = result;
-        self.emit_session(SessionScope::Full);
-        Ok(Reply::Ack)
-    }
-
     /// Test the configured S3 backup target (the backup panel's Test button).
     /// Empty fields fall back to the saved settings (the GUI passes its
     /// draft, an MCP call may pass nothing to test what is persisted); the
@@ -519,14 +433,14 @@ impl State {
         molt_storage::expand_tilde(&self.session.settings.workspace_dir)
     }
 
-    /// The config→dialer bridge (T4 §P1): resolve the SMP dialer from the live
+    /// The config→dialer bridge (T4 §P1): resolve the dialer from the live
     /// anonymity settings. `network=none`→Direct, `network=tor`→SOCKS/arti,
     /// and every misconfiguration (`embedded` without the feature, unknown
     /// mode, `nym`) is a fail-closed [`molt_net::NetError::TorMisconfigured`] —
     /// never a silent clearnet fallback.
-    pub(crate) fn dialer_for(&self) -> Result<molt_net::smp::tls::Dialer, molt_net::NetError> {
+    pub(crate) fn dialer_for(&self) -> Result<molt_net::dial::Dialer, molt_net::NetError> {
         let s = &self.session.settings;
-        molt_net::smp::tls::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
+        molt_net::dial::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
     }
 
     /// The display label for the EFFECTIVE global anonymity network — what
@@ -538,12 +452,12 @@ impl State {
         molt_core::effective_net_label(&self.session.settings.anonymity).to_string()
     }
 
-    /// Resolve the dialer for a flow about to open SMP connections, updating
-    /// the transport-health pill (T4 §P6): success clears it to `Ok`, a
-    /// fail-closed error sets it `Down` with the reason and returns that reason
-    /// so the caller aborts the flow (fail-closed). Does **not** emit — the
-    /// caller's own `emit_session` carries the new health state.
-    pub(crate) fn resolve_dialer(&mut self) -> Result<molt_net::smp::tls::Dialer, String> {
+    /// Resolve the dialer for a flow about to open network connections,
+    /// updating the transport-health pill (T4 §P6): success clears it to `Ok`,
+    /// a fail-closed error sets it `Down` with the reason and returns that
+    /// reason so the caller aborts the flow (fail-closed). Does **not** emit —
+    /// the caller's own `emit_session` carries the new health state.
+    pub(crate) fn resolve_dialer(&mut self) -> Result<molt_net::dial::Dialer, String> {
         match self.dialer_for() {
             Ok(dialer) => {
                 self.session.net_health = molt_core::NetHealth::Ok;
@@ -601,48 +515,23 @@ impl State {
         self.runtime_transport = None;
         self.session.active_workspace = id;
         // RESUME the real mesh from the clean-close snapshot: re-adopt the queue
-        // credentials into a fresh transport (recv keys + secured sender keys, so
-        // it can subscribe AND send) and load the advanced MLS ratchet. A
-        // workspace never cleanly closed (crash, or founded on another node) has
-        // no `smp_queues` → no mesh (offline until a recovery/rejoin; only the
-        // demo-mesh test seam stands simulated peers up here).
+        // credentials and load the advanced MLS ratchet. A workspace never
+        // cleanly closed (crash, or founded on another node) has no queue
+        // creds → no mesh (offline until a recovery/rejoin; only the demo-mesh
+        // test seam stands simulated peers up here). Until N4's Nostr
+        // transport lands, only the reopen SEAM (a transport on the test's
+        // still-running loopback hub) can resume — a production reopen has no
+        // transport to rebuild and opens honestly detached below.
         // fail-closed resume: resolve the dialer first. A misconfigured Tor
         // setting sets the health pill Down and skips the real mesh rather
         // than resuming over an unintended clearnet path.
         let dialer = self.resolve_dialer().ok();
         let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
-            (Some(mls), Some(creds), Some(dialer)) if !transport_state.mesh.is_empty() => {
-                // the reopen seam (tests): a transport on the still-running
-                // loopback hub replaces the fresh-SmpTransport build — same
-                // import contract
-                let transport = if let Some(seam) = self.reopen_seam.clone() {
-                    molt_net::Transport::import_creds(&seam, creds);
-                    Some(seam)
-                } else {
-                    crate::founding::reopen_transport(
-                        &transport_state.mesh,
-                        creds,
-                        dialer.clone(),
-                        &self.session.settings,
-                    )
-                };
-                // DIAGNOSTIC (MOLT_MESH_PROBE): instead of standing up the real
-                // mesh, run a raw per-leg SMP self-test to tell server-side queue
-                // expiry apart from a moltrepublic resume/delivery bug on a
-                // workspace that reopens deaf. Replaces the mesh for this session
-                // (one subscription per queue). See `crate::probe`.
-                if crate::probe::armed() {
-                    if let Some(t) = transport {
-                        crate::probe::spawn_mesh_probe(
-                            t,
-                            transport_state.mesh.clone(),
-                            self.member(),
-                        );
-                    }
-                    None
-                } else {
-                    transport.and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
-                }
+            (Some(mls), Some(creds), Some(_dialer)) if !transport_state.mesh.is_empty() => {
+                let transport = self.reopen_seam.clone().inspect(|seam| {
+                    molt_net::Transport::import_creds(seam, creds);
+                });
+                transport.and_then(|t| self.build_real_net(t, &transport_state.mesh, mls))
             }
             _ => None,
         };
@@ -705,15 +594,6 @@ impl State {
         } else {
             String::new()
         };
-        // diagnostics: make it unmistakable that the mesh is intentionally not
-        // running (the probe replaced it), so the offline banner isn't mistaken
-        // for the bug under investigation.
-        if crate::probe::armed() {
-            self.session.notice =
-                "mesh-probe: diagnostics only — the real mesh is NOT running; read the \
-                 molt_mesh_probe log"
-                    .to_string();
-        }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1472,56 +1352,5 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
             "workspace_dir must not be empty".to_string(),
         ));
     }
-    // Fail CLOSED on a custom SMP server with no URL (audit finding #3): the
-    // resolver falls back to the bundled PUBLIC server otherwise, so a user who
-    // picks a private server but leaves the field blank would silently route over
-    // the public one — a metadata surprise. A `urls` list satisfies it too.
-    if s.smp_server == "custom" && s.smp_url.trim().is_empty() && s.smp_urls.is_empty() {
-        return Err(MoltError::Settings(
-            "a custom SMP server needs a URL (or a redundant-server list)".to_string(),
-        ));
-    }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Audit finding #3: a custom SMP server with a BLANK url (and no redundant
-    /// list) must be REJECTED — otherwise the resolver silently falls back to the
-    /// bundled public server, routing a user who picked a private server over the
-    /// public one. A url OR a urls list satisfies it; "public" needs neither.
-    #[test]
-    fn validate_rejects_a_custom_smp_server_with_no_url() {
-        let base = molt_core::SessionSettings::default();
-        // public default: fine with no url
-        assert!(validate_settings(&base).is_ok());
-
-        // custom + blank url + no list → rejected (fail closed)
-        let blank = molt_core::SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: "   ".to_string(),
-            smp_urls: Vec::new(),
-            ..base.clone()
-        };
-        assert!(validate_settings(&blank).is_err(), "custom + blank url must fail closed");
-
-        // custom + a url → fine
-        let with_url = molt_core::SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://AAAA@host".to_string(),
-            ..base.clone()
-        };
-        assert!(validate_settings(&with_url).is_ok());
-
-        // custom + a redundant list (but blank url) → fine (the list is the source)
-        let with_list = molt_core::SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: String::new(),
-            smp_urls: vec!["smp://AAAA@host".to_string()],
-            ..base
-        };
-        assert!(validate_settings(&with_list).is_ok());
-    }
 }

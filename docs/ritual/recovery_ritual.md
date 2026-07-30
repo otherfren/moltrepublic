@@ -1,5 +1,13 @@
 # The Recovery Ritual
 
+> **Scope note (2026-07-30, etappe N-demo):** the SMP transport was removed in
+> the Nostr transport replacement (`docs/transport/nostr_transport_marmot.md`).
+> The recovery ritual itself stays LIVE over the loopback transport (the
+> `two_instances.rs` recovery suite is the keystone); the over-SMP drivers
+> named in the status sections below (`rejoin_over_smp`, the SMP queue
+> provisioning and its failure pin) were deleted — production `RecoverStart`
+> fails honestly until N4 re-implements the provisioning over Nostr.
+
 How a member who lost **everything but its recovery phrase** returns to a
 republic: re-authenticated, re-admitted to the encrypted group, and caught up to
 the latest shared state. This document describes the ritual **abstractly** — the

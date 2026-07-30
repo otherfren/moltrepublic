@@ -85,13 +85,13 @@ impl State {
         if let Some(net) = &self.net {
             net.publish(&env);
         }
-        // mesh keepalive idle gate (Stage 2): OUR OWN wire-crossing frame to a
-        // REAL mesh keeps every peer's inbound queue warm (the outbox only
-        // sends events we authored — `NetRuntime::wants`), so no keepalive is
-        // due for a while. A *received* peer event (`env.by != me`) is also
-        // recorded here but warms nothing outbound, so it must NOT suppress the
-        // ping. Stamped before the `active` borrow below so the mutation is
-        // conflict-free.
+        // `last_mesh_out` = "our own traffic crossed the wire since the last
+        // MLS snapshot" — its ONLY reader is `persist_mls_if_due`, which uses
+        // it to debounce the live ratchet persist (delivery guarantee §4.6).
+        // Only events WE authored advance our sender ratchet (the outbox sends
+        // authored events only — `NetRuntime::wants`), so a *received* peer
+        // event (`env.by != me`) must NOT stamp it. Stamped before the
+        // `active` borrow below so the mutation is conflict-free.
         if self.net.as_ref().is_some_and(|n| n.is_real())
             && crate::net::crosses_wire(&env.body)
             && env.by == self.member()
@@ -595,11 +595,7 @@ impl State {
         self.net_unreachable.clear();
         self.net_link_down.clear();
         self.net_send_stuck.clear();
-        self.mesh_up.clear();
-        self.last_raw_inbound.clear();
         self.last_mesh_out = 0;
-        self.rotate_at.clear();
-        self.seen_announces.clear();
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)
@@ -1320,8 +1316,8 @@ mod tests {
     const LEGACY_ID_OF_MSG_1: &str = "a69dfac27e835b034302877efee908ea";
 
     /// Explicit react ops are **idempotent** (an at-least-once transport
-    /// may deliver the same frame twice — SMP redelivers un-acked frames
-    /// after a hard crash, the MLS path has no wire-seq cursor), while a
+    /// may deliver the same frame twice — the transport redelivers un-acked
+    /// frames after a hard crash, the MLS path has no wire-seq cursor), while a
     /// legacy op-less event keeps its original toggle semantics on replay.
     #[test]
     fn explicit_react_ops_are_idempotent_but_legacy_toggles() {

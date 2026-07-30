@@ -255,17 +255,6 @@ pub struct SessionSettings {
     pub tor_mode: String,
     /// Local Tor SOCKS port.
     pub tor_port: u16,
-    /// SMP server selection: `"public"` (bundled default) or `"custom"`.
-    #[serde(default)]
-    pub smp_server: String,
-    /// Custom SMP server URL, used when `smp_server = "custom"`.
-    #[serde(default)]
-    pub smp_url: String,
-    /// Redundant SMP server list (Track B Stage 2). When non-empty, the node
-    /// spreads its inbound queues across these servers for redundancy; empty =
-    /// single-server (unchanged). Additive.
-    #[serde(default)]
-    pub smp_urls: Vec<String>,
     /// Where downloaded chat files land when no explicit destination is
     /// given (`~` expands).
     #[serde(default = "default_download_dir")]
@@ -327,44 +316,11 @@ impl Default for SessionSettings {
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: 9050,
-            smp_server: "public".to_string(),
-            smp_url: String::new(),
-            smp_urls: Vec::new(),
             download_dir: default_download_dir(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
         }
-    }
-}
-
-impl SessionSettings {
-    /// The effective SMP server URL list the transport builds over (Track B
-    /// Stage 2 redundancy). When `smp_urls` is non-empty it wins (de-duplicated,
-    /// order preserved — ≥2 entries activate N=2 redundancy); otherwise the
-    /// single-server resolution: the custom `smp_url` when `smp_server ==
-    /// "custom"` and it is set, else `default_public` (the caller passes the
-    /// bundled public server — `molt-core` has no transport/config dependency).
-    /// Always returns ≥1 entry, so a transport built from it is never empty.
-    pub fn smp_server_list(&self, default_public: &str) -> Vec<String> {
-        if !self.smp_urls.is_empty() {
-            let mut out: Vec<String> = Vec::with_capacity(self.smp_urls.len());
-            for u in &self.smp_urls {
-                let u = u.trim();
-                if !u.is_empty() && !out.iter().any(|e| e == u) {
-                    out.push(u.to_string());
-                }
-            }
-            if !out.is_empty() {
-                return out;
-            }
-        }
-        let single = if self.smp_server == "custom" && !self.smp_url.trim().is_empty() {
-            self.smp_url.trim().to_string()
-        } else {
-            default_public.to_string()
-        };
-        vec![single]
     }
 }
 
@@ -1776,8 +1732,8 @@ pub fn roster_canonical_bytes(
 /// The explicit direction of a reaction event (chat bus). The **sender**
 /// computes the toggle outcome against its own state and puts the result on
 /// the wire; the applier treats it as an idempotent set/unset, so
-/// at-least-once redelivery (SMP redelivers un-acked frames after a hard
-/// crash; the MLS path has no wire-seq cursor) can never invert a reaction.
+/// at-least-once redelivery (the transport redelivers un-acked frames after a
+/// hard crash; the MLS path has no wire-seq cursor) can never invert a reaction.
 ///
 /// Mixed-version degradation (accepted, chat-bus Q3 posture): an OLD reader
 /// drops the unknown `op` field on decode and still *toggles*, so a
@@ -2528,15 +2484,10 @@ pub struct SessionView {
     pub theme: String,
     /// A transient notice key for the GUI (e.g. `"saved"`); cleared on navigate.
     pub notice: String,
-    /// Transient result of the settings panel's "Test connection" against
-    /// the SMP server: `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
+    /// Transient result of the backup panel's "Test connection" against the
+    /// S3 endpoint: `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
     /// Never persisted; lives here (not in [`SessionSettings`]) so a test in
     /// flight does not look like an unsaved settings edit.
-    #[serde(default)]
-    pub smp_test: String,
-    /// Transient result of the backup panel's "Test connection" against the
-    /// S3 endpoint, same vocabulary and rationale as [`Self::smp_test`]:
-    /// `""` (untested), `"testing"`, `"ok"`, or `"error: …"`.
     #[serde(default)]
     pub s3_test: String,
     /// Transient state of the last bucket listing ([`Command::NetListBackups`]),
@@ -2588,7 +2539,6 @@ impl Default for SessionView {
             language: "en".to_string(),
             theme: "classic".to_string(),
             notice: String::new(),
-            smp_test: String::new(),
             s3_test: String::new(),
             s3_list: String::new(),
             restart_required: Vec::new(),
@@ -2655,19 +2605,6 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
-    /// RAW inbound activity on a leg's queue (engine-internal, mesh reliability
-    /// Track D): a frame ARRIVED at the transport, decoded or not (a redelivered
-    /// duplicate, a held future-epoch frame, …). Unlike `NetPeerSeen` this does
-    /// NOT prove the peer is alive (it may be old redelivery) — it only proves
-    /// the QUEUE is alive and delivering, so verify-at-open must not churn it
-    /// with a rotate. Throttled by the supervisor; never advances presence.
-    NetRawInbound {
-        /// The leg (peer) whose queue delivered a frame.
-        peer: MemberId,
-        /// Mesh incarnation (see [`Command::NetDelivered`]).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
     /// Periodic presence aging (engine-internal ticker): re-derive the
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.
@@ -2679,12 +2616,6 @@ pub enum Command {
     /// "3 s" ACK debounce a 33 s latency, losing the race against the
     /// sender's 30 s resend timer (E7 review).
     NetDeliveryTick,
-    /// Low-rate mesh keepalive (engine-internal ticker, mesh self-heal
-    /// Stage 2): send an idle-only, MLS-encrypted liveness ping to each mesh
-    /// peer whose leg has seen no recent traffic, so the server never
-    /// idle-expires the queue — and the ping doubles as the Stage 1 liveness
-    /// signal. An actively-chatting mesh sends none.
-    NetMeshKeepaliveTick,
     /// Sending to a member's queue keeps failing; the outbox is backing
     /// off and retrying (engine-internal transport health).
     NetSendFailed {
@@ -3199,33 +3130,6 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
-    /// Test connectivity to an SMP server (the settings panel's Test
-    /// button): a live TLS handshake, run off the actor, whose result lands
-    /// in `settings.smp_test`. Safe to expose — it only dials a server.
-    NetTestServer {
-        /// The `smp://<fingerprint>@host[:port]` URL to test. Empty tests
-        /// the currently-configured server (public default or custom URL).
-        #[serde(default)]
-        url: String,
-        /// Draft anonymity network to probe with (`none` | `tor` | `nym`).
-        /// Empty uses the saved setting. The settings form passes its live
-        /// draft so the probe reflects what the user is about to save.
-        #[serde(default)]
-        anonymity: String,
-        /// Draft tor mode (`local` | `embedded` | `whonix`); empty uses the
-        /// saved setting. Only consulted when the effective network is tor.
-        #[serde(default)]
-        tor_mode: String,
-        /// Draft tor SOCKS port; 0 uses the saved setting.
-        #[serde(default)]
-        tor_port: u16,
-    },
-    /// The outcome of a [`Command::NetTestServer`] handshake, reported back
-    /// from the off-actor probe task (engine-internal, never an MCP tool).
-    NetTestResult {
-        /// `"ok"` or `"error: …"`; written verbatim into `settings.smp_test`.
-        result: String,
-    },
     /// Test the S3 backup target (the backup settings panel's Test button):
     /// a real SigV4-signed `HEAD /bucket` probe over the configured dialer
     /// (Tor when enabled — fail-closed, like every dial), run off the actor;
@@ -3462,63 +3366,15 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
-    /// **Warm a peer back** in answer to a solicited probe (engine-internal,
-    /// mesh verify-at-open Fix A): a probe arrived from `peer`, so this node
-    /// sends it exactly one keepalive (`warm_leg`) — the deterministic pong that
-    /// lets the prober confirm its leg round-trips. The node's own transport
-    /// speaking — never an MCP tool (an agent must not forge mesh liveness).
-    NetMeshWarm {
-        /// The peer to warm back (the probe's sender).
-        peer: MemberId,
-        /// Mesh incarnation (a torn-down mesh drops the warm-back).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
-    /// The **verify-at-open one-shot** (engine-internal, mesh verify-at-open
-    /// Fix A): armed when a leg's subscription comes up, it fires after
-    /// `MESH_VERIFY_SECS`; if the leg has still delivered NOTHING since coming up
-    /// (its probes went unanswered), the leg is re-established via a rotate.
-    /// The node's own transport speaking — never an MCP tool.
-    NetMeshVerify {
-        /// The leg to verify (rotate if still unheard).
-        peer: MemberId,
-        /// Mesh incarnation (a torn-down/rebuilt mesh drops the stale verify).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
-    /// Self-initiated **mesh rotate** (engine-internal, mesh self-heal Stage 3):
-    /// a leg to `peer` is detected live-but-deaf, so this node mints a fresh
-    /// inbound queue for it and re-announces the new address over the still-
-    /// working legs. The node's own transport speaking — never an MCP tool (an
-    /// agent must not forge mesh churn).
-    NetMeshRotate {
-        /// The peer whose deaf inbound leg to re-establish.
-        peer: MemberId,
-        /// Mesh incarnation (a torn-down mesh drops the rotate).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
-    /// The off-actor **mesh-rotate task** has minted its fresh queue and built
-    /// the re-announce ciphertext; the engine records it as a self-authored
-    /// `WorkspaceEvent::MeshAnnounced` so the outbox broadcasts it over every
-    /// working leg (engine-internal, mesh self-heal Stage 3). Never an MCP tool.
-    NetMeshReAnnounce {
-        /// Hex of this node's MLS-encrypted `MeshAnnounce` (the new address).
-        ct: String,
-        /// Relay loop-prevention nonce (also marked seen locally so a relayed
-        /// copy coming back is not re-broadcast).
-        nonce: u64,
-        /// Mesh incarnation (a torn-down mesh drops the re-announce).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
 
     // --- joining via invite (shared, co-equal) ---
     /// Begin joining a republic from its `molt://invite/…` link. The link must
-    /// carry the SMP transport handover (a bare preview link is rejected); the
-    /// engine runs the real join over SMP off the actor, shows the joiner's own
-    /// recovery phrase, and enters the republic on its own once the founder
-    /// seals — its outcome arrives as `NetJoinSealed` / `NetJoinFailed`.
+    /// carry a transport handover (a bare preview link is rejected). There is
+    /// no network transport in this build (the Nostr transport lands with N4),
+    /// so a non-seam join fails honestly; the loopback seams serve the tests.
+    /// A join that runs shows the joiner's own recovery phrase and enters the
+    /// republic on its own once the founder seals — its outcome arrives as
+    /// `NetJoinSealed` / `NetJoinFailed`.
     JoinStart {
         /// The `molt://invite/…` link.
         invite: String,
@@ -4695,46 +4551,6 @@ mod tests {
             "demo orphans must not leak into the production session state"
         );
         assert!(SessionView::default().s3_list.is_empty(), "no listing ran yet");
-    }
-
-    /// Track B Stage 2: the SMP server-list resolution — a non-empty `smp_urls`
-    /// wins (de-duped, order kept), else the single custom/public server; always
-    /// ≥1 so a transport built from it is never empty.
-    #[test]
-    fn smp_server_list_resolves_redundancy_then_single() {
-        const PUB: &str = "smp://PUBLIC@default";
-        let def = SessionSettings::default();
-        assert_eq!(def.smp_server_list(PUB), vec![PUB.to_string()], "default → public");
-
-        let custom = SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://AAAA@one".to_string(),
-            ..SessionSettings::default()
-        };
-        assert_eq!(custom.smp_server_list(PUB), vec!["smp://AAAA@one".to_string()]);
-
-        let redundant = SessionSettings {
-            smp_urls: vec![
-                "smp://AAAA@one".to_string(),
-                "smp://BBBB@two".to_string(),
-                "smp://AAAA@one".to_string(), // dup
-                "  ".to_string(),             // blank
-            ],
-            ..SessionSettings::default()
-        };
-        assert_eq!(
-            redundant.smp_server_list(PUB),
-            vec!["smp://AAAA@one".to_string(), "smp://BBBB@two".to_string()],
-            "the list wins, de-duped, order preserved"
-        );
-
-        let blanks = SessionSettings {
-            smp_server: "custom".to_string(),
-            smp_url: "smp://CCCC@three".to_string(),
-            smp_urls: vec!["".to_string()],
-            ..SessionSettings::default()
-        };
-        assert_eq!(blanks.smp_server_list(PUB), vec!["smp://CCCC@three".to_string()]);
     }
 
     /// The bucket object-naming scheme (`backup_restore_design.md` §6.2):

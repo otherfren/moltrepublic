@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The engine-run lifecycles: **founding** (create) and **join** are real
-//! over SMP — founding provisions invite queues and waits for real members to
-//! seal; joining runs the member ritual off the actor and enters the republic
-//! once the founder distributes the sealed roster. **restore** is real too
+//! The engine-run lifecycles: **founding** (create) and **join** keep their
+//! command surface and wizard state, but the network legs are in the
+//! N-demo→N4 gap — there is no transport in this build, so the production
+//! paths fail honestly (the loopback seams still drive the full rituals in
+//! tests; N4's Nostr transport re-wires the off-actor tasks). **restore** is real
 //! (`backup_restore_design.md` §4/§6.6): an off-actor task fetches (file or
 //! S3) and stages the encrypted blob, the ACTOR hard-verifies the
 //! threshold-signed chain before anything materializes, and the restored
@@ -660,9 +661,9 @@ impl State {
             .start_ritual(&name, &member, threshold, members, &seed)
             .map_err(MoltError::Create)?;
 
-        // the in-app founding is real over SMP — the founder shares the invite
-        // links off-band and waits for real members to join. Only the offline
-        // sim test seam simulates the other members.
+        // the founder shares the invite links off-band and waits for real
+        // members to join. Only the offline sim test seam simulates the
+        // other members.
         let simulated = self.ritual_sim;
         let seats = links
             .into_iter()
@@ -691,8 +692,9 @@ impl State {
         ));
         if simulated {
             self.session.create.run.log.push(
-                "→ SIMULATION — no real network yet (T3): this node auto-activates and \
-                 signs for every member. Nothing was shared off-band."
+                "→ SIMULATION — no real network in this build (the Nostr transport \
+                 lands with N4): this node auto-activates and signs for every \
+                 member. Nothing was shared off-band."
                     .to_string(),
             );
         } else {
@@ -939,7 +941,7 @@ impl State {
             return Err(MoltError::Join("the handle must not be empty".to_string()));
         }
         let invite = invite.trim().to_string();
-        // a real join needs a link that carries the SMP transport handover —
+        // a real join needs a link that carries the transport handover —
         // a bare preview link is not joinable
         let Some(inv) = crate::founding::FoundingInvite::parse(&invite) else {
             return Err(MoltError::Join(
@@ -955,137 +957,33 @@ impl State {
             molt_storage::generate_seed_phrase().map_err(|e| MoltError::Join(e.to_string()))?;
         self.join_generation += 1;
         let generation = self.join_generation;
-        let mut run = RunCore::started();
-        // the join advances the progress bar through its real stages (request →
-        // accepted → charter → sealed) so the wizard shows movement, not a
-        // frozen 0%
-        run.progress_pct = 15;
-        run.log.push(
-            "→ join request sent over SMP · waiting for every member to seal the roster".to_string(),
-        );
         self.session.join = JoinState {
-            run,
-            invite: invite.clone(),
-            member: member.clone(),
+            run: RunCore::started(),
+            invite,
+            member,
             republic: inv.info.republic.clone(),
             rule_m: inv.info.threshold,
             rule_n: inv.info.members,
             inviter: inv.info.inviter.clone(),
-            seed: seed.clone(),
+            seed,
             proposed_name: String::new(),
             proposed_agenda: String::new(),
             awaiting_ratify: false,
         };
         self.session.screen = Screen::Join;
-        self.emit_session(SessionScope::Full);
-
-        // run the real member ritual off the actor (it waits, possibly long,
-        // for the founder to seal); the outcome returns as an internal command
-        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
-            return Err(MoltError::Join("engine stopped".to_string()));
-        };
-        // fail-closed: resolve the SMP dialer from settings before spawning the
-        // join task. A TorMisconfigured aborts the join with the reason and
-        // sets the transport-health pill (T4 §P1/§P6).
-        let dialer = match self.resolve_dialer() {
-            Ok(dialer) => dialer,
-            Err(reason) => {
-                self.emit_session(SessionScope::Full);
-                return Err(MoltError::Join(reason));
-            }
-        };
-        // the ratification gate: the join task surfaces the founder's proposed
-        // charter on `prop` and blocks on `conf` for the joiner's confirm
-        // before signing. A forwarder turns the surfaced charter into an
-        // internal command so the wizard can show it.
-        let (acc_tx, mut acc_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
-        let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
-        self.join_confirm = Some(conf_tx);
-        let ratify = crate::founding::Ratifier {
-            accepted: acc_tx,
-            proposal: prop_tx,
-            confirm: conf_rx,
-        };
-        // surface the founder's "join accepted" ack as an internal command so
-        // the wizard confirms the join landed (before the later charter step)
-        let cmd_tx_acc = cmd_tx.clone();
-        tokio::spawn(async move {
-            if acc_rx.recv().await.is_some() {
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx_acc
-                    .send(Envelope {
-                        cmd: Command::NetJoinAccepted {
-                            generation: Some(generation),
-                        },
-                        reply,
-                    })
-                    .await;
-            }
-        });
-        // enable the post-founding mesh bootstrap in the real product flow (the
-        // founder does too — see spawn_with_config); off for test seams
-        let bootstrap = self.ritual_bootstrap;
-        // a fresh transport slot for this join: the task hands its ritual
-        // transport back through it (a late fill from a superseded join lands in
-        // that join's own, now-orphaned Arc, never this one)
+        // a fresh transport slot for this join incarnation (N4's off-actor
+        // join task will fill it before reporting NetJoinSealed)
         self.join_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let transport_slot = self.join_transport.clone();
-        let cmd_tx_fwd = cmd_tx.clone();
-        tokio::spawn(async move {
-            if let Some((name, agenda)) = prop_rx.recv().await {
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx_fwd
-                    .send(Envelope {
-                        cmd: Command::NetJoinCharterProposed {
-                            name,
-                            agenda,
-                            generation: Some(generation),
-                        },
-                        reply,
-                    })
-                    .await;
-            }
-        });
-        // Track B Stage 2: this node's configured redundancy servers, so the
-        // joiner mints its inbound queues across N servers (empty = single-server
-        // joiner, unchanged).
-        let extra_servers = self.session.settings.smp_urls.clone();
-        tokio::spawn(async move {
-            let cmd = match crate::founding::ritual_join_over_smp(&invite, member, seed, bootstrap, Some(ratify), None, dialer, extra_servers).await {
-                Ok(result) => match serde_json::to_string(&result.sealed) {
-                    Ok(json) => {
-                        // hand the ritual transport back BEFORE reporting the
-                        // seal, so cmd_net_join_sealed can reuse it (its Arc owns
-                        // the bootstrap queues' receive credentials)
-                        if let Ok(mut slot) = transport_slot.lock() {
-                            *slot = Some(result.transport);
-                        }
-                        Command::NetJoinSealed {
-                            sealed: json,
-                            mls: result.mls_snapshot.map(hex::encode).unwrap_or_default(),
-                            mesh: result.mesh,
-                            generation: Some(generation),
-                        }
-                    }
-                    Err(e) => Command::NetJoinFailed {
-                        error: e.to_string(),
-                        generation: Some(generation),
-                    },
-                },
-                Err(e) => Command::NetJoinFailed {
-                    error: e,
-                    generation: Some(generation),
-                },
-            };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx.send(Envelope { cmd, reply }).await;
-        });
-        Ok(Reply::Ack)
+        // N-demo gap: there is no network transport to run the member ritual
+        // over (SMP is gone, Nostr lands with N4). Fail honestly through the
+        // join run's own failure surface — the wizard shows the reason instead
+        // of waiting forever, and co-equality keeps the command itself intact.
+        self.cmd_net_join_failed(crate::NO_TRANSPORT_YET.to_string(), Some(generation))
     }
 
-    /// A real SMP join completed: verify came from the off-actor task; write
-    /// the joiner's own workspace from its own seed and enter the republic.
+    /// A real network join completed (dormant until N4's Nostr join re-emits
+    /// it): verify what came from the off-actor task; write the joiner's own
+    /// workspace from its own seed and enter the republic.
     pub(crate) fn cmd_net_join_sealed(
         &mut self,
         sealed: String,
@@ -1213,9 +1111,11 @@ impl State {
     /// Begin recovering a lost seat from a coordinator-minted recovery link
     /// and the seat's recovery phrase — the rejoiner side of the recovery
     /// ritual (`recovery_ritual.md` §4), mirroring [`State::cmd_join_start`].
-    /// The rejoin runs off the actor (it waits for the coordinator's threshold
-    /// re-admission + Welcome, possibly long); the outcome returns as
-    /// [`Command::NetRecoverSealed`] / [`Command::NetRecoverFailed`].
+    /// Parses/validates the link and ARMS the recovery context (generation,
+    /// link + phrase, fresh transport slot) — the two-instance tests drive a
+    /// verified [`Command::NetRecoverSealed`] against that context. Until
+    /// N4's Nostr transport lands there is no network to run the rejoin
+    /// over, so the production path reports an honest failure right away.
     pub(crate) fn cmd_recover_start(
         &mut self,
         link: String,
@@ -1242,80 +1142,23 @@ impl State {
                 "the recovery phrase must not be empty".to_string(),
             ));
         }
-        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
-            return Err(MoltError::Recover("engine stopped".to_string()));
-        };
         // a restarted recovery supersedes the one in flight — bump the
         // incarnation so the stale task's late result is dropped
         self.recover_generation += 1;
         let generation = self.recover_generation;
-        self.recover_ctx = Some((inv.clone(), phrase.clone()));
-        // a fresh transport slot for this recovery: the task parks its SMP
-        // transport here BEFORE the rejoin, so cmd_net_recover_sealed can
-        // stand the runtime supervisor up over the re-established mesh (the
-        // slot's Arc owns the fresh queues' receive credentials — the
-        // join_transport twin)
+        self.recover_ctx = Some((inv.clone(), phrase));
+        // a fresh transport slot for this recovery incarnation, the
+        // join_transport twin: cmd_net_recover_sealed stands the runtime
+        // supervisor up from it when a rejoin task filled it (the two-instance
+        // tests inject NetRecoverSealed against exactly this armed context)
         self.recover_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let transport_slot = self.recover_transport.clone();
-        // fail-closed: resolve the SMP dialer before spawning the rejoin task.
-        // A TorMisconfigured aborts the recovery with the reason and sets the
-        // transport-health pill (T4 §P1/§P6).
-        let dialer = match self.resolve_dialer() {
-            Ok(dialer) => dialer,
-            Err(reason) => {
-                self.emit_session(SessionScope::Full);
-                return Err(MoltError::Recover(reason));
-            }
-        };
-        // Track B Stage 2: this node's own configured redundancy servers ride
-        // along, so the rejoiner mints its inbound queues across N servers like
-        // a joiner does (the coordinator's link server stays the primary).
-        let extra_servers = self.session.settings.smp_urls.clone();
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
-        tokio::spawn(async move {
-            let cmd = match crate::recovery::transport_for(&inv, dialer, &extra_servers) {
-                Ok(transport) => {
-                    if let Ok(mut slot) = transport_slot.lock() {
-                        *slot = Some(transport.clone());
-                    }
-                    match crate::recovery::run_rejoin(transport, inv, &phrase, true).await {
-                        Ok(outcome) => match match &outcome.checkpoint_blob {
-                            Some(blob) => {
-                                serde_json::to_string(&crate::chain::ServedChainWire::Pruned {
-                                    checkpoint_blob: blob.clone(),
-                                    blocks: outcome.chain.clone(),
-                                })
-                            }
-                            None => serde_json::to_string(&outcome.chain),
-                        } {
-                            Ok(chain) => Command::NetRecoverSealed {
-                                member: outcome.member,
-                                chain,
-                                mls: hex::encode(&outcome.mls_snapshot),
-                                mesh: outcome.mesh,
-                                generation: Some(generation),
-                            },
-                            Err(e) => Command::NetRecoverFailed {
-                                error: e.to_string(),
-                                generation: Some(generation),
-                            },
-                        },
-                        Err(e) => Command::NetRecoverFailed {
-                            error: e,
-                            generation: Some(generation),
-                        },
-                    }
-                }
-                Err(e) => Command::NetRecoverFailed {
-                    error: e,
-                    generation: Some(generation),
-                },
-            };
-            let (reply, _rx) = oneshot::channel();
-            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
-        });
-        Ok(Reply::Ack)
+        // N-demo gap: there is no network transport to run the rejoin over
+        // (SMP is gone, Nostr lands with N4). Fail honestly on the recovery
+        // notice channel — the armed context stays, so an injected/verified
+        // NetRecoverSealed (the loopback test seam) still materializes.
+        self.cmd_net_recover_failed(crate::NO_TRANSPORT_YET.to_string(), Some(generation))
     }
 
     /// The off-actor rejoin task finished: the seat is back inside the MLS
@@ -1500,7 +1343,7 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A real SMP join failed: surface the reason in the join run (retryable).
+    /// A join failed: surface the reason in the join run (retryable).
     pub(crate) fn cmd_net_join_failed(
         &mut self,
         error: String,
@@ -1685,7 +1528,7 @@ pub(crate) enum RestorePlan {
         /// The validated backup target.
         config: Box<molt_net::s3::S3Config>,
         /// The fail-closed dialer (Tor when configured).
-        dialer: molt_net::smp::tls::Dialer,
+        dialer: molt_net::dial::Dialer,
         /// Which object.
         pick: S3Pick,
     },

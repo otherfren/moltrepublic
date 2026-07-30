@@ -1,5 +1,13 @@
 # Härtung: Queue-Creds-Persist beim Mesh-Up + ehrlicher Offline-Zustand
 
+> **Historical (2026-07-30):** the SMP transport this plan targets was removed
+> in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`). The CORE it designed — the
+> live queue-creds/MLS persist at every mesh-up and the honest "detached"
+> offline state — survived and was carried into the delivery guarantee
+> (`docs/transport/delivery_guarantee.md`); the SMP-specific parts
+> (`SmpTransport`, `reopen_transport`, SKEY sender keys) are historical.
+
 > **STATUS: AUSFÜHRUNGSREIF (2026-07-19).** Analyse und Design sind fertig und
 > gegen den Quellstand **master `1d4f273`** verifiziert; die roten Tests (TDD)
 > liegen fertig committet auf Branch **`worktree-mesh-cred-persist`**

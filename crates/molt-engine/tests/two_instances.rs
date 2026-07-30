@@ -726,9 +726,8 @@ impl EngineSink for RecordSink {
 /// Part B — after founding, the founder engine stands a **real runtime
 /// supervisor** up from its persisted mesh + MLS group (no founding star, no
 /// demo mesh) and chats peer-to-peer over MLS with the joined member, both
-/// directions. The still-alive loopback hub stands in for the members' SMP
-/// server (its queues can't be rebuilt from state, so the runtime reuses it —
-/// exactly what a fresh SmpTransport does over a real server).
+/// directions. The still-alive loopback hub stands in for the members' relay
+/// (its queues can't be rebuilt from state, so the runtime reuses it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn founding_chats_over_the_direct_mesh() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -2909,7 +2908,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
             "member-b".to_string(),
             mesh::QueueHandover::of(&own_q.snd, &own_wrap),
         );
-        let reply = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
+        let reply = mesh::MeshAnnounce { queues };
         let ct = c_reply_group
             .lock()
             .expect("c group")
@@ -3092,7 +3091,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
+    let announce = mesh::MeshAnnounce { queues };
     let ct = b_group
         .lock()
         .expect("b group")
@@ -3221,7 +3220,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&third_q.snd, &third_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
+    let announce = mesh::MeshAnnounce { queues };
     let ct = b_group
         .lock()
         .expect("b group")
@@ -3929,7 +3928,7 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
+    let announce = mesh::MeshAnnounce { queues };
     let ct = b_group
         .encrypt(&serde_json::to_vec(&announce).expect("encode"))
         .expect("encrypt announce");
@@ -4097,7 +4096,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         "founder-a".to_string(),
         mesh::QueueHandover::of(&new_q.snd, &new_wrap),
     );
-    let announce = mesh::MeshAnnounce { queues, queues_extra: std::collections::BTreeMap::new() };
+    let announce = mesh::MeshAnnounce { queues };
     let ct = b_group
         .lock()
         .expect("b group")

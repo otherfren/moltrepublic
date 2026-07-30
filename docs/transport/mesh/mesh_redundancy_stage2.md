@@ -1,5 +1,11 @@
 # Design: Track B Stage 2 — N=2 redundant inbound queues per leg
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`), and the N-queue redundancy
+> machinery with it. Kept as the design record of the deleted machinery and
+> of why SMP was left.
+
 Status: **EXECUTION-READY DESIGN 2026-07-23.** Builds on Stage 0 (`rcv_server`)
 and Stage 1 (multi-server `SmpTransport` routing), both landed + audited clean.
 Read `docs/transport/mesh/mesh_reliability.md` (Track B) and the CLAUDE.md transport

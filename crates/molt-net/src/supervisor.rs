@@ -39,7 +39,7 @@ use crate::wrap::{unwrap_block, wrap, WrapKey};
 use crate::{AckToken, NetError, RcvQueue, SndQueueAddr, Transport};
 
 /// The node's MLS group at runtime (T2): the confidentiality layer whose
-/// ciphertext is the SMP payload. Shared by every per-peer outbox/recv task of a
+/// ciphertext is the wire payload. Shared by every per-peer outbox/recv task of a
 /// node. When present, a workspace event is **encrypted once** per log seq
 /// (`create_message` advances the ratchet exactly once) and the *same*
 /// ciphertext is fanned out to every peer — each per-queue-wrapped distinctly,
@@ -146,24 +146,12 @@ impl MlsChannel {
         };
         match m.decrypt(wire) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
-                // a transport-level keepalive ping (mesh self-heal Stage 2):
-                // authenticated inbound traffic that carries no event — it
-                // stamps the peer's presence but delivers nothing. Checked
-                // BEFORE the envelope parse; its NUL-prefixed tag can never be
-                // valid `EventEnvelope` JSON.
-                if plaintext == crate::MESH_KEEPALIVE_TAG {
-                    return MlsDecode::Keepalive;
-                }
-                // a solicited mesh probe (verify-at-open): authenticated presence
-                // that ALSO asks the receiver to warm the sender back once, so a
-                // node can deterministically confirm its leg round-trips.
-                if plaintext == crate::MESH_PROBE_TAG {
-                    return MlsDecode::Probe;
-                }
                 // a delivery ACK (delivery guarantee §4.3): the peer reports
                 // what it has engine-accepted of OUR events. Authenticated by
                 // the MLS credential (`from`) — the recv loop additionally
-                // pins it to the link's member before applying it.
+                // pins it to the link's member before applying it. Checked
+                // BEFORE the envelope parse; its NUL-prefixed tag can never be
+                // valid `EventEnvelope` JSON.
                 if let Some(payload) = plaintext.strip_prefix(crate::MESH_ACK_TAG) {
                     return match serde_json::from_slice::<molt_core::AcceptedWindow>(payload) {
                         Ok(win) => MlsDecode::Ack(from, Box::new(win)),
@@ -202,15 +190,6 @@ impl MlsChannel {
 enum MlsDecode {
     /// An authenticated application envelope — deliver and ack.
     Deliver(MemberId, Box<EventEnvelope>),
-    /// A transport-level keepalive ping (mesh self-heal Stage 2):
-    /// authenticated presence with no payload — stamp `peer_seen`, deliver
-    /// nothing, ack.
-    Keepalive,
-    /// A solicited mesh probe (mesh verify-at-open, Fix A): authenticated
-    /// presence like a keepalive, but the receiver ALSO warms the sender back
-    /// once (`probe_received`) so the prober can confirm its leg round-trips.
-    /// The warm-back is a keepalive, never a probe — no echo.
-    Probe,
     /// A delivery ACK (delivery guarantee §4.3): the authenticated sender
     /// reports its accept window over OUR events — advance that peer's
     /// `acked_floor`, stamp presence, deliver nothing.
@@ -320,44 +299,37 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         let _ = member;
         async {}
     }
-    /// A solicited mesh probe arrived from `member` (mesh verify-at-open): the
-    /// engine should warm that peer back once (`warm_leg`) so the prober can
-    /// confirm its leg round-trips. Default no-op so existing sinks keep
-    /// compiling and a stub simply does not answer (additive).
-    fn probe_received(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
-        let _ = member;
-        async {}
-    }
-    /// RAW inbound activity on `member`'s leg (mesh reliability Track D): a frame
-    /// arrived at the transport, decoded or not. Proves the QUEUE is alive (so
-    /// verify-at-open must not churn it) WITHOUT proving the peer is alive — it
-    /// never advances presence. Throttled by the caller. Default no-op (additive).
-    fn raw_inbound(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
-        let _ = member;
-        async {}
-    }
 }
 
-/// One fully wired peer connection: their inbound queue(s) send address and
-/// wrap key (we send), our queue(s) and its wrap key (we receive). Track B
-/// Stage 2: `snds`/`rcvs` are N ≥ 1 REDUNDANT queues (each typically on a
-/// different server); the wrap keys stay per-direction (one shared across the N
-/// queues). N=1 is the former single-queue leg exactly.
+/// One fully wired peer connection: the peer's inbound queue send address and
+/// wrap key (we send), our inbound queue and its wrap key (we receive).
+/// `snds`/`rcvs` keep their Vec-of-1 shape from the removed multi-queue
+/// redundancy: every mint site produces exactly one queue per directed pair
+/// and the runtime drives only index 0 (N5's relay runtime reshapes
+/// `PeerLink`); a longer persisted list reloads capped and rides along inert.
 #[derive(Debug, Clone)]
 pub struct PeerLink {
     /// The peer this link reaches.
     pub member: MemberId,
-    /// Send sides of the peer's N inbound queues — the SAME ciphertext goes to
-    /// all (the peer dedups). Non-empty; index 0 is the primary.
+    /// Send side of the peer's inbound queue. Non-empty; index 0 is the one
+    /// the outbox sends to.
     pub snds: Vec<SndQueueAddr>,
-    /// Wrap key of the peer's inbound direction (shared across `snds`).
+    /// Wrap key of the peer's inbound direction.
     pub wrap_out: WrapKey,
-    /// Our N inbound queues from this peer — we subscribe all and dedup.
-    /// Non-empty; index 0 is the primary.
+    /// Our inbound queue from this peer. Non-empty; index 0 is the one the
+    /// recv loop subscribes.
     pub rcvs: Vec<RcvQueue>,
-    /// Wrap key of our inbound direction (shared across `rcvs`).
+    /// Wrap key of our inbound direction.
     pub wrap_in: WrapKey,
 }
+
+/// Cap on the per-leg queue count reloaded from a persisted
+/// [`molt_core::MeshLink`] (SECURITY, Stage-2 audit finding #1, kept after
+/// the redundancy removal): a tampered/inflated `transport.state` must never
+/// reload an unbounded queue list that survives reopen. Nothing mints more
+/// than one queue per directed pair anymore; old state may still carry one
+/// extra.
+const MESH_LINK_QUEUE_CAP: usize = 2;
 
 impl PeerLink {
     /// The primary (index 0) send address — the outbox always has ≥1 target.
@@ -407,11 +379,10 @@ impl PeerLink {
     pub fn from_mesh(m: &molt_core::MeshLink) -> Option<PeerLink> {
         let snd_wrap: [u8; 32] = hex::decode(&m.snd_wrap).ok()?.try_into().ok()?;
         let rcv_wrap: [u8; 32] = hex::decode(&m.rcv_wrap).ok()?.try_into().ok()?;
-        // SECURITY (Stage-2 audit finding #1): cap the reloaded queue count at
-        // the SAME `MESH_REDUNDANCY_CAP` the mint + announce-ingest sides use, so
+        // SECURITY (Stage-2 audit finding #1): cap the reloaded queue count so
         // a tampered/inflated `transport.state` can never reload an unbounded
-        // send fan-out (or subscription set) that survives reopen.
-        let cap = crate::MESH_REDUNDANCY_CAP.max(1);
+        // queue list that survives reopen.
+        let cap = MESH_LINK_QUEUE_CAP.max(1);
         let mut snds = vec![SndQueueAddr {
             server: m.snd_server.clone(),
             id: crate::QueueId::from_bytes(hex::decode(&m.snd_queue).ok()?),
@@ -576,63 +547,24 @@ where
         // first send is one round-trip, not a cold circuit build. Drain-don't-
         // abort is untouched: each recv task still lands in the JoinSet and is
         // aborted with the rest on stop; only the initial dials go concurrent.
-        // Stage 2: a peer may have N redundant inbound queues, so prebuild every
-        // (peer, queue) leg (bounded), not just one per peer.
-        let legs: Vec<(usize, usize)> = cfg
-            .peers
-            .iter()
-            .enumerate()
-            .flat_map(|(pi, p)| (0..p.rcvs.len()).map(move |qi| (pi, qi)))
-            .collect();
         let subscribed = {
             let transport = transport.clone();
             let peers = cfg.peers.clone();
-            let legs = legs.clone();
-            prebuild_circuits(legs.len(), PREBUILD_PARALLELISM, move |j| {
+            prebuild_circuits(peers.len(), PREBUILD_PARALLELISM, move |i| {
                 let transport = transport.clone();
-                let (pi, qi) = legs[j];
-                let rcv = peers[pi].rcvs[qi].clone();
+                let rcv = peers[i].rcv0().clone();
                 async move { transport.subscribe(&rcv).await }
             })
             .await
         };
-        // Per peer: ONE merged channel + ONE consumer (the single Reassembler and
-        // sole-writer cursor), fed by N forwarder tasks (one per redundant inbound
-        // queue). The shared `live` count aggregates the peer's queues into ONE
-        // per-peer link_up/link_down (a leg is UP while ≥1 queue is live). It is a
-        // `tokio::Mutex<usize>` — NOT an atomic — so each forwarder holds it
-        // ACROSS its count transition AND the resulting link_up/link_down engine
-        // round-trip (Stage-2 audit finding #2): that binds the notification to
-        // the transition, so the engine can never receive an up/down out of order
-        // w.r.t. the count and get stuck alarming a leg that has a live queue.
-        // N=1 is the former single-subscription watchdog exactly.
-        let mut peer_tx: Vec<tokio::sync::mpsc::Sender<crate::Delivery>> =
-            Vec::with_capacity(cfg.peers.len());
-        let mut peer_live: Vec<Arc<tokio::sync::Mutex<usize>>> =
-            Vec::with_capacity(cfg.peers.len());
-        for peer in &cfg.peers {
-            let (tx, rx) = tokio::sync::mpsc::channel(RECV_MERGE_CAP);
-            peer_tx.push(tx);
-            peer_live.push(Arc::new(tokio::sync::Mutex::new(0usize)));
-            children.spawn(recv_consumer_task(
-                peer.clone(),
-                rx,
-                cfg.member.clone(),
-                log.clone(),
-                store.clone(),
-                sink.clone(),
-                state.clone(),
-                mls.clone(),
-            ));
-        }
-        for ((pi, qi), sub) in legs.into_iter().zip(subscribed) {
-            let peer = &cfg.peers[pi];
-            // the prebuild's first subscribe seeds the forwarder; a failed one is
-            // NOT fatal — the forwarder redials with capped backoff (Stage B)
+        for (i, sub) in subscribed.into_iter().enumerate() {
+            let peer = &cfg.peers[i];
+            // the prebuild's first subscribe seeds the watchdog; a failed one is
+            // NOT fatal — the watchdog redials with capped backoff (Stage B)
             let first = match sub {
                 Some(Ok(rx)) => Some(rx),
                 Some(Err(e)) => {
-                    tracing::error!(peer = %peer.member, queue = %queue_tag(&peer.rcvs[qi].id.0), error = %e, "subscribing an inbound queue failed — the forwarder will retry");
+                    tracing::error!(peer = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), error = %e, "subscribing an inbound queue failed — the watchdog will retry");
                     None
                 }
                 None => {
@@ -642,22 +574,21 @@ where
             };
             let seed = cfg.seed.wrapping_add(
                 0x9e37_79b9_7f4a_7c15u64
-                    .wrapping_mul(1 + u64::try_from(pi * 64 + qi).unwrap_or_default()),
+                    .wrapping_mul(1 + u64::try_from(i).unwrap_or_default()),
             ) | 1;
-            children.spawn(recv_forwarder_task(
+            children.spawn(recv_watchdog_task(
                 transport.clone(),
                 cfg.clone(),
-                peer.member.clone(),
-                peer.rcvs[qi].clone(),
-                peer_tx[pi].clone(),
-                peer_live[pi].clone(),
+                peer.clone(),
+                log.clone(),
+                store.clone(),
                 sink.clone(),
+                state.clone(),
+                mls.clone(),
                 first,
                 seed,
             ));
         }
-        // drop our tx clones so each merged channel closes when its forwarders end
-        drop(peer_tx);
         stopped.notified().await;
         // dropping the JoinSet aborts every child task
         drop(children);
@@ -709,12 +640,6 @@ where
 
 /// How many circuits the prebuild opens at once (concept §5).
 const PREBUILD_PARALLELISM: usize = 4;
-
-/// Capacity of a peer's merged inbound channel (Track B Stage 2): the N
-/// forwarders (one per redundant queue) push `Delivery`s into it and the single
-/// consumer drains. Bounded so a stalled consumer back-pressures the forwarders
-/// rather than growing unbounded.
-const RECV_MERGE_CAP: usize = 64;
 
 /// The per-peer outbox drainer. Never blocks the engine: it waits on the
 /// wakeup watch and reads pending envelopes straight from the log.
@@ -957,45 +882,31 @@ where
                 return Err(());
             }
         };
-        // N-redundant fan-out (Track B Stage 2): send the SAME block to every one
-        // of the peer's inbound queues each round (the peer dedups the copies).
-        // A round SUCCEEDS if ≥1 target accepts — one server down, another
-        // delivers; only an ALL-fail round backs off and retries the whole set.
-        // At N=1 this is the former single-target retry loop exactly.
+        // single-target retry: a failed round backs off (jittered exponential)
+        // and retries the same block until the transport accepts it — the
+        // transport never skips, only local encode/wrap failures do.
+        let snd = peer.snd0();
         let mut attempt: u32 = 0;
         loop {
-            let mut any_ok = false;
-            let mut last_err: Option<NetError> = None;
-            for snd in &peer.snds {
-                match transport.send(snd, block.clone()).await {
-                    Ok(()) => {
-                        any_ok = true;
-                        tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), "block sent");
+            match transport.send(snd, block.clone()).await {
+                Ok(()) => {
+                    tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), "block sent");
+                    if attempt > 0 {
+                        // the backoff exit: sends to this member work again
+                        sink.send_ok(&peer.member).await;
                     }
-                    Err(e) => {
-                        tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), error = %e, "block send to one queue failed");
-                        last_err = Some(e);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 0 {
+                        sink.send_failed(&peer.member, &e.to_string()).await;
                     }
+                    let backoff = backoff_ms(cfg, attempt, rng);
+                    tracing::debug!(peer = %peer.member, queue = %queue_tag(&snd.id.0), error = %e, backoff_ms = backoff, "block send failed — backing off");
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    attempt = attempt.saturating_add(1);
                 }
             }
-            if any_ok {
-                if attempt > 0 {
-                    // the backoff exit: sends to this member work again
-                    sink.send_ok(&peer.member).await;
-                }
-                break;
-            }
-            // every target failed this round
-            let err = last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "no send target".to_string());
-            if attempt == 0 {
-                sink.send_failed(&peer.member, &err).await;
-            }
-            let backoff = backoff_ms(cfg, attempt, rng);
-            tracing::debug!(peer = %peer.member, error = %err, backoff_ms = backoff, "all send targets failed — backing off");
-            tokio::time::sleep(Duration::from_millis(backoff)).await;
-            attempt = attempt.saturating_add(1);
         }
     }
     Ok(())
@@ -1171,21 +1082,6 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     }
                     ack_all(held);
                 }
-                MlsDecode::Keepalive => {
-                    // a keepalive that had been held for its epoch: still
-                    // authenticated presence — stamp it, deliver nothing
-                    progressed = true;
-                    sink.peer_seen(&peer.member).await;
-                    ack_all(held);
-                }
-                MlsDecode::Probe => {
-                    // a probe held for its epoch: stamp presence and warm the
-                    // sender back once (verify-at-open), still no payload
-                    progressed = true;
-                    sink.peer_seen(&peer.member).await;
-                    sink.probe_received(&peer.member).await;
-                    ack_all(held);
-                }
                 MlsDecode::Ack(_, _) => {
                     // an ack held across an epoch advance: stamp presence and
                     // let it go — its window is stale by now, and the peer's
@@ -1224,84 +1120,49 @@ const EPOCH_BUFFER_MAX: usize = 64;
 enum RecvEnd {
     /// The engine sink refused a delivery (actor gone): stop for good.
     EngineGone,
-    /// The delivery stream ended (the transport's recv loop died, e.g. a
-    /// dropped SMP connection): resubscribe.
+    /// The delivery stream ended (the transport's recv loop died): resubscribe.
     StreamEnded,
 }
 
-/// The per-peer receive **consumer** (Track B Stage 2): run the single
-/// [`recv_task`] — one `Reassembler` + the sole-writer delivery cursor — over the
-/// merged stream of the peer's N redundant inbound queues. Resubscribe lives in
-/// the forwarders, so the merged channel closing (all forwarders gone) = engine
-/// gone; either [`RecvEnd`] is terminal here.
+/// The per-peer inbound **watchdog** (Stage B): subscribe the peer's inbound
+/// queue, run [`recv_task`] over its deliveries, and when the stream ends — a
+/// died server-side recv loop used to leave the seat deaf for the whole
+/// session — redial `subscribe` with capped jittered backoff and run a fresh
+/// incarnation. The inbound twin of the outbox's retry-with-backoff. Health
+/// is honest: `link_up` when the subscription is live, `link_down` on a
+/// stream end or a failed redial. A fresh incarnation loses only in-memory
+/// buffers whose acks never fired — the transport redelivers them; the
+/// delivery cursor rides the shared `state`. Ends for good only when the
+/// engine sink is gone (nobody is listening, so no alarm either).
 #[allow(clippy::too_many_arguments)]
-async fn recv_consumer_task<L, S, K>(
+async fn recv_watchdog_task<T, L, S, K>(
+    transport: T,
+    cfg: NetConfig,
     peer: PeerLink,
-    merged_rx: tokio::sync::mpsc::Receiver<crate::Delivery>,
-    me: MemberId,
     log: L,
     store: S,
     sink: K,
     state: Arc<Mutex<TransportState>>,
     mls: Option<MlsChannel>,
-) where
-    L: OutboxLog,
-    S: StateStore,
-    K: EngineSink,
-{
-    let _ = recv_task(peer, merged_rx, me, log, store, sink, state, mls).await;
-}
-
-/// One inbound queue's **forwarder** (Track B Stage 2 + the Stage-B resubscribe
-/// watchdog): subscribe ONE of a peer's N redundant inbound queues, pump its
-/// deliveries into the peer's shared merged channel, and when the stream ends —
-/// a died SMP recv loop used to leave the seat deaf for the whole session —
-/// redial `subscribe` with capped jittered backoff, repeat. The shared `live`
-/// count aggregates the peer's queues into ONE per-peer status: `link_up` on the
-/// 0→1 transition, `link_down` on 1→0 (all queues down) and on a subscribe
-/// failure while no queue is up. Ends only when the consumer (merged channel) is
-/// gone = engine gone. An SMP `subscribe` dials its own fresh connection, so the
-/// forwarder re-dials implicitly.
-///
-/// `live` is a `tokio::Mutex<usize>` held ACROSS each count transition AND its
-/// link_up/link_down round-trip (Stage-2 audit finding #2): a peer's N forwarders
-/// then notify the engine in a strict order that matches the count, so the engine
-/// can never process an up/down out of order and get stuck alarming a leg that
-/// still has a live queue.
-#[allow(clippy::too_many_arguments)]
-async fn recv_forwarder_task<T, K>(
-    transport: T,
-    cfg: NetConfig,
-    member: MemberId,
-    rcv: RcvQueue,
-    merged: tokio::sync::mpsc::Sender<crate::Delivery>,
-    live: Arc<tokio::sync::Mutex<usize>>,
-    sink: K,
     first: Option<tokio::sync::mpsc::Receiver<crate::Delivery>>,
     seed: u64,
 ) where
     T: Transport,
+    L: OutboxLog,
+    S: StateStore,
     K: EngineSink,
 {
     let mut rng = seed;
     let mut attempt: u32 = 0;
     let mut next = first;
     loop {
-        let mut rx = match next.take() {
+        let rx = match next.take() {
             Some(rx) => rx,
-            None => match transport.subscribe(&rcv).await {
+            None => match transport.subscribe(peer.rcv0()).await {
                 Ok(rx) => rx,
                 Err(e) => {
-                    tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), error = %e, "inbound subscribe failed — backing off");
-                    // the leg is DOWN only if no other queue of it is up — read
-                    // the count and (if 0) alarm UNDER the lock, so this can't
-                    // race a sibling forwarder's link_up
-                    {
-                        let n = live.lock().await;
-                        if *n == 0 {
-                            sink.link_down(&member, &e.to_string()).await;
-                        }
-                    }
+                    tracing::warn!(member = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), error = %e, "inbound subscribe failed — backing off");
+                    sink.link_down(&peer.member, &e.to_string()).await;
                     let backoff = backoff_ms(&cfg, attempt, &mut rng);
                     tokio::time::sleep(Duration::from_millis(backoff)).await;
                     attempt = attempt.saturating_add(1);
@@ -1309,40 +1170,27 @@ async fn recv_forwarder_task<T, K>(
                 }
             },
         };
-        tracing::debug!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription live");
-        // this queue is up; the leg comes UP on the first live queue — the count
-        // bump AND the link_up are one critical section
-        {
-            let mut n = live.lock().await;
-            *n += 1;
-            if *n == 1 {
-                sink.link_up(&member).await;
-            }
-        }
+        tracing::debug!(member = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription live");
+        sink.link_up(&peer.member).await;
         let lived = tokio::time::Instant::now();
-        // pump every delivery into the peer's shared merged channel until the
-        // stream ends (`None`)
-        let mut consumer_gone = false;
-        while let Some(d) = rx.recv().await {
-            if merged.send(d).await.is_err() {
-                consumer_gone = true;
-                break;
-            }
-        }
-        // this queue went down; the leg goes DOWN only when the LAST one does —
-        // count decrement AND the link_down are one critical section. If the
-        // CONSUMER is gone (engine gone) we just drop our slot without alarming
-        // (the engine is not listening anyway).
+        match recv_task(
+            peer.clone(),
+            rx,
+            cfg.member.clone(),
+            log.clone(),
+            store.clone(),
+            sink.clone(),
+            state.clone(),
+            mls.clone(),
+        )
+        .await
         {
-            let mut n = live.lock().await;
-            *n = n.saturating_sub(1);
-            if *n == 0 && !consumer_gone {
-                tracing::warn!(member = %member, queue = %queue_tag(&rcv.id.0), "inbound subscription ended — resubscribing");
-                sink.link_down(&member, "inbound subscription ended — resubscribing").await;
+            RecvEnd::EngineGone => return,
+            RecvEnd::StreamEnded => {
+                tracing::warn!(member = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription ended — resubscribing");
+                sink.link_down(&peer.member, "inbound subscription ended — resubscribing")
+                    .await;
             }
-        }
-        if consumer_gone {
-            return;
         }
         // Reset the escalation only after a LONG-LIVED incarnation: a queue
         // whose subscription is accepted but ended immediately (e.g. a server END
@@ -1393,11 +1241,6 @@ where
     // MLS path: complete messages encrypted at an epoch ahead of ours, held
     // (acks unfired) until a commit merges — the cross-epoch retry
     let mut epoch_buffer: Vec<([u8; 16], Vec<u8>, Vec<AckToken>)> = Vec::new();
-    // Track D: throttle the raw-inbound signal to at most one per this window per
-    // leg — every arriving frame proves the queue is alive, but the engine only
-    // needs the fact, not a command per frame.
-    let raw_throttle = Duration::from_secs(2);
-    let mut last_raw_signal: Option<tokio::time::Instant> = None;
     // ack-spam hardening (E7 review): full ack processing — a log read on
     // the writer thread + a possible state save — at most twice a second
     // per peer; surplus frames still stamp presence and are acked away
@@ -1439,18 +1282,6 @@ where
                 continue;
             }
         };
-        // Track D: a frame unwrapped — the queue is ALIVE (even if this turns out
-        // to be a duplicate/held/undecoded frame). Signal it, throttled, so
-        // verify-at-open does not churn a busy or redelivering leg with a rotate.
-        let raw_now = tokio::time::Instant::now();
-        let raw_due = match last_raw_signal {
-            Some(t) => raw_now.duration_since(t) >= raw_throttle,
-            None => true,
-        };
-        if raw_due {
-            last_raw_signal = Some(raw_now);
-            sink.raw_inbound(&peer.member).await;
-        }
         tracing::debug!(peer = %peer.member, plain = plain.len(), "MESHRX unwrapped a block → reassembler");
         let (id, complete) = match reasm.push(&plain) {
             Ok(PushOutcome::Duplicate(id)) => {
@@ -1515,26 +1346,6 @@ where
                     }
                     ack_all(acks);
                 }
-                MlsDecode::Keepalive => {
-                    tracing::debug!(peer = %peer.member, "MESHRX decode=KEEPALIVE");
-                    // authenticated liveness ping (mesh self-heal Stage 2):
-                    // stamps presence exactly like a delivered envelope, but
-                    // carries no event — so it keeps this leg's `last_seen`
-                    // fresh (feeding the Stage 1 deaf-leg cross-check) without
-                    // touching the log.
-                    sink.peer_seen(&peer.member).await;
-                    ack_all(acks);
-                }
-                MlsDecode::Probe => {
-                    tracing::debug!(peer = %peer.member, "MESHRX decode=PROBE");
-                    // a solicited probe (mesh verify-at-open): stamp presence
-                    // like a keepalive, AND warm the sender back once so it can
-                    // confirm this leg round-trips. The warm-back is a keepalive
-                    // (the engine's `warm_leg`), never a probe — so no echo.
-                    sink.peer_seen(&peer.member).await;
-                    sink.probe_received(&peer.member).await;
-                    ack_all(acks);
-                }
                 MlsDecode::Ack(from, win) => {
                     // only the LINK's member may move this link's floor — an
                     // authenticated ack from anyone else is misrouted traffic
@@ -1544,8 +1355,8 @@ where
                         continue;
                     }
                     tracing::debug!(peer = %peer.member, high = win.high, "MESHRX decode=ACK");
-                    // authenticated live traffic: stamps presence like a
-                    // keepalive (an acking peer is a breathing peer)
+                    // authenticated live traffic stamps presence (an acking
+                    // peer is a breathing peer)
                     sink.peer_seen(&peer.member).await;
                     if last_ack_processed
                         .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
@@ -1836,53 +1647,6 @@ mod tests {
         assert!(PeerLink::from_mesh(&bad).is_none());
     }
 
-    /// Mesh self-heal Stage 2: a keepalive ping decodes to `Keepalive`
-    /// (authenticated presence, no payload — the recv loop stamps `peer_seen`
-    /// and delivers nothing), while a real envelope still decodes to
-    /// `Deliver` authenticated to its sender. Both ride the same MLS group.
-    #[test]
-    fn a_keepalive_frame_classifies_as_keepalive_and_an_envelope_still_delivers() {
-        use ed25519_dalek::SigningKey;
-        let sk = |s: u8| SigningKey::from_bytes(&[s; 32]);
-        let mut founder = MlsMember::new(&sk(1), "founder").expect("founder");
-        let bob = MlsMember::new(&sk(2), "bob").expect("bob");
-        founder.create_group().expect("create group");
-        let welcome = founder
-            .add_members(&[bob.key_package().expect("bob kp")])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        let recv = MlsChannel::new(bob);
-
-        // a keepalive ping: classifies as a liveness ping, not an envelope
-        let ka = founder.encrypt(crate::MESH_KEEPALIVE_TAG).expect("encrypt keepalive");
-        assert!(
-            matches!(recv.decode(&ka), MlsDecode::Keepalive),
-            "the keepalive tag classifies as a liveness ping"
-        );
-
-        // a real envelope still delivers, authenticated to its sender
-        let env = EventEnvelope { prev_seq: 0,
-            seq: 1,
-            ts: 1,
-            by: "founder".to_string(),
-            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
-                molt_core::MessageId([1u8; 16]),
-                "founder",
-                "hi",
-                1,
-            )),
-        };
-        let ct = founder
-            .encrypt(&serde_json::to_vec(&env).expect("json"))
-            .expect("encrypt envelope");
-        assert!(
-            matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
-            "a real envelope still classifies as Deliver"
-        );
-    }
-
     /// §4.4: the build-time rewind re-offers the unacked tail ONLY toward
     /// peers that ever acked (old nodes keep the plain cursor), and bumps
     /// the resend epoch so the re-offer carries fresh msg ids.
@@ -2042,13 +1806,13 @@ mod tests {
         );
     }
 
-    /// Mesh verify-at-open: a solicited probe decodes to `Probe` (presence +
-    /// warm-back), distinct from a plain `Keepalive`, while an UNKNOWN control
-    /// frame in the reserved `\x00molt-mesh-*` space is dropped as a no-op — a
-    /// newer control tag this build predates must never be mis-parsed as an
-    /// event or answered.
+    /// The `\x00molt-mesh-*` space is reserved for control frames (the ACK
+    /// rides in it): an UNKNOWN control frame is dropped as a no-op — a newer
+    /// control tag this build predates must never be mis-parsed as an event,
+    /// while a real envelope still decodes to `Deliver` authenticated to its
+    /// sender.
     #[test]
-    fn a_probe_classifies_as_probe_and_an_unknown_control_tag_drops() {
+    fn an_unknown_control_tag_drops_and_an_envelope_still_delivers() {
         use ed25519_dalek::SigningKey;
         let sk = |s: u8| SigningKey::from_bytes(&[s; 32]);
         let mut founder = MlsMember::new(&sk(1), "founder").expect("founder");
@@ -2062,25 +1826,31 @@ mod tests {
         bob.join_from_welcome(&welcome).expect("bob joins");
         let recv = MlsChannel::new(bob);
 
-        // a probe: its own class, NOT a keepalive (so the recv loop warms back)
-        let probe = founder.encrypt(crate::MESH_PROBE_TAG).expect("encrypt probe");
-        assert!(
-            matches!(recv.decode(&probe), MlsDecode::Probe),
-            "the probe tag classifies as a solicited probe, not a keepalive"
-        );
-
-        // a keepalive is still its own class (never a probe — no echo)
-        let ka = founder.encrypt(crate::MESH_KEEPALIVE_TAG).expect("encrypt keepalive");
-        assert!(
-            matches!(recv.decode(&ka), MlsDecode::Keepalive),
-            "a keepalive stays a keepalive — it must not provoke a warm-back"
-        );
-
         // an unknown NUL-prefixed control frame: dropped, never mis-parsed
         let unknown = founder.encrypt(b"\x00molt-mesh-future-v9").expect("encrypt unknown");
         assert!(
             matches!(recv.decode(&unknown), MlsDecode::Discard),
             "an unknown reserved control tag is a dropped no-op"
+        );
+
+        // a real envelope still delivers, authenticated to its sender
+        let env = EventEnvelope { prev_seq: 0,
+            seq: 1,
+            ts: 1,
+            by: "founder".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([1u8; 16]),
+                "founder",
+                "hi",
+                1,
+            )),
+        };
+        let ct = founder
+            .encrypt(&serde_json::to_vec(&env).expect("json"))
+            .expect("encrypt envelope");
+        assert!(
+            matches!(recv.decode(&ct), MlsDecode::Deliver(from, _) if from == "founder"),
+            "a real envelope still classifies as Deliver"
         );
     }
 

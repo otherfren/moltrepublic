@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use molt_net::s3::http::{roundtrip_download, roundtrip_upload, DownloadBounds};
 use molt_net::s3::{sigv4, S3Client, S3Config, S3Error};
-use molt_net::smp::tls::Dialer;
+use molt_net::dial::Dialer;
 use sha2::{Digest, Sha256};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

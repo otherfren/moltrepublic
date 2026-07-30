@@ -1,5 +1,11 @@
 # Design: mesh self-heal — queue liveness, honest health, auto-heal, recovery fallback
 
+> **Historical (2026-07-30):** the SMP transport this document describes was
+> removed in etappe N-demo of the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`), and the deaf-leg self-heal /
+> rotate machinery with it. Kept as the design record of the deleted
+> machinery and of why SMP was left.
+
 Status: **PLANNED 2026-07-19** — design agreed in discussion; not yet built.
 Execution-ready, test-first. Read `docs/transport/dynamic_mesh.md`,
 `docs/ritual/recovery_ritual.md`, `docs/transport/mesh/stage_b.md`, and the CLAUDE.md
