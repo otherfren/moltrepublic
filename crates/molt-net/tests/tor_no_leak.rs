@@ -125,3 +125,69 @@ async fn tor_dialer_targets_the_socks_proxy_never_the_server() {
         "NO-LEAK VIOLATION: a Tor-configured dial reached the server host:port directly"
     );
 }
+
+/// KEYSTONE — the SOCKS handshake carries the PER-HOST stream-isolation
+/// credential (Tor's `IsolateSOCKSAuth`): username `molt-<session>-<host>`,
+/// non-empty password, and `DOMAINNAME` addressing (proxy-side DNS). Pinned
+/// across SOCKS client implementations (hand-rolled, then `tokio-socks` —
+/// `mdk_evaluation.md` §7.7): losing the credential would silently put every
+/// remote host on ONE Tor circuit, a fingerprinting regression no other test
+/// would notice.
+#[tokio::test]
+async fn socks_handshake_carries_the_per_host_isolation_username() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake socks");
+    let proxy_port = listener.local_addr().expect("addr").port();
+    let seen = Arc::new(tokio::sync::Mutex::new(None::<(String, usize)>));
+    let seen_srv = seen.clone();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.expect("accept");
+        // method negotiation: VER NMETHODS METHODS…
+        let mut head = [0u8; 2];
+        s.read_exact(&mut head).await.expect("greeting head");
+        assert_eq!(head[0], 0x05, "SOCKS5");
+        let mut methods = vec![0u8; usize::from(head[1])];
+        s.read_exact(&mut methods).await.expect("methods");
+        assert!(methods.contains(&0x02), "userpass must be offered: {methods:?}");
+        s.write_all(&[0x05, 0x02]).await.expect("select userpass");
+        // RFC 1929: VER ULEN USER PLEN PASS
+        let mut ah = [0u8; 2];
+        s.read_exact(&mut ah).await.expect("auth head");
+        assert_eq!(ah[0], 0x01, "auth sub-negotiation version");
+        let mut user = vec![0u8; usize::from(ah[1])];
+        s.read_exact(&mut user).await.expect("username");
+        let mut pl = [0u8; 1];
+        s.read_exact(&mut pl).await.expect("plen");
+        let mut pass = vec![0u8; usize::from(pl[0])];
+        s.read_exact(&mut pass).await.expect("password");
+        *seen_srv.lock().await =
+            Some((String::from_utf8_lossy(&user).into_owned(), pass.len()));
+        s.write_all(&[0x01, 0x00]).await.expect("auth ok");
+        // CONNECT: VER CMD RSV ATYP …
+        let mut ch = [0u8; 4];
+        s.read_exact(&mut ch).await.expect("connect head");
+        assert_eq!(ch[1], 0x01, "CONNECT");
+        assert_eq!(ch[3], 0x03, "DOMAINNAME addressing — DNS stays proxy-side");
+        let mut hl = [0u8; 1];
+        s.read_exact(&mut hl).await.expect("host len");
+        let mut host_port = vec![0u8; usize::from(hl[0]) + 2];
+        s.read_exact(&mut host_port).await.expect("host+port");
+        assert_eq!(&host_port[..usize::from(hl[0])], b"relay.example.test");
+        // success reply, bound 0.0.0.0:0 — then keep the tunnel open briefly
+        s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .expect("connect reply");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let dialer = Dialer::resolve("tor", "local", proxy_port).expect("tor+local dialer");
+    let res = dialer.dial_host("relay.example.test", 443).await;
+    assert!(res.is_ok(), "a fully negotiated SOCKS dial succeeds: {res:?}");
+    let (user, pass_len) = seen.lock().await.clone().expect("the proxy saw the auth frame");
+    assert!(
+        user.starts_with("molt-") && user.ends_with("-relay.example.test"),
+        "isolation credential must be per-host: {user:?}"
+    );
+    assert!(pass_len > 0, "RFC 1929 servers may reject an empty password");
+}

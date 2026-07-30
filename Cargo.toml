@@ -78,6 +78,8 @@ chacha20poly1305   = "0.10"   # XChaCha20-Poly1305 AEAD for frames/snapshots/sea
 hkdf               = "0.12"   # seed -> workspace id/key derivations
 sha2               = "0.10"
 hmac               = "0.12"   # invite ticket -> JoinRequest MAC binding (molt-net)
+tokio-socks        = "0.5"    # SOCKS5h client (Tor dialing, per-host isolation creds) —
+                              # replaced the hand-rolled socks5.rs (mdk_evaluation.md §7.7)
 ed25519-dalek      = { version = "2", default-features = false, features = ["std", "rand_core"] }  # member identity keys (derived, never random)
 crc32c             = "0.6"    # molt-storage: torn-write/bitrot detection over the ciphertext
 

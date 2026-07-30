@@ -53,6 +53,7 @@ chacha20poly1305.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+tokio-socks.workspace = true
 zeroize.workspace = true
 hex.workspace = true
 # Pure-Rust TLS (the T4 dialer + S3-over-https; N2's WebSockets reuse it)

@@ -274,6 +274,13 @@ non-trivial mechanism.
    never pass blind.
 7. **Replace `socks5.rs` with `tokio-socks`** (already in the lockfile) and
    swap the hand-rolled constant-time MAC compare for `hmac::Mac::verify_slice`.
+   **DONE 2026-07-31** — `socks5.rs` deleted; the dialer drives
+   `tokio_socks::Socks5Stream::connect_with_password` (DOMAINNAME addressing
+   = proxy-side DNS, isolation username capped at the RFC 1929 limit). A new
+   keystone in `tor_no_leak.rs` pins the per-host isolation credential ON THE
+   WIRE across implementations. `verify_join_mac` now rides
+   `Mac::verify_slice` (subtle's constant-time compare) behind a shared
+   mint/verify HMAC state, with the exact-lowercase-hex wire form pinned.
 8. **Record the NIP-06 decision**: `nostr::nips::nip06::FromMnemonic` with a
    passphrase is exactly our ticket-salted derivation, with interoperability.
    If we keep the bespoke SHA-256 scheme, the ADR must say why.

@@ -4698,6 +4698,7 @@ dependencies = [
  "tls_codec",
  "tokio",
  "tokio-rustls",
+ "tokio-socks",
  "tor-rtcompat",
  "tracing",
  "webpki-roots 1.0.9",

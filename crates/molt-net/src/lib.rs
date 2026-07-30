@@ -41,7 +41,6 @@ pub mod mesh;
 pub mod mls;
 pub mod nostr;
 pub mod s3;
-pub mod socks5;
 pub mod supervisor;
 pub mod transfer;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`

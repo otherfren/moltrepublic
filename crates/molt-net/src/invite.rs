@@ -46,6 +46,17 @@ pub fn mint_ticket() -> Result<String, NetError> {
 /// `KDF(ticket)` is a domain-separated SHA-256 of the ticket (unchanged
 /// from v1), so the raw ticket is never the HMAC key directly.
 pub fn join_mac(ticket: &str, name: &str, identity_pk: &str, nostr_pk: &str) -> String {
+    hex::encode(
+        join_mac_state(ticket, name, identity_pk, nostr_pk)
+            .finalize()
+            .into_bytes(),
+    )
+}
+
+/// The keyed, fully-updated HMAC state behind [`join_mac`] and
+/// [`verify_join_mac`] — ONE place computes the layout, so mint and verify
+/// cannot drift.
+fn join_mac_state(ticket: &str, name: &str, identity_pk: &str, nostr_pk: &str) -> HmacSha256 {
     let mut kdf = Sha256::new_with_prefix(b"molt-invite-mac-key\0");
     use sha2::Digest;
     kdf.update(ticket.as_bytes());
@@ -57,7 +68,7 @@ pub fn join_mac(ticket: &str, name: &str, identity_pk: &str, nostr_pk: &str) -> 
     mac.update(identity_pk.as_bytes());
     mac.update(&[0u8]);
     mac.update(nostr_pk.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    mac
 }
 
 /// Verify an activation MAC against the ticket in constant time. The
@@ -70,19 +81,25 @@ pub fn verify_join_mac(
     nostr_pk: &str,
     mac_hex: &str,
 ) -> bool {
-    let expected = join_mac(ticket, name, identity_pk, nostr_pk);
-    // hex of a fixed-size HMAC: constant-time compare of equal-length
-    // strings; unequal length is an immediate reject
-    let a = expected.as_bytes();
-    let b = mac_hex.as_bytes();
-    if a.len() != b.len() {
+    // The wire form is exactly lowercase hex of a 32-byte HMAC — an
+    // uppercase or malformed spelling is not the MAC we minted (this
+    // shape check is over the ATTACKER'S input only, so its timing
+    // reveals nothing about the expected value).
+    if mac_hex.len() != 64
+        || !mac_hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    let Ok(given) = hex::decode(mac_hex) else {
+        return false;
+    };
+    // the battle-tested constant-time compare (subtle, inside hmac) —
+    // replaces the hand-rolled XOR fold (mdk_evaluation.md §7.7)
+    join_mac_state(ticket, name, identity_pk, nostr_pk)
+        .verify_slice(&given)
+        .is_ok()
 }
 
 /// Where the founder sends the canonical table back: the reply queue the
@@ -289,6 +306,12 @@ mod tests {
             "independently computed v2 fixture"
         );
         assert!(verify_join_mac("deadbeef", "ada", &idpk, &npk, &mac));
+        // the wire form is EXACTLY lowercase hex: a re-encoded spelling of
+        // the same value is refused (pins the strictness across the
+        // verify_slice refactor), as is anything not 64 hex chars
+        assert!(!verify_join_mac("deadbeef", "ada", &idpk, &npk, &mac.to_uppercase()));
+        assert!(!verify_join_mac("deadbeef", "ada", &idpk, &npk, &mac[..62]));
+        assert!(!verify_join_mac("deadbeef", "ada", &idpk, &npk, "zz"));
         // every bound field matters — the nostr anchor included
         assert!(!verify_join_mac("deadbeef", "ada", &idpk, &"ee".repeat(32), &mac));
         assert!(!verify_join_mac("deadbeef", "eva", &idpk, &npk, &mac));

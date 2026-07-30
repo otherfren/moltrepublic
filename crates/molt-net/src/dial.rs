@@ -262,19 +262,34 @@ impl Dialer {
                 Ok(DialStream::Tcp(tcp))
             }
             Dialer::Socks5 { proxy, session } => {
-                // one Tor circuit per remote host: molt-<session>-<host>
-                let isolation = format!("molt-{session}-{host}");
-                let tcp = timeout(
+                // One Tor circuit per remote host (IsolateSOCKSAuth): the
+                // SOCKS username is `molt-<session>-<host>`, capped at the
+                // RFC 1929 limit (tokio-socks refuses an oversized field
+                // where the old client silently truncated). The fixed
+                // non-empty password keeps strict RFC 1929 servers happy.
+                // `(host, port)` dials with DOMAINNAME addressing, so the
+                // name resolves PROXY-side (SOCKS5h) — no local DNS.
+                let mut isolation = format!("molt-{session}-{host}");
+                isolation.truncate(255);
+                let stream = timeout(
                     CONNECT_TIMEOUT,
-                    crate::socks5::socks5h_connect(proxy, host, port, &isolation),
+                    tokio_socks::tcp::Socks5Stream::connect_with_password(
+                        proxy.as_str(),
+                        (host, port),
+                        &isolation,
+                        "molt",
+                    ),
                 )
                 .await
                 .map_err(|_| {
                     NetError::TorUnavailable(format!(
                         "tor circuit to {host} via {proxy} timed out"
                     ))
-                })??;
-                Ok(DialStream::Tcp(tcp))
+                })?
+                .map_err(|e| {
+                    NetError::Unreachable(format!("socks proxy {proxy} to {host}: {e}"))
+                })?;
+                Ok(DialStream::Tcp(stream.into_inner()))
             }
             #[cfg(feature = "embedded-tor")]
             Dialer::Arti(handle) => {
