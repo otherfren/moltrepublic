@@ -144,7 +144,13 @@ Three event kinds carry MLS over relays:
   commits/proposals). Double-wrapped: the MLS ciphertext is additionally
   NIP-44-encrypted with a keypair derived from the MLS `exporter_secret`
   (label `nostr`, 32 bytes, **rotated every epoch**) — so relays cannot even
-  see the MLS frames. Published **per event with a fresh ephemeral Nostr
+  see the MLS frames. **Outer layer DECIDED 2026-07-31 (§10.11):** we build
+  the *current* Marmot shape instead of this older derived-keypair NIP-44
+  form — `content = base64(nonce ‖ ChaCha20Poly1305(exporter_secret,
+  plaintext, aad=""))`, one raw AEAD sealing keyed by the exporter secret
+  itself (simpler, 33 bytes smaller, escapes the rust-nostr 65408-byte
+  NIP-44 send cap; see `mdk_evaluation.md` §2.1). The epoch rotation and
+  the exporter ring (§6) are unchanged by this. Published **per event with a fresh ephemeral Nostr
   keypair** (membership/size hidden); the only visible group metadatum is the
   `h`-tag group id, which can change over the group's lifetime.
 - **Group metadata** (the group's relay list, group id, `admin_pubkeys`) live
@@ -661,10 +667,11 @@ prohibition.
   ["rustls-tls-webpki-roots"] }` — i.e. the **`ring` rustls provider is
   non-optional** in that stack (no rustcrypto path, no feature to swap it).
   Consequence: the pool + in-process test relay are **dev-dependencies only**
-  for now; whether the N2 runtime adopts the ready-made pool (ring returns to
-  the default graph) or drives `tokio-tungstenite` directly over our existing
-  rustls-rustcrypto config (and the T4 fail-closed onion dialer, §7.5/ADR-0001)
-  is an explicit N2 decision, not an N0 side effect. `cargo tree` after N0:
+  for now. **DECIDED 2026-07-31 (ADR-0005): the N2 runtime does NOT adopt the
+  pool** — it drives `tokio-tungstenite` directly over our existing
+  rustls-rustcrypto config and the T4 fail-closed onion dialer
+  (§7.5/ADR-0001); the default graph stays ring-free, and the pool + relay
+  builder remain dev-only test tooling. `cargo tree` after N0:
   the default no-dev graph is byte-unperturbed (every Nostr crate is dev-only
   until N1 promotes `nostr` — then `secp256k1-sys` enters per ADR-0002);
   `ring` only via the pre-existing `x509-parser` cert-pin (died in N-demo,
@@ -767,6 +774,34 @@ decided any time before ship.
   ±1h skew margin. Only the RELAY LIST change is governed + gets a grace.
 - **§10.8 — done:** the self-host experiment ran; verdict GO (§0).
 
+**Post-MDK-evaluation decisions (2026-07-31, user-ratified):**
+
+- **§10.11 — 445 outer envelope: DECIDED — current-Marmot raw AEAD.**
+  `content = base64(nonce ‖ ChaCha20Poly1305(exporter_secret, plaintext,
+  aad=""))` — one sealing, key = the exporter secret itself — instead of the
+  older derived-keypair NIP-44 form §1 quotes from EE.md. Simpler, 33 bytes
+  smaller, escapes the rust-nostr 65408-byte send cap, and byte-compatible
+  with the vendored peeler and its 34 tests (`mdk_evaluation.md` §2.1). No
+  interop goal either way (§10.3), so the better mechanics win.
+- **§10.12 — N2 WebSocket stack: DECIDED (ADR-0005) — own client, no pool.**
+  `tokio-tungstenite` driven directly over our rustls-rustcrypto config + the
+  T4 fail-closed onion dialer. The rust-nostr relay pool would hard-return
+  `ring` to the default graph and cannot ride the T4 dialer; connect/backoff/
+  health are N2-budgeted anyway, and the pool's genuinely valuable behaviours
+  are exactly the six adapter ports from `mdk_evaluation.md` §2.2.
+- **§10.13 — nostr key derivation: DECIDED (ADR-0006) — keep the N1
+  ticket-salted SHA-256 scheme, not NIP-06.** No interop goal (§10.3), the
+  scheme is landed and byte-pinned, and our phrases are not checksummed
+  BIP-39 mnemonics. The ADR records the why; the `mdk_evaluation.md` §7.8
+  follow-up is closed.
+- **§10.14 — private/local relay addresses: DECIDED — gated like clearnet,
+  not hard-rejected.** RFC1918/loopback/link-local/ULA relays go behind the
+  same ADR-0004 gate as clearnet (explicit acknowledgement + per-session
+  activation, never a silent dial — they bypass Tor by nature). A LAN
+  self-hosted relay stays possible, informed; MDK's hard-reject is not
+  adopted. Lands with the `url`-based parser rebuild
+  (`mdk_evaluation.md` §7.1/§7.2).
+
 ## 11. Etappen (each green on master, TDD)
 
 Because this is a **full replacement** (not a parallel backend), there is a
@@ -849,7 +884,9 @@ once. So:
 - **N2 — NostrTransport core:** the relay POOL/policy already exists
   (`molt_core::relay`, ADR-0004 — N2 MUST dial through
   `relay::dialable(...)`, never read the pool directly, and must stay silent
-  while it returns empty); relay runtime (connect/backoff/health), publish
+  while it returns empty); relay runtime (connect/backoff/health) on the
+  DECIDED own WS client (§10.12/ADR-0005 — `tokio-tungstenite` over
+  rustls-rustcrypto, NOT the ring-pinned rust-nostr pool), publish
   with ≥1-OK semantics + NIP-11 size budget, per-relay cursor with clamp +
   overlap, event-id dedup, per-connection decrypt-failure circuit breaker.
   The WebSocket dialer rides the T4 onion-preferred, fail-closed path (§7.5) —

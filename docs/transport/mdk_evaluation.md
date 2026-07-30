@@ -79,7 +79,9 @@ CRITICAL findings:
    chose "NIP-EE mechanics only, no Marmot interop" (§10.3), so this is a
    **choice point that must be decided explicitly** — MDK's variant is
    simpler, 33 bytes smaller, and escapes the rust-nostr 65408-byte NIP-44
-   send cap we pinned as a canary in N0.
+   send cap we pinned as a canary in N0. **DECIDED 2026-07-31 (concept
+   §10.11): MDK's variant** — the peeler's envelope code and tests apply
+   unmodified on this axis.
 2. **Our h-tag rotation.** MDK's `h` is static per group. Our §4.4 requires
    deterministic 24h-window rotation — a deliberate metadata improvement over
    MDK. Vendoring unmodified would silently regress it.
@@ -240,9 +242,14 @@ non-trivial mechanism.
    `molt-net` behind a `RelayLocator` newtype and keep the policy in
    `molt-core` reading the pre-parsed host.
 2. **Add a local/private-address gate** (`is_local_addr` equivalent).
+   **DECIDED 2026-07-31 (concept §10.14): gate like clearnet, don't
+   hard-reject** — RFC1918/loopback/link-local/ULA go behind the ADR-0004
+   acknowledgement + per-session activation (a LAN self-hosted relay stays
+   possible, informed), never a silent dial.
 3. **Fix the concurrent-commit fork** (§2.4) — red test first.
 4. **Vendor the peeler** as the N3 envelope layer, with the four adaptations
-   in §2.1 and the envelope decision made explicitly.
+   in §2.1. The envelope decision is made: current-Marmot raw AEAD (concept
+   §10.11, 2026-07-31).
 5. **Port the six adapter behaviours** (§2.2) into N5's runtime.
 6. **Make the ring guard a CI gate**, not prose.
 7. **Replace `socks5.rs` with `tokio-socks`** (already in the lockfile) and
@@ -250,3 +257,6 @@ non-trivial mechanism.
 8. **Record the NIP-06 decision**: `nostr::nips::nip06::FromMnemonic` with a
    passphrase is exactly our ticket-salted derivation, with interoperability.
    If we keep the bespoke SHA-256 scheme, the ADR must say why.
+   **DECIDED 2026-07-31: keep the N1 scheme — ADR-0006 records the why**
+   (no interop goal per §10.3, landed + byte-pinned, our phrases are not
+   checksummed BIP-39 mnemonics).
