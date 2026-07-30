@@ -896,10 +896,12 @@ mod tests {
             MemberIdentity {
                 member: "petra".to_string(),
                 identity_pk: "aa".to_string(),
+                nostr_pk: "cc".to_string(),
             },
             MemberIdentity {
                 member: "walter".to_string(),
                 identity_pk: "bb".to_string(),
+                nostr_pk: "dd".to_string(),
             },
         ];
         let genesis = ChainBlock {
@@ -958,6 +960,7 @@ mod tests {
             .map(|(m, _, pk)| MemberIdentity {
                 member: (*m).to_string(),
                 identity_pk: (*pk).to_string(),
+                nostr_pk: "cc".repeat(32),
             })
             .collect();
         let rule_n = u8::try_from(members.len()).expect("small roster");

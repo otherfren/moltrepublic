@@ -82,7 +82,9 @@ members (the attestations — see `founding_ritual.md` §4–8). The chain **roo
 exactly those bytes**: block 0's `change` is the sealed constitution and its
 `sigs` *are* the founding attestations. So the founding needs no new signing
 path, and a rejoiner verifies the constitution the same way every member
-ratified it. `roster_canonical_bytes` is untouched (still `molt-roster-v2`).
+ratified it. (`roster_canonical_bytes` carries its own version tag —
+`molt-roster-v3` since etappe N1 bound the nostr transport anchor into the
+signed bytes; the chain roots on whatever the ritual sealed.)
 
 ## 5. What is signed, and what links
 
@@ -219,7 +221,7 @@ Having verified a chain, a member knows — not trusts — that:
 - **Real (WP4b, 2026-07-18): threshold-signed chain checkpoints.** The
   republic compacts the way it governs: `propose_checkpoint` (a co-equal
   verb — MCP tool + GUI button) cuts at the current head; every member
-  recomputes the canonical state (`molt-chain-checkpoint-v1`: founding
+  recomputes the canonical state (`molt-chain-checkpoint-v2`: founding
   table for republic-id recomputation, current roster, per-surface
   applied projection, consumed proposal ids) from its OWN chain and
   auto-co-signs only on an exact hash match. The sealed

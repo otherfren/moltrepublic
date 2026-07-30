@@ -130,6 +130,14 @@ pub(crate) struct RitualRuntime {
     rule_n: u8,
     founder: MemberIdentity,
     founder_sk: SigningKey,
+    /// The founder's own Nostr transport secret (32-byte secp256k1 scalar),
+    /// derived at ritual start from a random ephemeral self-ticket — salt
+    /// only, minted and dropped inside `start_ritual` (consistency with the
+    /// members' ticket-salted derivation, no cross-republic correlation).
+    /// Lives in memory until the seal persists it beside `identity_sk`;
+    /// `Zeroizing`, so a cancelled/torn-down ritual wipes it on drop (the
+    /// ritual's no-trace promise extends to freed memory).
+    founder_nostr_sk: zeroize::Zeroizing<Vec<u8>>,
     seats: Vec<SeatRuntime>,
     generation: u64,
     /// Keepalives for the simulated members of the offline **test seam**
@@ -233,6 +241,12 @@ impl RitualRuntime {
         &self.founder_sk
     }
 
+    /// The founder's Nostr transport secret (the third anchor's private
+    /// half) — persisted beside `identity_sk` when the founding seals.
+    pub(crate) fn founder_nostr_sk(&self) -> &[u8] {
+        &self.founder_nostr_sk
+    }
+
     /// A clone of the ritual transport — keeping it alive keeps the founding
     /// star (and its queues) up for the post-founding mesh bootstrap.
     pub(crate) fn transport(&self) -> RitualTransport {
@@ -274,9 +288,23 @@ impl State {
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| e.to_string())?;
         let ws_id = molt_storage::derive_workspace_id(&entropy, founder_name);
         let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&entropy, &ws_id);
+        // the founder's own third anchor: same ticket-salted derivation as
+        // every member's, salted with a random SELF-ticket. The ticket is
+        // salt only — minted here, dropped at the end of this scope (the
+        // ritual is ephemeral pre-seal); the derived secret rides the
+        // runtime until the seal persists it beside identity_sk.
+        let self_ticket = invite::mint_ticket().map_err(|e| e.to_string())?;
+        let (mut founder_nostr_raw, founder_nostr_pk) =
+            molt_net::nostr_identity(&entropy, &self_ticket);
+        // one long-lived carrier for the scalar (wiped on ritual teardown);
+        // the stack copy is wiped here — the derivation's reject-path hygiene
+        // (nostr.rs) extends to the accepted secret's hops
+        let founder_nostr_sk = zeroize::Zeroizing::new(founder_nostr_raw.to_vec());
+        zeroize::Zeroize::zeroize(&mut founder_nostr_raw);
         let founder = MemberIdentity {
             member: founder_name.to_string(),
             identity_pk: founder_pk,
+            nostr_pk: founder_nostr_pk,
         };
         self.net_generation += 1;
         let generation = self.net_generation;
@@ -377,6 +405,7 @@ impl State {
             rule_n,
             founder,
             founder_sk,
+            founder_nostr_sk,
             seats,
             generation,
             _sim: sim,
@@ -451,6 +480,7 @@ fn spawn_founder_recv(
                     seat,
                     member: j.name,
                     identity_pk: j.identity_pk,
+                    nostr_pk: j.nostr_pk,
                     proof: j.mac,
                     // the member's reply-queue handover, opaque to core
                     reply: j
@@ -641,15 +671,52 @@ impl FoundingInvite {
     }
 }
 
+/// Every seat's third anchor must be a valid, canonical, roster-unique
+/// nostr key — the check EVERY member can (and must) run for EVERY seat.
+/// A member can only compare its OWN seat's value against its derivation;
+/// format and uniqueness are the verifiable properties of the others'
+/// anchors, and threshold-signing a malformed, second-byte-form, or
+/// duplicated anchor would seal it into the roster-v3 bytes and the
+/// republic-id-v2 preimage forever. Empty is rejected too: the one
+/// founding path always fills the anchor, so an empty value on a founding
+/// seat is an attacker aliasing the legacy marker — the legitimately empty
+/// anchors of chain-derived later-`Joined` seats never pass through the
+/// two callers below (both verify freshly-sealed FOUNDING rosters only;
+/// `sealed_roster_from_blob` documents it must not be routed here).
+fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for id in identities {
+        let canonical = molt_net::canonical_nostr_pk(&id.nostr_pk)
+            .map_err(|e| format!("seat {} carries an invalid nostr anchor: {e}", id.member))?;
+        if canonical != id.nostr_pk {
+            return Err(format!(
+                "seat {} carries a non-canonical nostr anchor (one key, one signed-byte form)",
+                id.member
+            ));
+        }
+        if !seen.insert(id.nostr_pk.as_str()) {
+            return Err(format!(
+                "seat {} shares its nostr anchor with another seat",
+                id.member
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify a distributed sealed roster before trusting it: the republic id
-/// must be the neutral content-derived value, every attestation must verify
-/// against its member's anchored key over the canonical table, and every
-/// member must have signed (n identities, n attestations).
+/// must be the neutral content-derived value (v2 — committing to every
+/// member's identity/nostr anchor PAIR), every seat's nostr anchor must be
+/// valid, canonical and unique ([`check_roster_anchors`]), every
+/// attestation must verify against its member's anchored key over the
+/// canonical table (v3 — the nostr anchors are inside the signed bytes),
+/// and every member must have signed (n identities, n attestations).
 pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), String> {
     let rid = molt_storage::republic_id(&s.name, s.rule_m, s.rule_n, &s.identities);
     if rid != s.republic_id {
         return Err("republic id does not match the roster content".to_string());
     }
+    check_roster_anchors(&s.identities)?;
     if s.attestations.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
@@ -729,13 +796,19 @@ pub fn verify_seat_proof(
 /// Verify a `Seal` proposal before ratifying it, and return the exact canonical
 /// bytes to sign. The republic id must be the content-derived value (no forged
 /// salt), and our own `(name, key)` must be in the roster — otherwise a founder
-/// could have us ratify a constitution we are not part of. Recomputing the table
-/// here (rather than trusting an opaque blob) is what makes the signature a
-/// ratification of exactly the name + agenda + roster the member is shown.
+/// could have us ratify a constitution we are not part of. Sign-what-you-see
+/// extends to the THIRD anchor: our seat's `nostr_pk` must be exactly the key
+/// WE derived (`nostr_pk`), or a malicious founder could anchor an
+/// attacker-controlled transport key for us — MLS still binds Ed25519, but our
+/// future gift-wrapped material (Welcomes, recovery) would flow to the
+/// attacker. Recomputing the table here (rather than trusting an opaque blob)
+/// is what makes the signature a ratification of exactly the name + agenda +
+/// roster the member is shown.
 pub(crate) fn verify_seal_proposal(
     proposal: &molt_core::SealedRoster,
     name: &str,
     pk: &str,
+    nostr_pk: &str,
 ) -> Result<Vec<u8>, String> {
     let rid = molt_storage::republic_id(
         &proposal.name,
@@ -746,12 +819,22 @@ pub(crate) fn verify_seal_proposal(
     if rid != proposal.republic_id {
         return Err("proposed republic id does not match its roster".to_string());
     }
-    if !proposal
+    // format + uniqueness for EVERY seat, not just ours: we can only compare
+    // our own anchor's VALUE, but we must never ratify a table that seals a
+    // malformed or duplicated anchor for a peer
+    check_roster_anchors(&proposal.identities)?;
+    let Some(our_seat) = proposal
         .identities
         .iter()
-        .any(|i| i.member == name && i.identity_pk == pk)
-    {
+        .find(|i| i.member == name && i.identity_pk == pk)
+    else {
         return Err("the proposed roster does not anchor our own (name, key)".to_string());
+    };
+    if our_seat.nostr_pk != nostr_pk {
+        return Err(
+            "the proposed roster anchors a nostr transport key for us that we did not derive"
+                .to_string(),
+        );
     }
     Ok(molt_core::roster_canonical_bytes(
         &proposal.republic_id,
@@ -769,6 +852,13 @@ pub(crate) fn verify_seal_proposal(
 pub struct JoinOutcome {
     /// The member's identity public key (what the founder anchored).
     pub pk: String,
+    /// The member's derived Nostr transport secret (32-byte secp256k1
+    /// scalar — `molt_net::nostr_identity`, salted with this seat's ticket).
+    /// The ticket dies with the ritual, so this is NOT re-derivable later:
+    /// the caller must seal it into the member's `transport.state.nostr_sk`
+    /// beside `identity_sk`. `Zeroizing` — a caller that drops the outcome
+    /// (a failed join tail) wipes the scalar with it.
+    pub nostr_sk: zeroize::Zeroizing<Vec<u8>>,
     /// The complete sealed roster, present only when `collect_genesis` was
     /// set and the founder finished distributing it.
     pub sealed: Option<molt_core::SealedRoster>,
@@ -1050,7 +1140,17 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     // derivation must be reproducible when the join finish materializes the
     // workspace (so the chain signing key matches the anchored roster key) —
     // hence the shared [`member_identity`] helper.
-    let (sk, pk) = member_identity(&phrase)?;
+    let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
+    let (sk, pk) = member_identity_from_entropy(&entropy);
+    // the third anchor: the Nostr transport key, salted with THIS seat's
+    // ticket (one key per republic — no cross-republic correlation handle).
+    // Derived once here; the pk is MAC-bound to the ticket, anchored by the
+    // founder, and re-checked at ratification (sign-what-you-see); the sk
+    // must survive the ritual via the JoinOutcome (the ticket dies with it).
+    // ONE wiped-on-drop carrier — the stack copy is zeroized immediately.
+    let (mut nostr_raw, nostr_pk) = molt_net::nostr_identity(&entropy, &m.ticket);
+    let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());
+    zeroize::Zeroize::zeroize(&mut nostr_raw);
 
     // the MLS member, built from the *same* identity key (concept §3.3: one
     // identity anchors both the genesis table and the MLS credential). Its
@@ -1077,7 +1177,8 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
         seat: m.seat,
         name: name.clone(),
         identity_pk: pk.clone(),
-        mac: invite::join_mac(&m.ticket, &name, &pk),
+        nostr_pk: nostr_pk.clone(),
+        mac: invite::join_mac(&m.ticket, &name, &pk, &nostr_pk),
         reply: Some(invite::ReplyHandover {
             server: reply_q.snd.server.clone(),
             queue_id: hex::encode(&reply_q.snd.id.0),
@@ -1156,8 +1257,9 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
         serde_json::from_str(&proposal_json).map_err(|e| e.to_string())?;
     // verify what we are about to ratify BEFORE we sign, and recompute the exact
     // bytes to sign from the shown proposal — so what we sign provably equals
-    // the name + agenda + roster we ratify
-    let table = verify_seal_proposal(&proposal, &name, &pk)?;
+    // the name + agenda + roster we ratify (including OUR derived nostr
+    // anchor: a split third anchor is rejected before we sign)
+    let table = verify_seal_proposal(&proposal, &name, &pk, &nostr_pk)?;
     // human ratification gate: surface the charter and wait for the confirm
     // before signing. The non-interactive paths (sim members, CLI) pass None
     // and ratify once the proposal verified.
@@ -1202,6 +1304,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
         // joined the founder's group, they just never process the Welcome
         return Ok(JoinOutcome {
             pk,
+            nostr_sk,
             sealed: None,
             mls_snapshot: None,
             mesh: None,
@@ -1224,10 +1327,31 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
             invite::RitualMsg::Genesis { sealed, welcome } => {
                 let sealed: molt_core::SealedRoster =
                     serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
+                // sign-what-you-see closes at the GENESIS: the roster we
+                // MATERIALIZE must be byte-identically the table we RATIFIED.
+                // verify_seal_proposal re-runs the full checks over the
+                // DISTRIBUTED roster (content-derived id, our 3-anchor seat,
+                // every seat's anchor format) and returns its canonical
+                // bytes, which must equal the exact bytes we signed. Without
+                // this, a founder could run the ritual honestly through
+                // ratification and then seal a DIFFERENT, fully
+                // self-consistent table (e.g. our seat swapped to attacker
+                // keys, all n attestations self-signed) — verify_sealed_roster
+                // alone cannot catch that, it has no memory of the proposal.
+                let sealed_table = verify_seal_proposal(&sealed, &name, &pk, &nostr_pk)
+                    .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
+                if sealed_table != table {
+                    return Err(
+                        "the sealed roster is not the table we ratified — the founder \
+                         distributed a different constitution"
+                            .to_string(),
+                    );
+                }
                 // a founding without a Welcome (pre-MLS peer) leaves us groupless
                 if welcome.is_empty() {
                     return Ok(JoinOutcome {
                         pk,
+                        nostr_sk,
                         sealed: Some(sealed),
                         mls_snapshot: None,
                         mesh: None,
@@ -1271,6 +1395,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                         .map_err(|e| e.to_string())?;
                     return Ok(JoinOutcome {
                         pk,
+                        nostr_sk,
                         sealed: Some(sealed),
                         mls_snapshot: Some(snap),
                         mesh,
@@ -1279,6 +1404,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                 let snap = mls.snapshot().map_err(|e| e.to_string())?;
                 return Ok(JoinOutcome {
                     pk,
+                    nostr_sk,
                     sealed: Some(sealed),
                     mls_snapshot: Some(snap),
                     mesh: None,
@@ -1534,7 +1660,8 @@ mod ritual_ops {
             Ok(molt_core::Reply::Ack)
         }
 
-        /// A member activated their link. Verify the ticket MAC, anchor
+        /// A member activated their link. Verify the ticket MAC (v2 — it
+        /// binds the nostr transport anchor to the ticket holder), anchor
         /// their identity, and — once every seat's key is in — send the
         /// canonical table to all members to sign. Verification failures
         /// are logged and dropped (a bad request must not wedge anything).
@@ -1544,6 +1671,7 @@ mod ritual_ops {
             seat: u32,
             member: MemberId,
             identity_pk: String,
+            nostr_pk: String,
             proof: String,
             reply: String,
             key_package: String,
@@ -1573,7 +1701,8 @@ mod ritual_ops {
                 });
             if let Some((anchored_member, anchored_pk, ticket)) = spent {
                 let same = anchored_member == member && anchored_pk == identity_pk;
-                if !same && invite::verify_join_mac(&ticket, &member, &identity_pk, &proof) {
+                if !same && invite::verify_join_mac(&ticket, &member, &identity_pk, &nostr_pk, &proof)
+                {
                     if let (Some((snd, wrap)), Some(ritual)) =
                         (parse_reply_handover(&reply), &self.net_ritual)
                     {
@@ -1599,14 +1728,41 @@ mod ritual_ops {
                 }
                 return Ok(molt_core::Reply::Ack);
             }
-            let Some(ritual) = &mut self.net_ritual else {
+            let Some(ritual) = &self.net_ritual else {
                 return Ok(molt_core::Reply::Ack);
             };
-            let Some(s) = ritual.seats.get_mut(idx) else {
+            let Some(s) = ritual.seats.get(idx) else {
                 return Ok(molt_core::Reply::Ack);
             };
-            if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &proof) {
+            if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &nostr_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
+                return Ok(molt_core::Reply::Ack);
+            }
+            // normalize-or-reject the wire anchor (concept §3, "normalize at
+            // ingest"): the MAC only proves the TICKET HOLDER chose these
+            // bytes, and the value becomes threshold-signed forever-bytes in
+            // the roster/genesis/republic-id — only the one canonical form of
+            // a real x-only key may be anchored. Rejecting here does NOT
+            // spend the ticket (the seat's identity stays empty), so the
+            // holder can re-activate with a well-formed anchor.
+            let nostr_pk = match molt_net::canonical_nostr_pk(&nostr_pk) {
+                Ok(canonical) => canonical,
+                Err(e) => {
+                    tracing::warn!(seat, %member, error = %e, "founding join rejected: invalid nostr transport anchor");
+                    return Ok(molt_core::Reply::Ack);
+                }
+            };
+            // cross-seat uniqueness: two seats sharing a transport anchor is
+            // either a broken client or a correlation attack (and would make
+            // the future npk→member mapping non-injective) — reject it. The
+            // founder's own anchor counts too.
+            let duplicate = ritual.founder.nostr_pk == nostr_pk
+                || ritual
+                    .seats
+                    .iter()
+                    .any(|other| other.identity.as_ref().is_some_and(|i| i.nostr_pk == nostr_pk));
+            if duplicate {
+                tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
                 return Ok(molt_core::Reply::Ack);
             }
             // the member advertised the reply queue for its table; without a
@@ -1617,9 +1773,12 @@ mod ritual_ops {
             };
             // the member's MLS KeyPackage is required AND must be bound to the
             // anchored identity: its credential must name this member and its
-            // signature key must be the MAC-bound identity key (one identity,
-            // two anchors). Otherwise a joiner could pass the ticket MAC for one
-            // handle yet authenticate inside the group as another.
+            // signature key must be the MAC-bound identity key (the Ed25519
+            // anchor is MLS-bound; the nostr anchor is NOT — its bindings are
+            // the MAC, the canonical-form gate above, and the member's own
+            // sign-what-you-see re-check). Otherwise a joiner could pass the
+            // ticket MAC for one handle yet authenticate inside the group as
+            // another.
             let key_package_binds = hex::decode(&key_package)
                 .ok()
                 .and_then(|b| molt_net::mls::key_package_binding(&b).ok())
@@ -1630,9 +1789,16 @@ mod ritual_ops {
             }
             // keep a copy of the reply handover to ack the joiner below
             let (ack_addr, ack_wrap) = (reply_snd.clone(), reply_wrap.clone());
+            // all checks passed — re-borrow mutably and anchor all three:
+            // the MAC bound the (now canonicalized) nostr transport key to
+            // the ticket holder alongside the identity key
+            let Some(s) = self.net_ritual.as_mut().and_then(|r| r.seats.get_mut(idx)) else {
+                return Ok(molt_core::Reply::Ack);
+            };
             s.identity = Some(MemberIdentity {
                 member: member.clone(),
                 identity_pk,
+                nostr_pk,
             });
             s.reply_snd = Some(reply_snd);
             s.reply_wrap = Some(reply_wrap);
@@ -1994,13 +2160,34 @@ mod tests {
         assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", &sig));
     }
 
-    /// A fully-signed 2-member sealed roster with real keys.
-    fn valid_roster() -> SealedRoster {
+    /// A real, canonical nostr anchor for the founder-seat fixtures.
+    fn npk_founder() -> String {
+        molt_net::nostr_identity(b"founder-entropy", "ticket-a").1
+    }
+
+    /// A real, canonical nostr anchor for the member-seat fixtures.
+    fn npk_member() -> String {
+        molt_net::nostr_identity(b"member-entropy", "ticket-b").1
+    }
+
+    /// A fully-signed 2-member sealed roster with real keys and the GIVEN
+    /// nostr anchors — the attestations are honest signatures over exactly
+    /// these identities, so a rejection isolates the anchor checks (it can
+    /// never hide behind a signature failure).
+    fn signed_roster_with(npk_a: &str, npk_b: &str) -> SealedRoster {
         let (sk_a, pk_a) = molt_storage::derive_identity_key(&[1u8; 32], "a");
         let (sk_b, pk_b) = molt_storage::derive_identity_key(&[2u8; 32], "b");
         let identities = vec![
-            MemberIdentity { member: "founder".into(), identity_pk: pk_a },
-            MemberIdentity { member: "member".into(), identity_pk: pk_b },
+            MemberIdentity {
+                member: "founder".into(),
+                identity_pk: pk_a,
+                nostr_pk: npk_a.to_string(),
+            },
+            MemberIdentity {
+                member: "member".into(),
+                identity_pk: pk_b,
+                nostr_pk: npk_b.to_string(),
+            },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
         let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter");
@@ -2018,6 +2205,11 @@ mod tests {
             attestations,
             agenda: "charter".into(),
         }
+    }
+
+    /// A fully-signed 2-member sealed roster with real keys.
+    fn valid_roster() -> SealedRoster {
+        signed_roster_with(&npk_founder(), &npk_member())
     }
 
     #[test]
@@ -2056,6 +2248,31 @@ mod tests {
         assert!(verify_sealed_roster(&s).is_err());
     }
 
+    /// N1 PIN — a member must never trust a sealed roster carrying a
+    /// malformed, non-canonical, or duplicated third anchor on ANY seat: the
+    /// value is threshold-signed forever-bytes (roster v3, republic id v2),
+    /// and honest attestations over garbage would seal the garbage. Every
+    /// forged roster here is SELF-CONSISTENT (honest signatures over exactly
+    /// the identities shown), so only the anchor check can reject it.
+    #[test]
+    fn verify_sealed_roster_rejects_malformed_or_duplicate_anchors() {
+        let good = npk_member();
+        // the empty legacy marker must never appear on a founding seat
+        assert!(verify_sealed_roster(&signed_roster_with("", &good)).is_err());
+        // 64 hex chars whose x is not on the curve
+        assert!(verify_sealed_roster(&signed_roster_with(&"ff".repeat(32), &good)).is_err());
+        // not hex at all
+        assert!(verify_sealed_roster(&signed_roster_with(&"zz".repeat(32), &good)).is_err());
+        // a REAL key in a second byte form (uppercase) — one key, one signed form
+        assert!(
+            verify_sealed_roster(&signed_roster_with(&npk_founder().to_uppercase(), &good))
+                .is_err()
+        );
+        // two seats sharing one transport anchor (founder claiming the
+        // member's npub — the seat nobody else verifies)
+        assert!(verify_sealed_roster(&signed_roster_with(&good, &good)).is_err());
+    }
+
     #[test]
     fn verify_sealed_roster_rejects_a_tampered_agenda() {
         // the signatures were made over the ratified charter; swapping the
@@ -2072,7 +2289,8 @@ mod tests {
     fn verify_seal_proposal_accepts_and_recomputes_the_table() {
         let p = valid_roster(); // acts as a proposal; attestations are ignored
         let pk = &p.identities[1].identity_pk; // "member"
-        let table = verify_seal_proposal(&p, "member", pk).expect("a member ratifies");
+        let npk = &p.identities[1].nostr_pk;
+        let table = verify_seal_proposal(&p, "member", pk, npk).expect("a member ratifies");
         // the returned bytes are exactly the canonical table over the charter,
         // so a signature over them ratifies precisely this name + agenda + roster
         let expect =
@@ -2085,27 +2303,414 @@ mod tests {
         let mut p = valid_roster();
         p.republic_id = "deadbeef".to_string();
         let pk = p.identities[1].identity_pk.clone();
-        assert!(verify_seal_proposal(&p, "member", &pk).is_err());
+        let npk = p.identities[1].nostr_pk.clone();
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk).is_err());
     }
 
     #[test]
     fn verify_seal_proposal_rejects_when_our_key_is_absent() {
         let p = valid_roster();
+        let npk = p.identities[1].nostr_pk.clone();
         // right name, wrong key → not us
-        assert!(verify_seal_proposal(&p, "member", &"00".repeat(32)).is_err());
+        assert!(verify_seal_proposal(&p, "member", &"00".repeat(32), &npk).is_err());
         // our key, but under a name not in the roster → not us
         let pk = p.identities[1].identity_pk.clone();
-        assert!(verify_seal_proposal(&p, "impostor", &pk).is_err());
+        assert!(verify_seal_proposal(&p, "impostor", &pk, &npk).is_err());
+    }
+
+    /// N1 PIN — sign-what-you-see extends to the THIRD anchor: a proposal
+    /// that anchors our (name, identity_pk) correctly but a nostr_pk we did
+    /// NOT derive must be rejected before we sign. Otherwise a malicious
+    /// founder anchors an attacker-controlled transport key for us — MLS
+    /// still binds Ed25519, but our future gift-wrapped material (Welcomes,
+    /// recovery) would flow to the attacker: denial-of-recovery plus a
+    /// shadow transport identity the relays see as us.
+    #[test]
+    fn verify_seal_proposal_rejects_a_split_nostr_anchor() {
+        let p = valid_roster();
+        let pk = p.identities[1].identity_pk.clone();
+        let ours = p.identities[1].nostr_pk.clone();
+        // the honest proposal passes the 3-anchor self-check
+        assert!(verify_seal_proposal(&p, "member", &pk, &ours).is_ok());
+        // same roster, but our seat carries a nostr anchor we never derived
+        let mut split = p.clone();
+        split.identities[1].nostr_pk = "ee".repeat(32);
+        // (the founder recomputes the id over the swapped roster, as a real
+        // attacker controlling the proposal would)
+        split.republic_id = molt_storage::republic_id(
+            &split.name,
+            split.rule_m,
+            split.rule_n,
+            &split.identities,
+        );
+        assert!(
+            verify_seal_proposal(&split, "member", &pk, &ours).is_err(),
+            "a split nostr anchor must be rejected before signing"
+        );
+    }
+
+    /// N1 PIN — the ratification self-check covers OTHER seats' anchor
+    /// format too: a member whose own seat is intact must still refuse to
+    /// sign a proposal that anchors a malformed or duplicated third anchor
+    /// for a peer (each member can only self-check its own VALUE, so format
+    /// + uniqueness are what everyone can and must verify for everyone).
+    #[test]
+    fn verify_seal_proposal_rejects_a_malformed_or_duplicate_foreign_anchor() {
+        let with_founder_anchor = |npk: &str| {
+            let mut p = valid_roster();
+            p.identities[0].nostr_pk = npk.to_string();
+            // the attacker controls the proposal, so it recomputes the id
+            p.republic_id =
+                molt_storage::republic_id(&p.name, p.rule_m, p.rule_n, &p.identities);
+            p
+        };
+        let pk = valid_roster().identities[1].identity_pk.clone();
+        let ours = npk_member();
+        for bad in [
+            String::new(),                  // empty legacy marker
+            "ff".repeat(32),                // 64 hex chars, not on the curve
+            "zz".repeat(32),                // not hex
+            npk_founder().to_uppercase(),   // a second byte form of a real key
+            ours.clone(),                   // duplicates OUR anchor
+        ] {
+            assert!(
+                verify_seal_proposal(&with_founder_anchor(&bad), "member", &pk, &ours).is_err(),
+                "a foreign anchor {:?}… must be rejected before we sign",
+                &bad[..bad.len().min(12)]
+            );
+        }
     }
 
     #[test]
     fn verify_seal_proposal_binds_the_agenda() {
         let mut p = valid_roster();
         let pk = p.identities[1].identity_pk.clone();
-        let before = verify_seal_proposal(&p, "member", &pk).expect("ok");
+        let npk = p.identities[1].nostr_pk.clone();
+        let before = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
         p.agenda = "a different charter".to_string();
-        let after = verify_seal_proposal(&p, "member", &pk).expect("ok");
+        let after = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
         assert_ne!(before, after, "a changed agenda changes the bytes we sign");
+    }
+
+    /// A bare, unactivated seat holding `ticket`.
+    fn bare_seat(ticket: &str) -> SeatRuntime {
+        SeatRuntime {
+            ticket: ticket.to_string(),
+            reply_snd: None,
+            reply_wrap: None,
+            identity: None,
+            key_package: None,
+            sealed: false,
+        }
+    }
+
+    /// N1 PIN — the ONE ingest choke point normalizes-or-rejects the wire
+    /// anchor (concept §3 "normalize at ingest"): a ticket holder MACs
+    /// whatever bytes it chooses, so the founder must parse-validate before
+    /// anchoring — the value becomes threshold-signed forever-bytes. A
+    /// rejected activation must NOT spend the ticket (the seat stays open
+    /// for the honest re-activation), and no two seats may share a
+    /// transport anchor (founder's included — a shared anchor is a bug or a
+    /// correlation attack).
+    #[test]
+    fn cmd_net_join_requested_rejects_invalid_or_duplicate_nostr_anchors() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
+        let hub = LoopbackHub::calm();
+        st.net_ritual = Some(RitualRuntime {
+            transport: RitualTransport::Loopback(hub.transport()),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            rule_m: 3,
+            rule_n: 3,
+            founder: MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: founder_pk,
+                nostr_pk: npk_founder(),
+            },
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats: vec![bare_seat("t0"), bare_seat("t1")],
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[3u8; 32], "bob");
+        let bob_kp = hex::encode(
+            molt_net::MlsMember::new(&bob_sk, "bob")
+                .expect("mls")
+                .key_package()
+                .expect("kp"),
+        );
+        let (carol_sk, carol_pk) = molt_storage::derive_identity_key(&[4u8; 32], "carol");
+        let carol_kp = hex::encode(
+            molt_net::MlsMember::new(&carol_sk, "carol")
+                .expect("mls")
+                .key_package()
+                .expect("kp"),
+        );
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        let join = |st: &mut State, seat: u32, member: &str, pk: &str, npk: &str, ticket: &str, kp: &str| {
+            st.cmd_net_join_requested(
+                seat,
+                member.to_string(),
+                pk.to_string(),
+                npk.to_string(),
+                invite::join_mac(ticket, member, pk, npk),
+                reply.clone(),
+                kp.to_string(),
+                None,
+            )
+            .expect("handler never errors");
+        };
+        let anchored = |st: &State, seat: usize| {
+            st.net_ritual
+                .as_ref()
+                .expect("ritual")
+                .seats[seat]
+                .identity
+                .clone()
+        };
+
+        // every malformed wire anchor is rejected WITHOUT spending the ticket
+        for bad in [
+            String::new(),
+            "ff".repeat(32),
+            "zz".repeat(32),
+            format!("{}\0{}", "bb".repeat(32), "33".repeat(16)),
+            "dd".repeat(31),
+        ] {
+            join(&mut st, 0, "bob", &bob_pk, &bad, "t0", &bob_kp);
+            assert!(
+                anchored(&st, 0).is_none(),
+                "a malformed anchor {:?}… must not be anchored",
+                &bad[..bad.len().min(12)]
+            );
+        }
+        // …so the honest re-activation on the SAME ticket still succeeds
+        let bob_npk = molt_net::nostr_identity(b"bob-entropy", "t0").1;
+        join(&mut st, 0, "bob", &bob_pk, &bob_npk, "t0", &bob_kp);
+        let bob_anchor = anchored(&st, 0).expect("the honest activation anchors");
+        assert_eq!(bob_anchor.nostr_pk, bob_npk);
+
+        // a second seat presenting an ALREADY-ANCHORED anchor is rejected —
+        // bob's, and the founder's own (the seat no member verifies)
+        join(&mut st, 1, "carol", &carol_pk, &bob_npk, "t1", &carol_kp);
+        assert!(anchored(&st, 1).is_none(), "duplicate of bob's anchor rejected");
+        join(&mut st, 1, "carol", &carol_pk, &npk_founder(), "t1", &carol_kp);
+        assert!(anchored(&st, 1).is_none(), "duplicate of the founder's anchor rejected");
+
+        // an uppercase presentation of a REAL key is normalized at ingest:
+        // the roster only ever carries the one canonical byte form
+        let carol_npk = molt_net::nostr_identity(b"carol-entropy", "t1").1;
+        join(&mut st, 1, "carol", &carol_pk, &carol_npk.to_uppercase(), "t1", &carol_kp);
+        assert_eq!(
+            anchored(&st, 1).expect("normalized activation anchors").nostr_pk,
+            carol_npk,
+            "the CANONICAL lowercase form is anchored"
+        );
+    }
+
+    /// N1 PIN — sign-what-you-see closes at the GENESIS: the roster a member
+    /// MATERIALIZES must be byte-identically the table it RATIFIED. The
+    /// scripted founder here runs the ritual honestly through ratification
+    /// (bob's `verify_seal_proposal` passes over proposal P with his true
+    /// anchors), then distributes a sealed roster with bob's seat replaced
+    /// by attacker keys (identity + nostr) and ALL attestations self-signed
+    /// over the swapped table — a fully self-consistent forgery that passes
+    /// `verify_sealed_roster` (the test asserts exactly that). Only the
+    /// member's own ratified-bytes comparison can reject it; without it bob
+    /// would enter a founder-controlled shadow republic whose "bob" seat he
+    /// does not own.
+    #[test]
+    fn a_sealed_roster_differing_from_the_ratified_proposal_is_rejected() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let hub = LoopbackHub::calm();
+            let transport = hub.transport();
+            let invite_q = transport.create_queue().await.expect("invite queue");
+            let invite_wrap = WrapKey::fresh().expect("invite wrap");
+            let ticket = invite::mint_ticket().expect("ticket");
+            // the founder listens BEFORE the member is spawned (queue order)
+            let mut founder_rx = transport.subscribe(&invite_q.rcv).await.expect("subscribe");
+            let mut reasm = molt_net::Reassembler::new();
+            let mut no_cancel: Option<mpsc::Receiver<()>> = None;
+
+            let material = InviteMaterial {
+                seat: 0,
+                transport: transport.clone(),
+                invite_snd: invite_q.snd.clone(),
+                invite_wrap: invite_wrap.clone(),
+                ticket: ticket.clone(),
+            };
+            let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+            let member_task = tokio::spawn(run_ritual_member(
+                material,
+                "bob".to_string(),
+                phrase,
+                true,  // collect_genesis — the arm under test
+                false, // no mesh bootstrap
+                None,  // ratify=None: signs as soon as the proposal verifies
+                None,
+            ));
+
+            // ❶ bob activates — his JoinRequest carries his true anchors
+            let join = loop {
+                if let invite::RitualMsg::Join(j) =
+                    next_ritual_msg(&mut founder_rx, &mut no_cancel, &invite_wrap, &mut reasm)
+                        .await
+                        .expect("join request")
+                {
+                    break j;
+                }
+            };
+            let reply = join.reply.clone().expect("bob advertised a reply queue");
+            let reply_snd = SndQueueAddr {
+                server: reply.server.clone(),
+                id: molt_net::QueueId::from_bytes(hex::decode(&reply.queue_id).expect("qid")),
+            };
+            let reply_wrap = WrapKey::from_bytes(
+                hex::decode(&reply.wrap)
+                    .expect("wrap hex")
+                    .try_into()
+                    .expect("32-byte wrap"),
+            );
+            let send = |msg: invite::RitualMsg, n: u64| {
+                let transport = transport.clone();
+                let reply_snd = reply_snd.clone();
+                let reply_wrap = reply_wrap.clone();
+                async move {
+                    let payload = serde_json::to_vec(&msg).expect("encode");
+                    supervisor::send_framed(
+                        &transport,
+                        &reply_snd,
+                        &reply_wrap,
+                        msg_id("founder", "test", n),
+                        &payload,
+                    )
+                    .await
+                    .expect("send");
+                }
+            };
+
+            // ❷ the HONEST proposal P: bob's true seat + the founder's
+            let (f_sk, f_pk) = molt_storage::derive_identity_key(&[7u8; 32], "f");
+            let identities = vec![
+                MemberIdentity {
+                    member: "founder".to_string(),
+                    identity_pk: f_pk,
+                    nostr_pk: npk_founder(),
+                },
+                MemberIdentity {
+                    member: "bob".to_string(),
+                    identity_pk: join.identity_pk.clone(),
+                    nostr_pk: join.nostr_pk.clone(),
+                },
+            ];
+            let rid = molt_storage::republic_id("R", 2, 2, &identities);
+            let proposal = SealedRoster {
+                name: "R".to_string(),
+                republic_id: rid,
+                rule_m: 2,
+                rule_n: 2,
+                roster: vec!["founder".to_string(), "bob".to_string()],
+                identities: identities.clone(),
+                attestations: Vec::new(),
+                agenda: "the ratified charter".to_string(),
+            };
+            send(invite::RitualMsg::JoinAccepted { seat: 0 }, 1).await;
+            send(
+                invite::RitualMsg::Seal {
+                    proposal: serde_json::to_string(&proposal).expect("proposal json"),
+                },
+                2,
+            )
+            .await;
+
+            // ❸ bob ratifies P (his 3-anchor self-check passes) and signs
+            loop {
+                if let invite::RitualMsg::Signed(_) =
+                    next_ritual_msg(&mut founder_rx, &mut no_cancel, &invite_wrap, &mut reasm)
+                        .await
+                        .expect("seal signature")
+                {
+                    break;
+                }
+            }
+
+            // ❹ the SWAP: distribute a sealed roster whose "bob" seat is
+            // attacker-owned, every attestation self-signed over the swap
+            let (evil_sk, evil_pk) = molt_storage::derive_identity_key(&[8u8; 32], "evil");
+            let evil_npk = molt_net::nostr_identity(b"evil-entropy", "evil-ticket").1;
+            let mut evil_identities = identities.clone();
+            evil_identities[1].identity_pk = evil_pk;
+            evil_identities[1].nostr_pk = evil_npk;
+            let evil_rid = molt_storage::republic_id("R", 2, 2, &evil_identities);
+            let table = molt_core::roster_canonical_bytes(
+                &evil_rid,
+                2,
+                2,
+                &evil_identities,
+                "the ratified charter",
+            );
+            let sealed = SealedRoster {
+                name: "R".to_string(),
+                republic_id: evil_rid,
+                rule_m: 2,
+                rule_n: 2,
+                roster: vec!["founder".to_string(), "bob".to_string()],
+                identities: evil_identities,
+                attestations: vec![
+                    RosterAttestation {
+                        member: "founder".to_string(),
+                        sig: molt_storage::identity_sign(&f_sk, &table),
+                    },
+                    RosterAttestation {
+                        member: "bob".to_string(),
+                        sig: molt_storage::identity_sign(&evil_sk, &table),
+                    },
+                ],
+                agenda: "the ratified charter".to_string(),
+            };
+            // the forgery is fully self-consistent — the engine-side roster
+            // check CANNOT catch it; only the member's ratified-bytes
+            // comparison can
+            assert!(
+                verify_sealed_roster(&sealed).is_ok(),
+                "the forged roster must pass the self-consistency check for this pin to bite"
+            );
+            send(
+                invite::RitualMsg::Genesis {
+                    sealed: serde_json::to_string(&sealed).expect("sealed json"),
+                    welcome: String::new(),
+                },
+                3,
+            )
+            .await;
+
+            // ❺ the member must reject the join
+            let outcome = member_task.await.expect("member task");
+            assert!(
+                outcome.is_err(),
+                "a sealed roster differing from the ratified table must fail the join"
+            );
+        });
     }
 
     fn sample_invite() -> FoundingInvite {

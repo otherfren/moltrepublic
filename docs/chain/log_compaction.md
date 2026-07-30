@@ -205,21 +205,24 @@ normalen positionsgebundenen Signaturen über
 Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
 sinngemäß).
 
-## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v1`)
+## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v2`)
 
 Deterministische Byte-Folge, längenpräfixierte Felder (dasselbe Framing
 wie `roster_canonical_bytes` — Geschwister-Layout, eigener
 Versions-Tag). Inhalt in fester Reihenfolge:
 
-1. Tag `molt-chain-checkpoint-v1\0`.
+1. Tag `molt-chain-checkpoint-v2\0` (v2 seit N1: beide Identity-Tabellen
+   tragen zusätzlich den `nostr_pk`-Transport-Anker jedes Mitglieds — unter
+   v1 wäre der Roster-Anker eines servierten Blobs ohne Hash-Änderung
+   austauschbar gewesen).
 2. `republic_id`.
 3. **Founding-Tabelle**: Name, `rule_m`, `rule_n`, GENESIS-Identities in
    Gründungsreihenfolge, Agenda — damit jeder Verifier `republic_id`
    aus dem Inhalt REKOMPUTIEREN kann (Fälschungsschutz wie beim
    Genesis-Check, §B.5).
 4. **Aktueller Roster** nach allen Membership-Blöcken ≤ `upto`:
-   `(member, identity_pk)` in Chain-Reihenfolge (deterministisch, weil
-   die Blockfolge total geordnet ist).
+   `(member, identity_pk, nostr_pk)` in Chain-Reihenfolge
+   (deterministisch, weil die Blockfolge total geordnet ist).
 5. **Applied-Projektion** pro Surface, Surfaces in
    `Surface::ALL`-Reihenfolge; je Surface die Liste
    `(proposal_id, payload_canonical_json)` in Block-Reihenfolge.
@@ -271,13 +274,17 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
   1. Blob-Hash == `state_hash` im Block.
   2. `republic_id`-Rekomputation aus der Founding-Tabelle im Blob ==
      erwartete Id (aus Invite/Recovery-Link) — Founding fälschen ändert
-     die Id, exakt der Genesis-Schutz.
+     die Id, exakt der Genesis-Schutz. Dazu die Struktur-Checks der
+     Genesis-Regel: `rule_m ∈ [1, rule_n]` und
+     `founding_identities.len() == rule_n` (seit N1 — eine größere
+     Tabelle würde Angreifer-Keys in die Signer-Menge schmuggeln).
   3. **Kein zirkuläres Vertrauen** (Review-Finding 2026-07-18): Der
      Blob-Roster ist nur durch den Hash gebunden, den die Anker-Signaturen
      selbst attestieren — deshalb verifizieren die Anker-Signaturen gegen
      die **Founding-Identities** (rid-gebunden), und jeder Roster-Eintrag
-     muss wörtlich in der Founding-Tabelle stehen (Sitze sind ab Gründung
-     fix; Restored behält den verankerten Key). Fälschung erfordert damit
+     muss wörtlich in der Founding-Tabelle stehen — alle DREI Anker,
+     `nostr_pk` eingeschlossen (Sitze sind ab Gründung fix; Restored
+     behält den verankerten Key). Fälschung erfordert damit
      m ECHTE Gründungs-Keys — die Honest-Majority-Annahme, nicht weniger.
      ≥ m distinct, m aus der Founding-Tabelle.
   4. Suffix ab H normal (prev-Links, Höhen, Signaturen); Double-Apply-

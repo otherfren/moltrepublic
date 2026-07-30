@@ -223,6 +223,39 @@ version does not bind):**
   an x for `d` and `n−d`; normalize to the even-y representation at ingest so
   one key has one signed-byte form.
 
+**Status of the binding (N1 adversarial-review pass, 2026-07-30) — all four
+components are BUILT:** ticket-salted derivation (`molt-net/src/nostr.rs`),
+MAC v2 (`invite.rs`), the sign-what-you-see self-check (extended: every seat's
+anchor is format-checked and the member compares the sealed roster's canonical
+bytes against the exact table it ratified — the genesis-time close), and
+**ingest normalization is now real**: `molt_net::canonical_nostr_pk`
+(64 hex → 32 bytes → `XOnlyPublicKey` parse → re-serialized lowercase even-y)
+runs at `cmd_net_join_requested` before anchoring — normalize-or-reject, the
+ticket is NOT spent on a rejection. `republic_id` landed as v2 with a
+le32-length-prefixed, entry-counted (injective) preimage, and the WP4b
+checkpoint bytes were bumped to `molt-chain-checkpoint-v2` so pruned-path
+rosters pin the third anchor too. Two rules and one limit to keep in mind:
+
+- **Cross-seat uniqueness is enforced at ingest and at every verify:** no two
+  seats (founder included) may anchor the same `nostr_pk` — a shared anchor
+  is a bug or a correlation/aliasing attack, and would make the future
+  npk→member mapping non-injective.
+- **No proof-of-possession — deliberate, unresolved:** the nostr key signs
+  nothing during the ritual, so an anchored `nostr_pk` is *chosen and bound*,
+  never proven *possessed* (Ed25519 gets PoP via the MLS KeyPackage
+  signature). Mostly self-harm today; any N2+ design that keys trust on
+  possession must add an explicit PoP first (founding_ritual §8).
+- **Ticket-reuse caveat — accepted limit:** the derivation is deterministic
+  `f(entropy, ticket)` and the member neither checks ticket freshness nor
+  remembers past tickets. A founder who reuses one ticket across two invites
+  to the same person (or two colluding founders sharing one) makes that
+  person derive the IDENTICAL `nostr_pk` in both republics — resurrecting,
+  against dishonest founders, exactly the relay-level correlation handle the
+  ticket salt prevents against honest ones. The no-correlation property
+  above holds for honest founders only; this is an accepted residual risk
+  (the member-side hardening — folding local randomness into the salt —
+  remains open as a possible N2+ improvement).
+
 ## 4. Transport mapping
 
 ### 4.1 Strategy: NOT behind the queue trait
@@ -762,12 +795,33 @@ once. So:
   ~⅓ of the ~49 `Net*` surface dies, ~⅓ needs relay twins, ~⅓ reuses (the
   delivery-guarantee tick, `AcceptedWindow`, MLS, chain, co-equality). Confirms
   the ~6-week sizing.
-- **N1 — Identity:** secp256k1 derivation from the phrase (ticket-salted, via
-  rust-nostr key types — ADR-0002, NOT k256);
-  `MemberIdentity.nostr_pk` + `molt-roster-v3` bump (the ~15-site ripple, byte
-  pins); MAC v2; the 3-anchor sign-what-you-see self-check; the `republic_id`
-  decision. **Keystone:** roster fixture v2→v3, MAC-v2 binding, a
-  split-anchor attempt rejected.
+- **N1 — Identity — ✅ DONE (2026-07-30, incl. the adversarial-review fix
+  pass):** secp256k1 derivation from the phrase (ticket-salted, via
+  rust-nostr key types — ADR-0002, NOT k256; the founder salts with a random
+  ephemeral self-ticket); `MemberIdentity.nostr_pk` + `molt-roster-v3` bump
+  (the ~15-site ripple, byte pins); MAC v2; `republic_id` v2 with an
+  injective le32-length-prefixed + entry-counted preimage;
+  `molt-chain-checkpoint-v2` (both identity tables hash all three anchors,
+  and the suffix path's roster⊆founding check compares them + gained the
+  `founding_identities.len() == rule_n` structural check); **ingest
+  validation** (`canonical_nostr_pk` normalize-or-reject at
+  `cmd_net_join_requested`, ticket not spent on rejection, cross-seat
+  uniqueness incl. the founder's seat); the 3-anchor sign-what-you-see
+  self-check for the OWN seat plus format+uniqueness for EVERY seat in
+  `verify_seal_proposal`/`verify_sealed_roster`; the **genesis-time
+  self-check** (the member compares the sealed roster's canonical bytes to
+  the exact ratified table — closes the whole-seat-swap hole); **secret
+  lifecycle**: `nostr_sk` persisted beside `identity_sk`, validated as the
+  private half of the anchored `nostr_pk` before persisting
+  (`nostr_pk_for_sk`), survives restore-with-replace, zeroized carriers on
+  the ritual hops, loud (never silent) loss on an unreadable
+  `transport.state`. **Honest limits stated:** no proof-of-possession of the
+  nostr secret; ticket-reuse by colluding founders re-creates the
+  cross-republic correlation handle (accepted, §3). **Keystones:** roster
+  fixture v2→v3 + republic-id anti-splice pin, MAC-v2 binding, a
+  split-anchor attempt rejected, malformed/duplicate-anchor ingest + verify
+  pins, the ratified-vs-sealed byte-comparison pin, the sk↔anchored-pk
+  persistence pins (unit + `two_instances`).
 - **N2 — NostrTransport core:** relay pool (connect/backoff/health), publish
   with ≥1-OK semantics + NIP-11 size budget, per-relay cursor with clamp +
   overlap, event-id dedup, per-connection decrypt-failure circuit breaker.

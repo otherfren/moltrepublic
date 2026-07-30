@@ -95,11 +95,13 @@ bip39              = "2"      # real recovery-phrase wordlist (replaces mock_see
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
 # Nostr transport (N0+, docs/transport/nostr_transport_marmot.md). rust-nostr
-# with its C libsecp256k1 backend — the third sanctioned transport-edge C
-# exception (ADR-0002); nip44/nip59 are the NIP-EE envelope crypto. The relay
-# pool and the in-process test relay are DEV-ONLY until N2 decides the runtime
-# WS/TLS stack: nostr-relay-pool → async-wsocket hard-pins tokio-rustls with
-# the `ring` provider (audited 2026-07-30), which the default build must not
+# with its C libsecp256k1 backend — the sanctioned transport-edge C exception
+# (ADR-0002); nip44/nip59 are the NIP-EE envelope crypto. `nostr` is a REAL
+# molt-net dependency since N1 (the ticket-salted identity anchor), so
+# secp256k1-sys is in the default build graph. The relay pool and the
+# in-process test relay stay DEV-ONLY until N2 decides the runtime WS/TLS
+# stack: nostr-relay-pool → async-wsocket hard-pins tokio-rustls with the
+# `ring` provider (audited 2026-07-30), which the default build must not
 # silently re-adopt after N-demo drops the SMP cert-pin.
 nostr               = { version = "0.44.6", default-features = false, features = ["std", "nip44", "nip59"] }
 nostr-relay-pool    = "0.44.1"

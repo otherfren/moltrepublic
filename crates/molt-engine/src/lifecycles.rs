@@ -61,6 +61,12 @@ impl State {
         // handle here would NOT match the roster — it must be passed in). `None`
         // for paths without a real founding (restore/demo), which have no chain.
         signing_key: Option<molt_storage::SigningKey>,
+        // this node's ALREADY-derived nostr transport secret (the third
+        // anchor's private half). Ticket-salted in the ritual, so it can never
+        // be re-derived here — it must be passed in. `None` where the ticket
+        // is genuinely gone (recovery — the old device held it; recovery-link
+        // v2 owns that story) or on pre-ritual paths.
+        nostr_sk: Option<Vec<u8>>,
         mls_snapshot: Option<Vec<u8>>,
         mesh: Vec<molt_core::MeshLink>,
         // a recovery adopts the FULL verified chain it caught up over the
@@ -113,6 +119,7 @@ impl State {
                 mls: mls_snapshot,
                 mesh,
                 identity_sk: if chain.is_empty() { None } else { sk_bytes },
+                nostr_sk: if chain.is_empty() { None } else { nostr_sk },
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
@@ -850,6 +857,9 @@ impl State {
                 c.agenda.clone(),
                 // the founder's identity key, exactly as anchored in the roster
                 Some(ritual.founder_sk().clone()),
+                // …and its nostr transport secret (self-ticket-salted in
+                // start_ritual; the ticket is gone, only the key survives)
+                Some(ritual.founder_nostr_sk().to_vec()),
                 founder_mls_blob,
                 // the founder's mesh is not known until its bootstrap finishes;
                 // it is persisted then, via NetMeshReady
@@ -989,6 +999,7 @@ impl State {
         sealed: String,
         mls: String,
         mesh: Vec<molt_core::MeshLink>,
+        nostr_sk: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted join bumped the generation — drop stale results
@@ -1029,6 +1040,53 @@ impl State {
             let joiner_sk = crate::founding::member_identity(&j.seed)
                 .ok()
                 .map(|(sk, _)| sk);
+            // the joiner's nostr transport secret comes FROM the ritual (the
+            // ticket that salted it died with the join task) and pairs with
+            // the seat's FOREVER-anchored nostr_pk — so it is validated like
+            // the MLS blob above, never trusted: 32 bytes of hex whose
+            // x-only public key equals OUR anchored anchor, or the join
+            // FAILS. Persisting a mismatched/absent secret would seal a
+            // genesis whose transport key this node cannot use — a defect
+            // that surfaces only when N4's transport first needs the key,
+            // with no re-derivation path.
+            let joiner_nostr_sk = {
+                let Some(our_seat) = sealed.identities.iter().find(|i| i.member == j.member)
+                else {
+                    return self.cmd_net_join_failed(
+                        "the sealed roster does not anchor our seat".to_string(),
+                        generation,
+                    );
+                };
+                let mut raw = match hex::decode(&nostr_sk) {
+                    Ok(raw) if raw.len() == 32 => raw,
+                    _ => {
+                        return self.cmd_net_join_failed(
+                            "the join task delivered a malformed nostr transport secret"
+                                .to_string(),
+                            generation,
+                        )
+                    }
+                };
+                match molt_net::nostr_pk_for_sk(&raw) {
+                    Ok(pk) if pk == our_seat.nostr_pk => Some(raw),
+                    Ok(_) => {
+                        zeroize::Zeroize::zeroize(&mut raw);
+                        return self.cmd_net_join_failed(
+                            "the delivered nostr transport secret is not the private half \
+                             of our anchored transport key"
+                                .to_string(),
+                            generation,
+                        );
+                    }
+                    Err(e) => {
+                        zeroize::Zeroize::zeroize(&mut raw);
+                        return self.cmd_net_join_failed(
+                            format!("invalid nostr transport secret: {e}"),
+                            generation,
+                        );
+                    }
+                }
+            };
             match self.materialize_workspace(
                 &sealed.name,
                 &j.member,
@@ -1040,6 +1098,7 @@ impl State {
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
                 joiner_sk,
+                joiner_nostr_sk,
                 mls_blob,
                 mesh,
                 None, // a join's chain IS the genesis
@@ -1251,6 +1310,10 @@ impl State {
             sealed.republic_id.clone(),
             sealed.agenda.clone(),
             Some(sk),
+            // the nostr transport secret was salted with the ORIGINAL seat's
+            // ticket, which died with the lost device — honestly None; the
+            // recovery-link v2 story (N4b) re-establishes the third anchor
+            None,
             mls_blob,
             mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),

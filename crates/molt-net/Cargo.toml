@@ -20,8 +20,11 @@ workspace = true
 #
 # **B2 RESOLVED (2026-07-11): the C dependency is ACCEPTED, opt-in only.**
 # The user decided (2026-07-11) to accept a C toolchain for the OPT-IN
-# `embedded-tor` feature — the DEFAULT build stays pure-Rust and its Cargo
-# graph is unperturbed (optional-off deps never compile). Honest record of
+# `embedded-tor` feature — turning it OFF removes ITS C deps from the graph
+# (optional-off deps never compile). NOTE the DEFAULT build is no longer
+# fully pure-Rust since N1: the promoted `nostr` dependency (below) pulls C
+# `secp256k1-sys` — the sanctioned ADR-0002 exception. `ring` must still
+# stay out of the default graph. Honest record of
 # what turning the feature ON pulls, unchanged from the first attempt's audit:
 #   arti-client 0.42 → tor-dirmgr 0.42 → rusqlite 0.39 → libsqlite3-sys 0.37
 #     (+ a `cc` build-dep)
@@ -68,9 +71,16 @@ openmls_rust_crypto.workspace = true
 openmls_basic_credential.workspace = true
 tls_codec.workspace = true
 bincode.workspace = true
+# Nostr identity + envelope crypto (N1, `nostr_transport_marmot.md` §3): the
+# ticket-salted secp256k1 transport anchor (src/nostr.rs) and, from N3 on, the
+# NIP-44/NIP-59 envelopes. Pulls the C `secp256k1`/`secp256k1-sys` backend into
+# the DEFAULT build graph — the sanctioned transport-edge C exception
+# (ADR-0002; verify with `cargo tree -p molt-net -e no-dev -i secp256k1-sys`).
+nostr.workspace = true
 # Embedded-Tor (opt-in `embedded-tor` feature only) — see the [features] note.
-# Both optional: the DEFAULT build never compiles them, so the pure-Rust core
-# graph is unperturbed. Minimal feature set: `tokio` + `rustls` (drops
+# Both optional: the DEFAULT build never compiles them, so they add nothing to
+# the default graph (whose one C exception since N1 is nostr's secp256k1 —
+# ADR-0002). Minimal feature set: `tokio` + `rustls` (drops
 # native-tls/OpenSSL and the zstd/xz compression C deps); libsqlite3-sys (via
 # tor-dirmgr) is the accepted C dep.
 arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls"], optional = true }
@@ -83,12 +93,11 @@ tokio = { workspace = true, features = ["test-util"] }
 # `tempfile` backs the embedded-tor config-to-state-dir unit test (feature-gated,
 # dev-only — the default non-dev graph is unchanged).
 tempfile = { workspace = true }
-# N0 Nostr spike (tests/nostr_vectors.rs, tests/nostr_relay_poc.rs). ALL
-# dev-only on purpose — nothing under src/ touches Nostr until N1 promotes
-# `nostr` to a real dependency (C libsecp256k1, ADR-0002), and the pool's WS
-# stack (async-wsocket) pins tokio-rustls/ring, which the RUNTIME only adopts
-# — or not — by the explicit N2 decision, never as an N0 side effect.
-nostr = { workspace = true }
+# Nostr relay pool + in-process test relay (tests/nostr_vectors.rs,
+# tests/nostr_relay_poc.rs). Dev-only on purpose — `nostr` itself is a real
+# dependency since N1, but the pool's WS stack (async-wsocket) pins
+# tokio-rustls/ring, which the RUNTIME only adopts — or not — by the explicit
+# N2 decision, never as a side effect.
 nostr-relay-pool = { workspace = true }
 nostr-relay-builder = { workspace = true }
 # byte-pin of the vectors' get_message_keys section: recompute the expected

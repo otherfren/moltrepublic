@@ -1419,6 +1419,16 @@ impl State {
     /// step ❸): verify the seat proof against the anchored roster identity and
     /// propose the threshold re-admission, remembering the fresh KeyPackage +
     /// reply queue for the MLS re-key once the `Restored` block commits.
+    ///
+    /// Nostr third anchor: recovery ingests NO wire-supplied `nostr_pk` —
+    /// `RecoverRequest` does not carry one, the `Restored` membership block
+    /// binds only `identity_pk` (and `apply_membership` keeps the seat's
+    /// anchored `nostr_pk` untouched), and the rejoiner materializes with
+    /// `nostr_sk = None` honestly (the salting ticket died with the lost
+    /// device; recovery-link v2 / N4b re-establishes the anchor). If a
+    /// future increment ever adds a nostr anchor to this wire, it must run
+    /// `molt_net::canonical_nostr_pk` at THIS choke point, exactly like
+    /// `cmd_net_join_requested`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_recover_requested(
         &mut self,

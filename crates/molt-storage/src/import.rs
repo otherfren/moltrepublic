@@ -459,10 +459,21 @@ impl ImportStaging {
                 crate::write_atomic(&self.dir, "keys/seed.sealed", &sealed_seed, true)?;
             }
             // fresh minimal transport.state: version + derived identity
-            // only — NEVER ratchets or queue credentials (§3.3)
+            // only — NEVER ratchets or queue credentials (§3.3). ONE
+            // exception, identity-class like `identity_sk` itself: a
+            // replaced dir may hold the workspace's only copy of the
+            // NON-re-derivable nostr transport secret (ticket-salted; the
+            // backup never carries transport.state), so that single field
+            // is carried over instead of being trashed with the old dir.
             if let Some(sk) = identity_sk {
+                let nostr_sk = existing
+                    .as_deref()
+                    .and_then(|dir| {
+                        crate::read_transport_state_at(dir, &self.workspace_key, &id).nostr_sk
+                    });
                 let state = molt_core::TransportState {
                     identity_sk: Some(sk.to_bytes().to_vec()),
+                    nostr_sk,
                     ..Default::default()
                 };
                 crate::write_transport_state_at(&self.dir, &self.workspace_key, &id, &state)?;
@@ -657,6 +668,55 @@ mod tests {
             std::fs::read_dir(&dest_root).expect("dir").next().is_none(),
             "no staging residue on failure"
         );
+    }
+
+    /// N1 PIN — restore-with-replace must not destroy the live dir's
+    /// non-re-derivable nostr transport secret. `identity_sk` survives a
+    /// replace because the engine re-derives it from the traveling seed;
+    /// `nostr_sk` CANNOT be re-derived (its salting ticket died with the
+    /// ritual) and the backup blob never carries `transport.state` (§3.3) —
+    /// so the dir being replaced holds the workspace's ONLY copy. The
+    /// commit carries exactly that one identity-class field over; ratchets,
+    /// mesh and queue credentials stay behind (§3.3 unchanged).
+    #[test]
+    fn replace_carries_the_nostr_secret_over_from_the_replaced_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        let id = ws.manifest.workspace.id.clone();
+        let dir = ws.dir().to_path_buf();
+        let nostr_sk = vec![0x42u8; 32];
+        ws.write_transport_state(&molt_core::TransportState {
+            mls: Some(b"live ratchet".to_vec()),
+            identity_sk: Some(vec![1u8; 32]),
+            nostr_sk: Some(nostr_sk.clone()),
+            ..Default::default()
+        })
+        .expect("transport.state");
+        drop(ws);
+        let blob = blob_of(&root, &dir, &ExportKey::passphrase(PASS));
+
+        let staging = import_stage(&root, &blob, PASS).expect("stage");
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let new_dir = staging.commit(&root, true, Some(&sk)).expect("replace commits");
+        let (opened, _) = crate::open_workspace(&new_dir).expect("open replaced");
+        let ts = opened.read_transport_state();
+        assert_eq!(
+            ts.nostr_sk.as_deref(),
+            Some(nostr_sk.as_slice()),
+            "the non-re-derivable third-anchor secret survives the replace"
+        );
+        assert_eq!(
+            ts.identity_sk.as_deref(),
+            Some(sk.to_bytes().as_slice()),
+            "identity_sk is the freshly re-derived one, exactly as before"
+        );
+        assert!(ts.mls.is_none(), "no MLS ratchet is ever imported");
+        assert!(ts.mesh.is_empty(), "no mesh links are ever imported");
+        assert!(ts.smp_queues.is_none(), "no queue credentials are ever imported");
     }
 
     /// §4.3 collision: a same-id import refuses by default; an explicit

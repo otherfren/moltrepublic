@@ -97,7 +97,6 @@ async fn founding_ritual_completes_across_two_instances() {
         molt_engine::run_ritual_member(seat, "member-b".to_string(), b_phrase, false, false, None, None)
             .await
             .expect("B completes the member side")
-            .pk
     });
 
     // once B has joined, the founder proposes the charter (deliberation step);
@@ -120,7 +119,8 @@ async fn founding_ritual_completes_across_two_instances() {
     })
     .await
     .expect("founder proposes the charter");
-    let b_pk = b_task.await.expect("B task");
+    let b_out = b_task.await.expect("B task");
+    let b_pk = b_out.pk.clone();
 
     // --- A seals and the workspace comes into being
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -211,6 +211,47 @@ async fn founding_ritual_completes_across_two_instances() {
             att.member
         );
     }
+
+    // --- N1: the real ritual anchors a NON-EMPTY, canonical third anchor
+    // for BOTH seats (the founder's is verified by nobody else — only this
+    // end-to-end pin catches a broken founder-side derivation), the two
+    // anchors differ (ticket-salted, no shared handle), and each side ends
+    // the ritual HOLDING the private half of exactly its anchored key.
+    let f_entry = identities
+        .iter()
+        .find(|i| i.member == "founder-a")
+        .expect("founder anchored");
+    for entry in [f_entry, b_entry] {
+        assert_eq!(
+            molt_net::canonical_nostr_pk(&entry.nostr_pk)
+                .expect("a real, valid third anchor"),
+            entry.nostr_pk,
+            "{} anchors the one canonical byte form",
+            entry.member
+        );
+    }
+    assert_ne!(
+        f_entry.nostr_pk, b_entry.nostr_pk,
+        "the ticket-salted derivations yield distinct transport anchors"
+    );
+    // B's ritual outcome carries the secret its workspace would persist —
+    // it must be the private half of B's anchored third anchor
+    assert_eq!(
+        molt_net::nostr_pk_for_sk(&b_out.nostr_sk).expect("a valid scalar"),
+        b_entry.nostr_pk,
+        "B's join-carried nostr secret pairs with B's anchored anchor"
+    );
+    // the founder's secret is persisted at the seal (transport.state, beside
+    // identity_sk) — a non-re-derivable key, so a silent drop is permanent
+    let ts = ws.read_transport_state();
+    let f_sk = ts
+        .nostr_sk
+        .expect("the founder's nostr_sk is persisted with the seal");
+    assert_eq!(
+        molt_net::nostr_pk_for_sk(&f_sk).expect("a valid scalar"),
+        f_entry.nostr_pk,
+        "the persisted founder secret pairs with the founder's anchored anchor"
+    );
 }
 
 /// The deliberation step **gates on the joiner's ratification** (concept

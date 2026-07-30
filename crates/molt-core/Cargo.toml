@@ -18,3 +18,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 strum.workspace = true
 hex.workspace = true # pure byte↔string encoding (MessageId wire form) — still no I/O
+
+[dev-dependencies]
+# independent digest check of the roster-v3 byte-identity pin (N1); the
+# crate itself stays hash-free (no I/O, no crypto)
+sha2.workspace = true

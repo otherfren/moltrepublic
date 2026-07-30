@@ -39,6 +39,7 @@ pub mod invite;
 pub mod loopback;
 pub mod mesh;
 pub mod mls;
+pub mod nostr;
 pub mod s3;
 pub mod socks5;
 pub mod supervisor;
@@ -58,6 +59,7 @@ pub use invite::{
     join_mac, mint_ticket, verify_join_mac, JoinRequest, ReplyHandover, RitualMsg, SealSigned,
 };
 pub use mls::{MlsError, MlsIncoming, MlsMember};
+pub use self::nostr::{canonical_nostr_pk, nostr_identity, nostr_pk_for_sk};
 pub use supervisor::send_framed;
 pub use loopback::{ChaosPolicy, LoopbackHub, LoopbackTransport};
 pub use supervisor::{

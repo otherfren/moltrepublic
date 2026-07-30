@@ -218,8 +218,22 @@ pub fn derive_workspace_key(seed: &[u8], id: &str) -> [u8; 32] {
 /// anchor the attestations verify against. Unlike a [`derive_workspace_id`]
 /// it depends on **no member's seed**, so the founder is not privileged and
 /// every member's local workspace (its own seed, its own id) still verifies
-/// the same roster. `hex(SHA-256("molt-republic-id-v1\0" ‖ name ‖ 0 ‖ m ‖ n
-/// ‖ each sorted identity pk, 0-separated))`.
+/// the same roster. v2 commits to the full anchor content: each member's
+/// `(identity_pk, nostr_pk)` PAIR is hashed as one sorted unit, so the id
+/// stays roster-order-independent but anchor pairings cannot be permuted.
+///
+/// **Every field is le32-length-prefixed and the entry count is hashed**, so
+/// the preimage is INJECTIVE for arbitrary field content — v1's 0-separated
+/// layout was only injective because every field was hex; the moment a field
+/// can carry a NUL (a member supplies its own `nostr_pk`), separators alone
+/// let one roster's preimage equal another's with extra identities spliced in,
+/// and `republic_id` is the genesis-forgery anchor a pruned-chain holder
+/// checks. Validation at ingest is the other half of that defense; this
+/// layout does not depend on it.
+///
+/// `hex(SHA-256("molt-republic-id-v2\0" ‖ le32|name| ‖ name ‖ m ‖ n ‖
+/// le32(count) ‖ per pair sorted by identity pk: (le32|identity_pk| ‖
+/// identity_pk ‖ le32|nostr_pk| ‖ nostr_pk)))`.
 pub fn republic_id(
     name: &str,
     rule_m: u8,
@@ -227,14 +241,24 @@ pub fn republic_id(
     identities: &[molt_core::MemberIdentity],
 ) -> String {
     use sha2::Digest;
-    let mut pks: Vec<&str> = identities.iter().map(|i| i.identity_pk.as_str()).collect();
-    pks.sort_unstable();
-    let mut h = Sha256::new_with_prefix(b"molt-republic-id-v1\0");
-    h.update(name.as_bytes());
-    h.update([0u8, rule_m, rule_n]);
-    for pk in pks {
-        h.update([0u8]);
-        h.update(pk.as_bytes());
+    let mut pairs: Vec<(&str, &str)> = identities
+        .iter()
+        .map(|i| (i.identity_pk.as_str(), i.nostr_pk.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    let mut h = Sha256::new_with_prefix(b"molt-republic-id-v2\0");
+    let name = name.as_bytes();
+    h.update(u32::try_from(name.len()).unwrap_or(0).to_le_bytes());
+    h.update(name);
+    h.update([rule_m, rule_n]);
+    h.update(u32::try_from(pairs.len()).unwrap_or(0).to_le_bytes());
+    for (pk, npk) in pairs {
+        let pk = pk.as_bytes();
+        h.update(u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
+        h.update(pk);
+        let npk = npk.as_bytes();
+        h.update(u32::try_from(npk.len()).unwrap_or(0).to_le_bytes());
+        h.update(npk);
     }
     hex::encode(h.finalize())
 }
@@ -1223,12 +1247,6 @@ impl OpenedWorkspace {
         Ok(())
     }
 
-    /// The `transport.state` sub-key: derived from the workspace key, so
-    /// the file shares the workspace's protection without reusing its key.
-    fn transport_key(&self) -> [u8; 32] {
-        hkdf32(&self.key, "molt-transport-state", &self.id)
-    }
-
     /// The `chain.state` sub-key (distinct HKDF tag from the transport key).
     fn chain_key(&self) -> [u8; 32] {
         hkdf32(&self.key, "molt-chain-state", &self.id)
@@ -1236,51 +1254,14 @@ impl OpenedWorkspace {
 
     /// Read `transport.state` (transport concept §6): node-local encrypted
     /// transport bookkeeping. Absent, damaged or newer-versioned files fall
-    /// back to defaults — losing this file costs resends (the peers' dedup
-    /// absorbs them), never history.
+    /// back to defaults. For the resendable state (cursors, ratchets, queue
+    /// credentials) that costs resends/re-negotiation, never history — but
+    /// since N1 (v3) the file may also hold `nostr_sk`, the seat's
+    /// NON-re-derivable transport secret (its salting ticket died with the
+    /// ritual), so a fallback on an EXISTING file is a loud, named loss,
+    /// not a shrug (see [`read_transport_state_at`]).
     pub fn read_transport_state(&self) -> TransportState {
-        let path = self.dir.join("transport.state");
-        let data = match fs::read(&path) {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
-            Err(e) => {
-                tracing::warn!(error = %e, "reading transport.state failed — starting fresh");
-                return TransportState::default();
-            }
-        };
-        let (frames, torn) = split_frames(&data);
-        if frames.len() != 1 || torn.is_some() {
-            tracing::warn!("transport.state framing is damaged — starting fresh");
-            return TransportState::default();
-        }
-        let plaintext = match decrypt_frame(
-            &self.transport_key(),
-            &self.id,
-            TRANSPORT_SEGMENT,
-            0,
-            frames[0].nonce,
-            frames[0].ciphertext,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "transport.state does not authenticate — starting fresh");
-                return TransportState::default();
-            }
-        };
-        match serde_json::from_slice::<TransportState>(&plaintext) {
-            Ok(st) if st.version <= TRANSPORT_STATE_VERSION => st,
-            Ok(st) => {
-                tracing::warn!(
-                    version = st.version,
-                    "transport.state was written by a newer node — starting fresh (safe: resends dedup)"
-                );
-                TransportState::default()
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "transport.state decode failed — starting fresh");
-                TransportState::default()
-            }
-        }
+        read_transport_state_at(&self.dir, &self.key, &self.id)
     }
 
     /// Rewrite `transport.state` atomically (via `tmp/`, mode 0600), old
@@ -1420,6 +1401,68 @@ impl OpenedWorkspace {
             }
         }
         Ok(out)
+    }
+}
+
+/// Read a `transport.state` for a workspace directory — shared by
+/// [`OpenedWorkspace::read_transport_state`] and the import commit (which carries
+/// the replaced dir's non-re-derivable `nostr_sk` over). An ABSENT file is
+/// silently the default (a fresh workspace has none). A file that EXISTS
+/// but cannot be read (damaged framing, failed authentication, decode
+/// error, newer version) also falls back to the default — but LOUDLY, at
+/// error level, naming what may be lost: since v3 the file can hold the
+/// seat's nostr transport secret, which no phrase or seed re-derives (the
+/// salting ticket died with the founding ritual), so "starting fresh" is
+/// only harmless for the resendable state (cursors, ratchets, creds), not
+/// for that identity. Honesty is the whole fix here: the fallback behavior
+/// is unchanged, the silence is not.
+fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> TransportState {
+    let path = dir.join("transport.state");
+    let lost = "an existing transport.state is unreadable — starting fresh; if this \
+                workspace anchored a nostr transport identity, its non-re-derivable \
+                secret (nostr_sk) was in this file and is now lost until a recovery \
+                ritual re-anchors the seat";
+    let data = match fs::read(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
+        Err(e) => {
+            tracing::error!(error = %e, "{lost}");
+            return TransportState::default();
+        }
+    };
+    let (frames, torn) = split_frames(&data);
+    if frames.len() != 1 || torn.is_some() {
+        tracing::error!("transport.state framing is damaged — {lost}");
+        return TransportState::default();
+    }
+    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
+    let plaintext = match decrypt_frame(
+        &transport_key,
+        id,
+        TRANSPORT_SEGMENT,
+        0,
+        frames[0].nonce,
+        frames[0].ciphertext,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "transport.state does not authenticate — {lost}");
+            return TransportState::default();
+        }
+    };
+    match serde_json::from_slice::<TransportState>(&plaintext) {
+        Ok(st) if st.version <= TRANSPORT_STATE_VERSION => st,
+        Ok(st) => {
+            tracing::error!(
+                version = st.version,
+                "transport.state was written by a newer node — {lost}"
+            );
+            TransportState::default()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "transport.state decode failed — {lost}");
+            TransportState::default()
+        }
     }
 }
 
@@ -2685,10 +2728,100 @@ mod tests {
 
     fn ids() -> Vec<MemberIdentity> {
         vec![
-            MemberIdentity { member: "founder".into(), identity_pk: "aa".repeat(32) },
-            MemberIdentity { member: "juno".into(), identity_pk: "bb".repeat(32) },
-            MemberIdentity { member: "mira".into(), identity_pk: "cc".repeat(32) },
+            MemberIdentity {
+                member: "founder".into(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: "dd".repeat(32),
+            },
+            MemberIdentity {
+                member: "juno".into(),
+                identity_pk: "bb".repeat(32),
+                nostr_pk: "ee".repeat(32),
+            },
+            MemberIdentity {
+                member: "mira".into(),
+                identity_pk: "cc".repeat(32),
+                nostr_pk: "ff".repeat(32),
+            },
         ]
+    }
+
+    /// N1 PIN — `molt-republic-id-v2` binds identity/nostr anchor PAIRS
+    /// (sorted by identity_pk): `sha256(tag ‖ name ‖ 0 ‖ m ‖ n ‖ per sorted
+    /// pair (0 ‖ identity_pk ‖ 0 ‖ nostr_pk))`. Fixture computed
+    /// INDEPENDENTLY (python hashlib) — the pairing lives inside the sorted
+    /// unit so a founder cannot permute nostr anchors against identity keys
+    /// without changing the id.
+    #[test]
+    fn republic_id_v2_binds_anchor_pairs() {
+        let ids = vec![
+            MemberIdentity {
+                member: "ada".to_string(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: "cc".repeat(32),
+            },
+            MemberIdentity {
+                member: "bob".to_string(),
+                identity_pk: "bb".repeat(32),
+                nostr_pk: "dd".repeat(32),
+            },
+        ];
+        let id = republic_id("R", 1, 2, &ids);
+        assert_eq!(
+            id, "a0414686dbfce13d1967053e6892a9d0dfb4d2fa16ce672cbb407818ec8f91b9",
+            "independently computed v2 fixture"
+        );
+        // permuting the nostr anchors between seats changes the id
+        let mut permuted = ids.clone();
+        permuted[0].nostr_pk = "dd".repeat(32);
+        permuted[1].nostr_pk = "cc".repeat(32);
+        assert_ne!(republic_id("R", 1, 2, &permuted), id);
+        // roster-order independence survives v2 (pairs are sorted)
+        let reversed: Vec<_> = ids.iter().rev().cloned().collect();
+        assert_eq!(republic_id("R", 1, 2, &reversed), id);
+    }
+
+    /// The republic id must be INJECTIVE over arbitrary field content, not
+    /// just over hex. A member supplies its own `nostr_pk`, so a hostile one
+    /// can put NULs (and anything else) in it; with v1's separator-only
+    /// layout that let a 2-seat roster's preimage equal a 3-seat roster's
+    /// with an attacker identity spliced in — and `republic_id` is exactly
+    /// what a pruned-chain holder recomputes to reject a forged genesis
+    /// (`verify_suffix_chain`). Length prefixes make the splice impossible
+    /// regardless of ingest validation.
+    #[test]
+    fn republic_id_v2_resists_a_spliced_nostr_anchor() {
+        let seat = |idpk: &str, npk: &str| MemberIdentity {
+            member: "x".to_string(),
+            identity_pk: idpk.to_string(),
+            nostr_pk: npk.to_string(),
+        };
+        // a crafted anchor that CONTINUES the hash stream of the old layout:
+        // <64hex> NUL <evil identity> NUL <evil anchor>
+        let spliced_anchor = format!("{}\0{}\0{}", "bb".repeat(32), "33".repeat(32), "ee".repeat(32));
+        let crafted = vec![
+            seat(&"11".repeat(32), &"aa".repeat(32)),
+            seat(&"22".repeat(32), &spliced_anchor),
+        ];
+        let forged_table = vec![
+            seat(&"11".repeat(32), &"aa".repeat(32)),
+            seat(&"22".repeat(32), &"bb".repeat(32)),
+            seat(&"33".repeat(32), &"ee".repeat(32)),
+        ];
+        assert_ne!(
+            republic_id("Club", 2, 2, &crafted),
+            republic_id("Club", 2, 2, &forged_table),
+            "a spliced anchor must not collide with a larger founding table"
+        );
+        // the same holds for the boundary between the two fields of ONE pair
+        let a = vec![seat("aabb", "ccdd")];
+        let b = vec![seat("aa", "bbccdd")];
+        assert_ne!(republic_id("Club", 1, 1, &a), republic_id("Club", 1, 1, &b));
+        // …and for the name/roster boundary
+        assert_ne!(
+            republic_id("Club", 1, 1, &[seat("aa", "bb")]),
+            republic_id("Clu", 1, 1, &[seat("baa", "bb")]),
+        );
     }
 
     #[test]

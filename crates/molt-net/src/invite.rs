@@ -5,10 +5,13 @@
 //! A founding invite carries a **high-entropy single-use ticket** and the
 //! transport path to the founder's invite queue. Activating it is bound to
 //! the ticket by a MAC: the member sends
-//! `JoinRequest{ name, identity pk, mac }` with
-//! `mac = HMAC-SHA256(KDF(ticket), name ‖ pk)`. The founder verifies the
-//! MAC against the unspent ticket and spends it — a bare leaked queue
-//! address cannot knock, and a replayed ticket is rejected.
+//! `JoinRequest{ name, identity pk, nostr pk, mac }` with
+//! `mac = HMAC-SHA256(KDF(ticket), 0x02 ‖ name ‖ 0 ‖ pk ‖ 0 ‖ nostr_pk)`
+//! (v2 — the explicit version byte keeps a v1 link from being replayed into
+//! a v2 seat, and binding the Nostr key is what anchors the roster's third
+//! anchor to the ticket holder). The founder verifies the MAC against the
+//! unspent ticket and spends it — a bare leaked queue address cannot knock,
+//! and a replayed ticket is rejected.
 //!
 //! The ritual's two wire messages (`JoinRequest` on the invite queue,
 //! `SealSigned` on the reply queue) ride the transport as ordinary
@@ -34,27 +37,40 @@ pub fn mint_ticket() -> Result<String, NetError> {
     Ok(hex::encode(t))
 }
 
-/// The MAC binding an activation to its ticket:
-/// `HMAC-SHA256(KDF(ticket), name ‖ 0 ‖ pk)`, lowercase hex. `KDF(ticket)`
-/// is a domain-separated SHA-256 of the ticket, so the raw ticket is never
-/// the HMAC key directly.
-pub fn join_mac(ticket: &str, name: &str, identity_pk: &str) -> String {
+/// The MAC binding an activation to its ticket (v2):
+/// `HMAC-SHA256(KDF(ticket), 0x02 ‖ name ‖ 0 ‖ pk ‖ 0 ‖ nostr_pk)`,
+/// lowercase hex. The leading version byte makes the layout explicit, so a
+/// MAC minted under the v1 formula (`name ‖ 0 ‖ pk` — no version byte, no
+/// Nostr anchor) can never verify against a v2 seat; binding `nostr_pk`
+/// makes the roster's third anchor as ticket-bound as the identity key.
+/// `KDF(ticket)` is a domain-separated SHA-256 of the ticket (unchanged
+/// from v1), so the raw ticket is never the HMAC key directly.
+pub fn join_mac(ticket: &str, name: &str, identity_pk: &str, nostr_pk: &str) -> String {
     let mut kdf = Sha256::new_with_prefix(b"molt-invite-mac-key\0");
     use sha2::Digest;
     kdf.update(ticket.as_bytes());
     let key = kdf.finalize();
     let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC accepts any key length");
+    mac.update(&[0x02u8]);
     mac.update(name.as_bytes());
     mac.update(&[0u8]);
     mac.update(identity_pk.as_bytes());
+    mac.update(&[0u8]);
+    mac.update(nostr_pk.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
 /// Verify an activation MAC against the ticket in constant time. The
 /// caller is still responsible for single-use (spend the ticket on the
 /// first accepted request).
-pub fn verify_join_mac(ticket: &str, name: &str, identity_pk: &str, mac_hex: &str) -> bool {
-    let expected = join_mac(ticket, name, identity_pk);
+pub fn verify_join_mac(
+    ticket: &str,
+    name: &str,
+    identity_pk: &str,
+    nostr_pk: &str,
+    mac_hex: &str,
+) -> bool {
+    let expected = join_mac(ticket, name, identity_pk, nostr_pk);
     // hex of a fixed-size HMAC: constant-time compare of equal-length
     // strings; unequal length is an immediate reject
     let a = expected.as_bytes();
@@ -94,7 +110,12 @@ pub struct JoinRequest {
     pub name: String,
     /// The member's per-workspace identity public key, lowercase hex.
     pub identity_pk: String,
-    /// `join_mac(ticket, name, identity_pk)`.
+    /// The member's Nostr transport anchor (x-only BIP-340 key, lowercase
+    /// hex), ticket-salted per seat (`molt_net::nostr_identity`). Additive:
+    /// empty only from a pre-N1 sender — whose MAC then fails v2 anyway.
+    #[serde(default)]
+    pub nostr_pk: String,
+    /// `join_mac(ticket, name, identity_pk, nostr_pk)` (v2).
     pub mac: String,
     /// The member's reply queue, so the founder can send the table back.
     /// `None` only on the legacy path where the founder pre-created it.
@@ -253,6 +274,36 @@ mod tests {
         );
     }
 
+    /// N1 PIN — invite MAC v2 binds the third anchor with an explicit
+    /// version byte: `HMAC-SHA256(KDF(ticket), 0x02 ‖ name ‖ 0 ‖ identity_pk
+    /// ‖ 0 ‖ nostr_pk)`. Fixture computed INDEPENDENTLY (python hmac). The
+    /// legacy v1 formula (no version byte, no nostr anchor) must NOT verify —
+    /// a v1 link cannot be replayed into a v2 seat.
+    #[test]
+    fn join_mac_v2_binds_the_nostr_anchor_and_rejects_v1() {
+        let idpk = "aa".repeat(32);
+        let npk = "cc".repeat(32);
+        let mac = join_mac("deadbeef", "ada", &idpk, &npk);
+        assert_eq!(
+            mac, "bf2327b8aa78c7aabd037cd5dba20b5411f95acdd304f4c8f1a37ab59ddebc30",
+            "independently computed v2 fixture"
+        );
+        assert!(verify_join_mac("deadbeef", "ada", &idpk, &npk, &mac));
+        // every bound field matters — the nostr anchor included
+        assert!(!verify_join_mac("deadbeef", "ada", &idpk, &"ee".repeat(32), &mac));
+        assert!(!verify_join_mac("deadbeef", "eva", &idpk, &npk, &mac));
+        assert!(!verify_join_mac("beefdead", "ada", &idpk, &npk, &mac));
+        // the v1-formula MAC over the same ticket/name/identity_pk (computed
+        // with the pre-N1 layout) is rejected
+        assert!(!verify_join_mac(
+            "deadbeef",
+            "ada",
+            &idpk,
+            &npk,
+            "19426eda32c712fc7e1b5d8ee2409ba80168aeb5bd09133298237c2f094e64a1"
+        ));
+    }
+
     #[test]
     fn tickets_are_fresh_and_hex() {
         let a = mint_ticket().expect("mint");
@@ -268,6 +319,7 @@ mod tests {
                 seat: 2,
                 name: "juno".into(),
                 identity_pk: "aa".repeat(32),
+                nostr_pk: "ee".repeat(32),
                 mac: "bb".repeat(32),
                 reply: None,
                 key_package: "cc".repeat(20),
@@ -289,16 +341,17 @@ mod tests {
     #[test]
     fn mac_binds_ticket_name_and_key() {
         let t = mint_ticket().expect("mint");
-        let mac = join_mac(&t, "petra", "aa");
-        assert!(verify_join_mac(&t, "petra", "aa", &mac));
+        let mac = join_mac(&t, "petra", "aa", "cc");
+        assert!(verify_join_mac(&t, "petra", "aa", "cc", &mac));
         // wrong ticket, name or key all fail
-        assert!(!verify_join_mac(&mint_ticket().expect("m"), "petra", "aa", &mac));
-        assert!(!verify_join_mac(&t, "walter", "aa", &mac));
-        assert!(!verify_join_mac(&t, "petra", "bb", &mac));
-        // no boundary confusion between name and pk
-        assert_ne!(join_mac(&t, "petraa", "a"), join_mac(&t, "petra", "aa"));
+        assert!(!verify_join_mac(&mint_ticket().expect("m"), "petra", "aa", "cc", &mac));
+        assert!(!verify_join_mac(&t, "walter", "aa", "cc", &mac));
+        assert!(!verify_join_mac(&t, "petra", "bb", "cc", &mac));
+        // no boundary confusion between name and pk, or pk and nostr pk
+        assert_ne!(join_mac(&t, "petraa", "a", "cc"), join_mac(&t, "petra", "aa", "cc"));
+        assert_ne!(join_mac(&t, "petra", "aac", "c"), join_mac(&t, "petra", "aa", "cc"));
         // garbage / wrong-length mac is rejected, never panics
-        assert!(!verify_join_mac(&t, "petra", "aa", "deadbeef"));
-        assert!(!verify_join_mac(&t, "petra", "aa", ""));
+        assert!(!verify_join_mac(&t, "petra", "aa", "cc", "deadbeef"));
+        assert!(!verify_join_mac(&t, "petra", "aa", "cc", ""));
     }
 }

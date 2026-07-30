@@ -1335,8 +1335,9 @@ impl Default for WorkspacePrefs {
 
 /// Format marker of `transport.state` (the node-local encrypted transport
 /// bookkeeping file — concept-transport-simplex-tor.md §6). v2 added the
-/// `identity_sk` field (additive; a v1 file loads with it defaulting to `None`).
-pub const TRANSPORT_STATE_VERSION: u32 = 2;
+/// `identity_sk` field (additive; a v1 file loads with it defaulting to
+/// `None`); v3 added `nostr_sk` the same way.
+pub const TRANSPORT_STATE_VERSION: u32 = 3;
 
 /// The outbound half of one delivery cursor: how far this node's log has
 /// been fanned out to one peer.
@@ -1539,7 +1540,10 @@ pub struct MeshLink {
 /// dedup windows join in later milestones. It must **not** live in the
 /// shared log: two nodes' cursors legitimately differ, and the log stays
 /// replayable shared history. Losing this file loses transport progress
-/// (peers absorb the resulting resends via their dedup), never history.
+/// (peers absorb the resulting resends via their dedup) — never shared
+/// history, BUT since v3 it can also hold `nostr_sk`, a non-re-derivable
+/// per-seat secret whose loss is permanent until a recovery ritual
+/// re-anchors the seat (the storage read layer logs that loss loudly).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportState {
     /// Schema version ([`TRANSPORT_STATE_VERSION`]).
@@ -1579,10 +1583,20 @@ pub struct TransportState {
     /// workspace can sign its governance approvals for the persistent chain
     /// without re-entering the phrase. Sensitive — lives only inside the
     /// already-encrypted `transport.state`; the same key also backs the
-    /// persisted MLS signer (one identity, two anchors). `None` before a
-    /// chain-aware founding.
+    /// persisted MLS signer (the Ed25519 pair of the three-anchor
+    /// identity). `None` before a chain-aware founding.
     #[serde(default)]
     pub identity_sk: Option<Vec<u8>>,
+    /// This node's own **Nostr transport secret** (32-byte secp256k1 scalar,
+    /// the third anchor's private half — `nostr_transport_marmot.md` §3),
+    /// derived at founding/join from the member's recovery phrase salted with
+    /// the seat's single-use ticket, and kept here because the ticket dies
+    /// with the ritual — the key is NOT re-derivable later. Sensitive — lives
+    /// only inside the already-encrypted `transport.state`, exactly like
+    /// `identity_sk`. `None` for legacy workspaces and for a recovered seat
+    /// (the old device's ticket is gone; recovery-link v2 owns that story).
+    #[serde(default)]
+    pub nostr_sk: Option<Vec<u8>>,
     /// Per SENDER: which of that sender's log seqs this node's engine has
     /// accepted ([`AcceptedWindow`] — the delivery guarantee's envelope dedup
     /// and ACK payload). Additive: an old `transport.state` reads as empty ⇒
@@ -1633,6 +1647,15 @@ pub struct MemberIdentity {
     pub member: MemberId,
     /// The identity public key, lowercase hex (32 bytes Ed25519).
     pub identity_pk: String,
+    /// The member's Nostr transport anchor: a 32-byte x-only BIP-340
+    /// secp256k1 public key, lowercase hex in the signed bytes (the third
+    /// anchor — `nostr_transport_marmot.md` §3). Ticket-salted per seat, so
+    /// one person presents a different key in every republic. Additive
+    /// (`#[serde(default)]`) so old persisted logs still decode; an empty
+    /// value only ever occurs for that legacy data — the one founding path
+    /// always fills it.
+    #[serde(default)]
+    pub nostr_pk: String,
 }
 
 /// One member's founding attestation: a signature with their identity key
@@ -1699,7 +1722,10 @@ impl SealedRoster {
 /// The one canonical serialization of a roster table — what every member
 /// signs during the founding ritual's seal round and what every verifier
 /// reconstructs. Length-prefixed fields, entries in the given order (the
-/// ritual fixes the order: founder first, then invite order).
+/// ritual fixes the order: founder first, then invite order). v3 binds the
+/// per-member `nostr_pk` (the third anchor) into the signed bytes — a
+/// founder cannot swap a member's transport key without breaking every
+/// attestation.
 pub fn roster_canonical_bytes(
     ws_id: &str,
     rule_m: u8,
@@ -1708,7 +1734,7 @@ pub fn roster_canonical_bytes(
     agenda: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-roster-v2\0");
+    out.extend_from_slice(b"molt-roster-v3\0");
     out.extend_from_slice(ws_id.as_bytes());
     out.push(rule_m);
     out.push(rule_n);
@@ -1719,6 +1745,12 @@ pub fn roster_canonical_bytes(
         let pk = m.identity_pk.as_bytes();
         out.extend_from_slice(&u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(pk);
+        // the third anchor rides inside each member's length-prefixed run;
+        // a legacy (empty) value length-prefixes as 0 — no special casing
+        // that could collide two different rosters onto one byte form
+        let npk = m.nostr_pk.as_bytes();
+        out.extend_from_slice(&u32::try_from(npk.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(npk);
     }
     // the deliberated charter (DAO name is already folded into the republic id
     // that salts ws_id; the free-text agenda is bound here) — every member's
@@ -3057,7 +3089,13 @@ pub enum Command {
         member: MemberId,
         /// The member's identity public key, lowercase hex.
         identity_pk: String,
-        /// `HMAC(KDF(ticket), name ‖ pk)`, lowercase hex.
+        /// The member's Nostr transport anchor (x-only BIP-340 key,
+        /// lowercase hex) — the third anchor the founder seals into the
+        /// roster. Empty only from a pre-N1 joiner (whose MAC then fails v2).
+        #[serde(default)]
+        nostr_pk: String,
+        /// `HMAC(KDF(ticket), 0x02 ‖ name ‖ 0 ‖ pk ‖ 0 ‖ nostr_pk)`,
+        /// lowercase hex (invite MAC v2 — binds the third anchor too).
         proof: String,
         /// The member's reply-queue handover (JSON of the transport's
         /// `ReplyHandover`) so the founder can send the canonical table
@@ -3297,6 +3335,13 @@ pub enum Command {
         /// when the bootstrap did not run or did not complete.
         #[serde(default)]
         mesh: Vec<MeshLink>,
+        /// The joiner's derived Nostr transport secret (32-byte secp256k1
+        /// scalar, hex) — ticket-salted in the ritual, so it cannot be
+        /// re-derived once the ritual is over; sealed into the joiner's
+        /// `transport.state.nostr_sk` (like the MLS blob above, it rides an
+        /// engine-internal command only). Empty on a legacy path.
+        #[serde(default)]
+        nostr_sk: String,
         /// Join incarnation (a cancelled/restarted join drops stale results).
         #[serde(default)]
         generation: Option<u64>,
@@ -4409,16 +4454,62 @@ mod tests {
         }
     }
 
+    /// N1 BYTE-IDENTITY PIN — `molt-roster-v3` binds the third anchor.
+    /// Layout: tag ‖ ws_id ‖ m ‖ n ‖ per member (le32-len name ‖ le32-len
+    /// identity_pk ‖ le32-len nostr_pk) ‖ le32-len agenda. The digest was
+    /// computed INDEPENDENTLY of this codebase (python hashlib over the
+    /// specified layout) — if this test disagrees with the implementation,
+    /// the implementation is wrong, not the fixture. Changing the layout
+    /// means a NEW version tag and a new independently-computed fixture.
+    #[test]
+    fn roster_canonical_bytes_v3_binds_the_third_anchor_byte_exactly() {
+        use sha2::Digest;
+        let table = vec![
+            MemberIdentity {
+                member: "ada".to_string(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: "cc".repeat(32),
+            },
+            MemberIdentity {
+                member: "bob".to_string(),
+                identity_pk: "bb".repeat(32),
+                nostr_pk: "dd".repeat(32),
+            },
+        ];
+        let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter");
+        assert!(bytes.starts_with(b"molt-roster-v3\0"), "version tag bumped");
+        assert_eq!(bytes.len(), 317, "fixture length");
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&bytes)),
+            "294586c7d20ded0358f3d62ca1cb2623867e93325eea67fbcc3c8705b66aff12",
+            "independently computed byte-identity fixture"
+        );
+        // the third anchor is inside the signed bytes: changing ONLY a
+        // nostr_pk changes what every member signs
+        let mut changed = table.clone();
+        changed[0].nostr_pk = "dd".repeat(32);
+        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter"));
+        // a legacy (empty) nostr_pk still length-prefixes as 0 — no special
+        // casing that could collide two different rosters onto one byte form
+        let mut legacy = table.clone();
+        legacy[0].nostr_pk = String::new();
+        let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter");
+        assert_eq!(legacy_bytes.len(), 317 - 64);
+        assert_ne!(legacy_bytes, bytes);
+    }
+
     #[test]
     fn roster_canonical_bytes_are_stable_and_field_separated() {
         let table = vec![
             MemberIdentity {
                 member: "petra".to_string(),
                 identity_pk: "aa".repeat(32),
+                nostr_pk: "cc".repeat(32),
             },
             MemberIdentity {
                 member: "walter".to_string(),
                 identity_pk: "bb".repeat(32),
+                nostr_pk: "dd".repeat(32),
             },
         ];
         let a = roster_canonical_bytes("f00", 2, 3, &table, "charter");
@@ -4434,10 +4525,12 @@ mod tests {
         let shifted = vec![MemberIdentity {
             member: "petraa".to_string(),
             identity_pk: format!("a{}", "a".repeat(63)),
+            nostr_pk: String::new(),
         }];
         let plain = vec![MemberIdentity {
             member: "petra".to_string(),
             identity_pk: format!("aa{}", "a".repeat(62)),
+            nostr_pk: String::new(),
         }];
         assert_ne!(
             roster_canonical_bytes("f00", 1, 1, &shifted, ""),

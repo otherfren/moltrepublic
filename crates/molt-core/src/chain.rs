@@ -242,14 +242,18 @@ pub struct CheckpointState {
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v1`) —
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v2` — v2
+/// covers each member's `nostr_pk` third anchor in BOTH tables; under v1 a
+/// served checkpoint's roster anchor could be swapped without changing the
+/// state hash, so the tamper-evidence roster-v3 gives the genesis vanished
+/// the moment a republic pruned) —
 /// same length-prefixed framing as [`roster_canonical_bytes`], so the
 /// layouts stay siblings. JSON payloads serialize canonically because
 /// `serde_json::Map` is a BTreeMap here (no `preserve_order` feature —
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v1\0");
+    out.extend_from_slice(b"molt-chain-checkpoint-v2\0");
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -258,12 +262,14 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     for i in &s.founding_identities {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
+        put_bytes(&mut out, i.nostr_pk.as_bytes());
     }
     put_bytes(&mut out, s.agenda.as_bytes());
     out.extend_from_slice(&u64::try_from(s.roster.len()).unwrap_or(0).to_le_bytes());
     for i in &s.roster {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
+        put_bytes(&mut out, i.nostr_pk.as_bytes());
     }
     for (surface, entries) in &s.applied {
         put_bytes(&mut out, surface.as_str().as_bytes());
@@ -314,6 +320,7 @@ mod tests {
         MemberIdentity {
             member: name.to_string(),
             identity_pk: pk.to_string(),
+            nostr_pk: "cc".repeat(32),
         }
     }
 

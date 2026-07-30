@@ -1114,6 +1114,7 @@ impl State {
                 seat,
                 member,
                 identity_pk,
+                nostr_pk,
                 proof,
                 reply,
                 key_package,
@@ -1122,6 +1123,7 @@ impl State {
                 seat,
                 member,
                 identity_pk,
+                nostr_pk,
                 proof,
                 reply,
                 key_package,
@@ -1216,8 +1218,9 @@ impl State {
                 sealed,
                 mls,
                 mesh,
+                nostr_sk,
                 generation,
-            } => self.cmd_net_join_sealed(sealed, mls, mesh, generation),
+            } => self.cmd_net_join_sealed(sealed, mls, mesh, nostr_sk, generation),
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }
@@ -3869,13 +3872,29 @@ mod tests {
         .render()
     }
 
+    /// Petra's nostr identity for the join fixtures — a REAL derived pair,
+    /// so the sealed handler's sk↔anchored-pk cross-check has a genuine
+    /// secret to validate (the anchors must be real canonical curve points
+    /// anyway: `verify_sealed_roster` rejects anything else).
+    fn petra_nostr() -> ([u8; 32], String) {
+        molt_net::nostr_identity(b"petra-entropy", "ticket-petra")
+    }
+
     fn valid_sealed_roster() -> molt_core::SealedRoster {
         use molt_core::{MemberIdentity, RosterAttestation};
         let (sk_a, pk_a) = molt_storage::derive_identity_key(&[1u8; 32], "a");
         let (sk_b, pk_b) = molt_storage::derive_identity_key(&[2u8; 32], "b");
         let identities = vec![
-            MemberIdentity { member: "founder".to_string(), identity_pk: pk_a },
-            MemberIdentity { member: "petra".to_string(), identity_pk: pk_b },
+            MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: pk_a,
+                nostr_pk: molt_net::nostr_identity(b"founder-entropy", "ticket-f").1,
+            },
+            MemberIdentity {
+                member: "petra".to_string(),
+                identity_pk: pk_b,
+                nostr_pk: petra_nostr().1,
+            },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
         let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
@@ -3951,7 +3970,7 @@ mod tests {
         st2.join_generation = 2;
         let before = st2.session.workspaces.len();
         let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-        st2.cmd_net_join_sealed(sealed, String::new(), Vec::new(), Some(1))
+        st2.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Some(1))
             .expect("stale seal");
         assert_eq!(
             st2.session.workspaces.len(),
@@ -3977,7 +3996,8 @@ mod tests {
             ..molt_core::JoinState::default()
         };
         let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-        st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), Some(1)).expect("sealed");
+        st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Some(1))
+            .expect("sealed");
         assert_eq!(st.session.screen, Screen::Main, "entered the republic");
         assert_eq!(st.session.join, molt_core::JoinState::default(), "join reset");
         let ws = st.session.workspaces.iter().find(|ws| ws.name == "R").expect("workspace added");
@@ -3993,10 +4013,115 @@ mod tests {
             ..molt_core::JoinState::default()
         };
         let before = st2.session.workspaces.len();
-        st2.cmd_net_join_sealed("{".to_string(), String::new(), Vec::new(), Some(1))
+        st2.cmd_net_join_sealed("{".to_string(), String::new(), Vec::new(), String::new(), Some(1))
             .expect("bad");
         assert_eq!(st2.session.join.run.outcome, 2, "garbage roster fails");
         assert_eq!(st2.session.workspaces.len(), before, "nothing materialized");
+    }
+
+    /// N1 PIN — the secret that pairs with the FOREVER-anchored third anchor
+    /// is validated before it is persisted: `cmd_net_join_sealed` must
+    /// refuse a nostr_sk that is not 32 bytes of hex, or whose x-only public
+    /// key is not OUR seat's anchored `nostr_pk` — in both directions the
+    /// join FAILS (like the corrupt-MLS arm), because sealing a genesis
+    /// whose transport secret the node does not actually hold surfaces only
+    /// when N4's transport first uses the key, with the salting ticket long
+    /// dead and no re-derivation path. The matching secret persists into
+    /// `transport.state.nostr_sk` byte-exactly.
+    #[test]
+    fn join_sealed_validates_the_persisted_nostr_secret() {
+        let rt = rt();
+        let _guard = rt.enter();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let persist_state = || {
+            let (ev_tx, _keep) = broadcast::channel::<Event>(8);
+            let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
+            let mut st = State::new(
+                GroupConfig::demo(),
+                SessionView {
+                    settings: molt_core::SessionSettings {
+                        workspace_dir: tmp.path().display().to_string(),
+                        ..molt_core::SessionSettings::default()
+                    },
+                    ..SessionView::default()
+                },
+                ev_tx,
+                cmd_tx,
+                None,
+                true, // persist — the secret-lifecycle path under test
+                None,
+            );
+            st.join_generation = 1;
+            st.session.join = molt_core::JoinState {
+                member: "petra".to_string(),
+                seed: molt_storage::generate_seed_phrase().expect("seed"),
+                ..molt_core::JoinState::default()
+            };
+            st
+        };
+        let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
+        let (petra_sk, petra_npk) = petra_nostr();
+
+        // absent, truncated, and odd-length secrets all FAIL the join
+        for bad in ["", "abcd", "ab", &hex::encode(&petra_sk[..16])] {
+            let mut st = persist_state();
+            st.cmd_net_join_sealed(sealed.clone(), String::new(), Vec::new(), bad.to_string(), Some(1))
+                .expect("handler never errors");
+            assert_eq!(
+                st.session.join.run.outcome, 2,
+                "a malformed nostr secret {bad:?} must fail the join"
+            );
+            assert!(st.active.is_none(), "nothing materialized for {bad:?}");
+        }
+        // a well-formed scalar that is NOT the private half of petra's
+        // anchored nostr_pk fails too (the wrong-seat/wrong-derivation case)
+        let (foreign_sk, _) = molt_net::nostr_identity(b"someone-else", "ticket-x");
+        let mut st = persist_state();
+        st.cmd_net_join_sealed(
+            sealed.clone(),
+            String::new(),
+            Vec::new(),
+            hex::encode(foreign_sk),
+            Some(1),
+        )
+        .expect("handler never errors");
+        assert_eq!(st.session.join.run.outcome, 2, "a mismatched secret must fail the join");
+        assert!(st.active.is_none(), "nothing materialized for the mismatch");
+
+        // the matching secret seals the join and persists byte-exactly
+        let mut st = persist_state();
+        st.cmd_net_join_sealed(
+            sealed.clone(),
+            String::new(),
+            Vec::new(),
+            hex::encode(petra_sk),
+            Some(1),
+        )
+        .expect("handler never errors");
+        assert_eq!(st.session.screen, Screen::Main, "the matching secret enters the republic");
+        let dir = st.active.as_ref().expect("materialized").dir.clone();
+        drop(st); // release the writer + flock before reopening
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let ws = loop {
+            match molt_storage::open_workspace(&dir) {
+                Ok((ws, _)) => break ws,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("reopening the joined workspace: {e}"),
+            }
+        };
+        let ts = ws.read_transport_state();
+        assert_eq!(
+            ts.nostr_sk.as_deref(),
+            Some(&petra_sk[..]),
+            "the validated secret is sealed into transport.state"
+        );
+        assert_eq!(
+            molt_net::nostr_pk_for_sk(&petra_sk).expect("pk"),
+            petra_npk,
+            "…and it IS the private half of the anchored third anchor"
+        );
     }
 
     /// A real, threshold-signed **two-block chain** for the recovery tests: a
@@ -4010,8 +4135,16 @@ mod tests {
         let (bob_sk, bob_pk) =
             crate::founding::member_identity(phrase).expect("bob's ritual identity");
         let identities = vec![
-            MemberIdentity { member: "coordinator".to_string(), identity_pk: coord_pk },
-            MemberIdentity { member: "bob".to_string(), identity_pk: bob_pk },
+            MemberIdentity {
+                member: "coordinator".to_string(),
+                identity_pk: coord_pk,
+                nostr_pk: "cc".repeat(32),
+            },
+            MemberIdentity {
+                member: "bob".to_string(),
+                identity_pk: bob_pk,
+                nostr_pk: "dd".repeat(32),
+            },
         ];
         let republic_id = molt_storage::republic_id("Guild", 1, 2, &identities);
         let change = ChainChange::Genesis {

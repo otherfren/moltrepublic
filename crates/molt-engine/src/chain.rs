@@ -169,6 +169,10 @@ fn apply_membership(
             identities.push(MemberIdentity {
                 member: member.to_string(),
                 identity_pk: identity_pk.to_string(),
+                // the Membership change carries no nostr anchor yet (the
+                // ChainChange layout is additive-only); a joined-later seat
+                // reads as legacy until a versioned Membership binds it
+                nostr_pk: String::new(),
             });
         }
         MembershipOp::Restored => {
@@ -601,23 +605,33 @@ pub(crate) fn verify_suffix_chain(
             "checkpoint founding table does not recompute to the republic id".to_string(),
         );
     }
-    if blob.rule_m == 0 || blob.roster.is_empty() {
+    if blob.rule_m == 0 || blob.rule_m > blob.rule_n || blob.roster.is_empty() {
         return Err("checkpoint roster/threshold out of range".to_string());
+    }
+    // the same structural size check verify_genesis runs on the full path: a
+    // founding table larger than rule_n would graft attacker-owned "founding"
+    // keys into the valid_signers set below (the rid recompute pins the
+    // table's CONTENT, not that its size matches the sealed n)
+    if usize::from(blob.rule_n) != blob.founding_identities.len() {
+        return Err("checkpoint founding table size does not match n".to_string());
     }
     // NO circular trust: the blob's roster is only bound by the state hash
     // the anchor sigs attest — so the roster itself must chain back to the
     // rid-bound FOUNDING table, and the anchor signatures must verify
     // against founding keys. Seats are fixed at founding (product decision)
     // and a Restored re-key keeps the anchored identity, so every roster
-    // entry must literally appear in the founding table; forging an anchor
+    // entry must literally appear in the founding table — ALL THREE anchors,
+    // the nostr transport anchor included (a re-signed blob that keeps
+    // member+identity_pk but swaps the third anchor would otherwise
+    // redirect that seat's future gift-wrapped material); forging an anchor
     // therefore needs m REAL founding keys — the honest-majority assumption
     // threshold governance already stands on, not less.
     for entry in &blob.roster {
-        if !blob
-            .founding_identities
-            .iter()
-            .any(|f| f.member == entry.member && f.identity_pk == entry.identity_pk)
-        {
+        if !blob.founding_identities.iter().any(|f| {
+            f.member == entry.member
+                && f.identity_pk == entry.identity_pk
+                && f.nostr_pk == entry.nostr_pk
+        }) {
             return Err(format!(
                 "checkpoint roster member {} is not anchored in the founding table",
                 entry.member
@@ -2028,6 +2042,7 @@ mod tests {
                 identities.push(MemberIdentity {
                     member: (*m).to_string(),
                     identity_pk: pk,
+                    nostr_pk: "cc".repeat(32),
                 });
                 keys.push(((*m).to_string(), sk));
             }
@@ -2491,6 +2506,16 @@ mod tests {
         assert!(
             verify_suffix_chain(&forged, &suffix, &b.republic_id).is_err(),
             "a doctored roster no longer hashes to the signed state"
+        );
+        // …and its nostr_pk twin: under checkpoint-v2 the third anchor is
+        // inside the hashed bytes, so a swapped roster transport anchor is
+        // caught exactly like a swapped identity key (under v1 it was NOT
+        // hashed — a served blob's roster anchor was silently mutable)
+        let mut forged_npk = blob.clone();
+        forged_npk.roster[0].nostr_pk = "ee".repeat(32);
+        assert!(
+            verify_suffix_chain(&forged_npk, &suffix, &b.republic_id).is_err(),
+            "a doctored roster nostr anchor no longer hashes to the signed state"
         );
         // a wholly self-consistent forged blob still fails the founding
         // recomputation against the expected republic id
@@ -3012,8 +3037,16 @@ mod tests {
         let (evil_sk1, evil_pk1) = derive_identity_key(&[9u8; 32], "petra");
         let (evil_sk2, evil_pk2) = derive_identity_key(&[8u8; 32], "walter");
         forged.roster = vec![
-            MemberIdentity { member: "petra".to_string(), identity_pk: evil_pk1 },
-            MemberIdentity { member: "walter".to_string(), identity_pk: evil_pk2 },
+            MemberIdentity {
+                member: "petra".to_string(),
+                identity_pk: evil_pk1,
+                nostr_pk: "ee".repeat(32),
+            },
+            MemberIdentity {
+                member: "walter".to_string(),
+                identity_pk: evil_pk2,
+                nostr_pk: "ff".repeat(32),
+            },
         ];
         let change = ChainChange::Checkpoint {
             upto: 2,
@@ -3052,6 +3085,102 @@ mod tests {
         assert!(
             verify_suffix_chain(&blob, &[gap], &b.republic_id).is_err(),
             "suffix holders refuse a gap upto"
+        );
+    }
+
+    /// N1 PIN — the suffix path must run the same structural size check as
+    /// `verify_genesis` (`founding_identities.len() == rule_n`): a served
+    /// blob whose founding table carries MORE entries than `rule_n` grafts
+    /// attacker-owned "founding" keys into the signer set. The forged blob
+    /// here is fully self-consistent (id and state hash recomputed over the
+    /// 4-entry table, anchor signed by m REAL founding keys) and is checked
+    /// against its own id — the trust-the-file restore posture — so only
+    /// the size check can reject it. (Under the injective republic-id-v2
+    /// layout a grafted table can no longer COLLIDE with the real id, so
+    /// this is defense in depth for the paths that pin no external id.)
+    #[test]
+    fn a_suffix_blob_with_an_oversized_founding_table_is_rejected() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let mut forged = blob.clone();
+        let (_evil_sk, evil_pk) = derive_identity_key(&[9u8; 32], "evil");
+        forged.founding_identities.push(MemberIdentity {
+            member: "evil".to_string(),
+            identity_pk: evil_pk,
+            nostr_pk: "dd".repeat(32),
+        });
+        forged.republic_id = molt_storage::republic_id(
+            &forged.founding_name,
+            forged.rule_m,
+            forged.rule_n,
+            &forged.founding_identities,
+        );
+        let change = ChainChange::Checkpoint {
+            upto: 1,
+            state_hash: checkpoint_state_hash(&forged),
+        };
+        let bytes = approval_bytes(&forged.republic_id, 2, &change);
+        let sigs = ["petra", "walter"]
+            .iter()
+            .map(|name| {
+                let (_, sk) = b.keys.iter().find(|(m, _)| m == name).expect("key");
+                RosterAttestation {
+                    member: (*name).to_string(),
+                    sig: identity_sign(sk, &bytes),
+                }
+            })
+            .collect();
+        let anchor = ChainBlock {
+            height: 2,
+            prev: "00".repeat(32),
+            change,
+            sigs,
+        };
+        assert!(
+            verify_suffix_chain(&forged, &[anchor], &forged.republic_id).is_err(),
+            "a founding table larger than rule_n must be rejected"
+        );
+    }
+
+    /// N1 PIN — the roster⊆founding comparison covers the THIRD anchor: a
+    /// blob whose roster entry keeps its member+identity_pk but swaps the
+    /// nostr anchor, with the state hash recomputed and the anchor block
+    /// re-signed by m real founding keys (insider collusion — the state-hash
+    /// check cannot catch a self-consistent re-signature), must still be
+    /// rejected: seats are fixed at founding, so every roster entry must be
+    /// a LITERAL founding-table entry, transport anchor included.
+    #[test]
+    fn a_resigned_roster_nostr_anchor_swap_is_rejected() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        let mut forged = blob.clone();
+        forged.roster[0].nostr_pk = "ee".repeat(32); // not petra's founding anchor
+        let change = ChainChange::Checkpoint {
+            upto: 1,
+            state_hash: checkpoint_state_hash(&forged),
+        };
+        let bytes = approval_bytes(&forged.republic_id, 2, &change);
+        let sigs = ["petra", "walter"]
+            .iter()
+            .map(|name| {
+                let (_, sk) = b.keys.iter().find(|(m, _)| m == name).expect("key");
+                RosterAttestation {
+                    member: (*name).to_string(),
+                    sig: identity_sign(sk, &bytes),
+                }
+            })
+            .collect();
+        let anchor = ChainBlock {
+            height: 2,
+            prev: "00".repeat(32),
+            change,
+            sigs,
+        };
+        assert!(
+            verify_suffix_chain(&forged, &[anchor], &b.republic_id).is_err(),
+            "a roster entry whose nostr anchor is not its founding-table anchor must be rejected"
         );
     }
 
@@ -3116,9 +3245,10 @@ mod tests {
             checkpoint_state_hash(&s2),
             "equal chains yield the identical checkpoint hash"
         );
-        // the canonical bytes carry the versioned tag
+        // the canonical bytes carry the versioned tag (v2 since N1 — the
+        // roster/founding nostr anchors are inside the hashed bytes)
         let bytes = molt_core::checkpoint_canonical_bytes(&s1);
-        assert!(bytes.starts_with(b"molt-chain-checkpoint-v1\0"));
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v2\0"));
         // consumed ids are sorted regardless of commit order
         assert_eq!(s1.consumed_ids, vec![1, 2]);
         // the founding table recomputes to the real republic id — the

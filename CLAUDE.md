@@ -71,9 +71,16 @@ same pattern as the tickers.
 - **`WorkspaceEvent::Founded`, `SealedRoster`, and `roster_canonical_bytes`
   ripple widely.** Adding a field touches ~15 sites, many of them test harnesses
   that recompute the signed table. `roster_canonical_bytes` is versioned
-  (`molt-roster-v2`) — bump the tag if you change the byte layout, and update
+  (`molt-roster-v3` since N1 — it binds each member's `nostr_pk` third
+  anchor) — bump the tag if you change the byte layout, and update
   every recompute site (founder canonical, `verify_sealed_roster`,
   `verify_seal_proposal`, the tests) together or signatures silently break.
+  The same rule holds for its sibling layouts: `molt-republic-id-v2`
+  (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
+  preimage stays injective for arbitrary field content; never regress it to
+  separators) and `molt-chain-checkpoint-v2`
+  (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
+  three anchors). Each has byte-pin tests that go red on an unbumped change.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
 - **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat
@@ -106,12 +113,27 @@ Load-bearing invariants — do not weaken them:
 
 - **Sign-what-you-see.** A member recomputes the canonical table from the
   proposal it is shown (`verify_seal_proposal`) and signs *that* — never an
-  opaque blob the founder supplied. It also checks its own `(name, key)` is in
-  the roster and that the republic id is the content-derived value.
-- **One identity, two anchors.** A member's derived Ed25519 key is both its
-  roster identity and its MLS credential key. The founder enforces this at join
+  opaque blob the founder supplied. It checks its own **three-anchor seat**
+  `(name, identity_pk, nostr_pk)` is in the roster, that the republic id is the
+  content-derived value, and that every OTHER seat's nostr anchor is valid,
+  canonical and roster-unique (format+uniqueness are what everyone can verify
+  for everyone). The check closes at the GENESIS: `run_ritual_member` compares
+  the distributed sealed roster's canonical bytes against the exact bytes it
+  ratified — a founder cannot seal a different (even fully self-consistent)
+  table than the one everybody signed.
+- **One identity, three anchors — bound differently, know the difference.** A
+  member's derived Ed25519 key is both its roster identity and its MLS
+  credential key; the founder enforces that pairing at join
   (`molt_net::mls::key_package_binding` — the KeyPackage's credential must equal
-  the anchored `name` and its signature key the MAC-bound `identity_pk`).
+  the anchored `name` and its signature key the MAC-bound `identity_pk`), which
+  also gives Ed25519 proof-of-possession. The **nostr transport anchor**
+  (`nostr_pk`, ticket-salted secp256k1) is bound by invite MAC v2 + ingest
+  validation (`molt_net::canonical_nostr_pk` at `cmd_net_join_requested` —
+  normalize-or-reject, plus cross-seat uniqueness) + the member's own
+  sign-what-you-see re-check. It is **NOT MLS-bound and has NO
+  proof-of-possession** (the secp256k1 key signs nothing during the ritual) —
+  never design N2+ code on the assumption that an anchored `nostr_pk` is a
+  possessed key.
 - **Tamper-evident charter.** The deliberated name+agenda are bound into the
   signed bytes and the genesis; `verify_sealed_roster` recomputes over them, so a
   founder cannot seal a charter different from what everyone ratified.
@@ -175,9 +197,10 @@ transport. The sanctioned exceptions now:
   never pulls it** (the feature is off by default). See
   `crates/molt-net/Cargo.toml` `[features]`.
 - **C `secp256k1` arrives via rust-nostr** (ADR-0002 — deliberately the
-  battle-tested C library, NOT k256). Dev-only today (the nostr crates are
-  dev-deps, so the default no-dev graph is untouched); it becomes a default-build
-  exception when N1 promotes `nostr` into src/ for the identity work.
+  battle-tested C library, NOT k256). In the DEFAULT build since N1 promoted
+  `nostr` into src/ for the identity work (`molt-net/src/nostr.rs`, the
+  ticket-salted transport anchor); contained to molt-net — roster/chain
+  signing stays pure-Rust Ed25519.
 
 Standing guard: the default build must **not silently re-adopt `ring`** —
 rust-nostr's relay pool (`nostr-relay-pool` → `async-wsocket`) hard-pins a
