@@ -107,6 +107,51 @@ fn clearnet_needs_the_acknowledgement_and_then_a_session_unlock() {
     });
 }
 
+/// KEYSTONE — §10.14 (decided 2026-07-31): a LOCAL relay (loopback, RFC1918,
+/// `localhost`) is a legitimate self-host target, but it is reached outside
+/// Tor — so it faces exactly the clearnet gate: explicit acknowledgement to
+/// confirm, per-session activation to dial, never a silent connection.
+#[test]
+fn a_local_relay_needs_the_same_acknowledgement_as_clearnet() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        const LOCAL: &str = "ws://192.168.1.5:7777";
+        w.execute(Command::RelayAdd { url: LOCAL.to_string() })
+            .await
+            .expect("a LAN self-host relay may enter the pool");
+        let s = session(&w).await;
+        assert_eq!(s.relays[0].kind, RelayKind::Local);
+        assert_eq!(s.relays[0].blocked, Some(RelayBlock::Unconfirmed));
+
+        let refused = w
+            .execute(Command::RelayConfirm {
+                url: LOCAL.to_string(),
+                accept_clearnet: false,
+            })
+            .await;
+        assert!(refused.is_err(), "no silent confirmation of a non-Tor relay");
+
+        w.execute(Command::RelayConfirm {
+            url: LOCAL.to_string(),
+            accept_clearnet: true,
+        })
+        .await
+        .expect("acknowledged");
+        let s = session(&w).await;
+        assert_eq!(
+            s.relays[0].blocked,
+            Some(RelayBlock::ClearnetSessionLocked),
+            "confirmed, but still waiting for the session activation"
+        );
+
+        w.execute(Command::RelayClearnetSession { unlock: true })
+            .await
+            .expect("unlock");
+        let s = session(&w).await;
+        assert_eq!(s.relays[0].blocked, None, "now it may be dialed");
+    });
+}
+
 /// An onion relay needs no acknowledgement and is dialable as soon as it is
 /// confirmed — that is the whole point of preferring onion.
 #[test]

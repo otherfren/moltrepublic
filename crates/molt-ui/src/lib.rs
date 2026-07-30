@@ -2402,10 +2402,12 @@ fn apply_relays(ui: &AppWindow, sv: &SessionView) {
     });
     let dialable = sv.relays.iter().filter(|r| r.blocked.is_none()).count();
     ui.set_relay_dialable(i32::try_from(dialable).unwrap_or(i32::MAX));
+    // the session toggle concerns everything reached outside Tor: clearnet
+    // AND local relays (§10.14) share the one per-session activation
     ui.set_relay_clearnet_confirmed(
         sv.relays
             .iter()
-            .any(|r| r.confirmed && r.kind == RelayKind::Clearnet),
+            .any(|r| r.confirmed && r.kind != RelayKind::Onion),
     );
     ui.set_cfg_clearnet_session(sv.clearnet_session);
     // the clearnet warning tailors its sentence to the SAVED anonymity
@@ -2426,6 +2428,10 @@ fn relay_add_error(lang: i32, raw: &str, pool: &[String]) -> Option<&'static str
         Err(RelayUrlError::PlaintextClearnet) => Some(l.rp_err_plain),
         Err(RelayUrlError::Junk) => Some(l.rp_err_junk),
         Err(RelayUrlError::OnionAddress) => Some(l.rp_err_onion),
+        Err(RelayUrlError::Userinfo) => Some(l.rp_err_userinfo),
+        Err(RelayUrlError::Fragment) => Some(l.rp_err_fragment),
+        Err(RelayUrlError::TooLong) => Some(l.rp_err_toolong),
+        Err(RelayUrlError::NonCanonical) => Some(l.rp_err_noncanon),
         Ok(url) => pool.contains(&url).then_some(l.rp_err_dup),
     }
 }
@@ -5306,22 +5312,26 @@ lexicon! {
     rp_down: "Lower priority", "Niedrigere Priorität";
     rp_remove: "Remove from the list", "Aus der Liste entfernen";
     rp_add: "Add", "Hinzufügen";
-    rp_add_hint: "Adding never connects: a new relay starts unconfirmed. ws:// is allowed for .onion addresses only — everything else needs wss://.", "Hinzufügen verbindet nicht: Ein neues Relay ist zunächst unbestätigt. ws:// ist nur für .onion-Adressen erlaubt — alles andere braucht wss://.";
-    rp_err_scheme: "A relay address starts with wss:// (or ws:// for .onion).", "Eine Relay-Adresse beginnt mit wss:// (oder ws:// bei .onion).";
-    rp_err_host: "This address has no host.", "Diese Adresse hat keinen Host.";
-    rp_err_plain: "ws:// is unencrypted and allowed for .onion addresses only — use wss:// here.", "ws:// ist unverschlüsselt und nur für .onion-Adressen erlaubt — hier brauchst du wss://.";
+    rp_add_hint: "Adding never connects: a new relay starts unconfirmed.", "Hinzufügen verbindet nicht: Ein neues Relay ist zunächst unbestätigt.";
+    rp_err_scheme: "A relay address starts with wss:// (or ws:// for .onion and local addresses).", "Eine Relay-Adresse beginnt mit wss:// (oder ws:// bei .onion- und lokalen Adressen).";
+    rp_err_host: "This address has no usable host.", "Diese Adresse hat keinen nutzbaren Host.";
+    rp_err_plain: "ws:// is unencrypted — allowed for .onion and local addresses only, use wss:// here.", "ws:// ist unverschlüsselt — nur bei .onion- und lokalen Adressen erlaubt, hier brauchst du wss://.";
     rp_err_junk: "This address contains spaces or control characters.", "Diese Adresse enthält Leerzeichen oder Steuerzeichen.";
     rp_err_onion: "This is not a valid .onion address — a v3 onion has 56 characters (a–z, 2–7) before .onion.", "Das ist keine gültige .onion-Adresse — eine v3-Onion hat 56 Zeichen (a–z, 2–7) vor .onion.";
+    rp_err_userinfo: "Credentials do not belong in a relay address.", "Zugangsdaten gehören nicht in eine Relay-Adresse.";
+    rp_err_fragment: "A relay address cannot carry a #fragment.", "Eine Relay-Adresse kann kein #Fragment tragen.";
+    rp_err_toolong: "This address is too long (max. 512 characters).", "Diese Adresse ist zu lang (max. 512 Zeichen).";
+    rp_err_noncanon: "Write the address plainly — host, IP and port in their canonical form.", "Schreib die Adresse schlicht — Host, IP und Port in ihrer kanonischen Form.";
     rp_err_dup: "This relay is already in the list.", "Dieses Relay steht schon in der Liste.";
     rp_cn_title: "Use a clearnet relay?", "Ein Clearnet-Relay benutzen?";
     rp_cn_body_tor: "This relay is not a .onion service. Its operator sees which conversations this node subscribes to and when it is online. Tor hides your IP address from them — but the relay stays a clearnet endpoint, run by someone you do not control.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse vor ihm — aber das Relay bleibt ein Clearnet-Endpunkt in fremder Hand.";
     rp_cn_body_plain: "This relay is not a .onion service. Its operator sees your IP address, which conversations this node subscribes to and when it is online. The anonymity network is switched off, so nothing hides where you connect from.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht deine IP-Adresse, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Das Anonymitäts-Netzwerk ist ausgeschaltet, es verbirgt also nichts, von wo aus du dich verbindest.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
-    rp_cn_note: "Even then clearnet relays are not dialed automatically: you activate them once per session.", "Auch dann werden Clearnet-Relays nicht automatisch angewählt: Du gibst sie einmal pro Sitzung frei.";
-    rp_cn_session_title: "Clearnet relays this session", "Clearnet-Relays in dieser Sitzung";
-    rp_cn_session_off: "Confirmed clearnet relays are not dialed automatically. Activate them when you need them — the activation ends when you close the app.", "Bestätigte Clearnet-Relays werden nicht automatisch angewählt. Gib sie frei, wenn du sie brauchst — die Freigabe endet, wenn du die App schließt.";
-    rp_cn_session_on: "Active: confirmed clearnet relays are in use until you close the app.", "Aktiv: Bestätigte Clearnet-Relays werden benutzt, bis du die App schließt.";
+    rp_cn_note: "Even then it is not dialed automatically: you activate it once per session.", "Auch dann wird es nicht automatisch angewählt: Du gibst es einmal pro Sitzung frei.";
+    rp_cn_session_title: "Relays outside Tor this session", "Relays außerhalb Tor in dieser Sitzung";
+    rp_cn_session_off: "Confirmed clearnet and local relays are not dialed automatically. Activate them when needed — the activation ends with the app.", "Bestätigte Clearnet- und lokale Relays werden nicht automatisch angewählt. Gib sie bei Bedarf frei — die Freigabe endet mit der App.";
+    rp_cn_session_on: "Active: confirmed clearnet and local relays are in use until you close the app.", "Aktiv: Bestätigte Clearnet- und lokale Relays werden benutzt, bis du die App schließt.";
     rp_cn_activate: "Activate for this session", "Für diese Sitzung freigeben";
     rp_cn_deactivate: "Deactivate", "Freigabe beenden";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";

@@ -826,7 +826,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_add",
             command: "relay_add",
-            description: "Add a Nostr relay to this node's pool. NOTHING SHIPS PRE-TRUSTED: the node connects to no relay until one is added AND confirmed, so adding is safe — the entry lands unconfirmed, at the lowest priority, and nothing is dialed. The URL is validated and normalized (wss://…, or ws://… for a .onion host only — plaintext to the clearnet is refused). Read the pool back from read_session.relays, which carries each entry's derived kind (onion|clearnet) and why it is or is not dialed.",
+            description: "Add a Nostr relay to this node's pool. NOTHING SHIPS PRE-TRUSTED: the node connects to no relay until one is added AND confirmed, so adding is safe — the entry lands unconfirmed, at the lowest priority, and nothing is dialed. The URL is validated and normalized (wss://…; ws://… only for a .onion or local/private host — plaintext to the clearnet is refused). Read the pool back from read_session.relays, which carries each entry's derived kind (onion|clearnet|local) and why it is or is not dialed.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -867,12 +867,12 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_confirm",
             command: "relay_confirm",
-            description: "Confirm a relay — the operator's persisted \"yes, use this one\". An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET relay is REFUSED unless accept_clearnet is true: its operator sees this node's subscriptions, and its IP address unless Tor is on. Even once confirmed, a clearnet relay is never dialed automatically — it additionally needs relay_clearnet_session in every session.",
+            description: "Confirm a relay — the operator's persisted \"yes, use this one\". An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET or LOCAL relay is REFUSED unless accept_clearnet is true: a clearnet operator sees this node's subscriptions (and its IP address unless Tor is on); a local relay is reached directly on this machine or network, never over Tor. Even once confirmed, a non-onion relay is never dialed automatically — it additionally needs relay_clearnet_session in every session.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string" },
-                    "accept_clearnet": { "type": "boolean", "description": "explicit acknowledgement of the clearnet exposure; ignored for .onion relays" }
+                    "accept_clearnet": { "type": "boolean", "description": "explicit acknowledgement of the non-Tor exposure (clearnet or local); ignored for .onion relays" }
                 },
                 "required": ["url"]
             }),
@@ -898,7 +898,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_clearnet_session",
             command: "relay_clearnet_session",
-            description: "Activate (or deactivate) CLEARNET relays for this session only — never persisted, so after a restart no clearnet packet leaves the machine until it is activated again. Onion relays are unaffected and always connect on their own. Confirmed clearnet relays stay blocked (read_session.relays shows \"clearnet_session_locked\") until this is unlocked.",
+            description: "Activate (or deactivate) non-Tor relays — CLEARNET and LOCAL — for this session only; never persisted, so after a restart no such packet leaves the machine until it is activated again. Onion relays are unaffected and always connect on their own. Confirmed clearnet/local relays stay blocked (read_session.relays shows \"clearnet_session_locked\") until this is unlocked.",
             schema: || json!({
                 "type": "object",
                 "properties": {

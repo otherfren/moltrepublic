@@ -227,9 +227,10 @@ transport. The sanctioned exceptions now:
 
 Standing guard: the default build must **not silently re-adopt `ring`** —
 rust-nostr's relay pool (`nostr-relay-pool` → `async-wsocket`) hard-pins a
-ring-flavored `tokio-rustls`, and adopting it is an explicit N2 WS/TLS decision,
-never a side effect of adding a dependency.
-`cargo tree -p molt-net -e no-dev -i ring` must stay empty.
+ring-flavored `tokio-rustls`; ADR-0005 (2026-07-31) decided against the pool
+(N2 drives `tokio-tungstenite` over rustls-rustcrypto + the T4 dialer).
+`cargo tree -p molt-net -e no-dev -i ring` must stay empty — enforced by
+`crates/molt-net/tests/ring_free_guard.rs` since 2026-07-31.
 
 Keep new code pure-Rust where you can; these are the sanctioned exceptions.
 

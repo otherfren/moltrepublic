@@ -152,9 +152,10 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Confirm a relay. A CLEARNET relay is refused without the explicit
-    /// acknowledgement — the gate lives here, so an MCP agent faces exactly
-    /// what a human clicking through the GUI warning faces.
+    /// Confirm a relay. A NON-ONION relay (clearnet or local — both reached
+    /// outside Tor, §10.14) is refused without the explicit acknowledgement —
+    /// the gate lives here, so an MCP agent faces exactly what a human
+    /// clicking through the GUI warning faces.
     pub(crate) fn cmd_relay_confirm(
         &mut self,
         url: String,
@@ -162,14 +163,23 @@ impl State {
     ) -> Result<Reply, MoltError> {
         let url = molt_core::relay::normalize_relay_url(&url)
             .map_err(|e| MoltError::Settings(e.to_string()))?;
-        if molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Clearnet
-            && !accept_clearnet
-        {
-            return Err(MoltError::Settings(format!(
-                "{url} is a CLEARNET relay: its operator sees this node's \
-                 subscriptions, and its IP address unless Tor is on. Confirm \
-                 it explicitly (accept_clearnet) to use it"
-            )));
+        match molt_core::relay::relay_kind(&url) {
+            molt_core::relay::RelayKind::Onion => {}
+            molt_core::relay::RelayKind::Clearnet if !accept_clearnet => {
+                return Err(MoltError::Settings(format!(
+                    "{url} is a CLEARNET relay: its operator sees this node's \
+                     subscriptions, and its IP address unless Tor is on. Confirm \
+                     it explicitly (accept_clearnet) to use it"
+                )));
+            }
+            molt_core::relay::RelayKind::Local if !accept_clearnet => {
+                return Err(MoltError::Settings(format!(
+                    "{url} is a LOCAL relay: it is reached directly on this \
+                     machine or network, never over Tor. Confirm it explicitly \
+                     (accept_clearnet) to use it"
+                )));
+            }
+            _ => {}
         }
         let entry = self
             .session

@@ -387,16 +387,30 @@ fn session_settings(s: &Settings) -> SessionSettings {
         tor_port: s.tor_port,
         download_dir: s.download_dir.clone(),
         // the file is hand-editable and never ran ingest validation, so the
-        // pool is sanitized here — see molt_core::relay::sanitize_pool
-        relays: molt_core::relay::sanitize_pool(
-            &s.relays
+        // pool is sanitized here — see molt_core::relay::sanitize_pool. Like
+        // the boot path in molt-app, a dropped entry is LOGGED, never
+        // silently discarded (an operator watching a reload deserves the
+        // reason their relay vanished).
+        relays: {
+            let raw: Vec<_> = s
+                .relays
                 .iter()
                 .map(|r| molt_core::relay::RelayEntry {
                     url: r.url.clone(),
                     confirmed: r.confirmed,
                 })
-                .collect::<Vec<_>>(),
-        ),
+                .collect();
+            let kept = molt_core::relay::sanitize_pool(&raw);
+            for r in &raw {
+                if !kept.iter().any(|k| k.url == r.url) {
+                    match molt_core::relay::normalize_relay_url(&r.url) {
+                        Err(e) => tracing::warn!(url = %r.url, reason = %e, "relay dropped on config reload"),
+                        Ok(n) => tracing::warn!(url = %r.url, kept_as = %n, "relay re-keyed/collapsed on config reload"),
+                    }
+                }
+            }
+            kept
+        },
     }
 }
 

@@ -25,49 +25,71 @@ first). Each entry is:
 
 | field | meaning |
 |---|---|
-| `url` | `wss://…` (or `ws://…` for `.onion` only — see §2) |
+| `url` | `wss://…` (or `ws://…` for `.onion` and local addresses — see §2) |
 | `confirmed` | the user's persisted "yes, use this relay" |
 
-**`kind` is never stored.** Whether a relay is onion or clearnet is *derived*
-from its URL every time it is needed. Storing it would create a second source
-of truth that a hand-edited config could contradict — a clearnet relay
-labelled `onion = true` would silently bypass the confirmation gate.
+**`kind` is never stored.** Whether a relay is onion, clearnet or local is
+*derived* from its URL every time it is needed. Storing it would create a
+second source of truth that a hand-edited config could contradict — a clearnet
+relay labelled `onion = true` would silently bypass the confirmation gate.
 
-## 2. URL validation — an allow-list, because a parser disagreement IS the bug
+## 2. URL validation — the WHATWG parser, plus strictness on top
+
+*(Rebuilt 2026-07-31 per `mdk_evaluation.md` §7.1/§7.2 — the hand-rolled
+allow-list parser is gone; `url`, the parser every real WebSocket/Nostr
+client dials with, is the authority for what a URL means.)*
 
 - scheme must be `wss://` or `ws://`; there must be a host
-- **the authority is validated by allow-list**: letters, digits, `-` and `.`
-  in the host, plus an optional numeric port. Everything a real URL parser
-  treats specially is refused — `@` (userinfo), `\`, `%`, `[` `]`, non-ASCII.
-  A trailing dot and empty labels are refused too, so one host has exactly one
-  spelling
+- **the host comes from the parse** (`url::Url` — WHATWG), never from string
+  slicing, so the classification can never disagree with what a client dials.
+  On TOP of the parse, ingest is strict: ASCII only, no whitespace/control,
+  no `\`, no credentials, no `#fragment`, ≤ 512 bytes (the MDK validator's
+  bound), conservative domain labels (letters, digits, `-`; no empty label,
+  no trailing dot)
+- **one endpoint, one spelling**: anything the parser had to rewrite — a
+  percent escape, an alternate IPv4 notation (`0x7f.1`, plain integer,
+  octal, leading zeros), an odd port spelling — is refused as non-canonical
+  rather than stored as a second reading of the same address. An explicit
+  default port (`:443` on wss, `:80` on ws) is the one redundancy accepted,
+  and it is dropped, so `wss://r:443` and `wss://r` are one pool entry. The
+  path is stored canonical (dot-segments collapsed)
 - **`Onion` requires a real v3 address**: 56 base32 characters (`a-z2-7`)
   before `.onion`. Merely *ending* in `.onion` does not earn the auto-dial
   privilege; a host that claims `.onion` without the right shape is refused at
   ingest rather than quietly demoted to clearnet (a clearnet badge and an
   IP-exposure warning would both be lies about an address that cannot resolve)
-- `ws://` (plaintext) is allowed **only** for such an onion host, where the Tor
-  circuit already provides encryption and authentication. Plaintext clearnet is
-  refused outright — it would publish every subscription in the clear
-- no whitespace or control characters; no duplicate URL in one pool
+- **`Local` (§10.14, decided 2026-07-31)**: loopback, RFC1918-private,
+  link-local and unique-local addresses, plus `localhost` names, classify as
+  a third kind. A local relay is a legitimate self-host target but is reached
+  DIRECTLY, never over Tor — so it rides exactly the clearnet gate: explicit
+  acknowledgement to confirm, per-session activation to dial. Addresses
+  nothing can listen on (unspecified, broadcast, multicast) are refused
+- `ws://` (plaintext) is allowed for an onion host (the Tor circuit already
+  encrypts and authenticates) and for a local one (no CA certifies private
+  addresses; the exposure ends at the local path and sits behind the
+  acknowledgement). Plaintext CLEARNET stays refused outright — it would
+  publish every subscription in the clear
+- no duplicate URL in one pool
 
-**Why an allow-list and not a delimiter blacklist** (found by the 2026-07-31
-adversarial review, two CRITICAL findings): the classifier decides whether
-something is dialed *with no user interaction*, so it must never disagree with
-the parser that actually dials. The first implementation ended the authority at
-`/ ? #` only and treated everything before the last `:` as the host. Both
+**Why the real parser and not our own** (two CRITICAL findings, 2026-07-31
+adversarial review): the classifier decides whether something is dialed *with
+no user interaction*, so it must never disagree with the parser that actually
+dials. The first implementation ended the authority at `/ ? #` only and
+treated everything before the last `:` as the host. Both
 `wss://evil.example.org\x.onion` and `wss://abcd.onion:1234@attacker.example.org`
 therefore classified as **Onion** here while WHATWG — what every WebSocket and
 Nostr client uses — resolves them to `evil.example.org` and
 `attacker.example.org`. Result: a green onion badge, no acknowledgement, no
-session lock, and an automatic clearnet connection on every start. Any future
-change to this parsing must keep the allow-list posture and re-run
-`onion_classification_cannot_be_spoofed`.
+session lock, and an automatic clearnet connection on every start. The fix on
+top of the fix (`mdk_evaluation.md` §6): stop hand-rolling — parse with `url`
+and apply policy to the PARSED host. `onion_classification_cannot_be_spoofed`
+remains the regression net for any future change here.
 
-**`relay_kind` is independently strict.** It does not assume its input passed
-ingest, because `config.toml` is hand-editable and reaches the pool without it.
-Anything it cannot parse as a well-formed onion authority counts as clearnet —
-the side of the gate that asks first.
+**`relay_kind` is one code path with ingest.** It runs the same single parse
+as `normalize_relay_url`, so the classifier and ingest cannot disagree — and
+it does not assume its input passed ingest, because `config.toml` is
+hand-editable and reaches the pool without it. Anything the parse refuses
+counts as clearnet — the side of the gate that asks first.
 
 ## 2.5 Pools that did not come through the command surface
 
@@ -99,16 +121,25 @@ than read the pool directly.
    what makes a fresh install offline.
 2. **Onion relays may be dialed automatically**, including at startup and in
    background reconnects.
-3. **A clearnet relay is never dialed automatically.** On top of its persisted
+3. **A non-onion relay is never dialed automatically** — clearnet and local
+   alike (§10.14: both are reached outside Tor). On top of its persisted
    `confirmed` flag it needs an *in-session* activation (`clearnet_session`),
    which resets to off on every start. So "always a warning and an explicit
-   confirmation before a clearnet connection" holds literally: after a
-   restart, no clearnet packet leaves the machine until the user acts again.
+   confirmation before a connection outside Tor" holds literally: after a
+   restart, no such packet leaves the machine until the user acts again.
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a
 clearnet operator; the user decides, and the warning names which of the two
-situations they are in.
+situations they are in. A local relay cannot be routed over Tor at all —
+that is exactly why it sits behind the same gate.
+
+**N2 dialer obligation (review 2026-07-31):** the plaintext allowance for
+`localhost`/`*.localhost` rests on those names resolving to loopback
+(RFC 6761 *SHOULD*). The N2 dialer must pin them to loopback itself —
+resolve `localhost` names to `127.0.0.1`/`::1` without asking the system
+resolver — before honoring the `ws://` allowance, so a non-conforming
+resolver can never carry plaintext off the machine.
 
 ## 4. Command surface (co-equal on GUI and MCP)
 
@@ -120,7 +151,7 @@ they are tools on both surfaces (co-equality rule) — never engine-internal:
 | `RelayAdd { url }` | validate + append, **unconfirmed** |
 | `RelayRemove { url }` | drop the entry |
 | `RelayMove { url, up }` | change priority by one position |
-| `RelayConfirm { url, accept_clearnet }` | persist the confirmation; the engine **refuses** a clearnet URL unless `accept_clearnet` is true |
+| `RelayConfirm { url, accept_clearnet }` | persist the confirmation; the engine **refuses** a clearnet or local URL unless `accept_clearnet` is true |
 | `RelayRevoke { url }` | withdraw the confirmation |
 | `RelayClearnetSession { unlock }` | activate/deactivate clearnet dialing for THIS session only |
 

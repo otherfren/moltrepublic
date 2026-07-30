@@ -18,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 strum.workspace = true
 hex.workspace = true # pure byte↔string encoding (MessageId wire form) — still no I/O
+url.workspace = true # WHATWG relay-URL parsing (relay.rs) — pure Rust, still no I/O
 
 [dev-dependencies]
 # independent digest check of the roster-v3 byte-identity pin (N1); the

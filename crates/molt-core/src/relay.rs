@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 /// tried first); the kind is never stored — see [`RelayKind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayEntry {
-    /// The validated, normalized relay URL (`wss://…`, or `ws://…` for onion).
+    /// The validated, normalized relay URL (`wss://…`; `ws://…` only for
+    /// onion and local addresses).
     pub url: String,
     /// The user's persisted "yes, use this relay". Never set by the app
     /// itself — an unconfirmed relay is never dialed.
@@ -36,6 +37,12 @@ pub enum RelayKind {
     /// A public clearnet relay: its operator sees the node's subscriptions
     /// and, without Tor, its IP address. Never dialed automatically.
     Clearnet,
+    /// A relay on a loopback, RFC1918-private, link-local or unique-local
+    /// address (or `localhost`) — a self-hosted relay on the operator's own
+    /// machine or network. Reached DIRECTLY, never over Tor, so it rides the
+    /// same explicit gate as clearnet (§10.14, decided 2026-07-31): confirm
+    /// once, activate per session, never a silent dial.
+    Local,
 }
 
 /// Why a relay is not currently dialable — the honest per-entry reason the
@@ -45,8 +52,9 @@ pub enum RelayKind {
 pub enum RelayBlock {
     /// The user has not confirmed this relay yet.
     Unconfirmed,
-    /// A confirmed clearnet relay that this session has not activated. The
-    /// activation deliberately does not survive a restart.
+    /// A confirmed non-onion relay (clearnet or local — both are reached
+    /// outside Tor) that this session has not activated. The activation
+    /// deliberately does not survive a restart.
     ClearnetSessionLocked,
 }
 
@@ -56,11 +64,13 @@ pub enum RelayBlock {
 pub enum RelayUrlError {
     /// Not `wss://` or `ws://`.
     Scheme,
-    /// No host between the scheme and the path.
+    /// No usable host between the scheme and the path (also: an address
+    /// nothing can listen on — unspecified, broadcast, multicast).
     Host,
     /// Plaintext `ws://` to a clearnet host — that publishes every
-    /// subscription to anyone on the path. Allowed for onion only, where the
-    /// Tor circuit already encrypts and authenticates.
+    /// subscription to anyone on the path. Allowed for onion (the Tor
+    /// circuit already encrypts and authenticates) and for local/private
+    /// addresses (no CA certifies those; exposure ends at the local path).
     PlaintextClearnet,
     /// Whitespace or control characters in the URL.
     Junk,
@@ -69,15 +79,32 @@ pub enum RelayUrlError {
     /// the address cannot resolve anywhere, so a clearnet badge and an
     /// IP-exposure warning would both be lies.
     OnionAddress,
+    /// Credentials (`user[:pass]@`) in the URL — never part of a relay
+    /// address, and historically the exact spelling that made a clearnet
+    /// host read as something else.
+    Userinfo,
+    /// A `#fragment` — meaningless in a WebSocket URL, refused like MDK's
+    /// validator does.
+    Fragment,
+    /// Longer than [`MAX_URL_LEN`] bytes.
+    TooLong,
+    /// The spelling is not what the WHATWG parser would dial: a percent
+    /// escape, an alternate IPv4 notation (`0x7f.1`, plain integer, octal,
+    /// leading zeros), an odd port spelling. Every real client dials the
+    /// REWRITTEN form, so storing the original would keep two readings of
+    /// one address. Write it canonically instead.
+    NonCanonical,
 }
 
 impl core::fmt::Display for RelayUrlError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Scheme => f.write_str("a relay URL must start with wss:// (or ws:// for .onion)"),
-            Self::Host => f.write_str("the relay URL has no host"),
+            Self::Scheme => f.write_str(
+                "a relay URL must start with wss:// (or ws:// for .onion and local addresses)",
+            ),
+            Self::Host => f.write_str("the relay URL has no usable host"),
             Self::PlaintextClearnet => f.write_str(
-                "ws:// is plaintext and only allowed for .onion relays — use wss:// here",
+                "ws:// is plaintext and only allowed for .onion or local relays — use wss:// here",
             ),
             Self::Junk => {
                 f.write_str("the relay URL contains whitespace or control characters")
@@ -85,156 +112,217 @@ impl core::fmt::Display for RelayUrlError {
             Self::OnionAddress => f.write_str(
                 "not a valid onion address — a v3 onion is 56 characters (a-z, 2-7) before .onion",
             ),
+            Self::Userinfo => f.write_str("credentials do not belong in a relay URL"),
+            Self::Fragment => f.write_str("a relay URL cannot carry a #fragment"),
+            Self::TooLong => f.write_str("the relay URL is longer than 512 bytes"),
+            Self::NonCanonical => f.write_str(
+                "not the canonical spelling of this address — write host, IP and port plainly \
+                 (e.g. wss://relay.example.org or ws://192.168.1.5:7777)",
+            ),
         }
     }
 }
 
-/// Validate and NORMALIZE a relay URL: lowercase scheme+host, no trailing
-/// slash, so two spellings of one relay cannot enter the pool as two entries.
-/// The path/query is preserved as typed (relays may live under a path).
+/// The MDK relay-validator bound (`mdk_evaluation.md` §2.2): nothing longer
+/// than this is a relay URL.
+pub const MAX_URL_LEN: usize = 512;
+
+/// Validate and NORMALIZE a relay URL: lowercase, no trailing slash, no
+/// redundant default port, canonical path — so two spellings of one relay
+/// cannot enter the pool as two entries.
 pub fn normalize_relay_url(raw: &str) -> Result<String, RelayUrlError> {
+    classified(raw).map(|(url, _)| url)
+}
+
+/// The kind of a relay URL — derived, never stored.
+///
+/// This is the security-critical direction: `Onion` means "may be dialed with
+/// no user interaction at all". It runs the SAME single parse as
+/// [`normalize_relay_url`] — one code path, so the classifier and the ingest
+/// can never disagree — and does not assume its input passed ingest: a
+/// hand-edited `config.toml` reaches the pool unvalidated. Anything that
+/// parse refuses counts as [`RelayKind::Clearnet`]: the side of the gate
+/// that asks the user first.
+pub fn relay_kind(url: &str) -> RelayKind {
+    classified(url).map_or(RelayKind::Clearnet, |(_, kind)| kind)
+}
+
+/// The one shared pass behind [`normalize_relay_url`] and [`relay_kind`].
+///
+/// The host is taken from the **WHATWG parser** (`url` — the parser every
+/// real WebSocket/Nostr client dials with), never from hand-rolled string
+/// slicing: the 2026-07-31 review found two CRITICAL onion spoofs
+/// (`\`-authority, `userinfo@`) that existed precisely because our reading
+/// of the authority differed from the dialing client's
+/// (`mdk_evaluation.md` §6). Strictness on TOP of the parse (ASCII only, no
+/// backslash, canonical spelling, conservative domain labels) narrows what
+/// we accept — but what we accept is always exactly what the parser read.
+fn classified(raw: &str) -> Result<(String, RelayKind), RelayUrlError> {
     let trimmed = raw.trim();
-    // A backslash has no place in a relay URL, and WHATWG rewrites it to `/`
-    // for ws/wss — so a stored URL containing one would not be the URL that
-    // gets dialed (and two spellings of one target could sit in the pool as
-    // two entries). Refuse it outright rather than store an ambiguity.
+    // A backslash has no place in a relay URL; WHATWG rewrites it to `/` for
+    // ws/wss, so a stored one would not be the URL that gets dialed. Refuse
+    // it outright rather than store an ambiguity.
     if trimmed
         .chars()
         .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
     {
         return Err(RelayUrlError::Junk);
     }
-    // ASCII-only from here on, so lowercasing cannot change byte offsets and
-    // the authority cannot carry homoglyphs or IDN forms that a real parser
-    // would resolve differently
+    // ASCII-only, so lowercasing is byte-stable and the authority cannot
+    // carry homoglyphs or IDN forms the parser would resolve differently.
     if !trimmed.is_ascii() {
         return Err(RelayUrlError::Junk);
     }
+    if trimmed.len() > MAX_URL_LEN {
+        return Err(RelayUrlError::TooLong);
+    }
     let lower = trimmed.to_ascii_lowercase();
-    let (scheme, rest) = if let Some(rest) = lower.strip_prefix("wss://") {
+    let (scheme, after_scheme) = if let Some(rest) = lower.strip_prefix("wss://") {
         ("wss://", rest)
     } else if let Some(rest) = lower.strip_prefix("ws://") {
         ("ws://", rest)
     } else {
         return Err(RelayUrlError::Scheme);
     };
-    let authority_end = rest.find(AUTHORITY_END).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let host = valid_host(authority).ok_or(RelayUrlError::Host)?;
-    // the path/query keeps the user's spelling; only a trailing slash is
-    // dropped so "…/" and "…" are one entry
-    let tail = lower
-        .get(scheme.len() + authority_end..)
-        .unwrap_or("")
-        .trim_end_matches('/');
-    // a name that CLAIMS .onion must actually be one; otherwise it would be
-    // stored as a clearnet relay that can never resolve
-    let kind = kind_of_host(host);
-    if kind != RelayKind::Onion && host.rsplit('.').next() == Some("onion") {
-        return Err(RelayUrlError::OnionAddress);
+    // THE parse — the same algorithm every dialing client runs.
+    let parsed = url::Url::parse(&lower).map_err(|_| RelayUrlError::Host)?;
+    if parsed.fragment().is_some() {
+        return Err(RelayUrlError::Fragment);
     }
-    if scheme == "ws://" && kind != RelayKind::Onion {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(RelayUrlError::Userinfo);
+    }
+    let host = parsed.host().ok_or(RelayUrlError::Host)?;
+    let host_str = parsed.host_str().ok_or(RelayUrlError::Host)?;
+    // port 0 parses, but nothing can listen on it
+    if parsed.port() == Some(0) {
+        return Err(RelayUrlError::Host);
+    }
+    // One spelling per endpoint: the input authority must already read as
+    // the parser re-serializes it. An explicit default port is the one
+    // redundancy we accept — and drop, so `wss://r:443` and `wss://r` are
+    // one pool entry (MDK hit that "two spellings, two routes" bug in
+    // production). Anything else the parser had to rewrite — a percent
+    // escape, an alternate IPv4 notation, an odd port spelling — is refused
+    // rather than stored as a second reading of the same address.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let input_authority = &after_scheme[..authority_end];
+    let canonical_authority = match parsed.port() {
+        Some(p) => format!("{host_str}:{p}"),
+        None => host_str.to_string(),
+    };
+    let default_port: u16 = if scheme == "wss://" { 443 } else { 80 };
+    let spelled_default = format!("{host_str}:{default_port}");
+    if input_authority != canonical_authority
+        && !(parsed.port().is_none() && input_authority == spelled_default)
+    {
+        return Err(RelayUrlError::NonCanonical);
+    }
+    let kind = match host {
+        url::Host::Domain(d) => domain_kind(d)?,
+        url::Host::Ipv4(a) => ipv4_kind(a)?,
+        url::Host::Ipv6(a) => ipv6_kind(a)?,
+    };
+    if scheme == "ws://" && kind == RelayKind::Clearnet {
         return Err(RelayUrlError::PlaintextClearnet);
     }
-    Ok(format!("{scheme}{authority}{tail}"))
+    // canonical path + query from the parse (dot-segments collapsed — the
+    // form every client requests); only a trailing slash is dropped so "…/"
+    // and "…" are one entry
+    let mut tail = parsed.path().trim_end_matches('/').to_string();
+    if let Some(q) = parsed.query() {
+        tail.push('?');
+        tail.push_str(q);
+    }
+    // FIXPOINT: escapes the parser ADDS (e.g. `{` → `%7B`) come out
+    // uppercase, while pre-existing escapes pass through verbatim — so a
+    // stored `%7B` would re-normalize to `%7b` and the pool key would drift
+    // (two spellings of one endpoint, unaddressable entries). Lowercasing
+    // the assembled tail (input is ASCII throughout) makes
+    // normalize(normalize(x)) == normalize(x) hold for every accepted x.
+    let out = format!("{scheme}{canonical_authority}{}", tail.to_ascii_lowercase());
+    // …and the length bound holds for what we STORE, not just what was
+    // typed: parser-added escapes triple a byte, so a short input can
+    // canonicalize past the cap
+    if out.len() > MAX_URL_LEN {
+        return Err(RelayUrlError::TooLong);
+    }
+    Ok((out, kind))
 }
 
-/// Where the authority ends. `\` is in here because WHATWG treats it exactly
-/// like `/` for the special schemes ws/wss — leaving it out is what let
-/// `wss://evil.example.org\x.onion` read as an onion host here while every
-/// real client dialed `evil.example.org`.
-const AUTHORITY_END: [char; 4] = ['/', '\\', '?', '#'];
-
-/// The kind of a relay URL — derived, never stored.
-///
-/// This is the security-critical direction: `Onion` means "may be dialed with
-/// no user interaction at all". It is therefore **independently strict** and
-/// does not assume its input passed [`normalize_relay_url`] — a hand-edited
-/// `config.toml` reaches the pool without ingest validation. Anything it
-/// cannot parse as a plain, well-formed onion authority counts as
-/// [`RelayKind::Clearnet`]: the side of the gate that asks the user first.
-pub fn relay_kind(url: &str) -> RelayKind {
-    let Some(rest) = url
-        .strip_prefix("wss://")
-        .or_else(|| url.strip_prefix("ws://"))
-    else {
-        return RelayKind::Clearnet;
-    };
-    let authority_end = rest.find(AUTHORITY_END).unwrap_or(rest.len());
-    match valid_host(&rest[..authority_end]) {
-        Some(host) => kind_of_host(host),
-        None => RelayKind::Clearnet,
-    }
-}
-
-/// Validate an authority (`host` or `host:port`) by ALLOW-LIST and return the
-/// bare host. A blacklist of delimiters is not enough here: every character a
-/// real URL parser treats specially (`@` userinfo, `\` authority end, `%`
-/// escapes, `[` `]` IP literals, non-ASCII IDN) must be refused, or our host
-/// and the dialer's host can differ — and a differing host defeats the whole
-/// onion/clearnet gate. Accepts letters, digits, `-` and `.` in the host, plus
-/// an optional numeric port; rejects empty labels and a trailing dot so one
-/// host has exactly one spelling.
-fn valid_host(authority: &str) -> Option<&str> {
-    let (host, port) = match authority.split_once(':') {
-        Some((h, p)) => (h, Some(p)),
-        None => (authority, None),
-    };
-    if let Some(port) = port {
-        // Digits only, then a real u16 range check. Neither half alone is
-        // enough: `str::parse` happily accepts a leading `+`, and "at most
-        // five digits" lets 65536..=99999 through — both are rejected by a
-        // real URL parser, so a relay we stored would be badged dialable and
-        // never connect. A leading zero is refused too, so one port has one
-        // spelling (`url` would normalize `0443` to `443`, we store verbatim).
-        if !port.bytes().all(|b| b.is_ascii_digit())
-            || port.starts_with('0')
-            || port.parse::<u16>().is_err()
-        {
-            return None;
-        }
-    }
+/// Classify a PARSED domain host. On top of the parse, only conservative
+/// label shapes are accepted (letters, digits, `-`; no empty label, no
+/// trailing dot): the parser also tolerates `_` and friends, and every extra
+/// character is gate surface we don't need.
+fn domain_kind(host: &str) -> Result<RelayKind, RelayUrlError> {
     if host.is_empty() || host.ends_with('.') {
-        return None;
+        return Err(RelayUrlError::Host);
     }
     for label in host.split('.') {
-        if label.is_empty() {
-            return None;
-        }
-        if !label
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        if label.is_empty()
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         {
-            return None;
+            return Err(RelayUrlError::Host);
         }
     }
-    Some(host)
-}
-
-/// `Onion` — and with it the right to be dialed with no user interaction —
-/// is granted only to a syntactically real **v3 onion address**: 56 base32
-/// characters (`a-z2-7`) before the `.onion` label. Merely *ending* in
-/// ".onion" is not enough; a name Tor could never resolve has no business
-/// skipping the clearnet warning, and requiring the real shape removes a
-/// whole class of "looks onion, resolves elsewhere" tricks. Retired v2
-/// addresses (16 chars) do not qualify — Tor dropped them.
-fn kind_of_host(host: &str) -> RelayKind {
+    // RFC 6761: localhost names resolve to loopback
+    if host == "localhost" || host.ends_with(".localhost") {
+        return Ok(RelayKind::Local);
+    }
+    // `Onion` — and with it the right to be dialed with no user interaction
+    // — is granted only to a syntactically real **v3 onion address**: 56
+    // base32 characters (`a-z2-7`) before the `.onion` label. A name that
+    // merely CLAIMS .onion cannot resolve anywhere, so it is refused rather
+    // than quietly demoted to clearnet. Retired v2 addresses (16 chars) do
+    // not qualify — Tor dropped them.
     const V3_LEN: usize = 56;
     let mut labels = host.rsplit('.');
-    if labels.next() != Some("onion") {
-        return RelayKind::Clearnet;
+    if labels.next() == Some("onion") {
+        return match labels.next() {
+            Some(addr)
+                if addr.len() == V3_LEN
+                    && addr
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) =>
+            {
+                Ok(RelayKind::Onion)
+            }
+            _ => Err(RelayUrlError::OnionAddress),
+        };
     }
-    match labels.next() {
-        Some(addr)
-            if addr.len() == V3_LEN
-                && addr
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) =>
-        {
-            RelayKind::Onion
-        }
-        _ => RelayKind::Clearnet,
+    Ok(RelayKind::Clearnet)
+}
+
+/// Classify a parsed IPv4 literal (§10.14): loopback/private/link-local are
+/// `Local`; addresses nothing can listen on are refused.
+fn ipv4_kind(a: core::net::Ipv4Addr) -> Result<RelayKind, RelayUrlError> {
+    if a.is_unspecified() || a.is_broadcast() || a.is_multicast() {
+        return Err(RelayUrlError::Host);
     }
+    if a.is_loopback() || a.is_private() || a.is_link_local() {
+        return Ok(RelayKind::Local);
+    }
+    Ok(RelayKind::Clearnet)
+}
+
+/// Classify a parsed IPv6 literal (§10.14). fc00::/7 (unique-local) and
+/// fe80::/10 (link-local) are computed from the leading segment — the std
+/// helpers for them are not stable on our MSRV.
+fn ipv6_kind(a: core::net::Ipv6Addr) -> Result<RelayKind, RelayUrlError> {
+    if a.is_unspecified() || a.is_multicast() {
+        return Err(RelayUrlError::Host);
+    }
+    let seg0 = a.segments()[0];
+    let unique_local = (seg0 & 0xfe00) == 0xfc00;
+    let link_local = (seg0 & 0xffc0) == 0xfe80;
+    if a.is_loopback() || unique_local || link_local {
+        return Ok(RelayKind::Local);
+    }
+    Ok(RelayKind::Clearnet)
 }
 
 /// One relay as the surfaces SEE it: the stored fields plus everything the
@@ -269,7 +357,13 @@ pub fn sanitize_pool(raw: &[RelayEntry]) -> Vec<RelayEntry> {
         let Ok(url) = normalize_relay_url(&entry.url) else {
             continue;
         };
-        if out.iter().any(|kept| kept.url == url) {
+        // duplicates collapse onto the FIRST entry (the file order is the
+        // dial priority), but a confirmation on ANY spelling survives the
+        // merge: when normalization re-keys two previously-distinct
+        // spellings (`wss://r:443` + `wss://r`) onto one endpoint, the
+        // operator's explicit "yes" must not be lost to entry order.
+        if let Some(kept) = out.iter_mut().find(|kept| kept.url == url) {
+            kept.confirmed |= entry.confirmed;
             continue;
         }
         out.push(RelayEntry { url, confirmed: entry.confirmed });
@@ -291,14 +385,16 @@ pub fn pool_status(pool: &[RelayEntry], clearnet_session: bool) -> Vec<RelayStat
 
 /// Why this entry may not be dialed right now — `None` means it is dialable.
 ///
-/// `clearnet_session` is the IN-SESSION activation of clearnet dialing; it
+/// `clearnet_session` is the IN-SESSION activation of non-Tor dialing; it
 /// resets to `false` on every start, which is what makes "always an explicit
-/// confirmation before a clearnet connection" true across restarts.
+/// confirmation before a connection outside Tor" true across restarts. It
+/// gates everything that is not an onion service: clearnet AND local
+/// relays (§10.14 — a local relay is reached directly, bypassing Tor).
 pub fn relay_block(entry: &RelayEntry, clearnet_session: bool) -> Option<RelayBlock> {
     if !entry.confirmed {
         return Some(RelayBlock::Unconfirmed);
     }
-    if relay_kind(&entry.url) == RelayKind::Clearnet && !clearnet_session {
+    if relay_kind(&entry.url) != RelayKind::Onion && !clearnet_session {
         return Some(RelayBlock::ClearnetSessionLocked);
     }
     None
@@ -420,7 +516,6 @@ mod tests {
             "wss://x.onion.",                        // trailing dot: one spelling only
             "wss://%78.onion",                       // percent-encoding
             "wss://xn--x.onion",                     // punycode is not a v3 onion
-            "wss://[::1]:443",                       // IP literal
             "wss://evil.example.org:80\\x.onion",
         ] {
             assert!(
@@ -506,9 +601,214 @@ mod tests {
             "wss://relay.example.org:99999",
             "wss://relay.example.org:+443",
             "wss://relay.example.org:0443",
+            // port 0 parses, but nothing listens on it — undialable
+            "wss://relay.example.org:0",
         ] {
             assert!(normalize_relay_url(bad).is_err(), "must refuse {bad:?}");
         }
+    }
+
+    /// KEYSTONE — §10.14 (user decision 2026-07-31): a relay on a private,
+    /// loopback or link-local address is a legitimate self-host target. It is
+    /// classified [`RelayKind::Local`], never dialed silently, and rides the
+    /// SAME per-session gate as clearnet — it bypasses Tor by nature, so the
+    /// explicit activation is what keeps "no un-acknowledged non-Tor dial"
+    /// true. Plaintext `ws://` is allowed here: no CA issues certificates for
+    /// private addresses, the exposure is bounded to the local path, and the
+    /// acknowledgement has already happened.
+    #[test]
+    fn local_addresses_are_classified_and_gated_like_clearnet() {
+        for local in [
+            "wss://127.0.0.1:7777",
+            "ws://127.0.0.1:7777",
+            "ws://127.1.2.3",
+            "ws://192.168.1.5:7777",
+            "ws://10.0.0.2",
+            "ws://172.16.0.1",
+            "ws://169.254.7.7",
+            "ws://[::1]:8080",
+            "ws://[fd00::1]",
+            "ws://localhost:7777",
+            "ws://relay.localhost",
+        ] {
+            let n = normalize_relay_url(local)
+                .unwrap_or_else(|e| panic!("{local:?} must be a valid local relay: {e}"));
+            assert_eq!(relay_kind(&n), RelayKind::Local, "{local:?}");
+            assert_ne!(relay_kind(local), RelayKind::Onion, "{local:?} is never onion");
+            let confirmed = RelayEntry { url: n.clone(), confirmed: true };
+            assert_eq!(
+                relay_block(&confirmed, false),
+                Some(RelayBlock::ClearnetSessionLocked),
+                "{local:?} must wait for the session unlock"
+            );
+            assert_eq!(relay_block(&confirmed, true), None, "{local:?} unlocks with the session");
+            assert_eq!(
+                relay_block(&RelayEntry { url: n, confirmed: false }, true),
+                Some(RelayBlock::Unconfirmed),
+                "confirmation still comes first"
+            );
+        }
+        // a PUBLIC IP literal is a clearnet relay: wss only, clearnet gate
+        let public = normalize_relay_url("wss://203.0.113.7:8443").expect("public IP relay");
+        assert_eq!(relay_kind(&public), RelayKind::Clearnet);
+        assert_eq!(
+            normalize_relay_url("ws://203.0.113.7"),
+            Err(RelayUrlError::PlaintextClearnet),
+            "plaintext to a PUBLIC address stays refused"
+        );
+        // …and addresses nothing can listen on are not relays at all
+        for dead in ["wss://0.0.0.0", "wss://255.255.255.255", "wss://224.0.0.1", "wss://[ff02::1]"] {
+            assert!(normalize_relay_url(dead).is_err(), "must refuse {dead:?}");
+        }
+    }
+
+    /// The WHATWG parser resolves alternate IPv4 spellings (hex, octal, plain
+    /// integer, leading zeros, shorthand) to an address — every real client
+    /// dials the RESOLVED address, so accepting the alternate spelling would
+    /// store a URL that reads differently here than on the wire (and hides a
+    /// LOCAL address behind a clearnet-looking name). Only the canonical
+    /// spelling enters the pool; `url` is the authority for what that is.
+    #[test]
+    fn alternate_ip_spellings_are_refused() {
+        for weird in [
+            "wss://0x7f.1",          // hex + short → 127.0.0.1
+            "wss://2130706433",      // plain integer → 127.0.0.1
+            "wss://0177.0.0.1",      // octal → 127.0.0.1
+            "wss://192.168.001.005", // leading zeros
+            "wss://127.1",           // shorthand
+            "ws://0x7f.1",
+        ] {
+            assert!(normalize_relay_url(weird).is_err(), "must refuse {weird:?}");
+            assert_ne!(relay_kind(weird), RelayKind::Onion, "{weird:?}");
+        }
+        assert_eq!(
+            normalize_relay_url("wss://127.0.0.1").expect("canonical"),
+            "wss://127.0.0.1"
+        );
+    }
+
+    /// MDK's relay-URL validator, adopted 2026-07-31 (`mdk_evaluation.md`
+    /// §2.2): credentials and fragments have no place in a relay URL, and
+    /// anything over 512 bytes is refused before it can wander into configs
+    /// and subscriptions.
+    #[test]
+    fn credentials_fragments_and_oversize_are_refused() {
+        assert_eq!(
+            normalize_relay_url("wss://user:pass@relay.example.org"),
+            Err(RelayUrlError::Userinfo)
+        );
+        assert_eq!(
+            normalize_relay_url("wss://user@relay.example.org"),
+            Err(RelayUrlError::Userinfo)
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example.org/x#frag"),
+            Err(RelayUrlError::Fragment)
+        );
+        let long = format!("wss://relay.example.org/{}", "a".repeat(600));
+        assert_eq!(normalize_relay_url(&long), Err(RelayUrlError::TooLong));
+    }
+
+    /// A default port is a redundant spelling: the WHATWG parser (what every
+    /// client dials with) treats `wss://r:443` and `wss://r` as the same
+    /// endpoint, and MDK hit the "two spellings, two routes" bug in
+    /// production. One endpoint, one pool entry.
+    #[test]
+    fn a_default_port_collapses_into_the_bare_spelling() {
+        assert_eq!(
+            normalize_relay_url("wss://relay.example.org:443").expect("default wss port"),
+            "wss://relay.example.org"
+        );
+        assert_eq!(
+            normalize_relay_url(
+                "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:80"
+            )
+            .expect("default ws port"),
+            "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example.org:8443").expect("real port"),
+            "wss://relay.example.org:8443"
+        );
+    }
+
+    /// `url` collapses dot-segments in the path (`/a/../b` → `/b`) — every
+    /// client requests the collapsed path, so the pool stores it. This was a
+    /// recorded residual divergence of the hand-rolled parser
+    /// (`mdk_evaluation.md` §6).
+    #[test]
+    fn paths_are_stored_canonical() {
+        assert_eq!(
+            normalize_relay_url("wss://relay.example.org/a/../nostr").expect("dot segments"),
+            "wss://relay.example.org/nostr"
+        );
+    }
+
+    /// KEYSTONE (review finding 2026-07-31, HIGH) — normalization is a
+    /// FIXPOINT: the stored form re-normalizes to ITSELF. Without this,
+    /// parser-ADDED escapes (uppercase `%7B`) re-key the entry on the next
+    /// load (`%7b`), commands stop addressing it, and the duplicate guard
+    /// can mint two entries for one endpoint — the exact MDK
+    /// "two spellings, two routes" bug this rebuild exists to kill.
+    #[test]
+    fn normalization_is_a_fixpoint() {
+        for raw in [
+            "wss://relay.example.org/a{b",   // the parser escapes `{` → %7b
+            "wss://relay.example.org/a%7Bb", // pre-existing uppercase escape
+            "wss://relay.example.org?a<b",   // query escape
+            "wss://relay.example.org/a/../b",
+            "wss://relay.example.org:443/x/",
+            "ws://192.168.1.5:7777",
+            "ws://[::1]:8080",
+            "ws://localhost:7777",
+            "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion/nostr",
+        ] {
+            let once = normalize_relay_url(raw).unwrap_or_else(|e| panic!("{raw:?}: {e}"));
+            assert_eq!(
+                normalize_relay_url(&once).as_deref(),
+                Ok(once.as_str()),
+                "stored form of {raw:?} must survive re-normalization unchanged"
+            );
+            assert_eq!(
+                relay_kind(&once),
+                relay_kind(raw.trim()),
+                "…and classify identically before and after storage"
+            );
+        }
+    }
+
+    /// REVIEW FINDING (2026-07-31, MEDIUM) — the length cap binds the STORED
+    /// form, not just the typed one: a parser-added escape turns one byte
+    /// into three, so a short input can canonicalize past the cap and the
+    /// stored entry would be rejected — and silently dropped — forever after.
+    #[test]
+    fn the_length_cap_binds_the_stored_form() {
+        let raw = format!("wss://relay.example.org/{}", "{".repeat(200));
+        assert!(raw.len() <= MAX_URL_LEN, "the INPUT is under the cap");
+        assert_eq!(normalize_relay_url(&raw), Err(RelayUrlError::TooLong));
+    }
+
+    /// REVIEW FINDING (2026-07-31, LOW) — when normalization re-keys two
+    /// previously-distinct spellings onto one endpoint, a confirmation on
+    /// EITHER survives the merge (first position wins, the "yes" is OR-ed) —
+    /// an upgrade must not silently un-confirm the operator's relay.
+    #[test]
+    fn sanitize_merges_spellings_without_losing_the_confirmation() {
+        let raw = vec![
+            RelayEntry { url: "wss://relay.example.org:443".to_string(), confirmed: false },
+            RelayEntry { url: "wss://relay.example.org".to_string(), confirmed: true },
+        ];
+        assert_eq!(
+            sanitize_pool(&raw),
+            vec![RelayEntry { url: "wss://relay.example.org".to_string(), confirmed: true }]
+        );
+        // a Local entry round-trips the pool unchanged, kind intact
+        let local = vec![RelayEntry { url: "ws://192.168.1.5:7777".to_string(), confirmed: true }];
+        let clean = sanitize_pool(&local);
+        assert_eq!(clean, local);
+        assert_eq!(relay_kind(&clean[0].url), RelayKind::Local);
+        // and the default-port collapse holds for IPv6 literals too
+        assert_eq!(normalize_relay_url("wss://[::1]:443").expect("v6 default"), "wss://[::1]");
     }
 
     #[test]
@@ -547,7 +847,9 @@ mod tests {
             ("https://relay.example.org", RelayUrlError::Scheme),
             ("relay.example.org", RelayUrlError::Scheme),
             ("wss://", RelayUrlError::Host),
-            ("wss:///nostr", RelayUrlError::Host),
+            // WHATWG skips surplus slashes and would read host "nostr" —
+            // not what the typed authority says, so: not canonical
+            ("wss:///nostr", RelayUrlError::NonCanonical),
             ("wss://relay example.org", RelayUrlError::Junk),
             ("wss://relay\u{7}.example.org", RelayUrlError::Junk),
         ] {

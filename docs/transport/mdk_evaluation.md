@@ -225,9 +225,9 @@ Our own design doc argued *"a parser disagreement IS the bug"* and then
 concluded "write a stricter hand-rolled parser" instead of the only conclusion
 that follows: **use the same parser**.
 
-Residual divergences from `url` still live in our allow-list parser (path
+Residual divergences from `url` lived on in the allow-list parser (path
 `..` collapsing, alternate IPv4 notations, no `is_local_addr` gate — we would
-happily dial RFC1918). The follow-up is tracked in §7.
+happily dial RFC1918) until the §7.1/§7.2 rebuild closed them (2026-07-31).
 
 CLAUDE.md now requires a search-and-verdict step before hand-building any
 non-trivial mechanism.
@@ -241,17 +241,37 @@ non-trivial mechanism.
    `molt-core`; if its ICU tail is unwanted there, put the parsing in
    `molt-net` behind a `RelayLocator` newtype and keep the policy in
    `molt-core` reading the pre-parsed host.
+   **DONE 2026-07-31** — `molt_core::relay` now runs ONE `url::Url` pass
+   behind both `normalize_relay_url` and `relay_kind` (they cannot disagree);
+   strictness on top of the parse (ASCII, no `\`, canonical-spelling-only,
+   512-byte cap on the STORED form, credentials/fragment refusal per the MDK
+   validator); the §6 residual divergences (dot-segment paths, alternate
+   IPv4 notations) are closed by storing only the canonical form. `url`
+   lives in `molt-core` (already in the workspace graph via `nostr`; pure
+   Rust, no I/O). The adversarial review of the rebuild confirmed the spoof
+   category clean and added two invariants as keystones: normalization is a
+   FIXPOINT (parser-added escapes are re-lowercased, or stored keys would
+   drift on every load), and `sanitize_pool` merges re-keyed spellings
+   without losing a confirmation.
 2. **Add a local/private-address gate** (`is_local_addr` equivalent).
    **DECIDED 2026-07-31 (concept §10.14): gate like clearnet, don't
    hard-reject** — RFC1918/loopback/link-local/ULA go behind the ADR-0004
    acknowledgement + per-session activation (a LAN self-hosted relay stays
    possible, informed), never a silent dial.
+   **DONE 2026-07-31** — `RelayKind::Local` (loopback/private/link-local/ULA
+   IPs + `localhost` names, undialable addresses refused), same session gate
+   as clearnet end-to-end (policy, engine command gate, GUI toggle);
+   plaintext `ws://` allowed for local, still refused for clearnet.
 3. **Fix the concurrent-commit fork** (§2.4) — red test first.
 4. **Vendor the peeler** as the N3 envelope layer, with the four adaptations
    in §2.1. The envelope decision is made: current-Marmot raw AEAD (concept
    §10.11, 2026-07-31).
 5. **Port the six adapter behaviours** (§2.2) into N5's runtime.
 6. **Make the ring guard a CI gate**, not prose.
+   **DONE 2026-07-31** — `crates/molt-net/tests/ring_free_guard.rs`: the
+   default (no-dev, all-target) graph of molt-net AND molt-app must show an
+   empty `cargo tree -i ring`, with a self-validation probe so the test can
+   never pass blind.
 7. **Replace `socks5.rs` with `tokio-socks`** (already in the lockfile) and
    swap the hand-rolled constant-time MAC compare for `hmac::Mac::verify_slice`.
 8. **Record the NIP-06 decision**: `nostr::nips::nip06::FromMnemonic` with a
