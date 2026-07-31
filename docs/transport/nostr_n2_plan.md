@@ -104,6 +104,42 @@ builds the envelope layer on.
 9. NIP-42: challenge → signed auth on the subscribe connection; publish
    connection stays unauthenticated; the forced-auth-publish warning path.
 
+## 3.5 Review pass (2026-07-31, landed in `7c31c13`)
+
+An adversarial review over the nine steps found four behaviour bugs worth
+recording, all fixed with keystones:
+
+- **Delivered events were trusted unverified.** `RelayMessage::from_json`
+  verifies nothing, and the dedup ring keyed on the relay-supplied id — so
+  ONE pool relay could suppress any event by sending garbage carrying that
+  id (the honest copy then dropped as a duplicate). Events are now id+sig
+  verified before they may touch the ring or the cursor.
+- **`synced()` could lie**: the EOSE numerator accepted relays outside its
+  denominator, so a late-connecting relay satisfied a gate it was never
+  part of. Numerator and denominator are the same set now.
+- **A failed `subscribe()` leaked supervisors** — a dropped `JoinHandle`
+  detaches, so each failed call left redial loops running forever.
+- **The WS upgrade was unbounded**, and first connects ran sequentially: a
+  relay that accepts bytes and never answers wedged `subscribe()` and the
+  engine task driving it.
+
+Plus: a LOCAL relay now dials DIRECT even under Tor (§10.14 — a Tor proxy
+refuses private addresses; routing one there disclosed the local address
+and never connected), the cursor clamps to local now so the skew margin
+cannot eat the 48 h overlap, the publish budget measures the WebSocket
+frame rather than the event JSON, backoff resets only after a session that
+lived, health entries drop on teardown, and keepalive pings plus `CLOSED`
+handling replace the hour-long idle blindness.
+
+**Known limits carried into N3** (documented, not bugs): the dedup horizon
+is 4096 ids, so the envelope layer must stay idempotent; `RelayRuntime`
+holds ONE cursor map per relay, so N3 must not run two concurrently
+subscribed filters against one runtime; `probe_nip11_max_message` has no
+production caller yet (N4 wiring) and a probed cap needs sanity bounds
+before it can veto publishing; NIP-42 with the roster anchor is a
+correlation handle across relays — an ephemeral per-relay auth key is the
+better default when N4 wires it.
+
 ## 4. Carried obligations
 
 - The ring guard (`ring_free_guard.rs`) must stay green — tungstenite is
