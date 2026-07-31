@@ -29,6 +29,15 @@ const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 /// republic, bounded so a hostile relay cannot balloon memory.
 const DEDUP_CAP: usize = 4096;
 
+/// Clock-skew margin for the cursor clamp: a delivered event may advance the
+/// cursor at most this far past LOCAL now (concept §4.4's ±1h skew).
+const CURSOR_SKEW: u64 = 3_600;
+
+/// Re-subscribe overlap: `since = cursor − OVERLAP`, the full NIP-59
+/// timestamp-tweak width — without it, offline gift-wraps are permanently
+/// skipped (MDK port #2, `mdk_evaluation.md` §2.2).
+const CURSOR_OVERLAP: u64 = 172_800;
+
 /// How one publish went, per relay — ≥1 accepted relay makes the publish a
 /// success, but the failures are always REPORTED, never hidden (concept
 /// §11 N2: no silent partial).
@@ -58,6 +67,9 @@ pub struct RelayRuntime {
     /// Normalized relay URLs, in priority order — the output of
     /// `molt_core::relay::dialable(...)`, never a raw pool.
     urls: Vec<String>,
+    /// Per-relay resume cursor: the max CLAMPED `created_at` delivered by
+    /// that relay. What a reopen persists and reseeds ([`Self::with_cursors`]).
+    cursors: Arc<Mutex<std::collections::HashMap<String, u64>>>,
 }
 
 impl RelayRuntime {
@@ -65,7 +77,19 @@ impl RelayRuntime {
     /// (a fresh install) — every operation then fails typed, and connects to
     /// nothing, silently (ADR-0004).
     pub fn new(dialer: Dialer, urls: Vec<String>) -> Self {
-        Self { dialer, urls }
+        Self { dialer, urls, cursors: Arc::new(Mutex::new(std::collections::HashMap::new())) }
+    }
+
+    /// Reseed the per-relay cursors (the reopen path — cursors come from the
+    /// persisted transport state).
+    #[must_use]
+    pub fn with_cursors(self, cursors: std::collections::HashMap<String, u64>) -> Self {
+        Self { cursors: Arc::new(Mutex::new(cursors)), ..self }
+    }
+
+    /// The current per-relay cursors — what a close persists.
+    pub async fn cursors(&self) -> std::collections::HashMap<String, u64> {
+        self.cursors.lock().await.clone()
     }
 
     /// Publish one signed event to EVERY relay concurrently. Success iff at
@@ -172,14 +196,24 @@ impl RelayRuntime {
         }
         let (tx, rx) = mpsc::channel(256);
         let dedup = Arc::new(Mutex::new(DedupRing::new()));
+        let stored = self.cursors.lock().await.clone();
         let mut readers = Vec::new();
         for url in &self.urls {
             let Ok(mut ws) = RelayWs::connect(&self.dialer, url).await else {
                 continue;
             };
+            // resume from this relay's cursor, widened by the overlap — the
+            // clamp on the WRITE side (below) is what keeps this `since`
+            // honest against future-dated events
+            let mut relay_filter = filter.clone();
+            if let Some(cursor) = stored.get(url) {
+                relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
+                    cursor.saturating_sub(CURSOR_OVERLAP),
+                ));
+            }
             let sub_id = SubscriptionId::generate();
             if ws
-                .send(ClientMessage::req(sub_id, vec![filter.clone()]))
+                .send(ClientMessage::req(sub_id, vec![relay_filter]))
                 .await
                 .is_err()
             {
@@ -187,10 +221,23 @@ impl RelayRuntime {
             }
             let tx = tx.clone();
             let dedup = dedup.clone();
+            let cursors = self.cursors.clone();
+            let url = url.clone();
             readers.push(tokio::spawn(async move {
                 loop {
                     match ws.recv(SUB_IDLE_TIMEOUT).await {
                         Ok(RelayMessage::Event { event, .. }) => {
+                            // this relay DELIVERED the event, so its cursor
+                            // advances (duplicates included) — but never past
+                            // local now + skew: a +24h `created_at` must not
+                            // blind the next reopen (concept §4.3)
+                            let clamp = nostr::Timestamp::now().as_u64() + CURSOR_SKEW;
+                            let stamp = event.created_at.as_u64().min(clamp);
+                            {
+                                let mut c = cursors.lock().await;
+                                let entry = c.entry(url.clone()).or_insert(0);
+                                *entry = (*entry).max(stamp);
+                            }
                             let fresh = dedup.lock().await.fresh(event.id);
                             if fresh && tx.send(event.into_owned()).await.is_err() {
                                 break; // consumer gone

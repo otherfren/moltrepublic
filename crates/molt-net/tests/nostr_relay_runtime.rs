@@ -145,3 +145,65 @@ async fn subscription_dedups_across_two_relays() {
         "no duplicate of the live event either"
     );
 }
+
+/// Step 4 KEYSTONE (concept §4.3/§11 N2) — "a peer publishing +24h
+/// `created_at` does not blind the receiver after reopen": the per-relay
+/// cursor advances on delivered events but is CLAMPED to local now + skew,
+/// and a runtime reopened from stored cursors subscribes with the 172 800 s
+/// overlap — so a normal now-event still arrives where an unclamped cursor
+/// would have skipped everything until tomorrow.
+#[tokio::test]
+async fn a_future_dated_event_does_not_blind_the_cursor() {
+    use molt_net::relay_runtime::RelayRuntime;
+    use nostr::Timestamp;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let now = Timestamp::now();
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+
+    // a peer publishes a +24h future-dated event
+    let future = EventBuilder::new(Kind::Custom(445), "from tomorrow")
+        .tag(Tag::parse(["h", "6d6f6c74"]).expect("h tag"))
+        .custom_created_at(Timestamp::from_secs(now.as_u64() + 86_400))
+        .sign_with_keys(&keys)
+        .expect("sign");
+    let rt = RelayRuntime::new(dialer.clone(), vec![url.clone()]);
+    rt.publish(&future).await.expect("publish future-dated");
+
+    let mut sub = rt.subscribe(filter.clone()).await.expect("subscribe");
+    let got = sub.recv(RECV_TIMEOUT).await.expect("future event delivered");
+    assert_eq!(got.id, future.id);
+
+    // the cursor is CLAMPED: never beyond local now + the skew margin
+    let cursors = rt.cursors().await;
+    let cursor = *cursors.get(&url).expect("a cursor for the relay");
+    assert!(
+        cursor <= now.as_u64() + 3_600 + 5,
+        "cursor {cursor} ran into the future (now {})",
+        now.as_u64()
+    );
+    drop(sub);
+
+    // "reopen": a fresh runtime seeded with the stored cursors. A normal
+    // now-event published meanwhile must still be delivered — the clamped
+    // cursor minus the overlap reaches it, an unclamped one would not.
+    let normal = h_tagged_event(&keys, "6d6f6c74", "from today");
+    rt.publish(&normal).await.expect("publish normal");
+
+    let rt2 = RelayRuntime::new(dialer, vec![url]).with_cursors(cursors);
+    let mut sub2 = rt2.subscribe(filter).await.expect("resubscribe");
+    let mut seen = Vec::new();
+    while let Some(ev) = sub2.recv(Duration::from_secs(2)).await {
+        seen.push(ev.id);
+    }
+    assert!(
+        seen.contains(&normal.id),
+        "the now-event must survive the reopen (seen: {seen:?})"
+    );
+}
