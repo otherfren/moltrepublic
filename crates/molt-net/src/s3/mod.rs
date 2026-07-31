@@ -585,24 +585,10 @@ impl S3Client {
     }
 }
 
-/// A rustls config verifying against the public WebPKI (`webpki-roots`).
-/// Shares the dialer's provider posture ([`crate::dial::x25519_provider`]):
-/// pure-Rust rustcrypto, TLS 1.3, X25519. Built once and cached — the root
-/// store holds every Mozilla trust anchor, and `request` is the shared core
-/// the backup upload/download stories will drive per object.
+/// The crate-shared public-WebPKI TLS config (`crate::dial::public_tls_config`
+/// — pure-Rust rustcrypto, TLS 1.3, X25519), with the error in S3 terms.
 fn public_tls_config() -> Result<Arc<ClientConfig>, S3Error> {
-    static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    if let Some(cfg) = CFG.get() {
-        return Ok(cfg.clone());
-    }
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(crate::dial::x25519_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| S3Error::Tls(format!("rustls provider: {e}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(CFG.get_or_init(|| Arc::new(config)).clone())
+    crate::dial::public_tls_config().map_err(|e| S3Error::Tls(e.to_string()))
 }
 
 #[cfg(test)]

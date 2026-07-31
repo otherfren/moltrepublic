@@ -191,3 +191,44 @@ async fn socks_handshake_carries_the_per_host_isolation_username() {
     );
     assert!(pass_len > 0, "RFC 1929 servers may reject an empty password");
 }
+
+/// N2 step 8 KEYSTONE — the WS twin of the T4 no-leak harness: a
+/// Tor-configured relay dial reaches ONLY the SOCKS proxy, never the relay's
+/// host:port directly — for wss exactly like for ws (TLS wraps the dialed
+/// stream; it never opens its own).
+#[tokio::test]
+async fn relay_ws_under_tor_targets_the_socks_proxy_never_the_relay() {
+    let (proxy_port, proxy_hits) = blackhole_listener().await;
+    let (relay_port, relay_hits) = blackhole_listener().await;
+    let dialer = Dialer::resolve("tor", "local", proxy_port).expect("tor+local dialer");
+
+    for scheme in ["ws", "wss"] {
+        let url = format!("{scheme}://127.0.0.1:{relay_port}");
+        let res = molt_net::relay_ws::RelayWs::connect(&dialer, &url).await;
+        assert!(res.is_err(), "the blackhole proxy cannot complete {url}");
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        proxy_hits.load(Ordering::SeqCst) >= 2,
+        "both relay dials must reach the SOCKS proxy"
+    );
+    assert_eq!(
+        relay_hits.load(Ordering::SeqCst),
+        0,
+        "NO-LEAK VIOLATION: a Tor-configured relay dial reached the relay directly"
+    );
+}
+
+/// …and the other fail-closed edge: an onion relay with Tor OFF is refused
+/// outright — never a clearnet dial, never a DNS leak.
+#[tokio::test]
+async fn an_onion_relay_without_tor_is_refused() {
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let onion = format!("ws://{}.onion", "a".repeat(56));
+    let res = molt_net::relay_ws::RelayWs::connect(&dialer, &onion).await;
+    let err = match res {
+        Err(e) => format!("{e}"),
+        Ok(_) => panic!("an onion dial without Tor must fail closed"),
+    };
+    assert!(err.contains("Tor"), "the refusal names the reason: {err}");
+}

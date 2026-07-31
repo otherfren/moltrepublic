@@ -6,30 +6,106 @@
 //! hand-rolled JSON framing). A dumb pipe with a typed edge: no policy, no
 //! retry, no cursor here; that is `relay_runtime`'s job.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use nostr::{ClientMessage, JsonUtil, RelayMessage};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::dial::{DialStream, Dialer};
 use crate::NetError;
 
+/// TLS handshake bound (the dial itself has its own deadline).
+const TLS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A dialed stream, plain (`ws://` — loopback/LAN per §10.14, or onion where
+/// the Tor circuit already encrypts) or wrapped in the crate's ONE TLS
+/// posture (`wss://` — rustls-rustcrypto over the same dialed stream, so
+/// Tor routing and TLS compose instead of competing).
+pub(crate) enum MaybeTls {
+    Plain(DialStream),
+    Tls(Box<tokio_rustls::client::TlsStream<DialStream>>),
+}
+
+impl AsyncRead for MaybeTls {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTls {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeTls::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTls::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Dial `host:port` per the fail-closed dialer, then wrap in TLS iff `tls`.
+/// The ONE stream-building path shared by the WS connection and the NIP-11
+/// probe — SNI comes from the parsed host, the trust root is the crate's
+/// public-WebPKI config.
+pub(crate) async fn dial_maybe_tls(
+    dialer: &Dialer,
+    host: &str,
+    port: u16,
+    tls: bool,
+) -> Result<MaybeTls, NetError> {
+    let stream = dialer.dial_host(host, port).await?;
+    if !tls {
+        return Ok(MaybeTls::Plain(stream));
+    }
+    let connector = tokio_rustls::TlsConnector::from(crate::dial::public_tls_config()?);
+    let sni = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| NetError::Framing(format!("bad TLS server name `{host}`")))?;
+    let tls_stream = tokio::time::timeout(TLS_TIMEOUT, connector.connect(sni, stream))
+        .await
+        .map_err(|_| NetError::Unreachable(format!("tls {host}: handshake timed out")))?
+        .map_err(|e| NetError::Unreachable(format!("tls {host}: {e}")))?;
+    Ok(MaybeTls::Tls(Box::new(tls_stream)))
+}
+
 /// One live relay connection with typed NIP-01 I/O.
 pub struct RelayWs {
-    ws: WebSocketStream<DialStream>,
+    ws: WebSocketStream<MaybeTls>,
 }
 
 impl RelayWs {
-    /// Dial `url` (`ws://…` or `wss://…`) through the fail-closed dialer and
-    /// perform the WebSocket upgrade. The URL is parsed with the SAME WHATWG
-    /// parser the pool policy validated it with, so the dialed host can never
-    /// differ from the classified one.
-    ///
-    /// `wss://` TLS (rustls-rustcrypto over the dialed stream) lands with
-    /// plan step 8 — until then a `wss` URL fails honestly instead of
-    /// dialing anything.
+    /// Dial `url` (`ws://…` or `wss://…`) through the fail-closed dialer,
+    /// wrap `wss` in the crate's rustls-rustcrypto TLS over the dialed
+    /// stream, and perform the WebSocket upgrade. The URL is parsed with the
+    /// SAME WHATWG parser the pool policy validated it with, so the dialed
+    /// host can never differ from the classified one.
     pub async fn connect(dialer: &Dialer, url: &str) -> Result<Self, NetError> {
         let parsed = url::Url::parse(url)
             .map_err(|e| NetError::Framing(format!("relay url {url}: {e}")))?;
@@ -46,12 +122,7 @@ impl RelayWs {
         let port = parsed
             .port_or_known_default()
             .ok_or_else(|| NetError::Framing(format!("relay url {url}: no port")))?;
-        if scheme == "wss" {
-            return Err(NetError::Framing(
-                "wss:// TLS over the dialer is not wired yet (N2 plan step 8)".into(),
-            ));
-        }
-        let stream = dialer.dial_host(&host, port).await?;
+        let stream = dial_maybe_tls(dialer, &host, port, scheme == "wss").await?;
         let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
             .await
             .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))?;

@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::dial::Dialer;
-use crate::relay_ws::RelayWs;
+use crate::relay_ws::{dial_maybe_tls, RelayWs};
 use crate::NetError;
 
 /// Per-relay deadline for one publish attempt (dial + upgrade + OK).
@@ -437,19 +437,14 @@ async fn read_session(
 /// response head is parsed with `httparse`, already in the tree via
 /// tungstenite). Returns the advertised `max_message_length`; `Ok(None)` =
 /// the relay answered but names no cap. On `Err` the caller keeps the
-/// conservative [`DEFAULT_SIZE_BUDGET`]. `wss://` probes ride the step-8
-/// TLS wiring — until then they fail honestly like the WS side.
+/// conservative [`DEFAULT_SIZE_BUDGET`]. A `wss://` probe rides the same
+/// rustls-rustcrypto TLS over the same dialed stream as the WS connection.
 pub async fn probe_nip11_max_message(
     dialer: &Dialer,
     ws_url: &str,
 ) -> Result<Option<u64>, NetError> {
     let parsed = url::Url::parse(ws_url)
         .map_err(|e| NetError::Framing(format!("relay url {ws_url}: {e}")))?;
-    if parsed.scheme() == "wss" {
-        return Err(NetError::Framing(
-            "wss:// NIP-11 probe rides the step-8 TLS wiring".into(),
-        ));
-    }
     let host = parsed
         .host_str()
         .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no host")))?
@@ -457,7 +452,7 @@ pub async fn probe_nip11_max_message(
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no port")))?;
-    let mut stream = dialer.dial_host(&host, port).await?;
+    let mut stream = dial_maybe_tls(dialer, &host, port, parsed.scheme() == "wss").await?;
     let request = format!(
         "GET / HTTP/1.1\r\nhost: {host}\r\naccept: application/nostr+json\r\nconnection: close\r\n\r\n"
     );

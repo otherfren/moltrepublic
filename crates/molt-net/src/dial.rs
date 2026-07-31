@@ -32,6 +32,28 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// provider's full group set makes strict servers abort the handshake
 /// (a group triggering HelloRetryRequest the provider mishandles); pinning
 /// X25519 avoids the retry entirely, and every current endpoint negotiates it.
+/// A rustls config verifying against the public WebPKI (`webpki-roots`) —
+/// the crate's ONE outbound TLS posture: pure-Rust rustcrypto provider,
+/// TLS 1.3, X25519 (see [`x25519_provider`]). Built once and shared by the
+/// S3 client and the N2 relay WebSocket layer.
+pub(crate) fn public_tls_config() -> Result<std::sync::Arc<rustls::ClientConfig>, NetError> {
+    static CFG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
+        std::sync::OnceLock::new();
+    if let Some(cfg) = CFG.get() {
+        return Ok(cfg.clone());
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        x25519_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|e| NetError::Crypto(format!("rustls provider: {e}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(CFG.get_or_init(|| std::sync::Arc::new(config)).clone())
+}
+
 pub(crate) fn x25519_provider() -> rustls::crypto::CryptoProvider {
     let mut base = rustls_rustcrypto::provider();
     base.kx_groups
