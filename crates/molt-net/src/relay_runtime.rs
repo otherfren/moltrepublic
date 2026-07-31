@@ -133,7 +133,7 @@ impl RelayRuntime {
         // accepting what another drops is the §7 wire-size cliff (a cursor
         // advances past an event a smaller relay never stored)
         let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
-        let size = event.as_json().len() as u64;
+        let size = u64::try_from(event.as_json().len()).unwrap_or(u64::MAX);
         if size > budget {
             return Err(NetError::Framing(format!(
                 "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
