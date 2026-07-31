@@ -234,21 +234,11 @@ ring-flavored `tokio-rustls`; ADR-0005 (2026-07-31) decided against the pool
 
 Keep new code pure-Rust where you can; these are the sanctioned exceptions.
 
-## MLS / OpenMLS reference (crates/molt-net/src/mls.rs)
+## MLS / OpenMLS + transport-crate specifics
 
-Facts that cost time to (re)discover:
-
-- Version pairing (they version independently): `openmls 0.8.1`,
-  `openmls_traits 0.5.0`, `openmls_rust_crypto 0.5.1`,
-  `openmls_basic_credential 0.5.0`, `tls_codec 0.4.2`. Ciphersuite
-  `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (matches our Ed25519 + X25519).
-- `SignatureKeyPair::from_raw(ED25519, seed, pub)` wants the **32-byte Ed25519
-  seed** (what `ed25519_dalek::SigningKey::to_bytes()` returns) — NOT a 64-byte
-  expanded key, NOT seed‖pub.
-- Persist the provider's storage by bincode-serializing its public byte-keyed
-  `values` map — **not** JSON (JSON object keys can't be `Vec<u8>`). Reload with
-  `MlsGroup::load(storage, &group_id)`; the signer round-trips via
-  `SignatureKeyPair::read`.
+Moved to `crates/molt-net/CLAUDE.md`, which loads only when you work under
+that crate: OpenMLS version pairing and API traps, the concurrent-commit
+convergence rule, and the reusable test doubles.
 
 ## Transport (loopback today) + the delivery guarantee
 
