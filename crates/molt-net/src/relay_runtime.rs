@@ -21,18 +21,33 @@ use crate::NetError;
 /// Per-relay deadline for one publish attempt (dial + upgrade + OK).
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A subscription reader's per-frame idle bound. Liveness/reconnect proper is
-/// plan step 7 — until then an hour of silence ends the reader instead of
-/// pinning a task forever.
-const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
+/// A subscription reader's per-frame idle bound: with a keepalive Ping every
+/// [`KEEPALIVE`], a healthy connection is never this quiet, so silence past
+/// it means the flow died invisibly (NAT/middlebox) — cut and reconnect.
+const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// Idle interval after which the reader pings the relay, so a silently
+/// dropped flow surfaces in seconds rather than at the idle bound.
+const KEEPALIVE: Duration = Duration::from_secs(45);
+
+/// A (re)connect must complete inside this: dial and TLS carry their own
+/// deadlines, but the WS upgrade itself would otherwise wait forever on a
+/// relay that accepts bytes and never answers (review finding, HIGH).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a session must live for the reconnect backoff to reset.
+const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 
 /// Dedup ring capacity: enough for the WP4a-horizon backlog of a busy
 /// republic, bounded so a hostile relay cannot balloon memory.
 const DEDUP_CAP: usize = 4096;
 
-/// Clock-skew margin for the cursor clamp: a delivered event may advance the
-/// cursor at most this far past LOCAL now (concept §4.4's ±1h skew).
-const CURSOR_SKEW: u64 = 3_600;
+/// Clock-skew margin (concept §4.4's ±1h): how far past local now a peer's
+/// `created_at` may plausibly sit. It is deliberately NOT applied to the
+/// cursor — the cursor clamps to local now, so a future-dated event cannot
+/// eat into the resubscribe overlap. The envelope layer (N3) applies it when
+/// judging an event's freshness.
+pub const CURSOR_SKEW: u64 = 3_600;
 
 /// Re-subscribe overlap: `since = cursor − OVERLAP`, the full NIP-59
 /// timestamp-tweak width — without it, offline gift-wraps are permanently
@@ -189,7 +204,12 @@ impl RelayRuntime {
         // accepting what another drops is the §7 wire-size cliff (a cursor
         // advances past an event a smaller relay never stored)
         let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
-        let size = u64::try_from(event.as_json().len()).unwrap_or(u64::MAX);
+        // NIP-11's cap bounds the WEBSOCKET MESSAGE, not the event JSON —
+        // measure what actually goes on the wire, `["EVENT",{…}]` framing
+        // included, or an event exactly at the cap ships a frame over it
+        // (review finding)
+        let size = u64::try_from(ClientMessage::event(event.clone()).as_json().len())
+            .unwrap_or(u64::MAX);
         if size > budget {
             return Err(NetError::Framing(format!(
                 "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
@@ -253,8 +273,20 @@ impl DedupRing {
 }
 
 /// A pooled subscription: one filter, every relay, ONE deduplicated stream
-/// out. Dropping it aborts the per-relay readers (the sanctioned inbound
-/// abort — outbound draining rules don't apply to pure readers).
+/// out.
+///
+/// **Dedup horizon.** The ring holds the last [`DEDUP_CAP`] event ids, so
+/// relay-count copies collapse within that window; a republic with more
+/// events than that inside the 48 h resubscribe overlap can see an evicted
+/// id re-delivered after a reconnect. That is within the at-least-once
+/// contract (`docs/transport/delivery_guarantee.md`) — but the envelope
+/// layer above MUST stay idempotent and must not read this stream as
+/// exactly-once.
+///
+/// **Teardown.** Dropping aborts the per-relay supervisors. The only
+/// outbound frames they own are subscription-scoped (the REQ and a NIP-42
+/// AUTH), so losing them on teardown is lossless by construction — the
+/// drain rule that governs the delivery path does not apply here.
 pub struct Subscription {
     rx: mpsc::Receiver<Event>,
     readers: Vec<tokio::task::JoinHandle<()>>,
@@ -263,6 +295,10 @@ pub struct Subscription {
     connected: usize,
     /// How many of them finished their stored-events replay.
     eose: tokio::sync::watch::Receiver<usize>,
+    /// Shared health map + this subscription's relays, so teardown can clear
+    /// the entries instead of leaving a stale `Up` behind (review finding).
+    health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    urls: Vec<String>,
 }
 
 impl Subscription {
@@ -292,6 +328,15 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         for reader in &self.readers {
             reader.abort();
+        }
+        // …and drop the health entries with them: a torn-down subscription
+        // has no connections, so reporting `Up` would be a stale lie to the
+        // N5 relay-status surface. `try_lock` keeps Drop non-blocking; the
+        // supervisors are already aborted either way.
+        if let Ok(mut health) = self.health.try_lock() {
+            for url in &self.urls {
+                health.remove(url);
+            }
         }
     }
 }
@@ -338,15 +383,31 @@ impl RelayRuntime {
             backoff: self.backoff,
             auth_keys: self.auth_keys.clone(),
         });
+        // the FIRST connects run CONCURRENTLY and bounded: sequentially, one
+        // relay that accepts TCP but never answers the WS upgrade would wedge
+        // subscribe() — and with it the engine task driving it (review
+        // finding, HIGH)
+        let firsts = futures_util::future::join_all(self.urls.iter().map(|url| {
+            let shared = shared.clone();
+            async move {
+                tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, url))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
+        }))
+        .await;
+
         let mut supervisors = Vec::new();
-        let mut connected = 0usize;
-        for url in &self.urls {
-            // the FIRST connect runs inline: it decides the EOSE denominator
-            // and gives subscribe() its ≥1-relay success criterion
-            let first = connect_and_req(&shared, url).await.ok();
+        // the EOSE gate's denominator is exactly the set of relays whose
+        // FIRST connect succeeded — and only those relays may count toward
+        // it, or a late-arriving relay's EOSE would satisfy a gate it was
+        // never part of and synced() would lie (review finding, HIGH)
+        let mut gated: Vec<String> = Vec::new();
+        for (url, first) in self.urls.iter().zip(firsts) {
             let up = first.is_some();
             if up {
-                connected += 1;
+                gated.push(url.clone());
             }
             shared
                 .health
@@ -355,14 +416,29 @@ impl RelayRuntime {
                 .insert(url.clone(), if up { RelayHealth::Up } else { RelayHealth::Down });
             let shared = shared.clone();
             let url = url.clone();
-            supervisors.push(tokio::spawn(supervise(shared, url, first)));
+            let counts = up;
+            supervisors.push(tokio::spawn(supervise(shared, url, first, counts)));
         }
-        if connected == 0 {
+        if gated.is_empty() {
+            // abort before returning: a dropped JoinHandle DETACHES, and a
+            // detached supervisor would redial a dead relay forever and keep
+            // writing health for a subscription that does not exist (review
+            // finding, HIGH)
+            for s in supervisors {
+                s.abort();
+            }
             return Err(NetError::Unreachable(
                 "no relay accepted the subscription".into(),
             ));
         }
-        Ok(Subscription { rx, readers: supervisors, connected, eose: eose_rx })
+        Ok(Subscription {
+            rx,
+            readers: supervisors,
+            connected: gated.len(),
+            eose: eose_rx,
+            health: self.health.clone(),
+            urls: self.urls.clone(),
+        })
     }
 }
 
@@ -371,19 +447,29 @@ impl RelayRuntime {
 /// future-dated events (concept §4.3).
 async fn connect_and_req(shared: &SubShared, url: &str) -> Result<RelayWs, NetError> {
     let mut ws = RelayWs::connect(&shared.dialer, url).await?;
-    place_req(shared, url, &mut ws).await?;
+    // ONE subscription id per session: the post-AUTH re-placement reuses it
+    // (NIP-01 overwrites a REQ by id), so the pre-auth subscription is not
+    // left open delivering every event a second time (review finding)
+    let sub_id = SubscriptionId::generate();
+    place_req(shared, url, &mut ws, &sub_id).await?;
+    ws.set_subscription(sub_id);
     Ok(ws)
 }
 
 /// Place (or re-place, after a NIP-42 handshake) the subscription REQ.
-async fn place_req(shared: &SubShared, url: &str, ws: &mut RelayWs) -> Result<(), NetError> {
+async fn place_req(
+    shared: &SubShared,
+    url: &str,
+    ws: &mut RelayWs,
+    sub_id: &SubscriptionId,
+) -> Result<(), NetError> {
     let mut relay_filter = shared.filter.clone();
     if let Some(cursor) = shared.cursors.lock().await.get(url) {
         relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
             cursor.saturating_sub(CURSOR_OVERLAP),
         ));
     }
-    ws.send(ClientMessage::req(SubscriptionId::generate(), vec![relay_filter]))
+    ws.send(ClientMessage::req(sub_id.clone(), vec![relay_filter]))
         .await
 }
 
@@ -392,19 +478,27 @@ async fn place_req(shared: &SubShared, url: &str, ws: &mut RelayWs) -> Result<()
 /// us — pure inbound, the sanctioned abort). The EOSE gate is counted at
 /// most ONCE per relay across all sessions, so a reconnect cannot inflate
 /// the denominator's numerator.
-async fn supervise(shared: Arc<SubShared>, url: String, first: Option<RelayWs>) {
+async fn supervise(
+    shared: Arc<SubShared>,
+    url: String,
+    first: Option<RelayWs>,
+    counts_toward_eose: bool,
+) {
     let (initial, cap) = shared.backoff;
     let mut backoff = initial;
     let mut session = first;
-    let mut eose_counted = false;
+    // relays that were down at subscribe time are NOT in the gate's
+    // denominator, so they must never increment its numerator either
+    let mut eose_counted = !counts_toward_eose;
     loop {
         let ws = match session.take() {
             Some(ws) => ws,
             None => {
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Connecting);
-                match connect_and_req(&shared, &url).await {
-                    Ok(ws) => ws,
-                    Err(_) => {
+                match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, &url)).await {
+                    Ok(Ok(ws)) => ws,
+                    // failed or hung past the connect deadline
+                    _ => {
                         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(cap);
@@ -414,9 +508,16 @@ async fn supervise(shared: Arc<SubShared>, url: String, first: Option<RelayWs>) 
             }
         };
         shared.health.lock().await.insert(url.clone(), RelayHealth::Up);
-        backoff = initial;
-        if read_session(&shared, &url, ws, &mut eose_counted).await.is_break() {
+        let started = tokio::time::Instant::now();
+        let outcome = read_session(&shared, &url, ws, &mut eose_counted).await;
+        if outcome.is_break() {
             return; // consumer gone — nothing left to supervise
+        }
+        // reset the backoff only after a session that LIVED: a relay that
+        // accepts and drops immediately (dead backend, ban) would otherwise
+        // pin us at the initial delay forever, hammering it (review finding)
+        if started.elapsed() >= HEALTHY_SESSION {
+            backoff = initial;
         }
         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
         tokio::time::sleep(backoff).await;
@@ -432,14 +533,35 @@ async fn read_session(
     mut ws: RelayWs,
     eose_counted: &mut bool,
 ) -> std::ops::ControlFlow<()> {
+    let mut last_ping = tokio::time::Instant::now();
+    let mut pending_auth: Option<nostr::EventId> = None;
     loop {
-        match ws.recv(SUB_IDLE_TIMEOUT).await {
+        // keepalive: a flow silently dropped by a NAT/middlebox otherwise
+        // reads as a healthy-but-quiet connection until the idle bound
+        if last_ping.elapsed() >= KEEPALIVE {
+            if ws.ping().await.is_err() {
+                return std::ops::ControlFlow::Continue(());
+            }
+            last_ping = tokio::time::Instant::now();
+        }
+        match ws.recv(KEEPALIVE.min(SUB_IDLE_TIMEOUT)).await {
             Ok(RelayMessage::Event { event, .. }) => {
+                // VERIFY BEFORE TRUSTING (review 2026-07-31, HIGH): the id
+                // and signature arrive verbatim from an untrusted relay
+                // (`RelayMessage::from_json` verifies NOTHING). Without this
+                // check a single pool relay could SUPPRESS any event it can
+                // name: send garbage carrying that event's id, the dedup ring
+                // records the id, and the honest relay's real copy is then
+                // dropped as a duplicate — multi-relay redundancy defeated.
+                if event.verify().is_err() {
+                    continue;
+                }
                 // this relay DELIVERED the event, so its cursor advances
-                // (duplicates included) — but never past local now + skew:
-                // a +24h `created_at` must not blind the next reopen
-                let clamp = nostr::Timestamp::now().as_secs() + CURSOR_SKEW;
-                let stamp = event.created_at.as_secs().min(clamp);
+                // (duplicates included) — but never past LOCAL NOW: the skew
+                // margin bounds what we ACCEPT, never the resume point, or a
+                // +1h event would eat an hour of the NIP-59 overlap
+                let now = nostr::Timestamp::now().as_secs();
+                let stamp = event.created_at.as_secs().min(now);
                 {
                     let mut c = shared.cursors.lock().await;
                     let entry = c.entry(url.to_string()).or_insert(0);
@@ -458,28 +580,67 @@ async fn read_session(
             }
             Ok(RelayMessage::Auth { challenge }) => {
                 // NIP-42 on the subscribe connection: answer with the
-                // transport anchor and RE-PLACE the REQ (the relay refused
-                // the pre-auth one). Without keys we stay connected and
-                // honestly unsynced — the caller sees it via synced().
-                if let Some(keys) = &shared.auth_keys {
-                    let auth_event = nostr::RelayUrl::parse(url).ok().and_then(|relay_url| {
-                        nostr::EventBuilder::auth(challenge.as_ref(), relay_url)
-                            .sign_with_keys(keys)
-                            .ok()
-                    });
-                    if let Some(auth_event) = auth_event {
-                        if ws.send(ClientMessage::auth(auth_event)).await.is_err()
-                            || place_req(shared, url, &mut ws).await.is_err()
-                        {
-                            return std::ops::ControlFlow::Continue(());
-                        }
-                    }
+                // transport anchor and RE-PLACE the REQ under the SAME
+                // subscription id (the relay refused the pre-auth one).
+                // Without keys we stay connected and honestly unsynced —
+                // the caller sees it via synced().
+                let Some(keys) = &shared.auth_keys else { continue };
+                let auth_event = nostr::RelayUrl::parse(url).ok().and_then(|relay_url| {
+                    nostr::EventBuilder::auth(challenge.as_ref(), relay_url)
+                        .sign_with_keys(keys)
+                        .ok()
+                });
+                let Some(auth_event) = auth_event else { continue };
+                let auth_id = auth_event.id;
+                if ws.send(ClientMessage::auth(auth_event)).await.is_err() {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                pending_auth = Some(auth_id);
+                let sub_id = ws.subscription().cloned().unwrap_or_else(SubscriptionId::generate);
+                if place_req(shared, url, &mut ws, &sub_id).await.is_err() {
+                    return std::ops::ControlFlow::Continue(());
                 }
             }
-            // OK/NOTICE/CLOSED etc. — not subscription traffic
+            // the relay's verdict on OUR auth event: a rejection would
+            // otherwise leave a connected-but-never-syncing session with no
+            // reason anywhere (review finding)
+            Ok(RelayMessage::Ok { event_id, status, message })
+                if pending_auth == Some(event_id) =>
+            {
+                pending_auth = None;
+                if !status {
+                    tracing::warn!(relay = %url, reason = %message, "NIP-42 auth rejected");
+                    return std::ops::ControlFlow::Continue(());
+                }
+            }
+            // the relay ENDED our subscription. `auth-required:` is the
+            // NIP-42 handshake asking us to authenticate — the AUTH
+            // challenge follows on the same connection and the REQ is
+            // re-placed there, so the session lives. Any OTHER reason
+            // (rate limit, bad filter, subscription quota) leaves a live
+            // but useless connection: treat it as session death so the
+            // supervisor backs off and retries instead of parking until
+            // the idle bound (review finding).
+            Ok(RelayMessage::Closed { message, .. }) => {
+                if !message.starts_with("auth-required:") {
+                    tracing::warn!(relay = %url, reason = %message, "relay closed the subscription");
+                    return std::ops::ControlFlow::Continue(());
+                }
+            }
+            // OK for other events / NOTICE etc. — not subscription traffic
             Ok(_) => {}
-            // closed or idle past the bound — the session is over
-            Err(_) => return std::ops::ControlFlow::Continue(()),
+            // a closed stream is session death; a timeout is just the
+            // keepalive window elapsing — ping and keep reading, unless the
+            // connection has been silent past the idle bound
+            Err(_) => {
+                if last_ping.elapsed() >= SUB_IDLE_TIMEOUT {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                if ws.ping().await.is_err() {
+                    return std::ops::ControlFlow::Continue(());
+                }
+                last_ping = tokio::time::Instant::now();
+            }
         }
     }
 }
@@ -505,7 +666,13 @@ pub async fn probe_nip11_max_message(
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no port")))?;
-    let mut stream = dial_maybe_tls(dialer, &host, port, parsed.scheme() == "wss").await?;
+    let mut stream = dial_maybe_tls(
+        &crate::relay_ws::dialer_for(dialer, ws_url),
+        &host,
+        port,
+        parsed.scheme() == "wss",
+    )
+    .await?;
     let request = format!(
         "GET / HTTP/1.1\r\nhost: {host}\r\naccept: application/nostr+json\r\nconnection: close\r\n\r\n"
     );

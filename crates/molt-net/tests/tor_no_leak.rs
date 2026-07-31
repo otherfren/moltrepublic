@@ -193,17 +193,20 @@ async fn socks_handshake_carries_the_per_host_isolation_username() {
 }
 
 /// N2 step 8 KEYSTONE — the WS twin of the T4 no-leak harness: a
-/// Tor-configured relay dial reaches ONLY the SOCKS proxy, never the relay's
-/// host:port directly — for wss exactly like for ws (TLS wraps the dialed
-/// stream; it never opens its own).
+/// Tor-configured dial of a CLEARNET relay reaches only the SOCKS proxy,
+/// for both schemes (TLS is layered above a dialed stream and never opens a
+/// socket of its own — otherwise a second connection would appear here).
+/// The relay host is a name, so a direct-dial regression would resolve it
+/// locally: the proxy counter is the positive proof, and SOCKS5h keeps the
+/// name off this machine's resolver.
 #[tokio::test]
 async fn relay_ws_under_tor_targets_the_socks_proxy_never_the_relay() {
     let (proxy_port, proxy_hits) = blackhole_listener().await;
-    let (relay_port, relay_hits) = blackhole_listener().await;
+    let (leak_port, leak_hits) = blackhole_listener().await;
     let dialer = Dialer::resolve("tor", "local", proxy_port).expect("tor+local dialer");
 
     for scheme in ["ws", "wss"] {
-        let url = format!("{scheme}://127.0.0.1:{relay_port}");
+        let url = format!("{scheme}://relay.example.test:{leak_port}");
         let res = molt_net::relay_ws::RelayWs::connect(&dialer, &url).await;
         assert!(res.is_err(), "the blackhole proxy cannot complete {url}");
     }
@@ -213,9 +216,35 @@ async fn relay_ws_under_tor_targets_the_socks_proxy_never_the_relay() {
         "both relay dials must reach the SOCKS proxy"
     );
     assert_eq!(
-        relay_hits.load(Ordering::SeqCst),
+        leak_hits.load(Ordering::SeqCst),
         0,
         "NO-LEAK VIOLATION: a Tor-configured relay dial reached the relay directly"
+    );
+}
+
+/// The deliberate counterpart (§10.14, review finding): a LOCAL relay is
+/// dialed DIRECTLY even with Tor configured — a Tor proxy refuses private
+/// addresses, and routing one through it would disclose the local address
+/// while never connecting. That is exactly why a local relay sits behind
+/// the same explicit per-session gate as clearnet.
+#[tokio::test]
+async fn a_local_relay_is_dialed_directly_even_under_tor() {
+    let (proxy_port, proxy_hits) = blackhole_listener().await;
+    let (relay_port, relay_hits) = blackhole_listener().await;
+    let dialer = Dialer::resolve("tor", "local", proxy_port).expect("tor+local dialer");
+
+    let url = format!("ws://127.0.0.1:{relay_port}");
+    let res = molt_net::relay_ws::RelayWs::connect(&dialer, &url).await;
+    assert!(res.is_err(), "the blackhole relay cannot complete the upgrade");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        relay_hits.load(Ordering::SeqCst) >= 1,
+        "a local relay must be reached directly"
+    );
+    assert_eq!(
+        proxy_hits.load(Ordering::SeqCst),
+        0,
+        "…and must not be pushed through the Tor proxy, which would refuse it"
     );
 }
 

@@ -22,6 +22,12 @@ use crate::NetError;
 /// TLS handshake bound (the dial itself has its own deadline).
 const TLS_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Largest WebSocket message/frame accepted from a relay. Our own traffic is
+/// bounded by the NIP-11 publish budget (≤128 KiB by default); this leaves
+/// headroom for a generous relay without letting a hostile one force a
+/// multi-megabyte allocation per connection.
+const MAX_WS_MESSAGE: usize = 1024 * 1024;
+
 /// A dialed stream, plain (`ws://` — loopback/LAN per §10.14, or onion where
 /// the Tor circuit already encrypts) or wrapped in the crate's ONE TLS
 /// posture (`wss://` — rustls-rustcrypto over the same dialed stream, so
@@ -71,6 +77,20 @@ impl AsyncWrite for MaybeTls {
     }
 }
 
+/// The dialer to use for THIS relay. A `RelayKind::Local` relay (loopback,
+/// RFC1918, `localhost` — §10.14) lives on the operator's own machine or
+/// network: routing it through Tor cannot work (the proxy refuses private
+/// addresses) and would disclose the local address to the proxy. It is
+/// dialed DIRECTLY — which is exactly why it sits behind the same explicit
+/// per-session gate as clearnet. Everything else keeps the configured
+/// fail-closed dialer unchanged.
+pub(crate) fn dialer_for(dialer: &Dialer, url: &str) -> Dialer {
+    if molt_core::relay::relay_kind(url) == molt_core::relay::RelayKind::Local {
+        return Dialer::Direct;
+    }
+    dialer.clone()
+}
+
 /// Dial `host:port` per the fail-closed dialer, then wrap in TLS iff `tls`.
 /// The ONE stream-building path shared by the WS connection and the NIP-11
 /// probe — SNI comes from the parsed host, the trust root is the crate's
@@ -86,6 +106,8 @@ pub(crate) async fn dial_maybe_tls(
         return Ok(MaybeTls::Plain(stream));
     }
     let connector = tokio_rustls::TlsConnector::from(crate::dial::public_tls_config()?);
+    // an IP literal is a valid server name too (rustls distinguishes DNS
+    // names from IP addresses; `try_from(&str)` handles both)
     let sni = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| NetError::Framing(format!("bad TLS server name `{host}`")))?;
     let tls_stream = tokio::time::timeout(TLS_TIMEOUT, connector.connect(sni, stream))
@@ -98,6 +120,22 @@ pub(crate) async fn dial_maybe_tls(
 /// One live relay connection with typed NIP-01 I/O.
 pub struct RelayWs {
     ws: WebSocketStream<MaybeTls>,
+    /// This session's subscription id, once a REQ was placed — so a
+    /// re-placement (after NIP-42) overwrites it instead of opening a
+    /// second subscription.
+    sub_id: Option<nostr::SubscriptionId>,
+}
+
+impl RelayWs {
+    /// Remember this session's subscription id.
+    pub fn set_subscription(&mut self, id: nostr::SubscriptionId) {
+        self.sub_id = Some(id);
+    }
+
+    /// This session's subscription id, if a REQ was placed.
+    pub fn subscription(&self) -> Option<&nostr::SubscriptionId> {
+        self.sub_id.as_ref()
+    }
 }
 
 impl RelayWs {
@@ -115,18 +153,37 @@ impl RelayWs {
                 "relay url {url}: scheme must be ws or wss"
             )));
         }
+        // `host_str()` brackets an IPv6 literal; the dialer and the TLS SNI
+        // both want the bare address (review finding)
         let host = parsed
             .host_str()
             .ok_or_else(|| NetError::Framing(format!("relay url {url}: no host")))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = parsed
             .port_or_known_default()
             .ok_or_else(|| NetError::Framing(format!("relay url {url}: no port")))?;
-        let stream = dial_maybe_tls(dialer, &host, port, scheme == "wss").await?;
-        let (ws, _resp) = tokio_tungstenite::client_async(url, stream)
+        let stream = dial_maybe_tls(&dialer_for(dialer, url), &host, port, scheme == "wss").await?;
+        // Bound what a hostile relay may make us allocate: tungstenite's
+        // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
+        // anything this client exchanges (the publish budget is ≤128 KiB).
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE))
+            .max_frame_size(Some(MAX_WS_MESSAGE));
+        let (ws, _resp) = tokio_tungstenite::client_async_with_config(url, stream, Some(config))
             .await
             .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))?;
-        Ok(Self { ws })
+        Ok(Self { ws, sub_id: None })
+    }
+
+    /// Send a WebSocket Ping — the keepalive that makes a silently dropped
+    /// flow (NAT/middlebox) surface in seconds instead of at the idle bound.
+    pub async fn ping(&mut self) -> Result<(), NetError> {
+        self.ws
+            .send(Message::Ping(Vec::new().into()))
+            .await
+            .map_err(|e| NetError::Unreachable(format!("ws ping: {e}")))
     }
 
     /// Send one typed client message.

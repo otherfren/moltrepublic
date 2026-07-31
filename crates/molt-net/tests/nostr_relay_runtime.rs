@@ -17,6 +17,16 @@ use nostr_relay_builder::MockRelay;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A URL nothing listens on: bind a port, learn it, drop the listener. Port
+/// 9 (discard) is NOT safe — a host running inetd/systemd discard would let
+/// the "dead" relay connect and silently invert these tests.
+async fn dead_relay_url() -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    drop(l);
+    format!("ws://127.0.0.1:{port}")
+}
+
 fn h_tagged_event(keys: &Keys, h: &str, content: &str) -> nostr::Event {
     EventBuilder::new(Kind::Custom(445), content)
         .tag(Tag::parse(["h", h]).expect("h tag"))
@@ -81,7 +91,7 @@ async fn publish_is_one_ok_with_per_relay_outcomes() {
 
     let relay = MockRelay::run().await.expect("relay");
     let live = relay.url().await.to_string();
-    let dead = "ws://127.0.0.1:9".to_string(); // discard port — nothing listens
+    let dead = dead_relay_url().await; // a bound-then-dropped port: nothing listens
     let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
     let keys = Keys::generate();
     let event = h_tagged_event(&keys, "6d6f6c74", "step2");
@@ -225,7 +235,7 @@ async fn synced_means_every_connected_relay_sent_eose() {
         vec![
             r1.url().await.to_string(),
             r2.url().await.to_string(),
-            "ws://127.0.0.1:9".to_string(), // dead — never connects
+            dead_relay_url().await, // dead — never connects
         ],
     );
     rt.publish(&h_tagged_event(&keys, "6d6f6c74", "stored"))
@@ -523,4 +533,142 @@ async fn real_relay_roundtrip_over_the_own_runtime() {
             None => panic!("the published event did not come back"),
         }
     }
+}
+
+/// REVIEW KEYSTONE (2026-07-31, HIGH) — a relay cannot SUPPRESS an event by
+/// claiming its id: delivered events are verified (id + signature) before
+/// they may touch the dedup ring. Without the check, one pool relay sends
+/// garbage carrying the victim's id, the ring records it, and the honest
+/// relay's real copy is dropped as a duplicate — multi-relay redundancy
+/// defeated, and the consumer never learns.
+#[tokio::test]
+async fn a_relay_cannot_suppress_an_event_by_forging_its_id() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let honest = MockRelay::run().await.expect("honest relay");
+    let honest_url = honest.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let real = h_tagged_event(&keys, "6d6f6c74", "the real event");
+
+    // a hostile relay: on any REQ it emits an event that CLAIMS the real
+    // event's id but carries different content (so the id no longer hashes)
+    let forged = serde_json::json!({
+        "id": real.id.to_hex(),
+        "pubkey": real.pubkey.to_hex(),
+        "created_at": real.created_at.as_secs(),
+        "kind": 445,
+        "tags": [["h", "6d6f6c74"]],
+        "content": "SUPPRESSOR",
+        "sig": real.sig.to_string(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let hostile_url = format!("ws://127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let forged = forged.clone();
+            tokio::spawn(async move {
+                use futures_util::{SinkExt, StreamExt};
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Ok(text) = msg.into_text() else { continue };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+                        continue;
+                    };
+                    if parsed.get(0).and_then(|v| v.as_str()) != Some("REQ") {
+                        continue;
+                    }
+                    let sub = parsed.get(1).and_then(|v| v.as_str()).unwrap_or("s").to_string();
+                    let ev = serde_json::json!(["EVENT", sub, forged]).to_string();
+                    let eose = serde_json::json!(["EOSE", sub]).to_string();
+                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::text(ev)).await;
+                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::text(eose)).await;
+                }
+            });
+        }
+    });
+
+    // seed the honest relay, then subscribe across both
+    RelayRuntime::new(dialer.clone(), vec![honest_url.clone()])
+        .publish(&real)
+        .await
+        .expect("seed the honest relay");
+
+    let rt = RelayRuntime::new(dialer, vec![hostile_url, honest_url]);
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+
+    let mut got_real = false;
+    while let Some(ev) = sub.recv(Duration::from_secs(2)).await {
+        assert_ne!(ev.content, "SUPPRESSOR", "an unverifiable event must never be delivered");
+        if ev.id == real.id {
+            got_real = true;
+        }
+    }
+    assert!(got_real, "the honest relay's real event must still arrive");
+}
+
+/// REVIEW KEYSTONE — publish NEVER authenticates (mdk_eval §5): against a
+/// relay that REQUIRES auth for writes, publishing fails loudly naming the
+/// tradeoff even when auth keys are configured — an authenticated publish
+/// channel would link every ephemeral-key event to the member.
+#[tokio::test]
+async fn publish_never_authenticates_even_with_keys() {
+    use molt_net::relay_runtime::RelayRuntime;
+    use nostr_relay_builder::builder::{RelayBuilderNip42, RelayBuilderNip42Mode};
+    use nostr_relay_builder::{LocalRelay, RelayBuilder};
+
+    let relay = LocalRelay::new(
+        RelayBuilder::default().nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Write }),
+    );
+    relay.run().await.expect("run write-auth relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+
+    let rt = RelayRuntime::new(dialer, vec![url]).with_auth_keys(Some(Keys::generate()));
+    let err = rt
+        .publish(&h_tagged_event(&keys, "6d6f6c74", "must not authenticate"))
+        .await
+        .expect_err("an auth-required write must be refused, not authenticated");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("refused to link the publish key"),
+        "the refusal names the privacy tradeoff: {msg}"
+    );
+}
+
+/// REVIEW KEYSTONE — the EOSE gate's numerator and denominator are the SAME
+/// set: a relay that connects but never replays keeps `synced()` false (an
+/// implementation counting any EOSE, or one with denominator 1, would pass
+/// the dead-relay test but fail this one).
+#[tokio::test]
+async fn a_connected_relay_that_never_replays_keeps_sync_false() {
+    use molt_net::relay_runtime::RelayRuntime;
+    use nostr_relay_builder::builder::{RelayBuilderNip42, RelayBuilderNip42Mode};
+    use nostr_relay_builder::{LocalRelay, RelayBuilder};
+
+    let healthy = MockRelay::run().await.expect("healthy relay");
+    // NIP-42 Read mode without auth keys: connects, accepts the REQ, never
+    // replays — exactly a connected-but-not-synced relay
+    let silent = LocalRelay::new(
+        RelayBuilder::default().nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Read }),
+    );
+    silent.run().await.expect("run silent relay");
+
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let rt = RelayRuntime::new(
+        dialer,
+        vec![healthy.url().await.to_string(), silent.url().await.to_string()],
+    );
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+    assert!(
+        !sub.synced(Duration::from_secs(2)).await,
+        "one connected relay never replayed — the pool is NOT synced"
+    );
 }
