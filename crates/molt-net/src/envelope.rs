@@ -104,6 +104,146 @@ pub fn decode_base64(content: &str) -> Result<Vec<u8>, EnvelopeError> {
         .map_err(|e| EnvelopeError::Shape(format!("not base64: {e}")))
 }
 
+/// The h-tag rotation window: **24 h, aligned to UTC day boundaries, the
+/// SAME for every republic** (concept §4.4). Uniformity is the load-bearing
+/// choice: a per-group window would make the rotation *cadence* a
+/// fingerprint and each rotation a solo, timing-linkable event, while one
+/// shared window rotates every group at once — all old tags go quiet and
+/// all new ones appear together, so an observer gets a batch with no
+/// old→new mapping. Only the timing is uniform; the tag VALUES stay
+/// per-group secret.
+pub const H_WINDOW: u64 = 86_400;
+
+/// The group's `h` tag for the window containing `unix_secs`:
+/// `SHA-256("molt-h-tag-v1\0" ‖ rotation_seed ‖ le64(window))`, lowercase
+/// hex. Deterministic and announcement-free — every member derives the same
+/// tag independently, and an offline member re-derives whatever it missed
+/// ([`h_tags_for_catchup`]), so there is no rotation to miss and no grace
+/// window to link.
+///
+/// The `rotation_seed` is a STABLE group secret set at founding and
+/// delivered in the Welcome — never the epoch-rotating exporter secret.
+pub fn h_tag(rotation_seed: &[u8; 32], unix_secs: u64) -> String {
+    use sha2::Digest as _;
+    let window = unix_secs / H_WINDOW;
+    let mut hasher = sha2::Sha256::new_with_prefix(b"molt-h-tag-v1\0");
+    hasher.update(rotation_seed);
+    hasher.update(window.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Every `h` tag from the window of `since_secs` through the window of
+/// `now_secs`, oldest first — what a returning member subscribes to so the
+/// windows it slept through are not lost. Bounded by `max_windows` (newest
+/// kept): a long-absent member asks a relay for a horizon, never for a year.
+pub fn h_tags_for_catchup(
+    rotation_seed: &[u8; 32],
+    since_secs: u64,
+    now_secs: u64,
+    max_windows: usize,
+) -> Vec<String> {
+    let first = since_secs / H_WINDOW;
+    let last = now_secs / H_WINDOW;
+    let windows = last.saturating_sub(first).saturating_add(1);
+    let take = u64::try_from(max_windows).unwrap_or(u64::MAX).min(windows);
+    let start = last.saturating_sub(take.saturating_sub(1));
+    (start..=last)
+        .map(|w| h_tag(rotation_seed, w.saturating_mul(H_WINDOW)))
+        .collect()
+}
+
+/// Why a kind-445 event's tag set is not acceptable. The list IS the
+/// contract (`mdk_evaluation.md` §2.1): exactly one `h`, at most one
+/// `expiration`, and **no other tag whatsoever** — a group event carries no
+/// `p`, no `e`, nothing a relay or a peer could use to say more about it
+/// than "this belongs to that group id".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TagError {
+    /// No `h` tag at all — the event names no group.
+    #[error("no h tag")]
+    MissingH,
+    /// More than one `h`. Counting OCCURRENCES rather than taking the first
+    /// match is the point: a first-match extractor lets a second tag say
+    /// something different to a different reader.
+    #[error("more than one h tag")]
+    DuplicateH,
+    /// `["h"]` with no value.
+    #[error("h tag without a value")]
+    ValuelessH,
+    /// `["h", v, …]` — an `h` tag with more than its value.
+    #[error("h tag with extra elements")]
+    OversizedH,
+    /// A `[]` tag.
+    #[error("empty tag")]
+    EmptyTag,
+    /// A tag that is neither `h` nor `expiration`.
+    #[error("unexpected tag: {0}")]
+    UnknownTag(String),
+    /// The `h` value is not exactly 64 lowercase hex characters.
+    #[error("h value must be 64 lowercase hex characters")]
+    BadHValue,
+    /// More than one `expiration`.
+    #[error("more than one expiration tag")]
+    DuplicateExpiration,
+    /// `expiration` is missing, negative, non-numeric, or does not fit.
+    #[error("expiration must be one non-negative integer")]
+    BadExpiration,
+}
+
+/// Validate a kind-445 event's tags and return `(h_value, expiration)`.
+///
+/// Strict by construction: occurrences are COUNTED, the `h` value must be
+/// the canonical 64-lowercase-hex group id (an uppercase spelling is a
+/// different string to a relay's index, so it is refused rather than
+/// normalized), and any tag outside the two allowed ones rejects the whole
+/// event. Shape is checked before anything is decrypted (the peeler's
+/// order): a frame we refuse never reaches the AEAD.
+pub fn parse_445_tags(tags: &[Vec<String>]) -> Result<(String, Option<u64>), TagError> {
+    let mut h: Option<&String> = None;
+    let mut expiration: Option<u64> = None;
+    let mut h_seen = 0usize;
+    let mut exp_seen = 0usize;
+    for tag in tags {
+        let name = tag.first().ok_or(TagError::EmptyTag)?;
+        match name.as_str() {
+            "h" => {
+                h_seen += 1;
+                if h_seen > 1 {
+                    return Err(TagError::DuplicateH);
+                }
+                match tag.len() {
+                    1 => return Err(TagError::ValuelessH),
+                    2 => h = Some(&tag[1]),
+                    _ => return Err(TagError::OversizedH),
+                }
+            }
+            "expiration" => {
+                exp_seen += 1;
+                if exp_seen > 1 {
+                    return Err(TagError::DuplicateExpiration);
+                }
+                let raw = tag.get(1).ok_or(TagError::BadExpiration)?;
+                // digits only: `str::parse` would accept a leading `+`, and
+                // a relay reading the plain integer would disagree with us
+                if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) || tag.len() != 2 {
+                    return Err(TagError::BadExpiration);
+                }
+                expiration = Some(raw.parse::<u64>().map_err(|_| TagError::BadExpiration)?);
+            }
+            other => return Err(TagError::UnknownTag(other.to_string())),
+        }
+    }
+    let h = h.ok_or(TagError::MissingH)?;
+    if h.len() != 64
+        || !h
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(TagError::BadHValue);
+    }
+    Ok((h.clone(), expiration))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

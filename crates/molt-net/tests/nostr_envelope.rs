@@ -73,3 +73,118 @@ fn malformed_and_tampered_frames_are_refused() {
         );
     }
 }
+
+/// KEYSTONE (N3 §3) — the kind-445 SHAPE is exact, and its validator counts
+/// OCCURRENCES rather than taking the first match: the peeler's 13-case
+/// rejection table (`mdk_evaluation.md` §2.1), which is precisely the class
+/// of code our own two CRITICAL findings came from. Nothing but one `h` tag
+/// and at most one `expiration` may ride on a group event.
+#[test]
+fn the_445_tag_shape_is_exact() {
+    use molt_net::envelope::{parse_445_tags, TagError};
+
+    let h = "a".repeat(64);
+    // the only two accepted shapes
+    assert_eq!(
+        parse_445_tags(&[vec!["h".into(), h.clone()]]).expect("bare h"),
+        (h.clone(), None)
+    );
+    assert_eq!(
+        parse_445_tags(&[
+            vec!["h".into(), h.clone()],
+            vec!["expiration".into(), "1760000000".into()],
+        ])
+        .expect("h + expiration"),
+        (h.clone(), Some(1_760_000_000))
+    );
+
+    for (tags, want) in [
+        (vec![], TagError::MissingH),
+        (vec![vec!["h".into(), h.clone()], vec!["h".into(), h.clone()]], TagError::DuplicateH),
+        (vec![vec!["h".into()]], TagError::ValuelessH),
+        (
+            vec![vec!["h".into(), h.clone(), "extra".into()]],
+            TagError::OversizedH,
+        ),
+        (vec![vec![]], TagError::EmptyTag),
+        (
+            vec![vec!["h".into(), h.clone()], vec!["p".into(), "x".into()]],
+            TagError::UnknownTag("p".into()),
+        ),
+        // the h value is lowercase hex of exactly 32 bytes
+        (vec![vec!["h".into(), h.to_uppercase()]], TagError::BadHValue),
+        (vec![vec!["h".into(), "a".repeat(62)]], TagError::BadHValue),
+        (vec![vec!["h".into(), "z".repeat(64)]], TagError::BadHValue),
+        (vec![vec!["h".into(), String::new()]], TagError::BadHValue),
+        // expiration: at most one, a plain non-negative integer that fits
+        (
+            vec![
+                vec!["h".into(), h.clone()],
+                vec!["expiration".into(), "1".into()],
+                vec!["expiration".into(), "2".into()],
+            ],
+            TagError::DuplicateExpiration,
+        ),
+        (
+            vec![vec!["h".into(), h.clone()], vec!["expiration".into(), "-1".into()]],
+            TagError::BadExpiration,
+        ),
+        (
+            vec![
+                vec!["h".into(), h.clone()],
+                vec!["expiration".into(), "99999999999999999999999".into()],
+            ],
+            TagError::BadExpiration,
+        ),
+        (
+            vec![vec!["h".into(), h.clone()], vec!["expiration".into()]],
+            TagError::BadExpiration,
+        ),
+    ] {
+        assert_eq!(parse_445_tags(&tags), Err(want.clone()), "tags {tags:?}");
+    }
+}
+
+/// KEYSTONE (N3 §3, concept §4.4) — the h tag rotates DETERMINISTICALLY:
+/// `h(window) = KDF(rotation_seed, floor(unix/86400))`, uniform 24h UTC
+/// windows for every DAO (the crowd effect), no announcement and no grace.
+/// An offline member re-derives the current tag AND every window it missed,
+/// so nobody is ever stranded — that is what makes an announced rotation
+/// (and its linkability) unnecessary.
+#[test]
+fn the_h_tag_rotates_deterministically_by_utc_day() {
+    use molt_net::envelope::{h_tag, h_tags_for_catchup, H_WINDOW};
+
+    let seed = [0x5a; 32];
+    let other = [0x5b; 32];
+    // midnight UTC boundary: 1760054400 is a multiple of 86400
+    let boundary = 1_760_054_400;
+    assert_eq!(boundary % H_WINDOW, 0, "the fixture sits on a UTC day boundary");
+
+    let before = h_tag(&seed, boundary - 1);
+    let at = h_tag(&seed, boundary);
+    let later_same_day = h_tag(&seed, boundary + H_WINDOW - 1);
+    assert_eq!(at, later_same_day, "one tag per 24h window");
+    assert_ne!(before, at, "…and it changes at the boundary");
+    assert_eq!(h_tag(&seed, boundary + H_WINDOW), h_tag(&seed, boundary + H_WINDOW));
+    assert_ne!(h_tag(&seed, boundary + H_WINDOW), at, "the next window differs");
+
+    // the tag VALUE is per-group secret (only the timing is uniform), and it
+    // is a canonical 445 h value
+    assert_ne!(h_tag(&other, boundary), at, "another group's tag is unrelated");
+    assert_eq!(at.len(), 64);
+    assert!(at.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    assert!(molt_net::envelope::parse_445_tags(&[vec!["h".into(), at.clone()]]).is_ok());
+
+    // an offline member re-derives every window it missed — oldest first,
+    // current last, bounded by the caller's horizon
+    let missed = h_tags_for_catchup(&seed, boundary - 3 * H_WINDOW, boundary, 10);
+    assert_eq!(missed.len(), 4, "three missed windows plus the current one");
+    assert_eq!(missed.last(), Some(&at), "the current window closes the list");
+    assert_eq!(missed[0], h_tag(&seed, boundary - 3 * H_WINDOW));
+    // …and the horizon bounds it (a long-absent member does not ask a relay
+    // for a year of tags)
+    let capped = h_tags_for_catchup(&seed, 0, boundary, 5);
+    assert_eq!(capped.len(), 5, "never more than the horizon");
+    assert_eq!(capped.last(), Some(&at), "still anchored at the current window");
+}
