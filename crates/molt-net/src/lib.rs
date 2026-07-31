@@ -51,6 +51,7 @@ pub mod relay_ws;
 pub mod s3;
 pub mod supervisor;
 pub mod transfer;
+pub mod welcome;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`
 /// (the default build never pulls arti). See the module docs and the
 /// `Cargo.toml` `[features]` note.

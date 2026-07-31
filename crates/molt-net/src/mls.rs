@@ -126,6 +126,27 @@ pub enum MlsIncoming {
     FutureEpoch,
 }
 
+/// The engine's answer to "may this group-data change be applied?" —
+/// defined here (molt-net), implemented by molt-engine, handed into the
+/// runtime, exactly like [`crate::EngineSink`]. It exists because the chain
+/// lives in engine state and the layering forbids molt-net reading it
+/// (`nostr_n05_engine_inventory.md` §5).
+///
+/// **Drop BEFORE merge.** A commit that changes group data is authorized by
+/// a threshold-decided chain block, and that authorization is checked
+/// before `merge_staged_commit` — never merge-then-reject. Merging first
+/// would advance the epoch on a change the republic never decided, and
+/// every node that refused it would then be on a different epoch: the
+/// permanent split concept §5 warns about.
+pub trait ChainOracle: Send + Sync + 'static {
+    /// Does a threshold-decided chain block with this hash authorize a
+    /// group-data change? Pure over the applied chain.
+    fn authorizes(&self, block_hash: &str) -> bool;
+    /// The current verified head `(height, hash)` — for staleness checks
+    /// and the AAD binding.
+    fn head(&self) -> Option<(u64, String)>;
+}
+
 /// How many past epochs' exporter secrets stay available for the OUTER
 /// envelope layer (§10.4, K = 3). Epochs change only on membership and
 /// recovery, so three covers the recent ones; beyond the ring an event is
@@ -139,6 +160,19 @@ pub const EXPORTER_RING_K: usize = 3;
 /// event is `export_secret("nostr", &[], 32)` of the epoch.
 const EXPORTER_LABEL: &str = "nostr";
 const EXPORTER_LEN: usize = 32;
+
+/// Why a group-data change was refused. Both cases are hard drops — there
+/// is no "apply provisionally" path, for the same reason `verify_chain` is
+/// all-or-nothing: a partially-trusted change could fork state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GroupDataRefused {
+    /// The commit carries no chain-block binding at all.
+    #[error("group-data change carries no chain-block binding")]
+    Unbound,
+    /// The binding names no threshold-decided block of the applied chain.
+    #[error("no threshold-decided block authorizes this group-data change")]
+    NotAuthorized,
+}
 
 /// The deterministic total order over commits of the SAME epoch
 /// (`docs/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
@@ -520,6 +554,22 @@ impl MlsMember {
                 Ok(MlsIncoming::Proposal)
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(MlsIncoming::Proposal),
+        }
+    }
+
+    /// The N3 §5 gate: may a group-data change carrying `block_hash` be
+    /// applied? Call this BEFORE processing such a commit — a refusal must
+    /// drop the commit with the epoch untouched.
+    pub fn authorize_group_data(
+        &self,
+        oracle: &dyn ChainOracle,
+        block_hash: Option<&str>,
+    ) -> Result<(), GroupDataRefused> {
+        let hash = block_hash.ok_or(GroupDataRefused::Unbound)?;
+        if oracle.authorizes(hash) {
+            Ok(())
+        } else {
+            Err(GroupDataRefused::NotAuthorized)
         }
     }
 
@@ -1311,6 +1361,50 @@ mod tests {
             "beyond the ring an old epoch is opaque — reported loudly, never silently skipped"
         );
         assert!(member.exporter_ring().len() <= EXPORTER_RING_K);
+    }
+
+    /// KEYSTONE (N3 §5) — the `ChainOracle` seam is a HARD gate, and it is
+    /// consulted BEFORE the merge: an unauthorized group-data change is
+    /// dropped with the epoch untouched. Merging first and rejecting after
+    /// would advance this node past a change the republic never decided,
+    /// while every node that refused it stayed behind — the permanent
+    /// epoch split concept §5 exists to prevent.
+    #[test]
+    fn an_unauthorized_group_data_commit_is_dropped_before_the_merge() {
+        struct Oracle {
+            allowed: &'static str,
+        }
+        impl ChainOracle for Oracle {
+            fn authorizes(&self, block_hash: &str) -> bool {
+                block_hash == self.allowed
+            }
+            fn head(&self) -> Option<(u64, String)> {
+                Some((7, self.allowed.to_string()))
+            }
+        }
+        let oracle = Oracle { allowed: "abc123" };
+        assert!(oracle.authorizes("abc123"), "the decided block authorizes");
+        assert!(!oracle.authorizes("beef99"), "any other hash does not");
+        assert!(!oracle.authorizes(""), "and neither does an absent binding");
+        assert_eq!(oracle.head().map(|(h, _)| h), Some(7));
+
+        // the gate itself: a group-data commit is applied only when its
+        // block binding is authorized, and a refusal leaves the epoch alone
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let before = founder.epoch();
+        assert_eq!(
+            founder.authorize_group_data(&oracle, Some("beef99")),
+            Err(GroupDataRefused::NotAuthorized),
+            "an unauthorized binding is refused"
+        );
+        assert_eq!(
+            founder.authorize_group_data(&oracle, None),
+            Err(GroupDataRefused::Unbound),
+            "…as is a group-data commit with no binding at all"
+        );
+        assert_eq!(founder.epoch(), before, "a refusal never moves the epoch");
+        assert_eq!(founder.authorize_group_data(&oracle, Some("abc123")), Ok(()));
     }
 
     /// building the group around a bogus member — and a real add still works
