@@ -236,21 +236,109 @@ async fn a_listening_proxy_without_a_relay_stops_at_the_partial_rung() {
     );
 }
 
-/// The strongest rung: a relay dialed THROUGH the SOCKS proxy, end to end.
-/// The relay host is a name that resolves nowhere — SOCKS5h keeps it
-/// proxy-side, which is exactly what a real circuit does.
+/// KEYSTONE (review finding 2026-07-31) — the strongest rung must prove the
+/// RELAY answered, not merely that a SOCKS server said "ok". The earlier
+/// version of this test asserted `Circuit` against a fake proxy that
+/// connected to NOTHING: green "Tor works" for a machine with no Tor and no
+/// relay. Now the proxy really forwards, to a real in-process relay, and the
+/// rung completes the same WebSocket upgrade the transport does.
 #[tokio::test]
 async fn a_relay_reached_through_tor_proves_a_circuit() {
-    let (port, seen) = fake_socks5(0x00).await;
+    let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+    let backend = relay.url().await.to_string().trim_start_matches("ws://").to_string();
+    let (port, seen) = forwarding_socks5(backend).await;
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
-    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    // a NAMED relay: a loopback address would never be Tor-routable (§10.14),
+    // and the name resolves nowhere here — the proxy resolves it, which is
+    // exactly what SOCKS5h does on a real circuit
+    // an ONION relay: the shape a Tor-routed pool really holds — plaintext
+    // ws:// is legitimate there because the circuit encrypts, the address
+    // resolves nowhere but inside Tor, and it is never Local
+    let onion = format!("ws://{}.onion", "a".repeat(56));
+    let v = tor_probe::probe(&dialer, Some(&onion)).await;
     assert_eq!(v.state, TorTestState::Circuit, "{v:?}");
-    assert_eq!(v.target, RELAY);
+    assert_eq!(v.target, onion);
     assert_eq!(
         seen.lock().await.clone(),
-        Some("relay.example.test".to_string()),
-        "the relay host went proxy-side (SOCKS5h), never through local DNS"
+        Some(format!("{}.onion", "a".repeat(56))),
+        "the onion address went PROXY-side, never through a local resolver"
     );
+}
+
+/// …and the inverse, which is the whole point: a SOCKS proxy that answers
+/// "connected" while connecting to nothing must NEVER read as a circuit.
+#[tokio::test]
+async fn a_proxy_that_answers_but_connects_nowhere_is_not_a_circuit() {
+    let (port, _seen) = fake_socks5(0x00).await;
+    let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
+    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    assert_ne!(
+        v.state,
+        TorTestState::Circuit,
+        "a lying proxy must not earn the end-to-end claim: {v:?}"
+    );
+    assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
+}
+
+/// A SOCKS5 proxy that negotiates userpass and then really FORWARDS to
+/// `backend` — the test double for a working Tor. Returns its port and the
+/// host the client asked for (proxy-side resolution proof).
+async fn forwarding_socks5(
+    backend: String,
+) -> (u16, std::sync::Arc<tokio::sync::Mutex<Option<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake socks");
+    let port = listener.local_addr().expect("addr").port();
+    let seen = std::sync::Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let seen_srv = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let backend = backend.clone();
+            let seen = seen_srv.clone();
+            tokio::spawn(async move {
+                let mut head = [0u8; 2];
+                if s.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let mut methods = vec![0u8; usize::from(head[1])];
+                if s.read_exact(&mut methods).await.is_err() {
+                    return;
+                }
+                let _ = s.write_all(&[0x05, 0x02]).await; // userpass
+                let mut ah = [0u8; 2];
+                if s.read_exact(&mut ah).await.is_err() {
+                    return;
+                }
+                let mut user = vec![0u8; usize::from(ah[1])];
+                let _ = s.read_exact(&mut user).await;
+                let mut pl = [0u8; 1];
+                let _ = s.read_exact(&mut pl).await;
+                let mut pass = vec![0u8; usize::from(pl[0])];
+                let _ = s.read_exact(&mut pass).await;
+                let _ = s.write_all(&[0x01, 0x00]).await;
+                let mut ch = [0u8; 4];
+                if s.read_exact(&mut ch).await.is_err() {
+                    return;
+                }
+                let mut hl = [0u8; 1];
+                let _ = s.read_exact(&mut hl).await;
+                let mut host = vec![0u8; usize::from(hl[0])];
+                let _ = s.read_exact(&mut host).await;
+                let mut port_bytes = [0u8; 2];
+                let _ = s.read_exact(&mut port_bytes).await;
+                *seen.lock().await = Some(String::from_utf8_lossy(&host).into_owned());
+                let _ = s
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await;
+                if let Ok(mut out) = tokio::net::TcpStream::connect(&backend).await {
+                    let _ = tokio::io::copy_bidirectional(&mut s, &mut out).await;
+                }
+            });
+        }
+    });
+    (port, seen)
 }
 
 /// A proxy that speaks SOCKS5 but cannot build the circuit is NOT a working

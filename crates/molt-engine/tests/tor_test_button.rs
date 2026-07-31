@@ -222,10 +222,17 @@ async fn a_listening_proxy_without_a_relay_is_the_partial_rung() {
     assert!(v.target.is_empty(), "nothing was dialed: {v:?}");
 }
 
-/// The full rung: a relay from the operator's OWN confirmed pool, dialed
-/// through the proxy end to end.
+/// The wiring of the full rung: a relay from the operator's OWN confirmed
+/// pool is picked as the target and really dialed through the proxy.
+///
+/// It ends at `CircuitFailed`, and that is the POINT (review finding
+/// 2026-07-31): the fake proxy answers "connected" while connecting to
+/// nothing, and the circuit rung now completes a real relay handshake, so a
+/// lying proxy can no longer earn the end-to-end claim. The rung's success
+/// path is proven in `molt-net/tests/tor_probe.rs`, against a proxy that
+/// actually forwards to a relay.
 #[tokio::test]
-async fn a_confirmed_relay_dialed_through_the_proxy_proves_a_circuit() {
+async fn a_confirmed_relay_is_the_target_and_a_lying_proxy_earns_no_circuit() {
     let w = engine();
     w.execute(Command::RelayAdd {
         url: RELAY.to_string(),
@@ -242,8 +249,13 @@ async fn a_confirmed_relay_dialed_through_the_proxy_proves_a_circuit() {
         .await
         .expect("clearnet unlocked");
     let v = run_test(&w, draft("local", fake_socks5().await)).await;
-    assert_eq!(v.state, TorTestState::Circuit, "{v:?}");
-    assert_eq!(v.target, RELAY, "{v:?}");
+    assert_eq!(v.target, RELAY, "the operator's own relay was the target: {v:?}");
+    assert_ne!(
+        v.state,
+        TorTestState::Circuit,
+        "a proxy that connects to nothing must not read as a working Tor: {v:?}"
+    );
+    assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
 }
 
 /// A confirmed relay the session has NOT unlocked is not dialable, so the

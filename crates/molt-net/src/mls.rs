@@ -546,19 +546,19 @@ impl MlsMember {
             .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
         let from = String::from_utf8_lossy(processed.credential().serialized_content()).into_owned();
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                // THE RACE WINDOW CLOSES HERE (review finding): once traffic
-                // of the new epoch has been accepted, the group has visibly
-                // moved on and a rewind would drop delivered state. Without
-                // this, the slot lived forever and a REPLAYED epoch-N commit
-                // could roll a node back at any later time — an attacker
-                // needs only to re-send bytes the relay still holds.
-                self.prior = None;
-                Ok(MlsIncoming::Application {
-                    from,
-                    plaintext: app.into_bytes(),
-                })
-            }
+            // NOTE (review 2026-07-31): application traffic must NOT clear
+            // the slot. Doing so re-opened the bystander fork: a member that
+            // merged the loser, then accepted one message, could no longer
+            // take the winning commit and was stranded alone forever. The
+            // slot is already bounded — `arm_prior_slot` runs on EVERY merge,
+            // so it always points exactly one epoch back — and a replay of
+            // the commit we applied is a no-op, because the tiebreak treats
+            // an equal key as superseded. Only a strictly LOWER key rewinds,
+            // which is precisely the convergence rule.
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(MlsIncoming::Application {
+                from,
+                plaintext: app.into_bytes(),
+            }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let retiring = self.exporter_secret().ok();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
@@ -1467,8 +1467,10 @@ mod tests {
         // …and a BYSTANDER that authors no commit at all: the majority of a
         // real republic. It must land on the same branch as the committers.
         let mut chris = MlsMember::new(&key(6), "chris").expect("chris");
-        // a second bystander, to see the commits in the OTHER order
+        // a second bystander, to see the commits in the OTHER order, and a
+        // third that accepts traffic BETWEEN the two commits
         let mut dana = MlsMember::new(&key(7), "dana").expect("dana");
+        let mut erik = MlsMember::new(&key(8), "erik").expect("erik");
         let carol = MlsMember::new(&key(4), "carol").expect("carol");
         let dave = MlsMember::new(&key(5), "dave").expect("dave");
         let welcome = founder
@@ -1477,12 +1479,13 @@ mod tests {
                 bob.key_package().expect("kp"),
                 chris.key_package().expect("kp"),
                 dana.key_package().expect("kp"),
+                erik.key_package().expect("kp"),
                 carol.key_package().expect("kp"),
                 dave.key_package().expect("kp"),
             ])
             .expect("add")
             .expect("welcome");
-        for m in [&mut alice, &mut bob, &mut chris, &mut dana] {
+        for m in [&mut alice, &mut bob, &mut chris, &mut dana, &mut erik] {
             m.join_from_welcome(&welcome).expect("join");
         }
 
@@ -1496,9 +1499,21 @@ mod tests {
             .restore_member("dave", &dave_again.key_package().expect("kp"), NO_CARRIER_STAMP)
             .expect("bob commits");
 
+        // A bystander that accepts TRAFFIC BETWEEN the two commits must still
+        // be able to take the winner afterwards. This runs FIRST, while bob
+        // is still on his own branch — a "close the window on traffic" rule
+        // stranded exactly this node (review finding 2026-07-31).
+        erik.decrypt(&commit_b).expect("erik merges bob's first");
+        let bob_talk = bob.encrypt(b"between the commits").expect("bob talks");
+        assert!(
+            matches!(erik.decrypt(&bob_talk), Ok(MlsIncoming::Application { .. })),
+            "erik reads bob's branch, which he just joined"
+        );
+        erik.decrypt(&commit_a).expect("…and can still take the winner");
+
         // …and the ENGINE's receive shape (`decrypt`, not `decrypt_at`).
-        // The bystander sees them in the WORST order: whichever it merges
-        // first, the other must still be able to take it there.
+        // The bystanders see the commits in opposite orders: whichever one
+        // is merged first, the other must still be able to take it there.
         alice.decrypt(&commit_b).expect("alice takes bob's");
         bob.decrypt(&commit_a).expect("bob takes alice's");
         chris.decrypt(&commit_a).expect("chris takes alice's first");
@@ -1508,7 +1523,7 @@ mod tests {
         assert_eq!(chris.epoch(), alice.epoch(), "…and so does the bystander");
         // the real detector: one key schedule, or nothing crosses
         let wire = alice.encrypt(b"one group?").expect("alice encrypts");
-        for (who, m) in [("bob", &mut bob), ("chris", &mut chris)] {
+        for (who, m) in [("bob", &mut bob), ("chris", &mut chris), ("erik", &mut erik)] {
             match m.decrypt(&wire).expect("decrypt") {
                 MlsIncoming::Application { from, plaintext } => {
                     assert_eq!(from, "alice");
@@ -1571,24 +1586,20 @@ mod tests {
             Ok(MlsIncoming::CommitSuperseded)
         ));
 
-        // …and once traffic of the NEW epoch is accepted, the window is shut:
-        // replaying the losing commit can no longer roll anyone back
-        let live = alice.encrypt(b"new epoch traffic").expect("encrypt");
-        assert!(matches!(
-            bob.decrypt_at(&live, 300),
-            Ok(MlsIncoming::Application { .. })
-        ));
-        let settled = bob.epoch();
-        for stamp in [1u64, 50, 100] {
+        // REPLAY IS A NO-OP: an equal key is "superseded", never a rewind —
+        // so re-sending bytes the relay still holds cannot roll a node back.
+        // The detector is not the epoch NUMBER (a rewind returns to the same
+        // number on a different key schedule) but whether alice's branch
+        // still reaches bob.
+        for stamp in [1u64, 50, 100, 200, 999] {
+            let _ = bob.decrypt_at(&commit_a, stamp);
             let _ = bob.decrypt_at(&commit_b, stamp);
-            assert_eq!(bob.epoch(), settled, "a replay must not roll the epoch back");
+            let probe = alice.encrypt(b"still one group").expect("encrypt");
+            assert!(
+                matches!(bob.decrypt_at(&probe, 400), Ok(MlsIncoming::Application { .. })),
+                "replay at stamp {stamp} knocked bob off alice's branch"
+            );
         }
-        // the group still works after the replay attempts
-        let wire = alice.encrypt(b"still one group").expect("encrypt");
-        assert!(matches!(
-            bob.decrypt_at(&wire, 400),
-            Ok(MlsIncoming::Application { .. })
-        ));
     }
 
     /// building the group around a bogus member — and a real add still works

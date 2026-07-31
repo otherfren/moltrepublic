@@ -90,8 +90,17 @@ pub fn verdict(r: &RungReport) -> TorTest {
             target: r.target.clone(),
             ms: *ms,
         },
-        // the dial through Tor failed: NOT a working Tor, whatever the proxy
-        // answered before.
+        // a DEADLINE is not a refusal — say so separately.
+        (_, Some(Err(why))) if why.starts_with(TIMEOUT_MARK) => TorTest {
+            state: TorTestState::CircuitTimeout,
+            detail: why.clone(),
+            proxy: r.proxy.clone(),
+            target: r.target.clone(),
+            ms: 0,
+        },
+        // the dial through Tor failed. This does NOT single out Tor: the
+        // relay may simply be down, firewalled or misconfigured, and the
+        // surfaces must say so (review finding 2026-07-31).
         (_, Some(Err(why))) => TorTest {
             state: TorTestState::CircuitFailed,
             detail: why.clone(),
@@ -143,6 +152,38 @@ pub fn probe_target(relays: &[RelayEntry], clearnet_session: bool) -> Option<Str
     dialable(relays, clearnet_session)
         .into_iter()
         .find(|url| relay_kind(url) != RelayKind::Local)
+}
+
+/// WHY no relay could be dialed — the difference matters to the operator,
+/// because the fixes are different (review finding 2026-07-31: telling
+/// someone to "add and confirm a relay" for one they already confirmed is
+/// advice that cannot help).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetGap {
+    /// No relay in the pool at all.
+    EmptyPool,
+    /// Relays exist, none confirmed.
+    Unconfirmed,
+    /// Confirmed, but waiting for this session's non-Tor activation — which
+    /// is ALSO the reason they would never prove a circuit.
+    SessionLocked,
+    /// Only local relays, which bypass Tor by design.
+    LocalOnly,
+}
+
+/// Classify why [`probe_target`] found nothing. Only called when it did.
+pub fn target_gap(relays: &[RelayEntry], clearnet_session: bool) -> TargetGap {
+    if relays.is_empty() {
+        return TargetGap::EmptyPool;
+    }
+    if !relays.iter().any(|r| r.confirmed) {
+        return TargetGap::Unconfirmed;
+    }
+    let dialable_now = dialable(relays, clearnet_session);
+    if dialable_now.is_empty() {
+        return TargetGap::SessionLocked;
+    }
+    TargetGap::LocalOnly
 }
 
 /// The SOCKS address this dialer routes through, or `""` when it has none
@@ -222,22 +263,33 @@ async fn proxy_rung(proxy: &str) -> Result<(), String> {
 /// transport makes, so a success here is a circuit the transport can use
 /// too. Returns the round-trip in milliseconds.
 async fn circuit_rung(dialer: &Dialer, url: &str) -> Result<u32, String> {
-    let (host, port) = relay_host_port(url)?;
+    let (host, _port) = relay_host_port(url)?;
     let started = std::time::Instant::now();
-    let dialed = timeout(CIRCUIT_TIMEOUT, dialer.dial_host(&host, port)).await;
+    // NOT a bare SOCKS CONNECT (review finding 2026-07-31): a proxy that
+    // answers `0x00` while connecting to nothing would then read as "Tor
+    // works" — a fake SOCKS server passes that bar, as this module's own
+    // test showed. Completing the WebSocket upgrade proves the RELAY
+    // answered, through Tor, on the exact path the transport uses.
+    let dialed = timeout(CIRCUIT_TIMEOUT, crate::relay_ws::RelayWs::connect(dialer, url)).await;
     let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     match dialed {
-        Ok(Ok(stream)) => {
-            drop(stream);
+        Ok(Ok(ws)) => {
+            ws.close().await;
             Ok(ms)
         }
-        Ok(Err(e)) => Err(format!("no circuit to {host}: {e}")),
+        Ok(Err(e)) => Err(format!("no relay handshake through Tor to {host}: {e}")),
         Err(_) => Err(format!(
-            "no circuit to {host}: timed out after {}s",
+            "{TIMEOUT_MARK} {host}: no answer within {}s",
             CIRCUIT_TIMEOUT.as_secs()
         )),
     }
 }
+
+/// Prefix that marks a DEADLINE rather than a refusal, so the surfaces can
+/// say "no answer yet" instead of "not working" — a cold embedded Tor
+/// bootstrap legitimately takes minutes (`dial.rs` deliberately puts no
+/// deadline on it).
+pub const TIMEOUT_MARK: &str = "timed out reaching";
 
 /// The dial coordinates of a relay URL, read with the SAME WHATWG parser the
 /// pool policy classified it with (`relay_ws::connect` does the identical

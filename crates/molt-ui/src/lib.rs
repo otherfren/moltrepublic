@@ -2373,7 +2373,15 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // "only a proven circuit is green" rule stays a tested statement, and the
     // technical specifics ride along untranslated.
     ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
-    ui.set_cfg_tor_test_text(tor_verdict_copy(lang, sv.tor_test.state).into());
+    // a confirmed-but-session-locked pool is a DIFFERENT problem from an
+    // empty one, and telling the user to "confirm a relay" they already
+    // confirmed is advice that cannot help (review finding)
+    let session_locked = !sv.settings.relays.is_empty()
+        && sv.settings.relays.iter().any(|r| r.confirmed)
+        && molt_core::relay::dialable(&sv.settings.relays, sv.clearnet_session).is_empty();
+    ui.set_cfg_tor_test_text(
+        tor_verdict_copy_for(lang, sv.tor_test.state, session_locked).into(),
+    );
     ui.set_cfg_tor_test_tone(tor_test_tone(sv.tor_test.state));
     ui.set_cfg_tor_test_detail(tor_test_detail(&sv.tor_test).into());
 
@@ -4981,6 +4989,9 @@ fn tor_test_tone(state: molt_core::TorTestState) -> i32 {
         S::ProxyOnly => TONE_WARN,
         S::Idle | S::Testing | S::Off => TONE_NEUTRAL,
         S::Misconfigured | S::NoProxy | S::NoTarget | S::CircuitFailed => TONE_BAD,
+        // a deadline says "no answer yet", not "broken" — a cold embedded
+        // Tor bootstrap takes minutes (review finding 2026-07-31)
+        S::CircuitTimeout => TONE_WARN,
     }
 }
 
@@ -4988,6 +4999,24 @@ fn tor_test_tone(state: molt_core::TorTestState) -> i32 {
 /// exactly what it proved and nothing more — the partial rung denies the
 /// circuit out loud, and only [`molt_core::TorTestState::Circuit`] says Tor
 /// works.
+/// The verdict sentence. `detail` decides between the two shapes of a failed
+/// circuit: a DEADLINE (a cold embedded-Tor bootstrap legitimately takes
+/// minutes, and `dial.rs` deliberately puts no cap on it) reads differently
+/// from a refusal — and neither may claim a proxy rung that never ran on the
+/// embedded path (review findings 2026-07-31).
+fn tor_verdict_copy_for(
+    lang: i32,
+    state: molt_core::TorTestState,
+    session_locked: bool,
+) -> &'static str {
+    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    use molt_core::TorTestState as S;
+    match state {
+        S::ProxyOnly if session_locked => l.tor_v_proxy_only_locked,
+        other => tor_verdict_copy(lang, other),
+    }
+}
+
 fn tor_verdict_copy(lang: i32, state: molt_core::TorTestState) -> &'static str {
     use molt_core::TorTestState as S;
     let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
@@ -5000,6 +5029,7 @@ fn tor_verdict_copy(lang: i32, state: molt_core::TorTestState) -> &'static str {
         S::ProxyOnly => l.tor_v_proxy_only,
         S::NoTarget => l.tor_v_no_target,
         S::CircuitFailed => l.tor_v_circuit_failed,
+        S::CircuitTimeout => l.tor_v_timeout,
         S::Circuit => l.tor_v_circuit,
     }
 }
@@ -5493,7 +5523,9 @@ lexicon! {
     tor_v_no_proxy: "No Tor daemon: nothing is listening at this SOCKS address.", "Kein Tor-Daemon: An dieser SOCKS-Adresse lauscht nichts.";
     tor_v_proxy_only: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Add and confirm a relay to test a real circuit.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Für einen echten Circuit-Test ein Relay hinzufügen und bestätigen.";
     tor_v_no_target: "Nothing could be established: this Tor mode has no SOCKS address to probe, and there was no relay to dial through it.", "Es konnte nichts festgestellt werden: Dieser Tor-Modus hat keine SOCKS-Adresse zum Prüfen, und es gab kein Relay, das hindurch gewählt werden konnte.";
-    tor_v_circuit_failed: "Tor is not working: the proxy answered, but the connection through it to the relay failed.", "Tor funktioniert nicht: Der Proxy antwortete, aber die Verbindung durch ihn zum Relay schlug fehl.";
+    tor_v_circuit_failed: "No connection to the relay through Tor. Either Tor is not working, or that relay is unreachable — the line below says which step failed.", "Keine Verbindung zum Relay durch Tor. Entweder funktioniert Tor nicht, oder das Relay ist nicht erreichbar — die Zeile darunter sagt, welcher Schritt scheiterte.";
+    tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes — try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern — nach dem Bootstrap erneut versuchen.";
+    tor_v_proxy_only_locked: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Your confirmed relays are waiting for this session's activation.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays warten auf die Freigabe für diese Sitzung.";
     tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an

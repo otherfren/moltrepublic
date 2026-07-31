@@ -2543,6 +2543,11 @@ pub enum TorTestState {
     /// **Not working**: the proxy answered, but the dial to the relay
     /// through it failed — there is no usable circuit to that relay.
     CircuitFailed,
+    /// The dial through Tor hit the deadline. NOT the same as a refusal: a
+    /// first embedded-Tor start bootstraps the directory and legitimately
+    /// takes minutes, so this says "no answer yet", never "not working"
+    /// (review finding 2026-07-31).
+    CircuitTimeout,
     /// **Working**: a relay from the operator's own confirmed pool was
     /// reached END TO END through Tor. The only state that means "Tor works".
     Circuit,
@@ -2560,6 +2565,7 @@ impl TorTestState {
             TorTestState::ProxyOnly => "proxy_only",
             TorTestState::NoTarget => "no_target",
             TorTestState::CircuitFailed => "circuit_failed",
+            TorTestState::CircuitTimeout => "circuit_timeout",
             TorTestState::Circuit => "circuit",
         }
     }
