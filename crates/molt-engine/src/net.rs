@@ -534,7 +534,16 @@ impl NetRuntime {
     ) -> Option<MlsRekey> {
         let (_transport, mls) = self.real_crypto.as_ref()?;
         let mut group = mls.lock().ok()?;
-        Some(group.restore_member(member, key_package).map_err(|e| e.to_string()))
+        // NO_CARRIER_STAMP on BOTH sides: the loopback mesh carries no
+        // per-event timestamp, and a locally-read clock here against a 0 on
+        // the receive side would make our own commit always lose the
+        // tiebreak (review finding 2026-07-31). N4's Nostr carrier supplies
+        // the real `created_at` to both ends.
+        Some(
+            group
+                .restore_member(member, key_package, molt_net::mls::NO_CARRIER_STAMP)
+                .map_err(|e| e.to_string()),
+        )
     }
 
     /// Publish one recorded envelope. The demo mesh mirrors it into its in-memory

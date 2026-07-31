@@ -227,6 +227,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         validate_settings(&settings)?;
         self.invalidate_backup_listing_on_target_change(&settings);
+        self.invalidate_tor_test_on_anonymity_change(&settings);
         // The relay pool has ONE way in: the `Relay*` commands, with their URL
         // validation and the clearnet acknowledgement. A wholesale settings
         // replacement must not become a second door — it would let a payload
@@ -267,6 +268,7 @@ impl State {
             return Ok(Reply::Ack); // no visible change, no notice churn
         }
         self.invalidate_backup_listing_on_target_change(&settings);
+        self.invalidate_tor_test_on_anonymity_change(&settings);
         self.session.settings = settings;
         self.session.language = language;
         self.session.theme = theme;
@@ -379,6 +381,151 @@ impl State {
         self.session.s3_test = result;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
+    }
+
+    /// Test whether Tor is actually there and working (the anonymity panel's
+    /// "Test Tor" button). Empty fields fall back to the saved settings (the
+    /// GUI passes its unsaved draft, an MCP call may pass nothing).
+    ///
+    /// Everything that can be decided without a socket is decided here, in
+    /// the actor: Tor not selected is a REFUSAL ([`molt_core::TorTestState::Off`] —
+    /// never a verdict about Tor), and a configuration the fail-closed dialer
+    /// rejects is `Misconfigured`. Only then does the two-rung probe run
+    /// **off the actor** (`molt_net::tor_probe`), against the operator's own
+    /// proxy and their own confirmed relay — the probe never picks a host
+    /// (ADR-0004). The verdict returns as
+    /// [`molt_core::Command::NetTestTorResult`].
+    pub(crate) fn cmd_net_test_tor(
+        &mut self,
+        network: String,
+        mode: String,
+        port: u16,
+    ) -> Result<Reply, MoltError> {
+        let s = &self.session.settings;
+        let network = if network.trim().is_empty() {
+            s.anonymity.clone()
+        } else {
+            network
+        };
+        let mode = if mode.trim().is_empty() {
+            s.tor_mode.clone()
+        } else {
+            mode
+        };
+        // port 0 is not a port anything can listen on, so it is the safe
+        // "not given" marker for a surface that has no optional integer.
+        let port = if port == 0 { s.tor_port } else { port };
+
+        // a probe that is starting invalidates any older one still in flight
+        self.tor_test_gen += 1;
+        let generation = self.tor_test_gen;
+
+        if network != "tor" {
+            // echo what is actually CONFIGURED, not the effective label:
+            // `effective_net_label` folds "nym" into "none", and telling an
+            // operator who set `nym` that their network is `none` would
+            // describe a setting they never made.
+            return self.settle_tor_test(molt_core::TorTest {
+                state: molt_core::TorTestState::Off,
+                detail: format!(
+                    "the configured anonymity network is `{}`, not tor — nothing was sent",
+                    quote_for_display(&network)
+                ),
+                ..molt_core::TorTest::default()
+            });
+        }
+        let dialer = match molt_net::dial::Dialer::resolve(&network, &mode, port) {
+            Ok(dialer) => dialer,
+            Err(e) => {
+                return self.settle_tor_test(molt_core::TorTest {
+                    state: molt_core::TorTestState::Misconfigured,
+                    // the message embeds the operator's own mode string
+                    detail: clamp_for_display(&e.to_string(), 200),
+                    ..molt_core::TorTest::default()
+                });
+            }
+        };
+        // belt and braces: `resolve` guarantees no clearnet dialer under
+        // network=tor, and this test must never be the place that regresses it
+        if !dialer.tor_on() {
+            return self.settle_tor_test(molt_core::TorTest {
+                state: molt_core::TorTestState::Off,
+                detail: "the resolved transport does not route over Tor".to_string(),
+                ..molt_core::TorTest::default()
+            });
+        }
+        let target =
+            molt_net::tor_probe::probe_target(&self.session.settings.relays, self.clearnet_session);
+        // "testing" is only shown once the task really runs — a failed
+        // upgrade (actor shutting down) must not wedge the state
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Ok(Reply::Ack);
+        };
+        self.session.tor_test = molt_core::TorTest {
+            state: molt_core::TorTestState::Testing,
+            detail: String::new(),
+            proxy: molt_net::tor_probe::proxy_of(&dialer),
+            target: target.clone().unwrap_or_default(),
+            ms: 0,
+        };
+        self.emit_session(SessionScope::Full);
+        tokio::spawn(async move {
+            let result = molt_net::tor_probe::probe(&dialer, target.as_deref()).await;
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(crate::Envelope {
+                    cmd: molt_core::Command::NetTestTorResult {
+                        result,
+                        generation: Some(generation),
+                    },
+                    reply,
+                })
+                .await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// Write a Tor verdict that was decided in-actor (no probe ran).
+    fn settle_tor_test(&mut self, result: molt_core::TorTest) -> Result<Reply, MoltError> {
+        self.session.tor_test = result;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Record a Tor probe verdict (fed back from the off-actor probe task).
+    /// A stale generation — the anonymity settings changed, or a newer probe
+    /// started while this one was in flight — is dropped: a verdict describes
+    /// exactly the configuration it tested.
+    pub(crate) fn cmd_net_test_tor_result(
+        &mut self,
+        result: molt_core::TorTest,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.tor_test_gen) {
+            return Ok(Reply::Ack);
+        }
+        self.session.tor_test = result;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// A changed anonymity configuration (network / tor mode / SOCKS port)
+    /// invalidates the Tor verdict: it described the OLD setting, and a
+    /// "circuit" badge must never be read as a statement about a
+    /// configuration that was never probed. Shared by save and reload.
+    fn invalidate_tor_test_on_anonymity_change(&mut self, new: &SessionSettings) {
+        let old = &self.session.settings;
+        if old.anonymity == new.anonymity
+            && old.tor_mode == new.tor_mode
+            && old.tor_port == new.tor_port
+        {
+            return;
+        }
+        if self.session.tor_test != molt_core::TorTest::default() {
+            // a probe still in flight against the OLD setting must not land
+            self.tor_test_gen += 1;
+            self.session.tor_test = molt_core::TorTest::default();
+        }
     }
 
     /// List the configured bucket's backup objects (the settings backup
@@ -1457,6 +1604,30 @@ fn export_to_file(
 /// Value validation shared by save and reload: nothing invalid reaches the
 /// session or the file. (The MCP schema and the GUI widgets narrow most of
 /// this already; the engine is the authority.)
+/// Render an operator-supplied setting value for a status line: bounded in
+/// length and stripped of control characters. The saved settings are
+/// validated to a closed set, but a `NetTestTor` request may carry an
+/// unsaved draft straight from an MCP argument — that must not be able to
+/// smuggle newlines or terminal escapes into a message the GUI, the MCP
+/// answer and the log all render.
+fn quote_for_display(value: &str) -> String {
+    clamp_for_display(value, 32)
+}
+
+/// [`quote_for_display`] with an explicit budget — used for whole error
+/// lines, which need more room than a single setting value.
+fn clamp_for_display(value: &str, max: usize) -> String {
+    let mut out: String = value
+        .chars()
+        .take(max)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if value.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
     if !matches!(s.anonymity.as_str(), "tor" | "nym" | "none") {
         return Err(MoltError::Settings(format!(

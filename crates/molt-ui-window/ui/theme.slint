@@ -651,6 +651,20 @@ export global Strings {
     in property <string> set-tab-general;
     in property <string> set-tab-workspace;
     in property <string> set-tab-backup;
+    // Per tab, the same title with a real newline at every line-break
+    // opportunity (derived in Rust: `tab_title_floor`). The tab bar is ONE row
+    // in which a title wraps rather than the bar breaking; a word-wrapping
+    // Text reports min-width 0, so each tab takes its MINIMUM width from this
+    // string's preferred width — its widest unbreakable chunk, measured in the
+    // real font. Never shown.
+    in property <string> set-tab-general-floor;
+    in property <string> set-tab-workspace-floor;
+    in property <string> set-tab-backup-floor;
+    in property <string> set-tab-anon-floor;
+    in property <string> set-tab-relays-floor;
+    in property <string> set-tab-mcp-floor;
+    in property <string> set-tab-node-floor;
+    in property <string> set-tab-chain-floor;
     in property <string> set-ws-choose;
     in property <string> set-ws-dir-title;
     in property <string> set-ws-dir-body;
@@ -691,9 +705,26 @@ export global Strings {
     in property <string> set-conflict-note;
     in property <string> set-restart-note;
     in property <string> set-tor-embedded-missing;
+    // settings → Anonymity network: the Tor connectivity probe. The button and
+    // its tooltip are read here; the NINE verdict sentences below are selected
+    // in Rust (`tor_verdict_copy`, so the "only a proven circuit is green"
+    // rule is unit-tested) and reach the panel resolved, as
+    // `cfg-tor-test-text` — they are declared here because every lexicon entry
+    // has its declaration here.
+    in property <string> set-tor-test;
+    in property <string> tor-test-tip;
+    in property <string> tor-v-idle;
+    in property <string> tor-v-testing;
+    in property <string> tor-v-off;
+    in property <string> tor-v-misconfigured;
+    in property <string> tor-v-no-proxy;
+    in property <string> tor-v-proxy-only;
+    in property <string> tor-v-no-target;
+    in property <string> tor-v-circuit-failed;
+    in property <string> tor-v-circuit;
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6)
     in property <string> rp-title;
-    in property <string> rp-hint;
+    in property <string> rp-copy;
     in property <string> rp-in-use;
     in property <string> rp-none-dialable;
     in property <string> rp-empty-title;

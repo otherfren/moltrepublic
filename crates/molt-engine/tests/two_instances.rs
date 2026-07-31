@@ -3398,7 +3398,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
 
     // re-key the seat with a REAL MLS commit and send the Welcome back
     let new_kp = hex::decode(&req.key_package).expect("kp hex");
-    let (_commit, welcome) = coord.restore_member("bob", &new_kp).expect("re-key bob");
+    let (_commit, welcome) = coord.restore_member("bob", &new_kp, molt_net::mls::NO_CARRIER_STAMP).expect("re-key bob");
     let reply = req.reply.expect("the request advertises a reply queue");
     let reply_snd = SndQueueAddr {
         server: reply.server.clone(),
@@ -3705,7 +3705,7 @@ async fn a_rekey_commit_broadcast_over_the_mesh_keeps_survivors_in_epoch() {
     let (commit, _welcome) = a_mls
         .lock()
         .expect("a mls lock")
-        .restore_member("zoe", &zoe2_kp)
+        .restore_member("zoe", &zoe2_kp, molt_net::mls::NO_CARRIER_STAMP)
         .expect("re-key zoe");
 
     // 3) broadcast the raw commit over the mesh. It is at-least-once (the log
@@ -3808,7 +3808,11 @@ async fn a_chat_racing_ahead_of_the_rekey_commit_is_buffered_not_lost() {
     let (commit, _welcome) = a_mls
         .lock()
         .expect("a mls lock")
-        .restore_member("zoe", &zoe2.key_package().expect("zoe2 kp"))
+        .restore_member(
+            "zoe",
+            &zoe2.key_package().expect("zoe2 kp"),
+            molt_net::mls::NO_CARRIER_STAMP,
+        )
         .expect("re-key zoe");
 
     // THE RACE: the post-re-key chat goes out FIRST …
@@ -4348,7 +4352,11 @@ async fn a_commit_on_one_link_releases_messages_held_on_another() {
     let (commit, _welcome) = a_mls
         .lock()
         .expect("a mls lock")
-        .restore_member("zoe", &zoe2.key_package().expect("zoe2 kp"))
+        .restore_member(
+            "zoe",
+            &zoe2.key_package().expect("zoe2 kp"),
+            molt_net::mls::NO_CARRIER_STAMP,
+        )
         .expect("re-key zoe");
     match b_mls.lock().expect("b mls").decrypt(&commit).expect("b merges") {
         molt_net::MlsIncoming::Commit => {}
@@ -4453,7 +4461,11 @@ async fn a_shed_future_epoch_message_survives_via_redelivery() {
     let (commit, _welcome) = a_mls
         .lock()
         .expect("a mls lock")
-        .restore_member("zoe", &zoe2.key_package().expect("zoe2 kp"))
+        .restore_member(
+            "zoe",
+            &zoe2.key_package().expect("zoe2 kp"),
+            molt_net::mls::NO_CARRIER_STAMP,
+        )
         .expect("re-key zoe");
 
     // 65 chats race ahead of the commit — one more than the hold buffer, so

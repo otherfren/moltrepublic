@@ -123,15 +123,40 @@ component SoundAlertsGroup inherits DetailGroup {
     }
 }
 
-// One button of the Settings tab bar. Factored out because the bar renders
-// the SAME eight tabs in two arrangements (one row / two rows of four), and
-// an eight-fold copy of the label+primary+clicked triple would rot apart.
+// One button of the Settings tab bar. The bar is ONE row: a tab whose TITLE
+// does not fit wraps its own title onto a second line instead of the bar
+// breaking into two rows.
+//
+// That needs a floor. A word-wrapping Slint Text reports min-width 0, so the
+// row would otherwise shrink every tab — including the single-word ones, which
+// cannot wrap — until the letters are clipped. `floor` is the same title with
+// a newline at every break opportunity (Rust: `tab_title_floor`); a hidden,
+// non-wrapping Text of it has exactly the width of the widest unbreakable
+// chunk, measured in the real font, and that plus the padding is this tab's
+// minimum width. So: a single-word tab never shrinks at all, and a wrappable
+// one shrinks only down to its longest word — it wraps, it never clips.
+//
 // `pad` is tighter than the default button: eight labels are a lot of width.
 component SettingsTab inherits AppButton {
     in property <int> index;
+    // the title broken at every line-break opportunity — Strings.set-tab-*-floor
+    in property <string> floor;
     in-out property <int> current;
-    pad: 10px;
+    pad: 8px;
+    wrap-label: true;
+    // room for TWO 14px lines (≈33px) — fixed, so the bar keeps its height
+    // whether or not a title happens to wrap at the current window width
+    height: 38px;
+    min-width: tab-floor.preferred-width + 2 * root.pad;
     primary: root.current == root.index;
+    // measured, never shown (the Clip that `visible: false` lowers to leaves
+    // the Text's own preferred-width intact)
+    tab-floor := Text {
+        visible: false;
+        text: root.floor;
+        font-size: Theme.fs-body;
+        font-weight: 600;
+    }
     clicked => {
         root.current = root.index;
     }
@@ -239,6 +264,7 @@ component RelayRow inherits Rectangle {
     callback confirm(string, int); // url + kind: a non-onion relay must pass the warning first
     callback revoke(string);
     callback removed(string);
+    callback copied(string); // put the address on the clipboard
     property <string> status: root.r.blocked == 1 ? Strings.rp-st-unconfirmed
         : (root.r.blocked == 2 ? Strings.rp-st-locked
         : (root.r.kind == 0 ? Strings.rp-st-auto : Strings.rp-st-active));
@@ -254,7 +280,15 @@ component RelayRow inherits Rectangle {
     HorizontalLayout {
         padding-left: 10px;
         padding-right: 10px;
-        spacing: 10px;
+        spacing: 8px;
+        // THE idiom for centring fixed-height controls in a row: the layout
+        // itself does it. A HorizontalLayout stretches its children over the
+        // full row height and puts anything that cannot stretch (every button
+        // here has an explicit height, the badge too) at the TOP. Do NOT reach
+        // for `y: (parent.height - self.height) / 2` — an x/y-anchored child
+        // drops out of the implicit preferred size (the collapse trap in
+        // parts.slint), which is how a control ends up 0px wide.
+        cross-axis-alignment: center;
         Text {
             text: "\{root.r.pos}";
             color: Theme.faint;
@@ -267,26 +301,38 @@ component RelayRow inherits Rectangle {
         VerticalLayout {
             horizontal-stretch: 1;
             spacing: 4px;
-            alignment: center;
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: root.r.url;
-                    color: Theme.text;
-                    font-size: Theme.fs-body;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                    vertical-alignment: center;
-                }
-                RelayBadge {
-                    kind: root.r.kind;
-                    y: (parent.height - self.height) / 2;
-                }
+            Text {
+                text: root.r.url;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                overflow: elide;
+                vertical-alignment: center;
             }
             DotLabel {
                 tone: root.tone;
                 label: root.status;
                 label-size: Theme.fs-cap;
+            }
+        }
+        // the kind badge belongs to the relay, not to the URL line: as a row
+        // child it is centred with the controls instead of clinging to the
+        // first of the two text lines
+        RelayBadge {
+            kind: root.r.kind;
+        }
+        // an address is long and unmemorable — one compact click puts it on
+        // the clipboard (the row has no field to edit it in; a wrong address
+        // is removed and re-added, which is also what re-confirms it)
+        AppButton {
+            width: 26px;
+            height: 26px;
+            pad: 0px;
+            icon: @image-url("assets/copy.svg");
+            icon-set: true;
+            tooltip: Strings.rp-copy;
+            tooltip-left: true;
+            clicked => {
+                root.copied(root.r.url);
             }
         }
         // the reorder pair is disabled (not hidden) at the ends, so the row
@@ -363,20 +409,12 @@ component RelayPoolGroup inherits DetailGroup {
     callback revoke(string);
     callback removed(string);
     callback session(bool);
+    callback copied(string); // a row's address goes to the clipboard
     callback edited(); // typing clears the stale error
     title: Strings.rp-title;
     // with a list the panel spreads (the list claims the leftover height);
     // with the empty state there is nothing to stretch — hug the top
     pack: root.rows.length == 0;
-    Text {
-        text: Strings.rp-hint;
-        color: Theme.faint;
-        font-size: Theme.fs-cap;
-        wrap: word-wrap;
-        // keep the long hint out of the group's preferred width — it wraps
-        // at whatever width the pane grants the panel
-        preferred-width: 0px;
-    }
     if root.rows.length > 0: DotLabel {
         tone: root.dialable > 0 ? Theme.good : Theme.faint;
         label: root.dialable > 0 ? "\{Strings.rp-in-use} \{root.dialable}" : Strings.rp-none-dialable;
@@ -435,6 +473,9 @@ component RelayPoolGroup inherits DetailGroup {
                     }
                     removed(url) => {
                         root.removed(url);
+                    }
+                    copied(url) => {
+                        root.copied(url);
                     }
                 }
             }
@@ -636,7 +677,19 @@ export component AppWindow inherits Window {
     title: "MoltRepublic — node";
     preferred-width: 940px;
     preferred-height: 720px;
-    min-width: 760px;
+    // Raised 760 → 900 for the one-row settings tab bar. Measured (DejaVu Sans
+    // Bold 14px, the default sans here), German — the widest set:
+    // Allgemein 79 · Workspace 87 · Backup 58 · Anonymitäts-Netzwerk 181 ·
+    // Nostr-Relays 101 · MCP 35 · Node 41 · Chain-History 108 = 690px of text,
+    // + 8 tabs × 2 × 8px padding + 7 × 6px spacing = 860px of bar. The bar sits
+    // in the content area: window − 64px icon rail − 2 × 24px pane padding, so
+    // 860px of bar wants 972px of window. Rather than demand that as a MINIMUM,
+    // the minimum buys the row enough width to carry the widest German title on
+    // two lines: 860 − 75 (the wrap saved by "Anonymitäts-|Netzwerk") = 785px of
+    // bar → 897px of window, rounded to 900. Narrower still is safe (the bar's
+    // absolute floor — every wrappable title on two lines — is 686px of bar,
+    // i.e. 798px of window); it just wraps more titles.
+    min-width: 900px;
     min-height: 600px;
     background: Theme.bg;
 
@@ -1197,6 +1250,20 @@ export component AppWindow inherits Window {
     in property <string> cfg-s3-test;
     // run a live signed probe against the S3 target in the draft
     callback test-s3();
+    // The Tor probe's verdict, pushed from Rust on every session update (it is
+    // transient and lives outside the settings draft, like cfg-s3-test).
+    // `cfg-tor-test` is the rung's key (molt_core::TorTestState::as_str) —
+    // "idle" hides the line, "testing" is a probe in flight; `-text` is the
+    // resolved localized sentence for that rung and `-tone` its colour
+    // (0 neutral · 1 good · 2 warn · 3 bad — only a proven circuit is ever 1);
+    // `-detail` is the untranslated technical specifics.
+    in property <string> cfg-tor-test;
+    in property <string> cfg-tor-test-text;
+    in property <int> cfg-tor-test-tone;
+    in property <string> cfg-tor-test-detail;
+    // probe the anonymity settings in the DRAFT (restart-required, so they are
+    // usually unsaved when the user wants to know whether Tor is there)
+    callback test-tor();
     // pushed from Rust: "" never listed · "listing" · "ok" · "error: …"
     in property <string> cfg-bk-list;
     // list the SAVED backup target's bucket (real ListObjectsV2); the
@@ -5729,113 +5796,68 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                // The eight tabs. AppButton neither elides nor scrolls, so a
-                // single row cannot shrink below the sum of its labels — and
-                // eight labels no longer fit the pane at the window's default
-                // width (German "Anonymitäts-Netzwerk" alone runs ~145px).
-                // Below the threshold the bar therefore wraps into two rows of
-                // four; ONE predicate, so the two arrangements stay
-                // complementary — same idiom as set-pane.side-groups.
-                tab-bar := VerticalLayout {
-                    property <bool> one-row: self.width >= 900px;
-                    spacing: 8px;
-                    if tab-bar.one-row: HorizontalLayout {
-                        spacing: 8px;
-                        SettingsTab {
-                            label: Strings.set-tab-general;
-                            index: 0;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-workspace;
-                            index: 1;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-backup;
-                            index: 2;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-anon;
-                            index: 3;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-relays;
-                            index: 4;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-mcp;
-                            index: 5;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-node;
-                            index: 6;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-chain;
-                            index: 7;
-                            current <=> root.set-tab;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
+                // The eight tabs, in ONE row. A tab whose title does not fit
+                // wraps THAT title onto a second line (SettingsTab: word-wrap
+                // plus a per-tab minimum width taken from its longest
+                // unbreakable chunk) — the bar itself never breaks into a
+                // second row any more. Slint spreads a shortfall evenly over
+                // the tabs that still have slack, so a narrow pane may wrap
+                // several titles at once; a title with no break opportunity
+                // ("MCP") is never shrunk and therefore never clipped.
+                HorizontalLayout {
+                    spacing: 6px;
+                    SettingsTab {
+                        label: Strings.set-tab-general;
+                        floor: Strings.set-tab-general-floor;
+                        index: 0;
+                        current <=> root.set-tab;
                     }
-                    if !tab-bar.one-row: HorizontalLayout {
-                        spacing: 8px;
-                        SettingsTab {
-                            label: Strings.set-tab-general;
-                            index: 0;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-workspace;
-                            index: 1;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-backup;
-                            index: 2;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-anon;
-                            index: 3;
-                            current <=> root.set-tab;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
+                    SettingsTab {
+                        label: Strings.set-tab-workspace;
+                        floor: Strings.set-tab-workspace-floor;
+                        index: 1;
+                        current <=> root.set-tab;
                     }
-                    if !tab-bar.one-row: HorizontalLayout {
-                        spacing: 8px;
-                        SettingsTab {
-                            label: Strings.set-tab-relays;
-                            index: 4;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-mcp;
-                            index: 5;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-node;
-                            index: 6;
-                            current <=> root.set-tab;
-                        }
-                        SettingsTab {
-                            label: Strings.set-tab-chain;
-                            index: 7;
-                            current <=> root.set-tab;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
+                    SettingsTab {
+                        label: Strings.set-tab-backup;
+                        floor: Strings.set-tab-backup-floor;
+                        index: 2;
+                        current <=> root.set-tab;
+                    }
+                    SettingsTab {
+                        label: Strings.set-tab-anon;
+                        floor: Strings.set-tab-anon-floor;
+                        index: 3;
+                        current <=> root.set-tab;
+                    }
+                    SettingsTab {
+                        label: Strings.set-tab-relays;
+                        floor: Strings.set-tab-relays-floor;
+                        index: 4;
+                        current <=> root.set-tab;
+                    }
+                    SettingsTab {
+                        label: Strings.set-tab-mcp;
+                        floor: Strings.set-tab-mcp-floor;
+                        index: 5;
+                        current <=> root.set-tab;
+                    }
+                    SettingsTab {
+                        label: Strings.set-tab-node;
+                        floor: Strings.set-tab-node-floor;
+                        index: 6;
+                        current <=> root.set-tab;
+                    }
+                    SettingsTab {
+                        label: Strings.set-tab-chain;
+                        floor: Strings.set-tab-chain-floor;
+                        index: 7;
+                        current <=> root.set-tab;
+                    }
+                    // the tabs keep their own width (stretch 0); everything
+                    // left over collects here, so the row stays left-aligned
+                    Rectangle {
+                        horizontal-stretch: 1;
                     }
                 }
                 set-pane := Rectangle {
@@ -6339,6 +6361,53 @@ export component AppWindow inherits Window {
                                 tor-port <=> root.cfg-tor-port;
                                 tor-modes-enabled: root.tor-mode-enabled;
                             }
+                            // Under the panel, only while Tor is the chosen
+                            // network: the real two-rung probe of the DRAFT
+                            // above (same idiom as the S3 test button and its
+                            // streamed verdict). The copy always names the rung
+                            // that was reached — a SOCKS port that answers is
+                            // amber and says outright that no circuit is
+                            // proven; only an end-to-end circuit reads green.
+                            if root.cfg-network-index == 0: VerticalLayout {
+                                vertical-stretch: 0;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    alignment: start;
+                                    AppButton {
+                                        height: 34px;
+                                        emoji: "🧅";
+                                        label: Strings.set-tor-test;
+                                        tooltip: Strings.tor-test-tip;
+                                        tooltip-below: true;
+                                        enabled: root.cfg-tor-test != "testing";
+                                        clicked => {
+                                            root.test-tor();
+                                        }
+                                    }
+                                }
+                                if root.cfg-tor-test != "" && root.cfg-tor-test != "idle": VerticalLayout {
+                                    spacing: 3px;
+                                    Text {
+                                        text: root.cfg-tor-test-text;
+                                        color: root.cfg-tor-test-tone == 1 ? Theme.good
+                                            : (root.cfg-tor-test-tone == 2 ? Theme.warn
+                                            : (root.cfg-tor-test-tone == 3 ? Theme.bad : Theme.faint));
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                        preferred-width: 0px;
+                                    }
+                                    // the engine's own specifics (what was
+                                    // probed, what failed) — technical English,
+                                    // deliberately untranslated
+                                    if root.cfg-tor-test-detail != "": Text {
+                                        text: root.cfg-tor-test-detail;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                        preferred-width: 0px;
+                                    }
+                                }
+                            }
                         }
                         // Nostr relays: its own tab because the pool needs the
                         // full pane width for the URLs and the leftover height
@@ -6385,6 +6454,10 @@ export component AppWindow inherits Window {
                                 }
                                 removed(url) => {
                                     root.relay-remove(url);
+                                }
+                                copied(url) => {
+                                    root.copy-text(url);
+                                    root.show-toast(Strings.toast-copied);
                                 }
                                 session(unlock) => {
                                     root.relay-clearnet-session(unlock);

@@ -2508,6 +2508,96 @@ pub enum NetHealth {
     },
 }
 
+/// The rung of the evidence ladder a Tor connectivity probe
+/// ([`Command::NetTestTor`]) actually reached.
+///
+/// The whole point of this type is that a green light must never claim more
+/// than was proven. Reaching the SOCKS address proves a socket is listening
+/// there — it does **not** prove a working Tor circuit; only a real dial
+/// THROUGH Tor to a relay the operator confirmed does. Each variant means
+/// exactly one thing, and the surfaces are expected to word them that way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TorTestState {
+    /// Never probed (or the verdict was invalidated by a settings change).
+    #[default]
+    Idle,
+    /// A probe is running right now.
+    Testing,
+    /// **Refusal, not a verdict**: the anonymity network is not Tor, so
+    /// there is nothing to test and no packet was sent.
+    Off,
+    /// **Nothing was probed**: Tor is selected but the fail-closed dialer
+    /// refused to resolve the configuration (unknown mode, `embedded`
+    /// without that build, …). A config failure, not a network result.
+    Misconfigured,
+    /// **No daemon**: nothing is listening at the configured SOCKS address.
+    NoProxy,
+    /// **Partial**: a socket answered at the SOCKS address, but nothing was
+    /// routed through it — no relay was dialable, so no circuit is proven.
+    ProxyOnly,
+    /// **Nothing testable**: this Tor mode has no SOCKS address to probe
+    /// (the embedded in-process client) and there was no relay to dial, so
+    /// no rung could be reached at all.
+    NoTarget,
+    /// **Not working**: the proxy answered, but the dial to the relay
+    /// through it failed — there is no usable circuit to that relay.
+    CircuitFailed,
+    /// **Working**: a relay from the operator's own confirmed pool was
+    /// reached END TO END through Tor. The only state that means "Tor works".
+    Circuit,
+}
+
+impl TorTestState {
+    /// The stable wire/UI key (identical to the serde tag).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TorTestState::Idle => "idle",
+            TorTestState::Testing => "testing",
+            TorTestState::Off => "off",
+            TorTestState::Misconfigured => "misconfigured",
+            TorTestState::NoProxy => "no_proxy",
+            TorTestState::ProxyOnly => "proxy_only",
+            TorTestState::NoTarget => "no_target",
+            TorTestState::CircuitFailed => "circuit_failed",
+            TorTestState::Circuit => "circuit",
+        }
+    }
+
+    /// Whether a probe is in flight (the surfaces' "testing…" affordance).
+    pub fn running(self) -> bool {
+        self == TorTestState::Testing
+    }
+}
+
+/// The outcome of a Tor connectivity probe — the rung that was reached plus
+/// the concrete, never-invented facts behind it.
+///
+/// `detail` is technical text (an error message, a reason); the surfaces own
+/// the human copy for [`Self::state`] and show `detail` as the specifics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TorTest {
+    /// Which rung of the ladder was reached.
+    #[serde(default)]
+    pub state: TorTestState,
+    /// The concrete reason/specifics behind the state (technical, English;
+    /// empty when there is nothing to add). Never invented.
+    #[serde(default)]
+    pub detail: String,
+    /// The SOCKS address that was (or would be) probed; empty when there is
+    /// none (Tor off, misconfigured, or the embedded in-process client).
+    #[serde(default)]
+    pub proxy: String,
+    /// The relay URL that was dialed through Tor; empty when none was
+    /// dialable — the probe never picks a host of its own.
+    #[serde(default)]
+    pub target: String,
+    /// How long the successful circuit dial took, in milliseconds. Only
+    /// meaningful for [`TorTestState::Circuit`]; `0` otherwise.
+    #[serde(default)]
+    pub ms: u32,
+}
+
 /// The whole shared app/session state: which screen, which language, the last
 /// wizard outcome, a transient notice (e.g. the settings-save toast) and the
 /// settings. Both operators read and mutate this through the command set.
@@ -2538,6 +2628,12 @@ pub struct SessionView {
     /// endpoint configured" when the backup target is not set up).
     #[serde(default)]
     pub s3_list: String,
+    /// Transient result of the anonymity panel's "Test Tor" probe
+    /// ([`Command::NetTestTor`]), same rationale as [`Self::s3_test`]: never
+    /// persisted, and cleared whenever the anonymity settings change (the
+    /// verdict describes ONE configuration). See [`TorTest`].
+    #[serde(default)]
+    pub tor_test: TorTest,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -2594,6 +2690,7 @@ impl Default for SessionView {
             notice: String::new(),
             s3_test: String::new(),
             s3_list: String::new(),
+            tor_test: TorTest::default(),
             restart_required: Vec::new(),
             settings: SessionSettings::default(),
             relays: Vec::new(),
@@ -3262,6 +3359,48 @@ pub enum Command {
     NetTestS3Result {
         /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`.
         result: String,
+    },
+    /// Test whether Tor is actually there and working (the anonymity settings
+    /// panel's "Test Tor" button), run off the actor; the verdict lands in
+    /// `session.tor_test`.
+    ///
+    /// The probe climbs an HONEST ladder and reports which rung it reached
+    /// (see [`TorTestState`]): a socket answering at the SOCKS address is
+    /// **not** a working Tor, and only a dial THROUGH Tor to a relay the
+    /// operator already confirmed proves a circuit. It never invents a host
+    /// to dial (ADR-0004 — nothing is pre-configured), so with an empty or
+    /// fully blocked relay pool it stops at the partial rung and says so.
+    ///
+    /// Safe to expose: it opens at most one connection, to the operator's
+    /// own proxy and their own confirmed relay.
+    NetTestTor {
+        /// Anonymity network to test (`"tor"`; anything else is refused as
+        /// [`TorTestState::Off`]). Empty tests the saved
+        /// `settings.anonymity`.
+        #[serde(default)]
+        network: String,
+        /// Tor mode (`"local" | "embedded" | "whonix"`); empty falls back to
+        /// the saved `settings.tor_mode`.
+        #[serde(default)]
+        mode: String,
+        /// Local Tor SOCKS port; `0` falls back to the saved
+        /// `settings.tor_port` (nothing can listen on port 0, so it is a
+        /// safe "not given" marker).
+        #[serde(default)]
+        port: u16,
+    },
+    /// The outcome of a [`Command::NetTestTor`] probe, reported back from the
+    /// off-actor probe task (engine-internal, never an MCP tool — an agent
+    /// must not be able to forge a "Tor works" verdict).
+    NetTestTorResult {
+        /// The honest verdict; written into `session.tor_test`.
+        result: TorTest,
+        /// Which probe request this answers (the engine's test generation).
+        /// A stale result — an older probe resolving after the anonymity
+        /// settings changed — is dropped instead of claiming the new
+        /// configuration was tested.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// List the configured S3 bucket's backup objects (the settings backup
     /// table's refresh): a SigV4-signed ListObjectsV2 under the `molt/`
@@ -4329,6 +4468,60 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Tor connectivity test (the honest ladder) ------------------------
+
+    /// The rung vocabulary is a CONTRACT: the GUI's copy and the MCP tool
+    /// description are both keyed on these exact strings, and `as_str` must
+    /// never drift from the serde tag (a mismatch would show one surface a
+    /// state the other cannot name).
+    #[test]
+    fn tor_test_state_keys_match_the_wire_tags() {
+        for state in [
+            TorTestState::Idle,
+            TorTestState::Testing,
+            TorTestState::Off,
+            TorTestState::Misconfigured,
+            TorTestState::NoProxy,
+            TorTestState::ProxyOnly,
+            TorTestState::NoTarget,
+            TorTestState::CircuitFailed,
+            TorTestState::Circuit,
+        ] {
+            let json = serde_json::to_string(&state).expect("serialize");
+            assert_eq!(
+                json,
+                format!("\"{}\"", state.as_str()),
+                "as_str drifted from the serde tag for {state:?}"
+            );
+        }
+        // exactly ONE state means "Tor works" — the whole point of the ladder
+        assert!(TorTestState::ProxyOnly != TorTestState::Circuit);
+        assert!(TorTestState::CircuitFailed != TorTestState::Circuit);
+        assert!(TorTestState::Testing.running());
+        assert!(!TorTestState::Circuit.running());
+    }
+
+    /// A fresh session has never probed Tor — and an older reader meeting a
+    /// view without the field lands in exactly that state (additive-only).
+    #[test]
+    fn a_fresh_session_has_no_tor_verdict() {
+        let sv = SessionView::default();
+        assert_eq!(sv.tor_test, TorTest::default());
+        assert_eq!(sv.tor_test.state, TorTestState::Idle);
+        let old: SessionView = serde_json::from_value(
+            serde_json::to_value(&sv)
+                .expect("to value")
+                .as_object_mut()
+                .map(|m| {
+                    m.remove("tor_test");
+                    serde_json::Value::Object(m.clone())
+                })
+                .expect("object"),
+        )
+        .expect("a view without tor_test still reads");
+        assert_eq!(old.tor_test.state, TorTestState::Idle);
+    }
 
     // ---- AcceptedWindow (delivery guarantee §4.2) -------------------------
 

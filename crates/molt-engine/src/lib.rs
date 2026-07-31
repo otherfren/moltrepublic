@@ -594,6 +594,11 @@ pub(crate) struct State {
     /// backup-target settings change, so a stale off-actor result can never
     /// overwrite a newer table (last-REQUEST wins, not last arrival).
     pub(crate) s3_list_gen: u64,
+    /// Generation of the newest Tor connectivity probe
+    /// ([`molt_core::Command::NetTestTor`]): bumped per request and on an
+    /// anonymity settings change, so a probe still in flight can never land
+    /// as a verdict about a configuration it did not test.
+    pub(crate) tor_test_gen: u64,
     /// Workspaces with a backup upload task in flight (story 12): the
     /// ticker never spawns a second task for one while its first is out,
     /// and Done/Failed clear the mark. Runtime-only.
@@ -803,6 +808,7 @@ impl State {
             clearnet_session: false,
             clock_override: None,
             s3_list_gen: 0,
+            tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
             backup_last_done: std::collections::HashMap::new(),
             restore_generation: 0,
@@ -1212,6 +1218,14 @@ impl State {
                 bucket,
             } => self.cmd_net_test_s3(endpoint, access_key, secret_key, bucket),
             Command::NetTestS3Result { result } => self.cmd_net_test_s3_result(result),
+            Command::NetTestTor {
+                network,
+                mode,
+                port,
+            } => self.cmd_net_test_tor(network, mode, port),
+            Command::NetTestTorResult { result, generation } => {
+                self.cmd_net_test_tor_result(result, generation)
+            }
             Command::NetListBackups => self.cmd_net_list_backups(),
             Command::NetListBackupsResult {
                 result,

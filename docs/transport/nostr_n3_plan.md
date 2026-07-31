@@ -44,6 +44,32 @@ TDD: the red test is two members committing at the same epoch with the
 deliveries crossed; both must land on the SAME epoch state, and the test
 must fail on today's code for the right reason (divergence, not an error).
 
+**Review correction (2026-07-31, two independent CRITICAL findings).** The
+first implementation passed its keystone while being broken in the WIRED
+path: the test drove explicit-stamp variants nothing outside tests called,
+while production stamped its own commit from a local clock and every
+foreign commit with `0`. The own key could therefore never win — both
+racers rewound onto each other's branch (still forked) and each silently
+reverted the eviction it had just performed: worse than the pre-N3 discard
+behaviour. The lesson is general: **a keystone that drives an API the
+product does not use pins nothing.**
+
+Corrections that landed:
+
+- There is no wall-clock default anywhere. `restore_member` REQUIRES the
+  stamp, and while the transport carries no per-event timestamp both sides
+  pass `NO_CARRIER_STAMP`. Equal timestamps degrade the order to the digest
+  alone — deterministic and symmetric (exactly one of two distinct commits
+  hashes lower), only grindable, which is the honest cost of having no
+  authenticated timestamp yet. N4's Nostr carrier supplies the real
+  `created_at` to both ends and restores the timestamp-first order.
+- **Bystanders converge too.** Only the two committers had a rewind slot, so
+  every other member — the majority of any real republic — kept whichever
+  commit arrived first and diverged permanently. The slot is now armed on
+  EVERY merged commit, which gives every node the same rule.
+- The keystone runs the PRODUCTION entry points (`restore_member` +
+  `decrypt`), with two bystanders receiving the commits in opposite orders.
+
 ## 2. The outer envelope (§10.11 — current-Marmot raw AEAD)
 
 `content = base64(nonce ‖ ChaCha20Poly1305(exporter_secret, plaintext,

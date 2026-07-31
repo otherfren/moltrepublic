@@ -297,6 +297,36 @@ pub fn run_app(
         });
     }
     {
+        // Probe Tor with the anonymity values in the DRAFT (not the saved
+        // settings): changing them is restart-required, so the user asking
+        // "is Tor actually there?" has normally not saved yet. The engine
+        // runs the two-rung ladder off-actor and streams the rung it reached
+        // back into `cfg-tor-test`.
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_test_tor(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let (network, mode, port) = tor_probe_args(
+                ui.get_cfg_network_index(),
+                ui.get_cfg_tor_mode_index(),
+                ui.get_cfg_tor_port(),
+            );
+            issue(
+                &rt,
+                &w,
+                &ui.as_weak(),
+                Command::NetTestTor {
+                    network,
+                    mode,
+                    port,
+                },
+            );
+        });
+    }
+    {
         // Refresh the backup table's bucket side: a real ListObjectsV2
         // against the SAVED backup target (never a draft — the table shows
         // the configured bucket). Fired on opening the backup tab and by
@@ -2338,6 +2368,14 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // open and `settings_changed` is suppressed
     ui.set_cfg_s3_test(sv.s3_test.clone().into());
     ui.set_cfg_bk_list(sv.s3_list.clone().into());
+    // …and the same for the Tor probe's verdict. The rung's key drives the
+    // "testing" affordance, the sentence and its tone come from Rust so the
+    // "only a proven circuit is green" rule stays a tested statement, and the
+    // technical specifics ride along untranslated.
+    ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
+    ui.set_cfg_tor_test_text(tor_verdict_copy(lang, sv.tor_test.state).into());
+    ui.set_cfg_tor_test_tone(tor_test_tone(sv.tor_test.state));
+    ui.set_cfg_tor_test_detail(tor_test_detail(&sv.tor_test).into());
 
     // transport health for the header "chat" pill: tone (green/amber/red) plus
     // the engine's reason string as the hover tooltip (P6). Pushed on every
@@ -2360,11 +2398,15 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
 
     if !settings_changed {
         apply_strings(ui, lang);
+        apply_tab_floors(ui);
         return;
     }
     apply_settings_fields(ui, &sv.settings);
 
     apply_strings(ui, lang);
+    // derived from the titles that were just pushed — a tab's wrap floor can
+    // never drift away from its label
+    apply_tab_floors(ui);
 }
 
 /// The relay pool as the Network panel renders it: the entries in priority
@@ -4913,6 +4955,149 @@ fn mode_name(i: i32) -> String {
     .to_string()
 }
 
+/// Tone codes for a streamed verdict line (`cfg-tor-test-tone` on the Slint
+/// side). Keeping the mapping in Rust keeps the `.slint` a plain colour
+/// lookup instead of a nine-way string comparison — and makes the honesty
+/// rule ("only a proven circuit is green") a testable statement.
+const TONE_NEUTRAL: i32 = 0;
+/// Proven: the only tone that may read as success.
+const TONE_GOOD: i32 = 1;
+/// Partial: something answered, but the thing that matters is unproven.
+const TONE_WARN: i32 = 2;
+/// Failed or refused by the configuration.
+const TONE_BAD: i32 = 3;
+
+/// The colour tone of a Tor probe verdict.
+///
+/// The whole point of the ladder ([`molt_core::TorTestState`]) is that a green
+/// light never claims more than was proven: ONLY a completed circuit through
+/// Tor is good. A SOCKS port that merely answers is amber — a socket is there,
+/// nothing was routed through it. Idle/Testing/Off are not verdicts at all
+/// (nothing was probed), so they stay neutral rather than pretending failure.
+fn tor_test_tone(state: molt_core::TorTestState) -> i32 {
+    use molt_core::TorTestState as S;
+    match state {
+        S::Circuit => TONE_GOOD,
+        S::ProxyOnly => TONE_WARN,
+        S::Idle | S::Testing | S::Off => TONE_NEUTRAL,
+        S::Misconfigured | S::NoProxy | S::NoTarget | S::CircuitFailed => TONE_BAD,
+    }
+}
+
+/// The localized sentence for one rung of the Tor ladder. Each rung says
+/// exactly what it proved and nothing more — the partial rung denies the
+/// circuit out loud, and only [`molt_core::TorTestState::Circuit`] says Tor
+/// works.
+fn tor_verdict_copy(lang: i32, state: molt_core::TorTestState) -> &'static str {
+    use molt_core::TorTestState as S;
+    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    match state {
+        S::Idle => l.tor_v_idle,
+        S::Testing => l.tor_v_testing,
+        S::Off => l.tor_v_off,
+        S::Misconfigured => l.tor_v_misconfigured,
+        S::NoProxy => l.tor_v_no_proxy,
+        S::ProxyOnly => l.tor_v_proxy_only,
+        S::NoTarget => l.tor_v_no_target,
+        S::CircuitFailed => l.tor_v_circuit_failed,
+        S::Circuit => l.tor_v_circuit,
+    }
+}
+
+/// The technical second line under a Tor verdict: the SOCKS address that was
+/// probed, the relay that was dialed, the circuit's dial time and the engine's
+/// own reason — every part omitted when the engine did not report it, so the
+/// line can never suggest a probe that did not happen. Deliberately English
+/// and untranslated (it is engine diagnostics, not product copy).
+fn tor_test_detail(t: &molt_core::TorTest) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !t.proxy.is_empty() {
+        parts.push(format!("socks {}", t.proxy));
+    }
+    if !t.target.is_empty() {
+        parts.push(format!("relay {}", t.target));
+    }
+    // a duration is only meaningful for a circuit that actually completed —
+    // printing it next to a failure would read as a working connection
+    if t.state == molt_core::TorTestState::Circuit && t.ms > 0 {
+        parts.push(format!("{} ms", t.ms));
+    }
+    if !t.detail.is_empty() {
+        parts.push(t.detail.clone());
+    }
+    parts.join(" · ")
+}
+
+/// The `NetTestTor` arguments for the anonymity panel's DRAFT (the form the
+/// user is looking at), not the saved settings: changing the anonymity network
+/// is restart-required, so the user will normally not have saved yet. A draft
+/// port outside the wire type collapses to the engine's "not given" marker
+/// (`0`, on which nothing can listen) instead of wrapping into a valid port.
+fn tor_probe_args(network_index: i32, mode_index: i32, port: i32) -> (String, String, u16) {
+    (
+        net_name(network_index),
+        mode_name(mode_index),
+        u16::try_from(port).unwrap_or(0),
+    )
+}
+
+/// The settings tab bar is ONE row in which an individual title wraps when it
+/// does not fit. A word-wrapping Slint `Text` reports a min-width of 0, so the
+/// layout would shrink such a tab until its letters are clipped; each tab
+/// therefore carries a hidden "floor" Text whose preferred width — measured in
+/// the real font — is its widest unbreakable chunk.
+///
+/// This turns a title into that floor by placing a real newline at every line
+/// BREAK OPPORTUNITY Slint would use for it (UAX #14): after a space, which
+/// disappears with the break, and after a hyphen, which stays on its line.
+fn tab_title_floor(title: &str) -> String {
+    let mut out = String::with_capacity(title.len() + 4);
+    let mut chars = title.chars().peekable();
+    while let Some(c) = chars.next() {
+        let more = chars.peek().is_some();
+        match c {
+            // a breaking space ends its line and vanishes with it; a run of
+            // spaces yields ONE break, never an empty line
+            ' ' if more && !out.ends_with('\n') => out.push('\n'),
+            ' ' => {}
+            // a hyphen stays on the line it ends (UAX #14 breaks AFTER it)
+            '-' if more => {
+                out.push('-');
+                out.push('\n');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Push each settings tab's wrap floor (see [`tab_title_floor`]) next to its
+/// title. Derived from the titles that were just pushed into `Strings`, so a
+/// renamed or re-translated tab can never drift away from its floor.
+fn apply_tab_floors(ui: &AppWindow) {
+    let s = ui.global::<Strings>();
+    let floors = [
+        s.get_set_tab_general(),
+        s.get_set_tab_workspace(),
+        s.get_set_tab_backup(),
+        s.get_set_tab_anon(),
+        s.get_set_tab_relays(),
+        s.get_set_tab_mcp(),
+        s.get_set_tab_node(),
+        s.get_set_tab_chain(),
+    ]
+    .map(|t| slint::SharedString::from(tab_title_floor(&t)));
+    let [general, workspace, backup, anon, relays, mcp, node, chain] = floors;
+    s.set_set_tab_general_floor(general);
+    s.set_set_tab_workspace_floor(workspace);
+    s.set_set_tab_backup_floor(backup);
+    s.set_set_tab_anon_floor(anon);
+    s.set_set_tab_relays_floor(relays);
+    s.set_set_tab_mcp_floor(mcp);
+    s.set_set_tab_node_floor(node);
+    s.set_set_tab_chain_floor(chain);
+}
+
 /// The tor-mode dropdown's per-row `enabled` flags (parallel to the model
 /// `["local", "embedded", "whonix"]`). `local` and `whonix` route to a system
 /// SOCKS proxy and are always available; `embedded` needs the in-process arti
@@ -5293,12 +5478,26 @@ lexicon! {
     field_sound_vote: "New vote", "Neue Abstimmung";
     sound_off: "off", "aus";
     set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor — use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor — nutze stattdessen einen lokalen Tor-Daemon.";
+    // settings → Anonymity network: the Tor connectivity probe. The ladder's
+    // rungs are worded so that NONE of them can be mistaken for a working Tor
+    // except the last one — a listening SOCKS port proves a socket, not a
+    // circuit (molt_core::TorTestState).
+    set_tor_test: "Test Tor connection", "Tor-Verbindung testen";
+    tor_test_tip: "Probes the draft settings above: first whether anything answers at the Tor SOCKS address, then whether a relay from your own confirmed pool can be reached through it. Nothing else is contacted.", "Prüft die Entwurfs-Einstellungen oben: zuerst, ob an der Tor-SOCKS-Adresse überhaupt etwas antwortet, dann, ob ein Relay aus deinem eigenen bestätigten Pool darüber erreichbar ist. Es wird nichts anderes kontaktiert.";
+    tor_v_idle: "Tor has not been tested yet.", "Tor wurde noch nicht getestet.";
+    tor_v_testing: "testing Tor…", "teste Tor…";
+    tor_v_off: "Nothing was sent — the anonymity network is not set to Tor.", "Es wurde nichts gesendet — das Anonymitäts-Netzwerk steht nicht auf Tor.";
+    tor_v_misconfigured: "Nothing was probed: this Tor configuration was refused before a single packet. Fix it and test again.", "Es wurde nichts geprüft: Diese Tor-Konfiguration wurde abgelehnt, bevor ein einziges Paket lief. Korrigieren und erneut testen.";
+    tor_v_no_proxy: "No Tor daemon: nothing is listening at this SOCKS address.", "Kein Tor-Daemon: An dieser SOCKS-Adresse lauscht nichts.";
+    tor_v_proxy_only: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Add and confirm a relay to test a real circuit.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Für einen echten Circuit-Test ein Relay hinzufügen und bestätigen.";
+    tor_v_no_target: "Nothing could be established: this Tor mode has no SOCKS address to probe, and there was no relay to dial through it.", "Es konnte nichts festgestellt werden: Dieser Tor-Modus hat keine SOCKS-Adresse zum Prüfen, und es gab kein Relay, das hindurch gewählt werden konnte.";
+    tor_v_circuit_failed: "Tor is not working: the proxy answered, but the connection through it to the relay failed.", "Tor funktioniert nicht: Der Proxy antwortete, aber die Verbindung durch ihn zum Relay schlug fehl.";
+    tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
     // added relay is idle, an onion relay connects by itself, a clearnet one
     // needs the warning AND a per-session activation.
-    rp_title: "Relays", "Relays";
-    rp_hint: "Nothing is preset — you decide which relays this node uses. The order is the dial priority.", "Nichts ist voreingestellt — du entscheidest, welche Relays dieser Knoten benutzt. Die Reihenfolge ist die Wählpriorität.";
+    rp_title: "Relay Pool", "Relay-Pool";
     rp_in_use: "Relays in use:", "Relays in Benutzung:";
     rp_none_dialable: "No relay is in use — this node is not connected.", "Kein Relay ist in Benutzung — dieser Knoten ist nicht verbunden.";
     rp_empty_title: "No relay configured yet", "Noch kein Relay eingerichtet";
@@ -5313,6 +5512,7 @@ lexicon! {
     rp_confirm: "Confirm", "Bestätigen";
     rp_revoke: "Withdraw", "Zurückziehen";
     rp_revoke_tip: "Withdraw the confirmation — the relay stays in the list but is no longer used", "Bestätigung zurückziehen — das Relay bleibt in der Liste, wird aber nicht mehr benutzt";
+    rp_copy: "Copy the address", "Adresse kopieren";
     rp_up: "Higher priority", "Höhere Priorität";
     rp_down: "Lower priority", "Niedrigere Priorität";
     rp_remove: "Remove from the list", "Aus der Liste entfernen";
@@ -6929,5 +7129,175 @@ mod tests {
             relay_add_error(0, "wss://", &pool),
             relay_add_error(1, "wss://", &pool),
         );
+    }
+
+    /// The settings tab bar is ONE row in which an individual title wraps.
+    /// A wrapping Slint `Text` reports min-width 0, so without a floor the
+    /// layout would happily shrink a tab until its letters are clipped. The
+    /// floor is a hidden Text carrying the title with every LINE-BREAK
+    /// OPPORTUNITY turned into a real newline: its preferred width is the
+    /// widest unbreakable chunk, measured in the actual font. This pins the
+    /// derivation — it must match Slint's UAX #14 breaking for our titles
+    /// (after a space, which is dropped, and after a hyphen, which stays).
+    #[test]
+    fn a_tab_title_floor_is_the_title_broken_at_every_break_opportunity() {
+        assert_eq!(tab_title_floor("Anonymitäts-Netzwerk"), "Anonymitäts-\nNetzwerk");
+        assert_eq!(tab_title_floor("Anonymity network"), "Anonymity\nnetwork");
+        assert_eq!(tab_title_floor("Chain-History"), "Chain-\nHistory");
+        assert_eq!(tab_title_floor("Nostr-Relays"), "Nostr-\nRelays");
+        // a title with no break opportunity is its own floor: such a tab can
+        // never wrap, so it must never be shrunk either
+        assert_eq!(tab_title_floor("MCP"), "MCP");
+        assert_eq!(tab_title_floor("Workspace"), "Workspace");
+        // a trailing hyphen/space has nothing after it — no empty last line
+        assert_eq!(tab_title_floor("Chain-"), "Chain-");
+        assert_eq!(tab_title_floor("Chain "), "Chain");
+        assert_eq!(tab_title_floor(""), "");
+        // the floor is the SAME text, only re-broken: dropping the breaking
+        // spaces must be the only edit (a wrong floor either clips letters or
+        // blocks the wrap it exists to allow)
+        for title in ["Anonymitäts-Netzwerk", "Anonymity network", "Chain-History", "MCP"] {
+            assert_eq!(
+                tab_title_floor(title).replace(['\n', ' '], ""),
+                title.replace(' ', ""),
+                "the floor of {title:?} must be the title itself, only re-broken"
+            );
+            assert!(
+                tab_title_floor(title).lines().all(|l| !l.is_empty()),
+                "no empty line in the floor of {title:?}"
+            );
+        }
+    }
+
+    /// The honesty invariant of the Tor probe, in colour: ONLY a proven
+    /// circuit may read as "good". A SOCKS port that merely answers is amber
+    /// (something is there, nothing is proven), and every rung that failed or
+    /// refused is red or neutral — never green.
+    #[test]
+    fn only_a_proven_tor_circuit_is_toned_good() {
+        use molt_core::TorTestState as S;
+        assert_eq!(tor_test_tone(S::Circuit), TONE_GOOD);
+        assert_eq!(tor_test_tone(S::ProxyOnly), TONE_WARN, "a listening port proves no circuit");
+        for s in [S::Idle, S::Testing, S::Off] {
+            assert_eq!(tor_test_tone(s), TONE_NEUTRAL, "{s:?} is not a verdict");
+        }
+        for s in [S::Misconfigured, S::NoProxy, S::NoTarget, S::CircuitFailed] {
+            assert_eq!(tor_test_tone(s), TONE_BAD, "{s:?} is a failure");
+        }
+        for s in [
+            S::Idle,
+            S::Testing,
+            S::Off,
+            S::Misconfigured,
+            S::NoProxy,
+            S::ProxyOnly,
+            S::NoTarget,
+            S::CircuitFailed,
+        ] {
+            assert_ne!(tor_test_tone(s), TONE_GOOD, "{s:?} must never read as success");
+        }
+    }
+
+    /// Every rung of the ladder reaches the user in their own language, and no
+    /// two rungs share a sentence — the whole point is that the user learns
+    /// WHICH rung was reached. The partial rung must say out loud that no
+    /// circuit is proven.
+    #[test]
+    fn every_tor_rung_has_its_own_honest_copy_in_both_languages() {
+        use molt_core::TorTestState as S;
+        let all = [
+            S::Idle,
+            S::Testing,
+            S::Off,
+            S::Misconfigured,
+            S::NoProxy,
+            S::ProxyOnly,
+            S::NoTarget,
+            S::CircuitFailed,
+            S::Circuit,
+        ];
+        for lang in [0, 1] {
+            for (i, a) in all.iter().enumerate() {
+                assert!(!tor_verdict_copy(lang, *a).is_empty(), "{a:?} needs copy");
+                for b in all.iter().skip(i + 1) {
+                    assert_ne!(
+                        tor_verdict_copy(lang, *a),
+                        tor_verdict_copy(lang, *b),
+                        "{a:?} and {b:?} must not read the same"
+                    );
+                }
+            }
+            // German is a real translation, not the English string
+            assert_ne!(tor_verdict_copy(0, *all.last().expect("non-empty")), tor_verdict_copy(1, *all.last().expect("non-empty")));
+        }
+        // the partial rung states the missing proof, in both languages
+        assert!(
+            tor_verdict_copy(0, S::ProxyOnly).contains("no circuit"),
+            "EN must deny the circuit outright"
+        );
+        assert!(
+            tor_verdict_copy(1, S::ProxyOnly).contains("Circuit"),
+            "DE must deny the circuit outright"
+        );
+        // …and no rung short of Circuit may claim Tor works
+        for s in all.iter().filter(|s| **s != S::Circuit) {
+            let en = tor_verdict_copy(0, *s).to_lowercase();
+            assert!(!en.contains("tor works"), "{s:?} must not claim Tor works");
+        }
+    }
+
+    /// The technical second line never invents anything: it names only what
+    /// the engine actually reported. A duration is shown for the rung it is
+    /// meaningful on (the completed circuit) and nowhere else.
+    #[test]
+    fn the_tor_detail_line_states_only_what_was_probed() {
+        use molt_core::{TorTest, TorTestState as S};
+        assert_eq!(tor_test_detail(&TorTest::default()), "");
+        let probed = TorTest {
+            state: S::ProxyOnly,
+            detail: "no confirmed relay to dial".into(),
+            proxy: "127.0.0.1:9050".into(),
+            target: String::new(),
+            ms: 0,
+        };
+        let line = tor_test_detail(&probed);
+        assert!(line.contains("127.0.0.1:9050"), "the probed SOCKS address is named");
+        assert!(line.contains("no confirmed relay to dial"), "the engine's reason rides along");
+        assert!(!line.contains("ms"), "no duration where none was measured");
+        let circuit = TorTest {
+            state: S::Circuit,
+            detail: String::new(),
+            proxy: "127.0.0.1:9050".into(),
+            target: "wss://relay.onion".into(),
+            ms: 812,
+        };
+        let line = tor_test_detail(&circuit);
+        assert!(line.contains("wss://relay.onion"), "the relay that was reached is named");
+        assert!(line.contains("812 ms"), "the circuit's dial time");
+        // a duration measured on a rung that never completed a circuit is NOT
+        // shown — it would read as a working connection
+        let failed = TorTest { state: S::CircuitFailed, ms: 812, ..circuit.clone() };
+        assert!(!tor_test_detail(&failed).contains("812 ms"));
+    }
+
+    /// The panel's button tests the DRAFT, not the saved settings: changing
+    /// the anonymity network is restart-required, so the user will usually not
+    /// have saved yet. The port is clamped into the wire type instead of
+    /// wrapping — a garbage port must not silently become a valid one.
+    #[test]
+    fn the_tor_button_probes_the_draft_the_user_is_looking_at() {
+        assert_eq!(tor_probe_args(0, 0, 9050), ("tor".to_string(), "local".to_string(), 9050));
+        assert_eq!(
+            tor_probe_args(0, 1, 9050),
+            ("tor".to_string(), "embedded".to_string(), 9050)
+        );
+        assert_eq!(tor_probe_args(0, 2, 9050), ("tor".to_string(), "whonix".to_string(), 9050));
+        // "none" is answered honestly by the engine (Off) — the GUI does not
+        // silently rewrite it into a tor probe
+        assert_eq!(tor_probe_args(1, 0, 9050), ("none".to_string(), "local".to_string(), 9050));
+        // out-of-range drafts clamp to the "not given" marker, never wrap
+        assert_eq!(tor_probe_args(0, 0, -1).2, 0);
+        assert_eq!(tor_probe_args(0, 0, 70000).2, 0);
+        assert_eq!(tor_probe_args(0, 0, 0).2, 0);
     }
 }

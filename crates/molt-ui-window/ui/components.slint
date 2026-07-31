@@ -50,6 +50,13 @@ export component AppButton inherits Rectangle {
     // (a plain-text emoji in `label` falls back to thin monochrome
     // outlines — never do that for pictographic icons)
     in property <string> emoji;
+    // Opt-in: let the label wrap onto a second line instead of forcing the
+    // button to its full single-line width. OFF by default on purpose — a
+    // word-wrapping Text reports min-width 0, so any layout may shrink such a
+    // button until its letters are clipped. Only turn it on where the caller
+    // gives the button a min-width that no chunk of the label can undercut
+    // (see SettingsTab and Strings.set-tab-*-floor).
+    in property <bool> wrap-label: false;
     callback clicked();
 
     height: 34px;
@@ -104,6 +111,11 @@ export component AppButton inherits Rectangle {
             font-size: Theme.fs-body;
             font-weight: 600;
             vertical-alignment: center;
+            // both lines of a wrapped label sit centred over each other; on a
+            // single-line label the Text is exactly as wide as it needs, so
+            // this is a no-op there
+            horizontal-alignment: center;
+            wrap: root.wrap-label ? TextWrap.word-wrap : TextWrap.no-wrap;
         }
     }
     ta := TouchArea {

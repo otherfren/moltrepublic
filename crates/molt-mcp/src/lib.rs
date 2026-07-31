@@ -932,6 +932,32 @@ pub fn tools() -> Vec<ToolDef> {
             },
         },
         ToolDef {
+            name: "net_test_tor",
+            command: "net_test_tor",
+            description: "Test whether Tor is actually there and working (the anonymity settings panel's Test button). Reports the RUNG of evidence it reached in session.tor_test.state — never a bare yes/no: \"off\" (Tor is not enabled; nothing was sent), \"misconfigured\" (the fail-closed dialer refused the config; nothing was probed), \"no_proxy\" (nothing is listening at the SOCKS address — no Tor daemon there), \"proxy_only\" (a socket answered there, but NO traffic was routed through it, so no circuit is proven), \"circuit_failed\" (the proxy answered but the dial through it failed — Tor is NOT working), \"circuit\" (a relay from the confirmed pool was reached end to end through Tor — the only state that means Tor works), \"no_target\" (nothing could be tested at all). session.tor_test also carries detail/proxy/target/ms. The probe never invents a host: with no confirmed, Tor-routable relay it stops at \"proxy_only\". Omit fields to test the saved settings; pass them to test a draft.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "network": { "type": "string", "description": "anonymity network to test (\"tor\"; anything else is refused as \"off\"); omit to use settings.anonymity" },
+                    "mode": { "type": "string", "enum": ["local", "embedded", "whonix"], "description": "Tor mode; omit to use settings.tor_mode" },
+                    "port": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "local Tor SOCKS port; omit or 0 to use settings.tor_port" }
+                }
+            }),
+            build: |args| {
+                let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                let port = args
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                Ok(Command::NetTestTor {
+                    network: s("network"),
+                    mode: s("mode"),
+                    port: u16::try_from(port)
+                        .map_err(|_| format!("port {port} is out of range (0..=65535)"))?,
+                })
+            },
+        },
+        ToolDef {
             name: "net_list_backups",
             command: "net_list_backups",
             description: "List the configured S3 bucket's backup objects (the settings backup table's refresh): a real SigV4-signed ListObjectsV2 under the molt/ prefix over the configured transport (Tor when enabled, fail-closed), driven by the SAVED settings. Objects with no matching local workspace land as real orphans in session.backup_orphans (foreign keys as unknown entries); the honest status lands in session.s3_list (\"ok\" or \"error: …\" — including \"no endpoint configured\" when no backup target is set up). Read-only against the bucket.",
@@ -1285,8 +1311,12 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 44] = [
+        const INTERNAL: [&str; 45] = [
             "net_test_s3_result",
+            // net_test_tor_result is the off-actor Tor probe reporting its
+            // real verdict (net_test_tor is the tool; an agent must not be
+            // able to forge a "Tor works" answer for the operator).
+            "net_test_tor_result",
             "net_presence_tick",
             "net_delivery_tick",
             "net_list_backups_result",
@@ -1603,6 +1633,49 @@ mod tests {
         // a present view of the wrong type is an error, never ignored
         assert!(build("read_state", &json!({ "surface": "chat", "view": 5 })).is_err());
         assert!(build("read_state", &json!({ "surface": "chat", "view": ["today"] })).is_err());
+    }
+
+    #[test]
+    fn net_test_tor_maps_its_draft_arguments() {
+        // Nothing passed = "test whatever is saved" — the engine falls back.
+        match build("net_test_tor", &json!({})).expect("empty builds") {
+            Command::NetTestTor {
+                network,
+                mode,
+                port,
+            } => {
+                assert!(network.is_empty() && mode.is_empty());
+                assert_eq!(port, 0, "0 is the 'not given' marker");
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // A draft from the settings panel (not yet saved).
+        match build(
+            "net_test_tor",
+            &json!({ "network": "tor", "mode": "local", "port": 9150 }),
+        )
+        .expect("draft builds")
+        {
+            Command::NetTestTor {
+                network,
+                mode,
+                port,
+            } => {
+                assert_eq!(network, "tor");
+                assert_eq!(mode, "local");
+                assert_eq!(port, 9150);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // An out-of-range port is a clean error, never a silent truncation
+        // onto some OTHER port the agent did not ask for.
+        assert!(build("net_test_tor", &json!({ "port": 70000 })).is_err());
+        // The description must not promise more than the ladder delivers.
+        let tool = tool_named("net_test_tor");
+        assert!(
+            tool.description.contains("proxy_only") && tool.description.contains("circuit"),
+            "the tool has to name the rungs an agent will see"
+        );
     }
 
     #[test]

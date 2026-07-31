@@ -50,6 +50,7 @@ pub mod relay_runtime;
 pub mod relay_ws;
 pub mod s3;
 pub mod supervisor;
+pub mod tor_probe;
 pub mod transfer;
 pub mod welcome;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`

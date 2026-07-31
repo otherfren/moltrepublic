@@ -174,6 +174,19 @@ pub enum GroupDataRefused {
     NotAuthorized,
 }
 
+/// The stamp to use while the transport carries no per-event timestamp (the
+/// loopback mesh today; the Nostr carrier's `created_at` replaces it in N4).
+///
+/// Both sides MUST use it — the send side in
+/// [`MlsMember::restore_member`] and the receive side in
+/// [`MlsMember::decrypt_at`]. With equal timestamps the order degrades to
+/// the digest alone: still deterministic, still symmetric (exactly one of
+/// two distinct commits has the lower digest), only grindable — a committer
+/// could search for bytes that hash low. That is the honest cost of having
+/// no authenticated timestamp yet, and it is bounded: whoever grinds wins a
+/// race they were already party to, nothing more.
+pub const NO_CARRIER_STAMP: u64 = 0;
+
 /// The deterministic total order over commits of the SAME epoch
 /// (`docs/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
 /// Every node computes it identically from the commit's own bytes and the
@@ -349,22 +362,16 @@ impl MlsMember {
     /// leaf), the Welcome brings the rejoiner in. The rejoiner re-derives the
     /// SAME identity from its phrase, so the new leaf's credential equals the
     /// removed one — a re-key of the same seat, not a new member (concept §3.3).
+    /// `created_at` is the stamp that enters this commit's [`CommitKey`]:
+    /// the timestamp of the CARRIER EVENT the commit rides on, so the
+    /// tiebreak every other node computes matches ours exactly. There is
+    /// deliberately no wall-clock default — a locally-read clock on the send
+    /// side and a wire value on the receive side are not the same order, and
+    /// two nodes would pick different winners (review finding 2026-07-31).
+    /// While the transport carries no timestamp, pass
+    /// [`NO_CARRIER_STAMP`] here AND to [`decrypt_at`](MlsMember::decrypt_at)
+    /// — symmetric on both sides, which is what convergence needs.
     pub fn restore_member(
-        &mut self,
-        member: &str,
-        new_key_package: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        self.restore_member_at(member, new_key_package, now)
-    }
-
-    /// [`restore_member`](MlsMember::restore_member) with an explicit
-    /// `created_at` — the stamp that enters this commit's [`CommitKey`]. The
-    /// caller passes the timestamp its carrier event will carry, so the
-    /// tiebreak every OTHER node computes matches ours exactly.
-    pub fn restore_member_at(
         &mut self,
         member: &str,
         new_key_package: &[u8],
@@ -473,7 +480,7 @@ impl MlsMember {
     /// reaches the engine (write-ahead, concept §6). Untrusted input: parse and
     /// verification failures are `Err`, never panics.
     pub fn decrypt(&mut self, wire: &[u8]) -> Result<MlsIncoming, MlsError> {
-        self.decrypt_at(wire, 0)
+        self.decrypt_at(wire, NO_CARRIER_STAMP)
     }
 
     /// [`decrypt`](MlsMember::decrypt) with the carrier event's `created_at`.
@@ -520,7 +527,7 @@ impl MlsMember {
                 if *own_key <= foreign {
                     return Ok(MlsIncoming::CommitSuperseded);
                 }
-                return self.rewind_and_apply(wire);
+                return self.rewind_and_apply(wire, created_at);
             }
         }
         let processed = group
@@ -534,11 +541,17 @@ impl MlsMember {
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let retiring = self.exporter_secret().ok();
+                // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
+                // that authored no commit still has to survive a race — it
+                // merges whichever of two concurrent commits arrives first,
+                // and without a rewind slot the loser's branch would be its
+                // permanent home. Arming the slot on EVERY merge gives every
+                // node the same rule as the committers.
+                self.arm_prior_slot(created_at, wire)?;
                 let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
                 group
                     .merge_staged_commit(&self.provider, *staged)
                     .map_err(|e| MlsError::Mls(format!("merging commit: {e:?}")))?;
-                self.prior = None; // the epoch moved on; nothing to rewind to
                 if let Some(secret) = retiring {
                     if self.exporter_ring.first() != Some(&secret) {
                         self.exporter_ring.insert(0, secret);
@@ -616,7 +629,11 @@ impl MlsMember {
     /// of our own. The snapshot is the exact state our commit was built on,
     /// so processing the winner there is what every node that never saw our
     /// commit does.
-    fn rewind_and_apply(&mut self, winner: &[u8]) -> Result<MlsIncoming, MlsError> {
+    fn rewind_and_apply(
+        &mut self,
+        winner: &[u8],
+        created_at: u64,
+    ) -> Result<MlsIncoming, MlsError> {
         let Some((_, snapshot, _)) = self.prior.clone() else {
             return Err(MlsError::NoGroup);
         };
@@ -631,7 +648,7 @@ impl MlsMember {
                                        // would send it straight back here
         let rewound = MlsMember::restore(&snapshot)?;
         self.provider_swap(rewound);
-        match self.decrypt_at(winner, 0) {
+        match self.decrypt_at(winner, created_at) {
             Ok(outcome) => Ok(outcome),
             Err(e) => {
                 // the "winner" did not apply after all — undo the rewind and
@@ -904,7 +921,7 @@ mod tests {
         let bob2_kp = bob2.key_package().expect("bob2 kp");
 
         // cara (an existing member, NOT the founder) approves: remove old bob + add bob2
-        let (commit, welcome2) = cara.restore_member("bob", &bob2_kp).expect("restore");
+        let (commit, welcome2) = cara.restore_member("bob", &bob2_kp, NO_CARRIER_STAMP).expect("restore");
 
         // every OTHER existing member merges the commit to advance the epoch
         match founder.decrypt(&commit).expect("founder processes the restore commit") {
@@ -963,7 +980,7 @@ mod tests {
         // bob's seat is re-keyed by cara → cara is at N+1, the founder still at N
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
         let (commit, _welcome2) =
-            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+            cara.restore_member("bob", &bob2.key_package().expect("kp"), NO_CARRIER_STAMP).expect("restore");
         let ct = cara.encrypt(b"raced ahead of the commit").expect("enc");
 
         // ❶ ahead of the commit: classified for retry, not dropped as an error
@@ -1011,7 +1028,7 @@ mod tests {
         // bob's (compromised) device is evicted by the recovery re-key
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
         let (commit, _welcome2) =
-            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+            cara.restore_member("bob", &bob2.key_package().expect("kp"), NO_CARRIER_STAMP).expect("restore");
         match founder.decrypt(&commit).expect("merge") {
             MlsIncoming::Commit => {}
             other => panic!("expected a commit, got {other:?}"),
@@ -1062,7 +1079,7 @@ mod tests {
         // has a chat in flight that was encrypted before the commit
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
         let (_commit, _welcome2) =
-            cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+            cara.restore_member("bob", &bob2.key_package().expect("kp"), NO_CARRIER_STAMP).expect("restore");
         let delayed = founder.encrypt(b"sent before the re-key").expect("enc");
 
         // the delayed epoch-N message arriving AFTER the re-key is rejected
@@ -1214,10 +1231,10 @@ mod tests {
         // every node sees, which is what makes the tiebreak agree everywhere
         let (stamp_a, stamp_b) = (1_760_000_000, 1_760_000_001);
         let (commit_a, _w) = alice
-            .restore_member_at("carol", &carol_again.key_package().expect("kp"), stamp_a)
+            .restore_member("carol", &carol_again.key_package().expect("kp"), stamp_a)
             .expect("alice commits carol's re-key");
         let (commit_b, _w) = bob
-            .restore_member_at("dave", &dave_again.key_package().expect("kp"), stamp_b)
+            .restore_member("dave", &dave_again.key_package().expect("kp"), stamp_b)
             .expect("bob commits dave's re-key");
 
         // …and the commits cross on the wire
@@ -1278,7 +1295,7 @@ mod tests {
 
         let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
         let (_commit, _w) = alice
-            .restore_member_at("carol", &carol_again.key_package().expect("kp"), 5_000)
+            .restore_member("carol", &carol_again.key_package().expect("kp"), 5_000)
             .expect("alice commits");
         let after = alice.epoch();
 
@@ -1323,7 +1340,7 @@ mod tests {
         // …then the seat is re-keyed: the epoch (and the exporter) advance
         let back = MlsMember::new(&key(3), "evicted").expect("returning");
         let (commit, _w) = founder
-            .restore_member_at("evicted", &back.key_package().expect("kp"), 9_000)
+            .restore_member("evicted", &back.key_package().expect("kp"), 9_000)
             .expect("re-key");
         alice.decrypt_at(&commit, 9_000).expect("alice merges the re-key");
         let new_secret = alice.exporter_secret().expect("new exporter secret");
@@ -1346,7 +1363,7 @@ mod tests {
         for round in 0..EXPORTER_RING_K {
             let again = MlsMember::new(&key(3), "evicted").expect("returning");
             let (c, _w) = founder
-                .restore_member_at(
+                .restore_member(
                     "evicted",
                     &again.key_package().expect("kp"),
                     10_000 + u64::try_from(round).unwrap_or(0),
@@ -1405,6 +1422,81 @@ mod tests {
         );
         assert_eq!(founder.epoch(), before, "a refusal never moves the epoch");
         assert_eq!(founder.authorize_group_data(&oracle, Some("abc123")), Ok(()));
+    }
+
+    /// KEYSTONE (review finding 2026-07-31, CRITICAL) — convergence through
+    /// the PRODUCTION entry points, and for a BYSTANDER too.
+    ///
+    /// The first version of this mechanism passed its keystone while being
+    /// broken in the wired path: the test drove explicit-stamp variants that
+    /// nothing outside tests called, while production stamped its own commit
+    /// from a local clock and every foreign commit with 0 — so the local
+    /// commit ALWAYS lost, both racers rewound onto each other's branch, and
+    /// each silently reverted the eviction it had just performed. This test
+    /// uses exactly what the engine uses.
+    #[test]
+    fn concurrent_commits_converge_through_the_production_entry_points() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(3), "bob").expect("bob");
+        // …and a BYSTANDER that authors no commit at all: the majority of a
+        // real republic. It must land on the same branch as the committers.
+        let mut chris = MlsMember::new(&key(6), "chris").expect("chris");
+        // a second bystander, to see the commits in the OTHER order
+        let mut dana = MlsMember::new(&key(7), "dana").expect("dana");
+        let carol = MlsMember::new(&key(4), "carol").expect("carol");
+        let dave = MlsMember::new(&key(5), "dave").expect("dave");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                bob.key_package().expect("kp"),
+                chris.key_package().expect("kp"),
+                dana.key_package().expect("kp"),
+                carol.key_package().expect("kp"),
+                dave.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        for m in [&mut alice, &mut bob, &mut chris, &mut dana] {
+            m.join_from_welcome(&welcome).expect("join");
+        }
+
+        let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
+        let dave_again = MlsMember::new(&key(5), "dave").expect("dave again");
+        // the ENGINE's call shape — one stamp source on both sides
+        let (commit_a, _w) = alice
+            .restore_member("carol", &carol_again.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("alice commits");
+        let (commit_b, _w) = bob
+            .restore_member("dave", &dave_again.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("bob commits");
+
+        // …and the ENGINE's receive shape (`decrypt`, not `decrypt_at`).
+        // The bystander sees them in the WORST order: whichever it merges
+        // first, the other must still be able to take it there.
+        alice.decrypt(&commit_b).expect("alice takes bob's");
+        bob.decrypt(&commit_a).expect("bob takes alice's");
+        chris.decrypt(&commit_a).expect("chris takes alice's first");
+        chris.decrypt(&commit_b).expect("…then bob's");
+
+        assert_eq!(alice.epoch(), bob.epoch(), "the committers agree on the epoch");
+        assert_eq!(chris.epoch(), alice.epoch(), "…and so does the bystander");
+        // the real detector: one key schedule, or nothing crosses
+        let wire = alice.encrypt(b"one group?").expect("alice encrypts");
+        for (who, m) in [("bob", &mut bob), ("chris", &mut chris)] {
+            match m.decrypt(&wire).expect("decrypt") {
+                MlsIncoming::Application { from, plaintext } => {
+                    assert_eq!(from, "alice");
+                    assert_eq!(plaintext, b"one group?");
+                }
+                other => panic!("{who} forked away from alice: {other:?}"),
+            }
+        }
+        // …and the bystander that saw them in the OTHER order lands there too
+        dana.decrypt(&commit_b).expect("dana takes bob's first");
+        dana.decrypt(&commit_a).expect("…then alice's");
+        assert_eq!(dana.epoch(), alice.epoch(), "order of arrival must not matter");
     }
 
     /// building the group around a bogus member — and a real add still works
