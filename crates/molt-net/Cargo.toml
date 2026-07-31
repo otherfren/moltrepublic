@@ -54,6 +54,9 @@ getrandom.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 tokio-socks.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true # Sink/Stream adapters for the WS split (relay_ws)
+url.workspace = true # relay URL → host/port/path for the dialer (same parser as molt-core's policy)
 zeroize.workspace = true
 hex.workspace = true
 # Pure-Rust TLS (the T4 dialer + S3-over-https; N2's WebSockets reuse it)

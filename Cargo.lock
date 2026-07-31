@@ -4677,6 +4677,7 @@ dependencies = [
  "chacha20",
  "chacha20poly1305",
  "ed25519-dalek",
+ "futures-util",
  "getrandom 0.2.17",
  "hex",
  "hmac",
@@ -4699,8 +4700,10 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-socks",
+ "tokio-tungstenite",
  "tor-rtcompat",
  "tracing",
+ "url",
  "webpki-roots 1.0.9",
  "zeroize",
 ]
