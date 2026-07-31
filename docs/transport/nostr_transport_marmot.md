@@ -625,9 +625,14 @@ relays (the native Nostr redundancy, §4.1), not one.
   The UI **recommends self-hosted relays**, stating plainly that **only a
   self-hosted relay avoids `h`-tag correlation** (any third-party relay, even
   an onion one, still sees which subscribers share a group).
-- **Onion relays connect automatically once confirmed; clearnet never does** —
-  it needs an explicit acknowledgement of the exposure AND a per-session
-  activation that does not survive a restart. The pool is ordered, and the
+- **Onion relays connect automatically once confirmed; a non-onion relay
+  needs an explicit acknowledgement of the exposure when it is confirmed** —
+  and that acknowledgement is then REMEMBERED (`[transport.nostr]
+  clearnet_enabled`; ADR-0004 amendment 2026-08-01). The earlier design also
+  demanded a per-session activation that reset on every start; it made the
+  operator re-consent after every restart and config edit, which is
+  habituation rather than informed consent, so the decision is persisted now.
+  Switching clearnet back off is persisted too. The pool is ordered, and the
   order is the dial priority.
 - Adding a `wss://` clearnet relay keeps the stronger flag: an inline
   "insecure — a visible, seizable clearnet target; only your client IP is

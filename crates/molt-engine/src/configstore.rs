@@ -360,6 +360,7 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
                 confirmed: r.confirmed,
             })
             .collect(),
+        clearnet_relays_enabled: s.clearnet_relays_enabled,
     }
 }
 
@@ -411,6 +412,7 @@ fn session_settings(s: &Settings) -> SessionSettings {
             }
             kept
         },
+        clearnet_relays_enabled: s.clearnet_relays_enabled,
     }
 }
 

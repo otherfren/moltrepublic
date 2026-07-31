@@ -4,8 +4,9 @@
 //! The relay pool through the REAL command surface — the same path an MCP
 //! agent drives (`docs/transport/relay_pool.md`). These pin the promises a
 //! user relies on: nothing is pre-trusted, adding never connects, and a
-//! clearnet relay needs an explicit acknowledgement plus a per-session
-//! activation before a single packet leaves.
+//! clearnet relay needs an explicit acknowledgement of its exposure before a
+//! single packet leaves — an acknowledgement that is then REMEMBERED
+//! (ADR-0004 amendment, 2026-07-31).
 
 use molt_core::relay::{RelayBlock, RelayKind};
 use molt_core::{Command, GroupConfig, Reply, SessionView};
@@ -55,10 +56,20 @@ fn a_fresh_node_has_no_relays_and_adding_one_does_not_connect() {
 }
 
 /// KEYSTONE — the clearnet gate: confirming a clearnet relay without the
-/// explicit acknowledgement is REFUSED (the same refusal an MCP agent hits),
-/// and even once confirmed it stays blocked until the session is unlocked.
+/// explicit acknowledgement is REFUSED (the same refusal an MCP agent hits).
+///
+/// **Changed 2026-07-31 (user decision, ADR-0004 amendment):** the
+/// acknowledged confirmation is now DURABLE and SUFFICIENT — it activates
+/// clearnet dialing and is persisted, so it survives a restart. The old
+/// design demanded a SECOND, per-session unlock that reset on every start;
+/// with a hand-edited config and repeated restarts that turned "confirm
+/// once" into "confirm, restart, unlock, restart, unlock, …" and made the
+/// node unusable for its actual purpose. The consent moment stays exactly
+/// where it was (`accept_clearnet` on the confirm); what changed is that
+/// consent is now REMEMBERED. The session toggle survives as a deliberate
+/// OFF switch, and turning it off is remembered too.
 #[test]
-fn clearnet_needs_the_acknowledgement_and_then_a_session_unlock() {
+fn an_acknowledged_clearnet_confirmation_is_durable_and_sufficient() {
     rt().block_on(async {
         let w = spawn(GroupConfig::demo(), SessionView::default());
         w.execute(Command::RelayAdd { url: CLEARNET.to_string() })
@@ -74,6 +85,10 @@ fn clearnet_needs_the_acknowledgement_and_then_a_session_unlock() {
         assert!(refused.is_err(), "no silent clearnet confirmation");
         let s = session(&w).await;
         assert!(!s.relays[0].confirmed, "the refusal changed nothing");
+        assert!(
+            !s.settings.clearnet_relays_enabled,
+            "a refused confirmation must not enable anything"
+        );
 
         w.execute(Command::RelayConfirm {
             url: CLEARNET.to_string(),
@@ -84,33 +99,69 @@ fn clearnet_needs_the_acknowledgement_and_then_a_session_unlock() {
         let s = session(&w).await;
         assert!(s.relays[0].confirmed);
         assert_eq!(
-            s.relays[0].blocked,
-            Some(RelayBlock::ClearnetSessionLocked),
-            "confirmed clearnet is still not dialed automatically"
+            s.relays[0].blocked, None,
+            "the acknowledged confirmation is enough — no second ritual"
         );
-        assert!(!s.clearnet_session, "a session never starts unlocked");
+        assert!(
+            s.settings.clearnet_relays_enabled,
+            "…and it is stored in the settings, so it survives a restart"
+        );
+        assert!(s.clearnet_session, "the live flag follows the stored decision");
 
-        w.execute(Command::RelayClearnetSession { unlock: true })
-            .await
-            .expect("unlock");
-        let s = session(&w).await;
-        assert!(s.clearnet_session);
-        assert_eq!(s.relays[0].blocked, None, "now it may be dialed");
-
-        // and it can be locked again without touching the confirmation
+        // the OFF switch still exists — and switching off is remembered too,
+        // so "go dark" is not undone by the next restart
         w.execute(Command::RelayClearnetSession { unlock: false })
             .await
-            .expect("relock");
+            .expect("go dark");
         let s = session(&w).await;
-        assert!(s.relays[0].confirmed);
+        assert!(s.relays[0].confirmed, "going dark keeps the confirmation");
         assert_eq!(s.relays[0].blocked, Some(RelayBlock::ClearnetSessionLocked));
+        assert!(
+            !s.settings.clearnet_relays_enabled,
+            "the OFF decision is persisted like the ON decision"
+        );
+    });
+}
+
+/// KEYSTONE — the stored decision is what a FRESH process starts from: a
+/// node whose `config.toml` says clearnet is enabled dials its confirmed
+/// clearnet relay immediately, with no further human action. This is the
+/// whole point of the amendment — the previous design could not express
+/// "yes, I mean it, stop asking".
+#[test]
+fn a_started_node_adopts_the_stored_clearnet_decision() {
+    rt().block_on(async {
+        let stored = SessionView {
+            settings: molt_core::SessionSettings {
+                relays: vec![molt_core::relay::RelayEntry {
+                    url: CLEARNET.to_string(),
+                    confirmed: true,
+                }],
+                clearnet_relays_enabled: true,
+                ..molt_core::SessionSettings::default()
+            },
+            ..SessionView::default()
+        };
+        let w = spawn(GroupConfig::demo(), stored);
+        let s = session(&w).await;
+        assert!(
+            s.clearnet_session,
+            "the stored decision is live from the first moment"
+        );
+        assert_eq!(
+            s.relays[0].blocked, None,
+            "the confirmed clearnet relay is dialable without a fresh unlock"
+        );
     });
 }
 
 /// KEYSTONE — §10.14 (decided 2026-07-31): a LOCAL relay (loopback, RFC1918,
 /// `localhost`) is a legitimate self-host target, but it is reached outside
-/// Tor — so it faces exactly the clearnet gate: explicit acknowledgement to
-/// confirm, per-session activation to dial, never a silent connection.
+/// Tor — so it faces exactly the clearnet gate: an explicit acknowledgement
+/// before it is ever dialed, never a silent connection. Since the ADR-0004
+/// amendment that acknowledgement is durable (see the clearnet keystone) —
+/// which matters most HERE, because a self-hosted LAN relay is the setup an
+/// operator restarts constantly while getting it working.
 #[test]
 fn a_local_relay_needs_the_same_acknowledgement_as_clearnet() {
     rt().block_on(async {
@@ -139,16 +190,14 @@ fn a_local_relay_needs_the_same_acknowledgement_as_clearnet() {
         .expect("acknowledged");
         let s = session(&w).await;
         assert_eq!(
-            s.relays[0].blocked,
-            Some(RelayBlock::ClearnetSessionLocked),
-            "confirmed, but still waiting for the session activation"
+            s.relays[0].blocked, None,
+            "the acknowledged confirmation is enough, and it is remembered"
         );
-
-        w.execute(Command::RelayClearnetSession { unlock: true })
-            .await
-            .expect("unlock");
-        let s = session(&w).await;
-        assert_eq!(s.relays[0].blocked, None, "now it may be dialed");
+        assert!(
+            s.settings.clearnet_relays_enabled,
+            "the decision is persisted — a LAN self-host node is not re-asked \
+             after every restart"
+        );
     });
 }
 

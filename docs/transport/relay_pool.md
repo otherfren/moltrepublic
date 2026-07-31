@@ -61,8 +61,9 @@ client dials with, is the authority for what a URL means.)*
 - **`Local` (§10.14, decided 2026-07-31)**: loopback, RFC1918-private,
   link-local and unique-local addresses, plus `localhost` names, classify as
   a third kind. A local relay is a legitimate self-host target but is reached
-  DIRECTLY, never over Tor — so it rides exactly the clearnet gate: explicit
-  acknowledgement to confirm, per-session activation to dial. Addresses
+  DIRECTLY, never over Tor — so it rides exactly the clearnet gate: an
+  explicit acknowledgement to confirm, which then also activates dialing and
+  is remembered (ADR-0004 amendment 2026-08-01). Addresses
   nothing can listen on (unspecified, broadcast, multicast) are refused
 - `ws://` (plaintext) is allowed for an onion host (the Tor circuit already
   encrypts and authenticates) and for a local one (no CA certifies private
@@ -107,8 +108,12 @@ editing their own file may add *and* confirm a relay; the template invites
 exactly that. So anything able to write `config.toml` can pre-confirm a relay,
 and a confirmed onion relay is dialed automatically. What still holds: the pool
 is always visible in the relay settings, so a relay the operator never added is
-on screen rather than hidden; clearnet still needs the per-session activation,
-which no file can grant; and invalid URLs never reach a dial path.
+on screen rather than hidden; a non-onion relay still needs its acknowledged
+confirmation; and invalid URLs never reach a dial path. Note the honest limit
+of the 2026-08-01 amendment: since the clearnet decision is persisted, a file
+that sets `clearnet_enabled = true` AND confirms a clearnet relay does grant
+non-onion dialing — the file is the operator's own authority, and the pool
+stays visible in the settings where such an entry can be revoked.
 
 ## 3. The gate — three rules, one pure function
 

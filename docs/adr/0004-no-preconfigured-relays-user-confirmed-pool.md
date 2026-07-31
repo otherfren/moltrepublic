@@ -57,8 +57,9 @@ in the product's ergonomics instead of in a recommendation nobody reads.
 - N2's relay runtime MUST consume `molt_core::relay::dialable(...)` rather than
   reading the pool directly — that pure function is the single place the policy
   lives, and it returns the empty set for an unconfigured node.
-- The per-session clearnet activation is runtime-only state
-  (`State::clearnet_session`) and must never be persisted.
+- ~~The per-session clearnet activation is runtime-only state
+  (`State::clearnet_session`) and must never be persisted.~~
+  **AMENDED 2026-08-01 — see the amendment below: the decision IS persisted.**
 - `SaveSettings` deliberately ignores any relay pool in its payload: the
   `Relay*` commands are the only way in, so a settings write cannot inject a
   pre-confirmed clearnet relay past the acknowledgement.
@@ -75,6 +76,41 @@ in the product's ergonomics instead of in a recommendation nobody reads.
   anything with write access to that file) may add *and* confirm a relay, and
   a confirmed onion relay then dials automatically. That is deliberate — the
   file is the operator's own authority — and the honest mitigations are that
-  the pool is always visible in the settings, that clearnet still needs the
-  per-session act no file can grant, and that unusable URLs are dropped at
-  ingest (`relay::sanitize_pool`).
+  the pool is always visible in the settings, that a non-onion relay still
+  needs the operator's acknowledged confirmation, and that unusable URLs are
+  dropped at ingest (`relay::sanitize_pool`).
+
+## Amendment 2026-08-01 — the clearnet decision is REMEMBERED
+
+**What changed.** The acknowledged confirmation of a non-onion (clearnet /
+LAN / loopback) relay now also *activates* non-onion dialing, and that
+decision is persisted (`[transport.nostr] clearnet_enabled`). The separate
+per-session unlock, which reset on every start, is gone as a *requirement*;
+the switch survives as the deliberate OFF control, and switching off is
+persisted too.
+
+**Why.** The original design demanded two acts for one decision: an explicit
+acknowledgement per relay (durable) plus a global activation (session-only).
+In use — reported from the operator's own two-node setup — that second act
+made the node unusable for its purpose: every config edit and every restart
+silently revoked it, so a founding or join failed until the operator
+re-performed a consent they had already given, with an error message that
+did not say so. Repetition is not consent; it is habituation, which is the
+failure mode informed-consent design exists to avoid. A control the operator
+must re-perform forever gets clicked without reading.
+
+**What is NOT weakened.** The consent moment is unchanged and still explicit:
+a non-onion relay cannot be confirmed without `accept_clearnet`, the refusal
+still names the exposure, and an unconfirmed relay is still never dialed. A
+fresh install still dials nothing. `SaveSettings` still cannot set the flag
+(one door: the `Relay*` commands), so neither a settings payload nor an MCP
+agent can grant itself non-onion dialing.
+
+**What IS given up, honestly.** The property "after a restart no clearnet
+packet leaves this machine until a human acts again" no longer holds for a
+node whose operator enabled it. That property protected against a stolen or
+seized machine being restarted and immediately phoning a clearnet relay —
+a real but narrow case, and one the operator can still choose by switching
+clearnet off before shutdown (now remembered). Weighed against a gate that
+made the product unusable and trained its operator to click past warnings,
+remembering the decision is the better trade.

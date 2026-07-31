@@ -151,6 +151,14 @@ pub struct NostrConfig {
     /// order is the dial priority** (the first entry is tried first).
     #[serde(default)]
     pub relay: Vec<RelayConfig>,
+    /// Whether this node may dial NON-onion relays (clearnet, LAN,
+    /// loopback — anything reached outside Tor). Off by default. Set by
+    /// acknowledging the exposure when confirming such a relay, and cleared
+    /// by switching clearnet off; persisted so the decision survives a
+    /// restart (ADR-0004 amendment 2026-07-31 — it used to reset on every
+    /// start, which made the operator re-perform the same consent forever).
+    #[serde(default)]
+    pub clearnet_enabled: bool,
 }
 
 /// One relay in the pool. The onion/clearnet kind is deliberately NOT a field:
@@ -394,6 +402,8 @@ pub struct Settings {
     /// The Nostr relay pool in dial-priority order. Empty by default — the
     /// node connects to no relay until its operator adds and confirms one.
     pub relays: Vec<RelayConfig>,
+    /// Whether non-onion (clearnet/LAN/loopback) relays may be dialed.
+    pub clearnet_relays_enabled: bool,
 }
 
 impl Default for Settings {
@@ -421,6 +431,7 @@ impl Default for Settings {
             lang: default_lang(),
             theme: default_theme(),
             relays: Vec::new(),
+            clearnet_relays_enabled: false,
         }
     }
 }
@@ -469,6 +480,7 @@ impl From<&Config> for Settings {
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: c.transport.anonymity.tor.port,
             relays: c.transport.nostr.relay.clone(),
+            clearnet_relays_enabled: c.transport.nostr.clearnet_enabled,
             mcp_port: c.mcp.port,
             mcp_allow: c.mcp.allow.clone(),
             mcp_token: c.mcp.token.clone(),
@@ -543,6 +555,11 @@ mode = {tor_mode}
 port = {tor_port}
 
 {relay_doc}[transport.nostr]
+# May this node dial relays that are NOT onion services (clearnet, LAN,
+# loopback)? Off by default. Confirming such a relay with its explicit
+# exposure acknowledgement sets this to true and KEEPS it — the decision is
+# remembered instead of being asked again after every restart.
+clearnet_enabled = {clearnet_enabled}
 {relays}
 [ui]
 # GUI language: "en" | "de".
@@ -571,6 +588,7 @@ theme = {theme}
         tor_port = settings.tor_port,
         relay_doc = RELAY_SECTION_DOC,
         relays = render_relays(&settings.relays),
+        clearnet_enabled = settings.clearnet_relays_enabled,
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
     )
@@ -580,7 +598,7 @@ theme = {theme}
 /// both writers: the generated template ([`render`]) and the retrofit that
 /// [`apply`] performs when an older config gains the section for the first
 /// time — so a hand-editing operator always finds the same instructions.
-const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically; a confirmed clearnet or local\n# (LAN/loopback) relay needs an additional explicit activation in every\n# session before a single packet leaves (Settings > Nostr relays, or the\n# relay_clearnet_session MCP tool).\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n";
+const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically. A clearnet or local (LAN/\n# loopback) relay must be confirmed WITH its exposure acknowledgement; that\n# also sets clearnet_enabled below and is remembered, so you confirm once\n# rather than after every restart. Switch it off again in Settings > Nostr\n# relays or with the relay_clearnet_session MCP tool.\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n";
 
 /// The `[[transport.nostr.relay]]` tables for [`render`], in pool order —
 /// empty (not even a table header) when the pool is empty, so a generated
@@ -681,6 +699,17 @@ pub fn salvage(text: &str) -> Settings {
                 s.tor_port = port;
             }
         }
+    }
+    // The persisted clearnet decision (ADR-0004 amendment). Absent or
+    // malformed salvages as FALSE — a damaged file must never grant
+    // non-onion dialing the operator cannot be shown to have chosen.
+    if let Some(enabled) = value
+        .get("transport")
+        .and_then(|t| t.get("nostr"))
+        .and_then(|n| n.get("clearnet_enabled"))
+        .and_then(toml::Value::as_bool)
+    {
+        s.clearnet_relays_enabled = enabled;
     }
     // The relay pool salvages entry by entry: one malformed table must not
     // cost the operator the rest of the pool. A relay with no `url` is
@@ -916,6 +945,7 @@ fn apply_relays(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         .map_or(true, |t| t.get("nostr").is_none());
     {
         let nostr = table_at(doc.as_table_mut(), &["transport", "nostr"]);
+        set_bool(nostr, "clearnet_enabled", settings.clearnet_relays_enabled);
         if settings.relays.is_empty() {
             nostr.remove("relay");
         } else {
@@ -1110,6 +1140,8 @@ mod tests {
                     confirmed: false,
                 },
             ],
+            // the persisted clearnet decision round-trips like any scalar
+            clearnet_relays_enabled: true,
         }
     }
 

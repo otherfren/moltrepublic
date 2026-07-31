@@ -212,8 +212,14 @@ fn main() -> anyhow::Result<()> {
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
             download_dir: config.storage.download_dir.clone(),
+            // the operator's PERSISTED clearnet decision (ADR-0004
+            // amendment): a node that was told "yes, use non-onion relays"
+            // starts that way instead of asking again after every restart.
+            // Onion relays never depended on it.
+            clearnet_relays_enabled: config.transport.nostr.clearnet_enabled,
             // the pool as configured; nothing is dialed until an entry is
-            // confirmed, and clearnet additionally needs a per-session act
+            // confirmed, and a non-onion entry additionally needs the
+            // decision above.
             // hand-written entries never ran ingest validation: normalize,
             // drop the unusable, collapse duplicates (relay_pool.md)
             relays: molt_core::relay::sanitize_pool(

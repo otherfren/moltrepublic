@@ -810,7 +810,10 @@ impl State {
             net_link_down: std::collections::BTreeMap::new(),
             net_send_stuck: std::collections::BTreeMap::new(),
             last_mesh_out: 0,
-            clearnet_session: false,
+            // the STORED decision is what a fresh process starts from
+            // (ADR-0004 amendment): an operator who acknowledged clearnet
+            // exposure is not asked again on every restart
+            clearnet_session: session.settings.clearnet_relays_enabled,
             clock_override: None,
             s3_list_gen: 0,
             tor_test_gen: 0,

@@ -2074,6 +2074,9 @@ fn parse_recover_notice(notice: &str) -> RecoverNotice {
 fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
     let mut stored = stored.clone();
     stored.relays = Vec::new();
+    // same reason as the pool: not a config-tab field, so comparing it would
+    // make every clearnet-enabled node look permanently "dirty"
+    stored.clearnet_relays_enabled = false;
     stored != read_settings_draft(ui)
 }
 
@@ -2081,6 +2084,11 @@ fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
 fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
     SessionSettings {
         headless: ui.get_cfg_headless(),
+        // not a config-tab field: the relay pool and the clearnet decision
+        // are edited through the Relay* commands, never the settings draft.
+        // Carried as false here and re-merged by the engine, exactly like
+        // `relays` below (save_settings can neither inject nor wipe them).
+        clearnet_relays_enabled: false,
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),

@@ -279,6 +279,20 @@ pub struct SessionSettings {
     /// `docs/transport/relay_pool.md`.
     #[serde(default)]
     pub relays: Vec<crate::relay::RelayEntry>,
+    /// Whether this node may dial relays that are NOT onion services
+    /// (clearnet, LAN, loopback — everything reached outside Tor).
+    ///
+    /// **Off by default: a fresh install dials no such relay.** It is turned
+    /// on by acknowledging a clearnet/local relay's exposure when confirming
+    /// it (`RelayConfirm { accept_clearnet: true }`), and off again by
+    /// `RelayClearnetSession { unlock: false }` — and BOTH decisions are
+    /// persisted (ADR-0004 amendment, 2026-07-31). It used to be a
+    /// session-only flag that reset on every start; that made the informed
+    /// consent unrepeatable-in-practice rather than strong, since the
+    /// operator had to re-perform it after every restart and every config
+    /// edit. The consent moment is unchanged — it is simply remembered now.
+    #[serde(default)]
+    pub clearnet_relays_enabled: bool,
 }
 
 /// Default alert sound: silent until the operator opts in.
@@ -330,6 +344,7 @@ impl Default for SessionSettings {
             read_receipts: true,
             // no relay ships with the app: a fresh install connects nowhere
             relays: Vec::new(),
+            clearnet_relays_enabled: false,
         }
     }
 }
@@ -3048,9 +3063,12 @@ pub enum Command {
         /// The relay to un-confirm.
         url: String,
     },
-    /// Activate (or deactivate) clearnet relays for THIS session. Never
-    /// persisted: after a restart no clearnet packet leaves the machine until
-    /// the user acts again. Onion relays are unaffected.
+    /// Turn dialing of NON-onion relays (clearnet, LAN, loopback) on or off.
+    /// **Persisted** since the ADR-0004 amendment (2026-07-31) — both the on
+    /// and the off decision — so an operator states it once instead of after
+    /// every restart. Confirming such a relay with its exposure
+    /// acknowledgement already turns it on; this is the explicit switch (and
+    /// the way to go dark again). Onion relays are unaffected.
     RelayClearnetSession {
         /// `true` = allow dialing confirmed clearnet relays until shutdown.
         unlock: bool,

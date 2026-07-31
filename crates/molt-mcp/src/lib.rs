@@ -412,6 +412,11 @@ fn settings_arg(args: &Value) -> SessionSettings {
             .get("headless")
             .and_then(Value::as_bool)
             .unwrap_or(d.headless),
+        // NOT settable through save_settings — the relay pool and the
+        // clearnet decision have exactly one door each (the Relay* tools),
+        // so an agent cannot grant itself non-onion dialing here. Carried
+        // through unchanged; the engine re-merges the stored value.
+        clearnet_relays_enabled: d.clearnet_relays_enabled,
         workspace_dir: text("workspace_dir", d.workspace_dir),
         download_dir: text("download_dir", d.download_dir),
         s3_backup: args

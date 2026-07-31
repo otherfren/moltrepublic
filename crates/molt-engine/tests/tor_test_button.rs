@@ -258,10 +258,13 @@ async fn a_confirmed_relay_is_the_target_and_a_lying_proxy_earns_no_circuit() {
     assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
 }
 
-/// A confirmed relay the session has NOT unlocked is not dialable, so the
-/// probe has no target — the partial rung, not a fabricated circuit.
+/// A relay whose clearnet dialing is switched OFF is not dialable, so the
+/// probe has no target — the partial rung, not a fabricated circuit. (Since
+/// the ADR-0004 amendment an acknowledged confirmation ENABLES dialing, so
+/// the blocked state is now reached by switching it back off — the operator
+/// going dark deliberately.)
 #[tokio::test]
-async fn a_session_locked_relay_is_not_a_probe_target() {
+async fn a_relay_with_clearnet_switched_off_is_not_a_probe_target() {
     let w = engine();
     w.execute(Command::RelayAdd {
         url: RELAY.to_string(),
@@ -274,6 +277,9 @@ async fn a_session_locked_relay_is_not_a_probe_target() {
     })
     .await
     .expect("relay confirmed");
+    w.execute(Command::RelayClearnetSession { unlock: false })
+        .await
+        .expect("go dark");
     let v = run_test(&w, draft("local", blackhole_port().await)).await;
     assert_eq!(v.state, TorTestState::ProxyOnly, "{v:?}");
     assert!(v.target.is_empty(), "{v:?}");

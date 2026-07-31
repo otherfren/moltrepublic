@@ -189,6 +189,19 @@ impl State {
             .find(|r| r.url == url)
             .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
         entry.confirmed = true;
+        // ADR-0004 amendment (2026-07-31): the acknowledgement IS the
+        // consent, and consent is REMEMBERED. Confirming a non-onion relay
+        // with `accept_clearnet` therefore also activates non-onion dialing
+        // and persists that — instead of demanding a second, session-only
+        // unlock that reset on every restart (which turned one informed
+        // decision into an endless re-confirmation loop, without making the
+        // node any safer).
+        if accept_clearnet
+            && molt_core::relay::relay_kind(&url) != molt_core::relay::RelayKind::Onion
+        {
+            self.clearnet_session = true;
+            self.session.settings.clearnet_relays_enabled = true;
+        }
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -212,11 +225,19 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Activate clearnet relays for THIS session only. Deliberately never
-    /// persisted: after a restart no clearnet packet leaves the machine until
-    /// the user acts again.
+    /// Turn dialing of NON-onion relays (clearnet, LAN, loopback) on or off.
+    ///
+    /// **Persisted since the ADR-0004 amendment (2026-07-31)** — both the ON
+    /// and the OFF decision. It used to be session-only, resetting on every
+    /// start; that did not protect anything an operator had not already
+    /// consented to, it merely made the consent unrepeatable in practice
+    /// (every restart, every config edit, ask again). Going dark is
+    /// remembered for the same reason: a deliberate OFF must not be undone
+    /// by the next restart.
     pub(crate) fn cmd_relay_clearnet_session(&mut self, unlock: bool) -> Result<Reply, MoltError> {
         self.clearnet_session = unlock;
+        self.session.settings.clearnet_relays_enabled = unlock;
+        self.persist_settings(false);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -235,6 +256,12 @@ impl State {
         // drop the operator's pool while changing an unrelated field.
         let mut settings = settings;
         settings.relays = std::mem::take(&mut self.session.settings.relays);
+        // …and the clearnet decision rides with the pool for the same reason:
+        // it is set by the acknowledged confirmation / the explicit switch,
+        // never by a wholesale settings replacement (which could otherwise
+        // grant non-onion dialing, or silently revoke it, as a side effect of
+        // changing an unrelated field).
+        settings.clearnet_relays_enabled = self.session.settings.clearnet_relays_enabled;
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
