@@ -126,6 +126,20 @@ pub enum MlsIncoming {
     FutureEpoch,
 }
 
+/// How many past epochs' exporter secrets stay available for the OUTER
+/// envelope layer (§10.4, K = 3). Epochs change only on membership and
+/// recovery, so three covers the recent ones; beyond the ring an event is
+/// epoch-opaque and must be reported loudly (G4), never silently skipped.
+/// The ring holds OUTER secrets only — the inner MLS layer keeps
+/// `max_past_epochs = 0`, so an evicted leaf's old-epoch message stays
+/// rejected (the asymmetry, concept §6).
+pub const EXPORTER_RING_K: usize = 3;
+
+/// The NIP-EE exporter label and length: the outer sealing key of a kind-445
+/// event is `export_secret("nostr", &[], 32)` of the epoch.
+const EXPORTER_LABEL: &str = "nostr";
+const EXPORTER_LEN: usize = 32;
+
 /// The deterministic total order over commits of the SAME epoch
 /// (`docs/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
 /// Every node computes it identically from the commit's own bytes and the
@@ -167,6 +181,9 @@ pub struct MlsMember {
     /// state nobody else shares (a silent permanent fork). Cleared as soon
     /// as the epoch moves on.
     prior: Option<(u64, Vec<u8>, CommitKey)>,
+    /// The bounded ring of PAST epochs' exporter secrets (newest first), for
+    /// the outer envelope layer only — see [`EXPORTER_RING_K`].
+    exporter_ring: Vec<[u8; EXPORTER_LEN]>,
     group: Option<MlsGroup>,
 }
 
@@ -207,6 +224,7 @@ impl MlsMember {
             name: name.to_string(),
             group: None,
             prior: None,
+            exporter_ring: Vec::new(),
         })
     }
 
@@ -358,6 +376,7 @@ impl MlsMember {
         // same-epoch commit may win the tiebreak, and then we must rewind to
         // exactly this state instead of forking the group (N3 §1)
         self.arm_prior_slot(created_at, &commit_bytes)?;
+        self.retire_exporter();
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         group
             .merge_pending_commit(&self.provider)
@@ -480,10 +499,18 @@ impl MlsMember {
                 plaintext: app.into_bytes(),
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                let retiring = self.exporter_secret().ok();
+                let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
                 group
                     .merge_staged_commit(&self.provider, *staged)
                     .map_err(|e| MlsError::Mls(format!("merging commit: {e:?}")))?;
                 self.prior = None; // the epoch moved on; nothing to rewind to
+                if let Some(secret) = retiring {
+                    if self.exporter_ring.first() != Some(&secret) {
+                        self.exporter_ring.insert(0, secret);
+                        self.exporter_ring.truncate(EXPORTER_RING_K);
+                    }
+                }
                 Ok(MlsIncoming::Commit)
             }
             ProcessedMessageContent::ProposalMessage(p) => {
@@ -493,6 +520,36 @@ impl MlsMember {
                 Ok(MlsIncoming::Proposal)
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(MlsIncoming::Proposal),
+        }
+    }
+
+    /// This epoch's exporter secret — the OUTER envelope key of a kind-445
+    /// event (§10.11: `ChaCha20Poly1305(exporter_secret, …)`). It
+    /// authenticates nothing and grants no MLS read capability.
+    pub fn exporter_secret(&self) -> Result<[u8; EXPORTER_LEN], MlsError> {
+        let group = self.group.as_ref().ok_or(MlsError::NoGroup)?;
+        let raw = group
+            .export_secret(self.provider.crypto(), EXPORTER_LABEL, &[], EXPORTER_LEN)
+            .map_err(|e| MlsError::Mls(format!("exporting secret: {e:?}")))?;
+        raw.try_into()
+            .map_err(|_| MlsError::Mls("exporter secret has the wrong length".into()))
+    }
+
+    /// The PAST epochs' exporter secrets still held for the outer layer,
+    /// newest first (bounded by [`EXPORTER_RING_K`]).
+    pub fn exporter_ring(&self) -> &[[u8; EXPORTER_LEN]] {
+        &self.exporter_ring
+    }
+
+    /// Push the CURRENT epoch's exporter secret into the ring — called right
+    /// before an epoch change, so the secret that just became "past" stays
+    /// strippable for the outer layer.
+    fn retire_exporter(&mut self) {
+        if let Ok(secret) = self.exporter_secret() {
+            if self.exporter_ring.first() != Some(&secret) {
+                self.exporter_ring.insert(0, secret);
+                self.exporter_ring.truncate(EXPORTER_RING_K);
+            }
         }
     }
 
@@ -623,6 +680,10 @@ impl MlsMember {
             group: Some(group),
             // a restored snapshot has no in-flight commit of its own
             prior: None,
+            // the ring is runtime-only: a restored node re-fills it as
+            // epochs advance, and past-epoch catch-up falls back to the
+            // ACK/rewind layer until then
+            exporter_ring: Vec::new(),
         })
     }
 }
@@ -1180,6 +1241,76 @@ mod tests {
         // …and the real race still works afterwards: the slot is re-armed,
         // so a genuine lower-keyed commit is still honoured
         assert!(alice.encrypt(b"still me").is_ok(), "the group still works");
+    }
+
+    /// KEYSTONE (N3 §2, concept §6 finding 1) — THE ASYMMETRY: the bounded
+    /// ring of past exporter secrets lets a laggard STRIP THE OUTER layer of
+    /// an event published before a re-key, while the INNER MLS layer still
+    /// REJECTS an evicted leaf's old-epoch message. Keeping outer secrets is
+    /// therefore not a re-opening of the eviction hole — the two secrets do
+    /// different jobs, and this test is what says so.
+    #[test]
+    fn the_exporter_ring_strips_the_outer_layer_but_mls_still_rejects_the_old_epoch() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let mut evicted = MlsMember::new(&key(3), "evicted").expect("evicted");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                evicted.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        alice.join_from_welcome(&welcome).expect("alice joins");
+        evicted.join_from_welcome(&welcome).expect("evicted joins");
+
+        // the epoch's outer secret, and a message sealed under it
+        let old_secret = alice.exporter_secret().expect("exporter secret");
+        assert_eq!(founder.exporter_secret().expect("same group"), old_secret);
+        let old_epoch_wire = evicted.encrypt(b"from the old epoch").expect("encrypt");
+
+        // …then the seat is re-keyed: the epoch (and the exporter) advance
+        let back = MlsMember::new(&key(3), "evicted").expect("returning");
+        let (commit, _w) = founder
+            .restore_member_at("evicted", &back.key_package().expect("kp"), 9_000)
+            .expect("re-key");
+        alice.decrypt_at(&commit, 9_000).expect("alice merges the re-key");
+        let new_secret = alice.exporter_secret().expect("new exporter secret");
+        assert_ne!(new_secret, old_secret, "the exporter rotates with the epoch");
+
+        // OUTER: the ring still holds the previous secret, so a pre-commit
+        // event is not an opaque blob — catch-up across one re-key works
+        assert!(
+            alice.exporter_ring().contains(&old_secret),
+            "the last K exporter secrets stay available for the outer layer"
+        );
+        // INNER: …and the evicted leaf's old-epoch message is STILL rejected
+        assert!(
+            alice.decrypt_at(&old_epoch_wire, 8_000).is_err(),
+            "max_past_epochs = 0 must still refuse an old-epoch message"
+        );
+
+        // the ring is bounded at K: after K further re-keys the oldest is gone
+        let mut member = alice;
+        for round in 0..EXPORTER_RING_K {
+            let again = MlsMember::new(&key(3), "evicted").expect("returning");
+            let (c, _w) = founder
+                .restore_member_at(
+                    "evicted",
+                    &again.key_package().expect("kp"),
+                    10_000 + u64::try_from(round).unwrap_or(0),
+                )
+                .expect("re-key");
+            member
+                .decrypt_at(&c, 10_000 + u64::try_from(round).unwrap_or(0))
+                .expect("merge");
+        }
+        assert!(
+            !member.exporter_ring().contains(&old_secret),
+            "beyond the ring an old epoch is opaque — reported loudly, never silently skipped"
+        );
+        assert!(member.exporter_ring().len() <= EXPORTER_RING_K);
     }
 
     /// building the group around a bogus member — and a real add still works
