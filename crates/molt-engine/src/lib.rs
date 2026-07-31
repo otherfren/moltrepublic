@@ -36,6 +36,7 @@ mod events;
 mod founding;
 mod lifecycles;
 mod net;
+mod nostr_ritual;
 mod proposals;
 mod recovery;
 mod session;
@@ -698,6 +699,10 @@ pub(crate) struct State {
     /// supervisor reuses the same instance. A fresh per-join `Arc` (replaced in
     /// `cmd_join_start`) isolates a stale task's late fill from a new join.
     pub(crate) join_transport: std::sync::Arc<std::sync::Mutex<Option<founding::RitualTransport>>>,
+    /// The running Nostr member-join task (N4a) — aborted on cancel or on a
+    /// restarted join (its generation-guarded commands would be dropped
+    /// anyway; aborting also releases its relay sockets).
+    pub(crate) join_task: Option<tokio::task::JoinHandle<()>>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -829,6 +834,7 @@ impl State {
             founder_mesh_in: None,
             runtime_transport: None,
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            join_task: None,
             net_generation: 0,
             net_scope: 0,
             join_generation: 0,
@@ -1258,8 +1264,10 @@ impl State {
                 mls,
                 mesh,
                 nostr_sk,
+                relays,
+                rotation_seed,
                 generation,
-            } => self.cmd_net_join_sealed(sealed, mls, mesh, nostr_sk, generation),
+            } => self.cmd_net_join_sealed(sealed, mls, mesh, nostr_sk, relays, rotation_seed, generation),
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }
@@ -3655,11 +3663,12 @@ mod tests {
         });
     }
 
-    /// The N-demo gap: a PRODUCTION founding (no test seam) has no network
-    /// transport and fails honestly — never a loopback republic that looks
-    /// reachable by real remote members.
+    /// N4a: a PRODUCTION founding (no test seam) runs over Nostr — and on a
+    /// fresh node with an EMPTY relay pool (ADR-0004: nothing pre-configured)
+    /// it fails honestly, naming the missing prerequisite, before a single
+    /// ticket leaves the engine.
     #[test]
-    fn create_start_without_a_transport_fails_honestly() {
+    fn create_start_without_a_confirmed_relay_fails_honestly() {
         rt().block_on(async {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             let err = w
@@ -3670,10 +3679,10 @@ mod tests {
                     members: 3,
                 })
                 .await
-                .expect_err("no transport → no founding");
+                .expect_err("no confirmed relay → no founding");
             assert!(
-                err.to_string().contains(NO_TRANSPORT_YET),
-                "the honest N-demo gap error surfaces: {err}"
+                err.to_string().contains("no confirmed, dialable relay"),
+                "the honest prerequisite error surfaces: {err}"
             );
         });
     }
@@ -3848,8 +3857,9 @@ mod tests {
 
             // a real founding link (with the transport handover) arms the
             // wizard — and then fails HONESTLY: this build has no network
-            // transport (SMP demolished, Nostr lands with N4), so the run
-            // reports exactly that instead of waiting forever
+            // relay-gate refusal: the link names a relay this node never
+            // confirmed (ADR-0004), so the run reports exactly that instead
+            // of dialing somewhere the operator never approved
             let link = crate::FoundingInvite {
                 info: molt_core::InviteInfo {
                     republic: "Chess Club".to_string(),
@@ -3879,10 +3889,10 @@ mod tests {
                     assert_eq!(s.join.republic, "Chess Club");
                     assert_eq!((s.join.rule_m, s.join.rule_n), (2, 2));
                     assert!(!s.join.seed.is_empty(), "the joiner's recovery phrase is shown");
-                    assert_eq!(s.join.run.outcome, 2, "no transport → the run fails honestly");
+                    assert_eq!(s.join.run.outcome, 2, "unconfirmed relay → the run fails honestly");
                     assert!(
-                        s.join.run.log.iter().any(|l| l.contains(crate::NO_TRANSPORT_YET)),
-                        "the honest N-demo gap error is in the run log: {:?}",
+                        s.join.run.log.iter().any(|l| l.contains("not confirmed")),
+                        "the honest relay-gate error is in the run log: {:?}",
                         s.join.run.log
                     );
                 }
@@ -3957,9 +3967,10 @@ mod tests {
         }
     }
 
-    /// The honest N-demo gap failure rides the join run's EXISTING failure
-    /// surface (`cmd_net_join_failed`), and that surface keeps its gates: a
-    /// report after the run already failed is dropped, not double-appended.
+    /// An honest join failure (here: the ADR-0004 relay gate) rides the join
+    /// run's EXISTING failure surface (`cmd_net_join_failed`), and that
+    /// surface keeps its gates: a report after the run already failed is
+    /// dropped, not double-appended.
     #[test]
     fn join_fails_honestly_and_late_reports_stay_dropped() {
         rt().block_on(async {
@@ -3969,8 +3980,8 @@ mod tests {
                 .expect("start");
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
-                    assert_eq!(s.join.run.outcome, 2, "no transport → honest failure");
-                    assert!(s.join.run.log.iter().any(|l| l.contains(crate::NO_TRANSPORT_YET)));
+                    assert_eq!(s.join.run.outcome, 2, "unconfirmed relay → honest failure");
+                    assert!(s.join.run.log.iter().any(|l| l.contains("not confirmed")));
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -4013,7 +4024,7 @@ mod tests {
         st2.join_generation = 2;
         let before = st2.session.workspaces.len();
         let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-        st2.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Some(1))
+        st2.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Vec::new(), String::new(), Some(1))
             .expect("stale seal");
         assert_eq!(
             st2.session.workspaces.len(),
@@ -4039,7 +4050,7 @@ mod tests {
             ..molt_core::JoinState::default()
         };
         let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
-        st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Some(1))
+        st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Vec::new(), String::new(), Some(1))
             .expect("sealed");
         assert_eq!(st.session.screen, Screen::Main, "entered the republic");
         assert_eq!(st.session.join, molt_core::JoinState::default(), "join reset");
@@ -4056,7 +4067,7 @@ mod tests {
             ..molt_core::JoinState::default()
         };
         let before = st2.session.workspaces.len();
-        st2.cmd_net_join_sealed("{".to_string(), String::new(), Vec::new(), String::new(), Some(1))
+        st2.cmd_net_join_sealed("{".to_string(), String::new(), Vec::new(), String::new(), Vec::new(), String::new(), Some(1))
             .expect("bad");
         assert_eq!(st2.session.join.run.outcome, 2, "garbage roster fails");
         assert_eq!(st2.session.workspaces.len(), before, "nothing materialized");
@@ -4108,7 +4119,7 @@ mod tests {
         // absent, truncated, and odd-length secrets all FAIL the join
         for bad in ["", "abcd", "ab", &hex::encode(&petra_sk[..16])] {
             let mut st = persist_state();
-            st.cmd_net_join_sealed(sealed.clone(), String::new(), Vec::new(), bad.to_string(), Some(1))
+            st.cmd_net_join_sealed(sealed.clone(), String::new(), Vec::new(), bad.to_string(), Vec::new(), String::new(), Some(1))
                 .expect("handler never errors");
             assert_eq!(
                 st.session.join.run.outcome, 2,
@@ -4125,6 +4136,8 @@ mod tests {
             String::new(),
             Vec::new(),
             hex::encode(foreign_sk),
+            Vec::new(),
+            String::new(),
             Some(1),
         )
         .expect("handler never errors");
@@ -4138,6 +4151,8 @@ mod tests {
             String::new(),
             Vec::new(),
             hex::encode(petra_sk),
+            Vec::new(),
+            String::new(),
             Some(1),
         )
         .expect("handler never errors");

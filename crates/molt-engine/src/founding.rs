@@ -146,6 +146,45 @@ pub(crate) struct RitualRuntime {
     _sim: Vec<mpsc::Sender<()>>,
     /// The founder's own recv tasks live on the transport; kept alive by it.
     seq: std::sync::atomic::AtomicU64,
+    /// The Nostr founding runtime (N4a) — `Some` on the production path,
+    /// `None` for the loopback manual/sim seams. When set, every send leg
+    /// branches HERE FIRST; the queue `transport` above is an inert
+    /// placeholder that must never carry a frame.
+    nostr: Option<NostrRitual>,
+}
+
+/// The founder's Nostr-side ritual state (N4a): its transport endpoint over
+/// the invite relays, and — from the all-joined group birth on — the live
+/// MLS group, the h-tag seed, and the 445 channel.
+pub(crate) struct NostrRitual {
+    /// The founder's ritual endpoint (keys + invite relays): gift-wrap sends
+    /// and the 1059 inbox ride it.
+    pub(crate) net: molt_net::ritual_net::RitualNet,
+    /// The fail-closed dialer the whole ritual dials through.
+    pub(crate) dialer: molt_net::dial::Dialer,
+    /// The group relay list (= the invite relays at founding).
+    pub(crate) relays: Vec<String>,
+    /// Minted at group birth; delivered only inside the Welcomes.
+    pub(crate) rotation_seed: Option<[u8; 32]>,
+    /// The founder's live MLS group, born at all-joined (shared with the
+    /// spawned 445 publish/recv tasks).
+    pub(crate) group: Option<std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>>,
+    /// The 445 group channel (set with the group).
+    pub(crate) chan: Option<molt_net::ritual_net::GroupChannel>,
+    /// INBOUND task handles (the 1059 inbox loop, the 445 recv loop) —
+    /// aborted when the ritual ends. Outbound legs are fire-and-forget tasks
+    /// that finish on their own (drain, don't abort).
+    pub(crate) tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for NostrRitual {
+    fn drop(&mut self) {
+        // inbound-only tasks — the sanctioned abort (they hold sockets that
+        // must not outlive the ritual; a cancelled ritual leaves no listener)
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
 }
 
 impl RitualRuntime {
@@ -253,6 +292,33 @@ impl RitualRuntime {
         self.transport.clone()
     }
 
+    /// The live Nostr-born MLS group (`None` on the loopback seams, and
+    /// before all-joined) — finalize snapshots THIS group instead of
+    /// building a second one.
+    pub(crate) fn nostr_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>> {
+        self.nostr.as_ref().and_then(|n| n.group.clone())
+    }
+
+    /// The 445 group channel (set with the group at birth).
+    pub(crate) fn nostr_chan(&self) -> Option<molt_net::ritual_net::GroupChannel> {
+        self.nostr.as_ref().and_then(|n| n.chan.clone())
+    }
+
+    /// What the founder's materialize seals into `transport.state`: the
+    /// Nostr shape (kind + relays + rotation seed) on the production path,
+    /// the legacy default on the loopback seams.
+    pub(crate) fn transport_shape(&self) -> crate::lifecycles::TransportShape {
+        match &self.nostr {
+            Some(n) => match n.rotation_seed {
+                Some(seed) => crate::lifecycles::TransportShape::nostr(n.relays.clone(), seed),
+                None => crate::lifecycles::TransportShape::default(),
+            },
+            None => crate::lifecycles::TransportShape::default(),
+        }
+    }
+
     /// This ritual's incarnation (the bootstrap's late results are bound to it).
     pub(crate) fn generation(&self) -> u64 {
         self.generation
@@ -349,49 +415,105 @@ impl State {
             });
         }
 
-        // A production founding (no test seam) has no network to run over in
-        // this build: the SMP transport is gone and the Nostr transport is
-        // not built yet. Fail honestly — never pretend a loopback republic is
-        // reachable by real remote members.
-        if !manual && !self.ritual_sim {
-            return Err(crate::NO_TRANSPORT_YET.to_string());
-        }
+        // A production founding (no test seam) runs over Nostr (N4a): the
+        // fail-closed dialer + the operator's confirmed relay pool are the
+        // prerequisites, and both failures are honest, named refusals.
+        let mut nostr = None;
         let mut sim = Vec::new();
-        // loopback dev seams: the hub creates queues synchronously. The
-        // manual seam hands the per-seat material to the waiting
-        // instance(s); the sim seam spawns simulated members.
-        let hub = LoopbackHub::calm();
-        let transport = RitualTransport::Loopback(hub.transport());
-        let mut materials = Vec::with_capacity(seat_count);
-        for (seat_u32, ticket, invite_wrap) in &seat_setup {
-            let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
-            spawn_founder_recv(
-                transport.clone(),
-                invite_q.rcv.clone(),
-                invite_wrap.clone(),
-                *seat_u32,
+        // the loopback transport of the test seams; on the Nostr path it is
+        // an inert placeholder (no queue is ever created on it)
+        let transport;
+        if !manual && !self.ritual_sim {
+            let dialer = self
+                .dialer_for()
+                .map_err(|e| format!("transport: {e}"))?;
+            let relays = molt_core::relay::dialable(
+                &self.session.settings.relays,
+                self.clearnet_session,
+            );
+            if relays.is_empty() {
+                return Err(
+                    "no confirmed, dialable relay — add and confirm one in the settings \
+                     before founding (nothing is pre-configured, by design)"
+                        .to_string(),
+                );
+            }
+            let net = molt_net::ritual_net::RitualNet::new(
+                dialer.clone(),
+                relays.clone(),
+                &founder_nostr_sk,
+            )
+            .map_err(|e| format!("transport keys: {e}"))?;
+            // the inbox task: subscribe the founder's 1059 inbox, THEN
+            // surface the v2 links (subscribe-before-advertise), then feed
+            // every gift-wrapped JoinRequest into the actor's ladder
+            let seat_invites = seat_setup
+                .iter()
+                .map(|(seat, ticket, _)| crate::nostr_ritual::SeatInvite {
+                    seat: *seat,
+                    ticket: ticket.clone(),
+                    info: molt_core::InviteInfo {
+                        republic: name.to_string(),
+                        threshold: rule_m,
+                        members: rule_n,
+                        inviter: founder_name.to_string(),
+                        ticket: ticket[..10].to_string(),
+                    },
+                })
+                .collect();
+            let inbox_task = crate::nostr_ritual::spawn_founder_inbox(
+                net.clone(),
+                seat_invites,
                 generation,
                 cmd_tx.downgrade(),
             );
-            let material = InviteMaterial {
-                seat: *seat_u32,
-                transport: transport.clone(),
-                invite_snd: invite_q.snd.clone(),
-                invite_wrap: invite_wrap.clone(),
-                ticket: ticket.clone(),
-            };
-            if self.ritual_sim {
-                sim.push(spawn_sim_member(material)?);
-            } else {
-                materials.push(material);
+            nostr = Some(NostrRitual {
+                net,
+                dialer,
+                relays,
+                rotation_seed: None,
+                group: None,
+                chan: None,
+                tasks: vec![inbox_task],
+            });
+            transport = RitualTransport::Loopback(LoopbackHub::calm().transport());
+        } else {
+            // loopback dev seams: the hub creates queues synchronously. The
+            // manual seam hands the per-seat material to the waiting
+            // instance(s); the sim seam spawns simulated members.
+            let hub = LoopbackHub::calm();
+            transport = RitualTransport::Loopback(hub.transport());
+            let mut materials = Vec::with_capacity(seat_count);
+            for (seat_u32, ticket, invite_wrap) in &seat_setup {
+                let invite_q = hub.create_queue_blocking().map_err(|e| e.to_string())?;
+                spawn_founder_recv(
+                    transport.clone(),
+                    invite_q.rcv.clone(),
+                    invite_wrap.clone(),
+                    *seat_u32,
+                    generation,
+                    cmd_tx.downgrade(),
+                );
+                let material = InviteMaterial {
+                    seat: *seat_u32,
+                    transport: transport.clone(),
+                    invite_snd: invite_q.snd.clone(),
+                    invite_wrap: invite_wrap.clone(),
+                    ticket: ticket.clone(),
+                };
+                if self.ritual_sim {
+                    sim.push(spawn_sim_member(material)?);
+                } else {
+                    materials.push(material);
+                }
             }
+            if let Some(sink) = &self.ritual_material_sink {
+                let _ = sink.send(materials);
+            }
+            // `hub` drops here; `transport` (and its task clones) hold the
+            // shared Arc, so every ritual queue stays alive until the runtime
+            // is dropped
         }
-        if let Some(sink) = &self.ritual_material_sink {
-            let _ = sink.send(materials);
-        }
-        // `hub` drops here; `transport` (and its task clones) hold the
-        // shared Arc, so every ritual queue stays alive until the runtime
-        // is dropped
 
         self.net_ritual = Some(RitualRuntime {
             transport,
@@ -410,6 +532,7 @@ impl State {
             generation,
             _sim: sim,
             seq: std::sync::atomic::AtomicU64::new(0),
+            nostr,
         });
         Ok(links)
     }
@@ -1657,6 +1780,109 @@ mod ritual_ops {
             Ok(molt_core::Reply::Ack)
         }
 
+        /// N4a §4.2: **the group is born at all-joined** on the Nostr path.
+        /// Build the founder's MLS group (one commit adds every seat), mint
+        /// the h-tag rotation seed, gift-wrap one Welcome (payload v2) per
+        /// seat, and stand the 445 recv up — all BEFORE any seal proposal,
+        /// because deliberation/ratification run as 445s inside the group.
+        /// Idempotent; a no-op on the loopback seams.
+        pub(crate) fn nostr_group_birth(&mut self) {
+            let Some(ritual) = &self.net_ritual else {
+                return;
+            };
+            let Some(nostr) = &ritual.nostr else {
+                return;
+            };
+            if nostr.group.is_some() {
+                return;
+            }
+            let generation = ritual.generation;
+            let fail = |state: &mut Self, e: String| {
+                let _ = state.cmd_net_ritual_failed(format!("group birth: {e}"), Some(generation));
+            };
+            let (mls, welcome_hex) = match ritual.build_founder_mls() {
+                Ok(x) => x,
+                Err(e) => return fail(self, e),
+            };
+            let welcome_bytes = match hex::decode(&welcome_hex) {
+                Ok(b) if !b.is_empty() => b,
+                _ => return fail(self, "the group produced no Welcome".to_string()),
+            };
+            let seed = match molt_net::ritual_net::mint_rotation_seed() {
+                Ok(s) => s,
+                Err(e) => return fail(self, e.to_string()),
+            };
+            let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+                return;
+            };
+            let weak = cmd_tx.downgrade();
+            let group = std::sync::Arc::new(std::sync::Mutex::new(mls));
+            let (net, dialer, relays, targets) = {
+                let Some(ritual) = &self.net_ritual else {
+                    return;
+                };
+                let Some(n) = &ritual.nostr else { return };
+                (
+                    n.net.clone(),
+                    n.dialer.clone(),
+                    n.relays.clone(),
+                    ritual
+                        .seats
+                        .iter()
+                        .filter_map(|s| s.identity.as_ref().map(|i| i.nostr_pk.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let chan = molt_net::ritual_net::GroupChannel::new(dialer, relays.clone(), seed);
+            // Welcome fan-out: outbound fire-and-forget tasks (they drain on
+            // their own — never aborted); a failed publish is fatal for the
+            // founding (that member could never deliberate) and reports
+            // through the designed NetRitualFailed seam
+            for npub in targets {
+                let net = net.clone();
+                let payload = molt_net::welcome::WelcomePayload {
+                    welcome: welcome_bytes.clone(),
+                    rotation_seed: seed,
+                    relays: relays.clone(),
+                };
+                let weak = weak.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = net.send_welcome(&npub, &payload).await {
+                        tracing::error!(error = %e, "welcome did not publish");
+                        let (reply, _rx) = tokio::sync::oneshot::channel();
+                        if let Some(tx) = weak.upgrade() {
+                            let _ = tx
+                                .send(crate::Envelope {
+                                    cmd: molt_core::Command::NetRitualFailed {
+                                        error: format!("welcome did not publish: {e}"),
+                                        generation: Some(generation),
+                                    },
+                                    reply,
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
+            let recv_task = crate::nostr_ritual::spawn_founder_group_recv(
+                chan.clone(),
+                group.clone(),
+                generation,
+                weak,
+            );
+            if let Some(nostr) = self.net_ritual.as_mut().and_then(|r| r.nostr.as_mut()) {
+                nostr.rotation_seed = Some(seed);
+                nostr.group = Some(group);
+                nostr.chan = Some(chan);
+                nostr.tasks.push(recv_task);
+            }
+            self.session
+                .create
+                .run
+                .log
+                .push("→ the group is born · welcomes sent to every member".to_string());
+        }
+
         /// A member activated their link. Verify the ticket MAC (v2 — it
         /// binds the nostr transport anchor to the ticket holder), anchor
         /// their identity, and — once every seat's key is in — send the
@@ -1700,7 +1926,23 @@ mod ritual_ops {
                 let same = anchored_member == member && anchored_pk == identity_pk;
                 if !same && invite::verify_join_mac(&ticket, &member, &identity_pk, &nostr_pk, &proof)
                 {
-                    if let (Some((snd, wrap)), Some(ritual)) =
+                    // tell the second activator its link is spent — over its
+                    // OWN claimed transport address: the gift-wrap anchor on
+                    // Nostr (canonicalized; an invalid one gets no reply),
+                    // the advertised reply queue on loopback
+                    if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
+                        if let Ok(target) = molt_net::canonical_nostr_pk(&nostr_pk) {
+                            let net = nostr.net.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = net
+                                    .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
+                                    .await
+                                {
+                                    tracing::warn!(error = %e, "link-spent notice did not publish");
+                                }
+                            });
+                        }
+                    } else if let (Some((snd, wrap)), Some(ritual)) =
                         (parse_reply_handover(&reply), &self.net_ritual)
                     {
                         if let Ok(payload) =
@@ -1762,11 +2004,23 @@ mod ritual_ops {
                 tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
                 return Ok(molt_core::Reply::Ack);
             }
-            // the member advertised the reply queue for its table; without a
-            // usable one the seat can never be sealed, so reject the join
-            let Some((reply_snd, reply_wrap)) = parse_reply_handover(&reply) else {
-                tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
-                return Ok(molt_core::Reply::Ack);
+            // the reply address: on Nostr it IS the MAC-bound nostr anchor
+            // (no queue handover travels); on loopback the member advertised
+            // a reply queue, without which the seat can never be sealed
+            let is_nostr = self
+                .net_ritual
+                .as_ref()
+                .is_some_and(|r| r.nostr.is_some());
+            let reply_queue = if is_nostr {
+                None
+            } else {
+                match parse_reply_handover(&reply) {
+                    Some(rq) => Some(rq),
+                    None => {
+                        tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
+                        return Ok(molt_core::Reply::Ack);
+                    }
+                }
             };
             // the member's MLS KeyPackage is required AND must be bound to the
             // anchored identity: its credential must name this member and its
@@ -1785,10 +2039,11 @@ mod ritual_ops {
                 return Ok(molt_core::Reply::Ack);
             }
             // keep a copy of the reply handover to ack the joiner below
-            let (ack_addr, ack_wrap) = (reply_snd.clone(), reply_wrap.clone());
+            let ack_queue = reply_queue.clone();
             // all checks passed — re-borrow mutably and anchor all three:
             // the MAC bound the (now canonicalized) nostr transport key to
             // the ticket holder alongside the identity key
+            let ack_npub = nostr_pk.clone();
             let Some(s) = self.net_ritual.as_mut().and_then(|r| r.seats.get_mut(idx)) else {
                 return Ok(molt_core::Reply::Ack);
             };
@@ -1797,8 +2052,10 @@ mod ritual_ops {
                 identity_pk,
                 nostr_pk,
             });
-            s.reply_snd = Some(reply_snd);
-            s.reply_wrap = Some(reply_wrap);
+            if let Some((reply_snd, reply_wrap)) = reply_queue {
+                s.reply_snd = Some(reply_snd);
+                s.reply_wrap = Some(reply_wrap);
+            }
             s.key_package = Some(key_package);
             // reflect into the session seat + log
             if let Some(view) = self.session.create.seats.get_mut(idx) {
@@ -1815,7 +2072,20 @@ mod ritual_ops {
             // of a silent wait until the charter (advisory — the joiner still
             // verifies the eventual Seal/Genesis)
             if let Some(ritual) = &self.net_ritual {
-                if let Ok(payload) = serde_json::to_vec(&invite::RitualMsg::JoinAccepted { seat }) {
+                if let Some(nostr) = &ritual.nostr {
+                    let net = nostr.net.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = net
+                            .send_ritual(&ack_npub, &invite::RitualMsg::JoinAccepted { seat })
+                            .await
+                        {
+                            tracing::warn!(error = %e, "join-accepted ack did not publish");
+                        }
+                    });
+                } else if let (Some((ack_addr, ack_wrap)), Ok(payload)) = (
+                    ack_queue,
+                    serde_json::to_vec(&invite::RitualMsg::JoinAccepted { seat }),
+                ) {
                     let transport = ritual.transport.clone();
                     let id = ritual.next_msg_id(&format!("accepted-{idx}"));
                     tokio::spawn(async move {
@@ -1840,6 +2110,13 @@ mod ritual_ops {
                     .run
                     .log
                     .push("→ every member has joined · propose the charter to seal".to_string());
+            }
+            // Nostr (N4a): all-joined is the GROUP BIRTH — build the MLS
+            // group, mint the rotation seed, gift-wrap every Welcome, and
+            // stand the 445 recv up, BEFORE any seal can be proposed (§4.2:
+            // deliberation runs inside the freshly born group)
+            if all_joined {
+                self.nostr_group_birth();
             }
             // seal now if the charter was already proposed (the sim seam
             // pre-proposes; a founder may also propose before the last join)
@@ -1999,12 +2276,23 @@ mod ritual_ops {
             let msg = invite::RitualMsg::Seal {
                 proposal: proposal_json,
             };
+            let Some(ritual) = &self.net_ritual else {
+                return;
+            };
+            // Nostr (N4a): ONE 445 group event carries the proposal to every
+            // member (they joined the group at all-joined, before this).
+            if let Some(nostr) = &ritual.nostr {
+                if let (Some(group), Some(chan)) = (nostr.group.clone(), nostr.chan.clone()) {
+                    crate::nostr_ritual::spawn_publish_frame(chan, group, msg, "seal");
+                } else {
+                    // group birth failed or has not happened — never silent
+                    tracing::error!("seal proposed but the Nostr group is not born");
+                }
+                return;
+            }
             let payload = match serde_json::to_vec(&msg) {
                 Ok(p) => p,
                 Err(_) => return,
-            };
-            let Some(ritual) = &self.net_ritual else {
-                return;
             };
             for (idx, s) in ritual.seats.iter().enumerate() {
                 // every joined seat has a reply queue (set on join); skip
@@ -2437,6 +2725,7 @@ mod tests {
             generation: 0,
             _sim: Vec::new(),
             seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
         });
 
         let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[3u8; 32], "bob");

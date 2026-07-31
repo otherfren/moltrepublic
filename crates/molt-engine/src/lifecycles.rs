@@ -20,6 +20,28 @@ use tokio::sync::oneshot;
 
 use crate::{now_secs, ActiveStorage, Envelope, State};
 
+/// The transport family + Nostr material a materializing workspace seals
+/// into its v4 `transport.state`. Default = the legacy queue shape (no
+/// discriminator) — loopback tests and (until N4b) recovery.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TransportShape {
+    pub kind: Option<molt_core::TransportKind>,
+    pub relays: Vec<String>,
+    pub rotation_seed: Option<Vec<u8>>,
+}
+
+impl TransportShape {
+    /// The Nostr shape of a sealed founding/join: discriminator + the group
+    /// relay list + the h-tag seed.
+    pub(crate) fn nostr(relays: Vec<String>, rotation_seed: [u8; 32]) -> Self {
+        TransportShape {
+            kind: Some(molt_core::TransportKind::Nostr),
+            relays,
+            rotation_seed: Some(rotation_seed.to_vec()),
+        }
+    }
+}
+
 /// Guard shared by every `*Start`: refuse while that run is in flight.
 fn guard_idle(run: &RunCore, err: fn(String) -> MoltError) -> Result<(), MoltError> {
     if run.running() {
@@ -56,6 +78,11 @@ impl State {
         attestations: Vec<molt_core::RosterAttestation>,
         republic_id: String,
         agenda: String,
+        // which transport family this workspace runs on + its Nostr material
+        // (relay list, rotation seed) — all persisted into the v4
+        // `transport.state`. `TransportShape::default()` = the legacy
+        // queue-shaped state (loopback tests, recovery until N4b).
+        shape: TransportShape,
         // this node's ALREADY-derived identity signing key (the ritual anchors
         // it under a workspace-id-derived string, so re-deriving from the member
         // handle here would NOT match the roster — it must be passed in). `None`
@@ -120,6 +147,9 @@ impl State {
                 mesh,
                 identity_sk: if chain.is_empty() { None } else { sk_bytes },
                 nostr_sk: if chain.is_empty() { None } else { nostr_sk },
+                kind: shape.kind,
+                relays: shape.relays,
+                rotation_seed: shape.rotation_seed,
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;
@@ -817,28 +847,54 @@ impl State {
             agenda: c.agenda.clone(),
         };
 
-        // build the founder's MLS group from every seat's KeyPackage BEFORE
+        // the founder's MLS group. On the Nostr path it was BORN at
+        // all-joined (the Welcomes are already gift-wrapped out — concept
+        // §4.2: deliberation ran as 445s inside it), so finalize ENCRYPTS
+        // the genesis frame first and only then snapshots the live group:
+        // the encrypt advances the sender ratchet, and a snapshot taken
+        // before it would persist a state that re-uses the genesis
+        // generation on its next message — a SecretReuseError on every
+        // member after reopen. Rebuilding the group here would be worse
+        // still (a second group nobody was welcomed into). On the loopback
+        // path it is built now, from every seat's KeyPackage, BEFORE
         // touching disk, so a missing/invalid package fails the founding
-        // cleanly (only for a persisted founding — the demo has no workspace to
-        // hold a group, and its sim members ignore the Welcome anyway).
-        let founder_mls = if self.persist {
-            Some(ritual.build_founder_mls().map_err(MoltError::Create)?)
-        } else {
-            None
-        };
-        // split the founder's live group from the Welcome: the group is
-        // snapshotted (sealed into its workspace atomically with the genesis, see
-        // materialize_workspace) and — when the mesh bootstrap is on — kept alive
-        // to drive the post-founding announcement exchange before its final save
-        let (founder_mls_member, welcome) = match founder_mls {
-            Some((mls, welcome)) => (Some(mls), welcome),
-            None => (None, String::new()),
-        };
-        let founder_mls_blob = founder_mls_member
-            .as_ref()
-            .map(|mls| mls.snapshot())
-            .transpose()
-            .map_err(|e| MoltError::Create(e.to_string()))?;
+        // cleanly (only for a persisted founding — the demo has no
+        // workspace to hold a group, and its sim members ignore the
+        // Welcome anyway).
+        let mut nostr_genesis_frame: Option<(Vec<u8>, [u8; 32])> = None;
+        let (founder_mls_member, welcome, founder_mls_blob) =
+            if let Some(group) = ritual.nostr_group() {
+                let sealed_json = serde_json::to_string(&sealed)
+                    .map_err(|e| MoltError::Create(e.to_string()))?;
+                let genesis_payload =
+                    serde_json::to_vec(&molt_net::invite::RitualMsg::Genesis {
+                        sealed: sealed_json,
+                        // the Welcome went out at group birth — never here
+                        welcome: String::new(),
+                    })
+                    .map_err(|e| MoltError::Create(e.to_string()))?;
+                let mut g = group
+                    .lock()
+                    .map_err(|_| MoltError::Create("mls lock poisoned".to_string()))?;
+                let ct = g
+                    .encrypt(&genesis_payload)
+                    .map_err(|e| MoltError::Create(e.to_string()))?;
+                let exporter = g
+                    .exporter_secret()
+                    .map_err(|e| MoltError::Create(e.to_string()))?;
+                let blob = g.snapshot().map_err(|e| MoltError::Create(e.to_string()))?;
+                drop(g);
+                nostr_genesis_frame = Some((ct, exporter));
+                (None, String::new(), Some(blob))
+            } else if self.persist {
+                let (mls, welcome) = ritual.build_founder_mls().map_err(MoltError::Create)?;
+                let blob = mls.snapshot().map_err(|e| MoltError::Create(e.to_string()))?;
+                // the live group is kept (not just the blob) only where the
+                // mesh bootstrap needs to drive post-founding announcements
+                (Some(mls), welcome, Some(blob))
+            } else {
+                (None, String::new(), None)
+            };
 
         // write the FOUNDER's own workspace first. If the disk fails, the
         // founding fails cleanly and no member is left committed to a
@@ -855,6 +911,7 @@ impl State {
                 attestations,
                 republic_id.clone(),
                 c.agenda.clone(),
+                ritual.transport_shape(),
                 // the founder's identity key, exactly as anchored in the roster
                 Some(ritual.founder_sk().clone()),
                 // …and its nostr transport secret (self-ticket-salted in
@@ -878,10 +935,23 @@ impl State {
             demo_workspace_id(&c.name)
         };
 
-        // only now distribute the sealed roster + the MLS Welcome to every
-        // member so each writes its own workspace (own seed) and enters the
-        // group from the same constitution
-        if let Ok(json) = serde_json::to_string(&sealed) {
+        // only now distribute the sealed roster so each member writes its
+        // own workspace (own seed) and enters from the same constitution.
+        // Nostr: the frame was pre-encrypted above (ratchet coherence with
+        // the snapshot) — the task only publishes it. Publish failure is
+        // logged loudly, not routed to NetRitualFailed: the founder has
+        // already materialized, and the member's own open wait surfaces a
+        // relays-down condition.
+        if let Some((ct, exporter)) = nostr_genesis_frame {
+            if let Some(chan) = ritual.nostr_chan() {
+                tokio::spawn(async move {
+                    if let Err(e) = chan.publish_frame(&exporter, &ct).await {
+                        tracing::error!(error = %e, "genesis 445 did not publish");
+                    }
+                });
+            }
+        } else if let Ok(json) = serde_json::to_string(&sealed) {
+            // loopback: the sealed roster + the MLS Welcome per reply queue
             ritual.distribute_genesis(json, welcome);
         }
 
@@ -978,31 +1048,108 @@ impl State {
             awaiting_ratify: false,
         };
         self.session.screen = Screen::Join;
-        // a fresh transport slot for this join incarnation (N4's off-actor
-        // join task will fill it before reporting NetJoinSealed)
+        // a fresh transport slot for this join incarnation (the loopback
+        // seams still fill it; the Nostr join has no queue transport to park)
         self.join_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
-        // N-demo gap: there is no network transport to run the member ritual
-        // over (SMP is gone, Nostr lands with N4). Fail honestly through the
-        // join run's own failure surface — the wizard shows the reason instead
-        // of waiting forever, and co-equality keeps the command itself intact.
-        self.cmd_net_join_failed(crate::NO_TRANSPORT_YET.to_string(), Some(generation))
+        // the Nostr join (N4a): resolve the fail-closed dialer, gate every
+        // link-carried relay through the operator's OWN pool (ADR-0004 — a
+        // pasted link must never make this node dial somewhere it has not
+        // confirmed), then spawn the off-actor member task. Its results ride
+        // the long-dormant NetJoin* commands.
+        let dialer = match self.dialer_for() {
+            Ok(d) => d,
+            Err(e) => {
+                return self.cmd_net_join_failed(format!("transport: {e}"), Some(generation))
+            }
+        };
+        let dialable = molt_core::relay::dialable(
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        for r in &inv.handover.relays {
+            if !dialable.contains(r) {
+                return self.cmd_net_join_failed(
+                    format!(
+                        "the invite names relay {r}, which this node has not confirmed — \
+                         add and confirm it in the settings first (nothing is dialed \
+                         without your say-so)"
+                    ),
+                    Some(generation),
+                );
+            }
+        }
+        // the human ratification gate: the task blocks on this channel until
+        // cmd_join_confirm_charter / cmd_join_decline_charter releases it
+        let (confirm_tx, confirm_rx) = tokio::sync::mpsc::channel(1);
+        self.join_confirm = Some(confirm_tx);
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return self.cmd_net_join_failed("engine stopped".to_string(), Some(generation));
+        };
+        // a restarted join aborts the previous incarnation's task (its
+        // generation-guarded commands would be dropped anyway; aborting also
+        // releases its sockets)
+        if let Some(task) = self.join_task.take() {
+            task.abort();
+        }
+        self.join_task = Some(crate::nostr_ritual::spawn_member_join(
+            dialer,
+            crate::nostr_ritual::JoinCtx {
+                invite: inv,
+                member: self.session.join.member.clone(),
+                phrase: self.session.join.seed.clone(),
+                generation,
+            },
+            confirm_rx,
+            cmd_tx.downgrade(),
+        ));
+        Ok(Reply::Ack)
     }
 
     /// A real network join completed (dormant until N4's Nostr join re-emits
     /// it): verify what came from the off-actor task; write the joiner's own
     /// workspace from its own seed and enter the republic.
+    #[allow(clippy::too_many_arguments)] // mirrors the Command's own field set
     pub(crate) fn cmd_net_join_sealed(
         &mut self,
         sealed: String,
         mls: String,
         mesh: Vec<molt_core::MeshLink>,
         nostr_sk: String,
+        relays: Vec<String>,
+        rotation_seed: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted join bumped the generation — drop stale results
         if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
             return Ok(Reply::Ack);
         }
+        // the Nostr shape rides the sealed report (relay list + rotation seed
+        // from the authenticated Welcome). Both present = a Nostr join; both
+        // empty = the loopback/test path. A half-present or malformed pair is
+        // a broken task — fail rather than seal a workspace whose transport
+        // can never come up.
+        let shape = match (relays.is_empty(), rotation_seed.is_empty()) {
+            (true, true) => TransportShape::default(),
+            (false, false) => match hex::decode(&rotation_seed) {
+                Ok(seed) if seed.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&seed);
+                    TransportShape::nostr(relays.clone(), arr)
+                }
+                _ => {
+                    return self.cmd_net_join_failed(
+                        "the join task delivered a malformed rotation seed".to_string(),
+                        generation,
+                    )
+                }
+            },
+            _ => {
+                return self.cmd_net_join_failed(
+                    "the join task delivered an incomplete Nostr transport shape".to_string(),
+                    generation,
+                )
+            }
+        };
         let sealed: molt_core::SealedRoster = match serde_json::from_str(&sealed) {
             Ok(s) => s,
             Err(e) => return self.cmd_net_join_failed(format!("decoding sealed roster: {e}"), generation),
@@ -1094,6 +1241,7 @@ impl State {
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
+                shape,
                 joiner_sk,
                 joiner_nostr_sk,
                 mls_blob,
@@ -1306,6 +1454,9 @@ impl State {
             sealed.attestations.clone(),
             sealed.republic_id.clone(),
             sealed.agenda.clone(),
+            // recovery still materializes the legacy shape — the N4b
+            // recovery-link v2 story carries the Nostr shape (+ re-anchor)
+            TransportShape::default(),
             Some(sk),
             // the nostr transport secret was salted with the ORIGINAL seat's
             // ticket, which died with the lost device — honestly None; the
@@ -1422,9 +1573,14 @@ impl State {
 
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
         // invalidate any in-flight join task so its late result is dropped;
-        // dropping join_confirm closes the gate → a paused ritual declines
+        // dropping join_confirm closes the gate → a paused ritual declines.
+        // The Nostr member task is aborted outright — the user cancelled, so
+        // an in-flight frame of ITS OWN join is fine to lose.
         self.join_generation += 1;
         self.join_confirm = None;
+        if let Some(task) = self.join_task.take() {
+            task.abort();
+        }
         self.session.join = JoinState::default();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);

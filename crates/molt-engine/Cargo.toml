@@ -41,3 +41,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # dev-only cycle (cargo allows it): the cross-frontend integration test
 # proves the MCP tool layer builds the SAME filtered reads the engine path
 # serves — co-equality end to end
+# in-process Nostr relay for the N4 ritual keystones (the engine-level twin
+# of two_instances over a MockRelay) — dev-only, like molt-net's
+nostr-relay-builder = { workspace = true }

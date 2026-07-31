@@ -4646,6 +4646,7 @@ dependencies = [
  "molt-core",
  "molt-net",
  "molt-storage",
+ "nostr-relay-builder",
  "serde",
  "serde_json",
  "sha2",

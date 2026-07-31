@@ -3591,6 +3591,16 @@ pub enum Command {
         /// engine-internal command only). Empty on a legacy path.
         #[serde(default)]
         nostr_sk: String,
+        /// The group's relay list as delivered inside the authenticated
+        /// Welcome (N4) — sealed into `transport.state.relays`. Empty on a
+        /// loopback/test join.
+        #[serde(default)]
+        relays: Vec<String>,
+        /// The group's h-tag rotation seed (32 bytes, hex) from the same
+        /// Welcome — sealed into `transport.state.rotation_seed`. Empty on a
+        /// loopback/test join.
+        #[serde(default)]
+        rotation_seed: String,
         /// Join incarnation (a cancelled/restarted join drops stale results).
         #[serde(default)]
         generation: Option<u64>,

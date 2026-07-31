@@ -48,6 +48,7 @@ pub mod mls;
 pub mod nostr;
 pub mod relay_runtime;
 pub mod relay_ws;
+pub mod ritual_net;
 pub mod ritual_wrap;
 pub mod s3;
 pub mod supervisor;
