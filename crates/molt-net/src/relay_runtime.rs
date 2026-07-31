@@ -231,8 +231,8 @@ impl RelayRuntime {
                             // advances (duplicates included) — but never past
                             // local now + skew: a +24h `created_at` must not
                             // blind the next reopen (concept §4.3)
-                            let clamp = nostr::Timestamp::now().as_u64() + CURSOR_SKEW;
-                            let stamp = event.created_at.as_u64().min(clamp);
+                            let clamp = nostr::Timestamp::now().as_secs() + CURSOR_SKEW;
+                            let stamp = event.created_at.as_secs().min(clamp);
                             {
                                 let mut c = cursors.lock().await;
                                 let entry = c.entry(url.clone()).or_insert(0);

@@ -170,7 +170,7 @@ async fn a_future_dated_event_does_not_blind_the_cursor() {
     // a peer publishes a +24h future-dated event
     let future = EventBuilder::new(Kind::Custom(445), "from tomorrow")
         .tag(Tag::parse(["h", "6d6f6c74"]).expect("h tag"))
-        .custom_created_at(Timestamp::from_secs(now.as_u64() + 86_400))
+        .custom_created_at(Timestamp::from_secs(now.as_secs() + 86_400))
         .sign_with_keys(&keys)
         .expect("sign");
     let rt = RelayRuntime::new(dialer.clone(), vec![url.clone()]);
@@ -184,9 +184,9 @@ async fn a_future_dated_event_does_not_blind_the_cursor() {
     let cursors = rt.cursors().await;
     let cursor = *cursors.get(&url).expect("a cursor for the relay");
     assert!(
-        cursor <= now.as_u64() + 3_600 + 5,
+        cursor <= now.as_secs() + 3_600 + 5,
         "cursor {cursor} ran into the future (now {})",
-        now.as_u64()
+        now.as_secs()
     );
     drop(sub);
 
