@@ -207,3 +207,40 @@ async fn a_future_dated_event_does_not_blind_the_cursor() {
         "the now-event must survive the reopen (seen: {seen:?})"
     );
 }
+
+/// Step 5 — the EOSE gate (MDK port #6): "synced" means every CONNECTED
+/// relay finished its stored-events replay. A dead relay in the pool never
+/// connected, so it must NOT wedge the gate.
+#[tokio::test]
+async fn synced_means_every_connected_relay_sent_eose() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let r1 = MockRelay::run().await.expect("relay 1");
+    let r2 = MockRelay::run().await.expect("relay 2");
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+
+    let rt = RelayRuntime::new(
+        dialer,
+        vec![
+            r1.url().await.to_string(),
+            r2.url().await.to_string(),
+            "ws://127.0.0.1:9".to_string(), // dead — never connects
+        ],
+    );
+    rt.publish(&h_tagged_event(&keys, "6d6f6c74", "stored"))
+        .await
+        .expect("seed");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+    assert!(
+        sub.synced(RECV_TIMEOUT).await,
+        "both LIVE relays sent EOSE; the dead one is not part of the gate"
+    );
+    // and the stored event arrived (once)
+    assert!(sub.recv(RECV_TIMEOUT).await.is_some());
+    assert!(sub.recv(Duration::from_millis(300)).await.is_none());
+}

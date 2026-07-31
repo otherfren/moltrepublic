@@ -164,6 +164,11 @@ impl DedupRing {
 pub struct Subscription {
     rx: mpsc::Receiver<Event>,
     readers: Vec<tokio::task::JoinHandle<()>>,
+    /// How many relays actually accepted the REQ — the EOSE gate's
+    /// denominator (a dead relay never joined, so it cannot wedge the gate).
+    connected: usize,
+    /// How many of them finished their stored-events replay.
+    eose: tokio::sync::watch::Receiver<usize>,
 }
 
 impl Subscription {
@@ -172,6 +177,20 @@ impl Subscription {
     /// drained).
     pub async fn recv(&mut self, timeout: Duration) -> Option<Event> {
         tokio::time::timeout(timeout, self.rx.recv()).await.ok().flatten()
+    }
+
+    /// Wait until EVERY connected relay sent EOSE (MDK port #6) — only then
+    /// is the stored backlog complete. `false` on timeout.
+    pub async fn synced(&mut self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while *self.eose.borrow() < self.connected {
+            match tokio::time::timeout_at(deadline, self.eose.changed()).await {
+                Ok(Ok(())) => {}
+                // timeout, or every sender gone without reaching the count
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -196,6 +215,8 @@ impl RelayRuntime {
         }
         let (tx, rx) = mpsc::channel(256);
         let dedup = Arc::new(Mutex::new(DedupRing::new()));
+        let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
+        let eose_tx = Arc::new(eose_tx);
         let stored = self.cursors.lock().await.clone();
         let mut readers = Vec::new();
         for url in &self.urls {
@@ -222,8 +243,10 @@ impl RelayRuntime {
             let tx = tx.clone();
             let dedup = dedup.clone();
             let cursors = self.cursors.clone();
+            let eose_tx = eose_tx.clone();
             let url = url.clone();
             readers.push(tokio::spawn(async move {
+                let mut eose_sent = false;
                 loop {
                     match ws.recv(SUB_IDLE_TIMEOUT).await {
                         Ok(RelayMessage::Event { event, .. }) => {
@@ -243,7 +266,15 @@ impl RelayRuntime {
                                 break; // consumer gone
                             }
                         }
-                        // EOSE/OK/NOTICE etc. — the EOSE gate is plan step 5
+                        Ok(RelayMessage::EndOfStoredEvents(_)) => {
+                            // this relay's stored replay is complete — count
+                            // it exactly once toward the sync gate
+                            if !eose_sent {
+                                eose_sent = true;
+                                eose_tx.send_modify(|n| *n += 1);
+                            }
+                        }
+                        // OK/NOTICE etc. — not subscription traffic
                         Ok(_) => {}
                         // closed or idle past the bound — reader ends
                         Err(_) => break,
@@ -256,7 +287,8 @@ impl RelayRuntime {
                 "no relay accepted the subscription".into(),
             ));
         }
-        Ok(Subscription { rx, readers })
+        let connected = readers.len();
+        Ok(Subscription { rx, readers, connected, eose: eose_rx })
     }
 }
 
