@@ -38,33 +38,75 @@ Declines and seal signatures are author-bound too.
 Closes: R1 CRITICAL ×2, R1 MEDIUM (Declined ×2, forged-Genesis strand, m/n
 vs link), R2 CRITICAL, R2 MEDIUM (Declined seat).
 
-## B. The joiner's relay gate — HIGH — ✅ DONE (`9fe600f`), one gap OPEN
+## B. The joiner's relay gate — HIGH — ✅ DONE (`9fe600f` + the diagnosis)
 
 The gate demanded EVERY relay in the invite be locally dialable, so any node
 whose pool merely *overlapped* the founder's was refused. Fixed: the join
 runs over the intersection, refused only when empty.
 
-**OPEN — the operator-visible gap (reported from real use, config2 vs
-config3):** a relay hand-written into `config.toml` as `confirmed = true`
-but WITHOUT `clearnet_enabled = true` is silently undialable, and the
-refusal ("no relay in common … this node can dial [...]") does not say why
-the relay the operator can see in their pool is missing from that list.
+**The operator-visible gap (reported from real use, config2 vs config3) — ✅
+FIXED.** A relay hand-written into `config.toml` as `confirmed = true` but
+WITHOUT `clearnet_enabled = true` is undialable, and the refusal ("no relay
+in common … this node can dial [nothing (no confirmed relay on this node)]")
+told the operator to confirm what they had already confirmed.
 
-Fix (do this FIRST — it blocks real use): make the refusal diagnose each
-invite relay individually against the pool:
-- not in the pool → "add and confirm it"
-- in the pool, unconfirmed → "confirm it"
-- confirmed, non-onion, but non-onion dialing is off → "clearnet/local
-  dialing is off — enable it in Settings, or set `[transport.nostr]
-  clearnet_enabled = true`"
-A generic "no relay in common" is only correct when none of the three
-applies. Keystone per branch, driven through `Command::JoinStart`.
+`molt_core::relay::diagnose_invite_relays` / `invite_relay_refusal` now judge
+every invite relay individually against the pool — not in the pool / in the
+pool but unconfirmed / confirmed but non-onion dialing off — each with the
+one action that fixes THAT relay, one log line each (the run log elides per
+line, so a paragraph would have reached the operator as its first clause).
+"No relay in common" survives only for the case where it is true: every named
+relay unknown here. Keystone
+`the_relay_refusal_diagnoses_every_invite_relay_individually` drives all
+three branches through `Command::JoinStart`; two `molt-core` unit tests pin
+the classification and the wording.
 
-**Decide while there:** should a hand-written `confirmed = true` on a
-non-onion relay imply the clearnet decision? ADR-0004 already treats the file
-as the operator's own authority (a hand-confirmed ONION relay dials
-automatically). Leaning no — a file edit should not silently grant non-onion
-dialing — but then the message above is load-bearing and must ship with it.
+**Decided (2026-08-01): a hand-written `confirmed = true` does NOT imply the
+clearnet decision.** Confirming an entry says "use this one"; the non-onion
+switch says "this node may leave Tor at all" — a property of the NODE, which
+a file edit must not grant as a side effect. Recorded in
+`relay_pool.md` §2.5.
+
+**Same root, also fixed:** the surfaces still narrated the *removed*
+session-only model — the GUI badge said "confirmed — needs activation this
+session", the clearnet panel promised the activation "ends with the app", and
+THREE MCP tool descriptions said it is "never persisted". That is the same
+defect as the join message: the operator is told to repeat an act that no
+longer exists, and never told about the switch that is actually off.
+
+**Found by the review pass over this change-set, and fixed with it:**
+- The refusal was *invisible* even when correct. Both run logs used
+  `overflow: elide` with no horizontal scroll, so a failure's tail — the part
+  that says what to do — was unrecoverable. Worse, the founding wizard has its
+  OWN copy of the log block (`app.slint`) that the first fix missed. Both wrap
+  now; the duplication is noted in both files as debt.
+- The founding refusal reaches the GUI as a **toast**, which was a fixed 38px
+  single-line bubble sized to its text: a 200+ character message rendered
+  wider than the window and clipped. Long toasts now wrap inside a capped
+  bubble.
+- "Why can this node dial nothing" existed **three times** (`tor_probe::
+  target_gap` — which had zero callers, an inline predicate in the GUI's Tor
+  panel, and the new one). One `relay::pool_gap` in molt-core now; the others
+  delegate. See `relay_pool.md` §3a.
+- Operator-facing prose had landed in `molt-core`, naming a GUI tab and a
+  config key from the no-I/O contract crate. Classification stayed in core
+  (`PoolGap`, `InviteRelayBlock`, both `Serialize`); the words moved to
+  `molt-engine::relay_msg`, where every other run-log line is authored.
+- The join gate judged each relay **twice** (once for the dial set, once for
+  the message) — two readings that could disagree, making the refusal
+  contradict its own detail lines. One `diagnose_invite_relays` pass feeds
+  both now.
+- The new hand-edit warning in the config template shipped only on a *fresh*
+  `[transport.nostr]` section — never reaching the operator who hand-edited an
+  existing one. It now also fills in a section that carries no comment of its
+  own (never overwriting one the operator wrote), and both pool-load paths
+  `tracing::warn!` when the confirmed-but-switched-off state is loaded.
+
+**Left as debt (not this change-set):** `tor_probe::verdict` still cannot name
+the real cause for `ProxyOnly` — it has no pool to inspect, so it now claims
+only what it observed; threading `TargetGap` in is the real fix. The two
+run-log blocks should become one component. `TargetGap` itself is still
+uncalled.
 
 ## C. The inert publish-failure seam — HIGH ×3 + MEDIUM ×3
 
@@ -177,7 +219,7 @@ debt and should not be deferred again.
 
 ## Suggested order
 
-1. **B-open** (blocks real use today) — the diagnosing relay message.
+1. ~~**B-open** (blocks real use today) — the diagnosing relay message.~~ ✅
 2. **C** (silent hangs + the inert seam I wrote).
 3. **D** (session hijack by a stale join).
 4. **H** (the coverage debt — do it before more behavior lands on top).

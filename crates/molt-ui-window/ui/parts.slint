@@ -1608,7 +1608,11 @@ export component RunView inherits VerticalLayout {
                                     : root.tones[i] == 1 ? Theme.good : Theme.dim)
                                 : Theme.dim;
                             font-size: Theme.fs-cap;
-                            overflow: elide;
+                            // WRAP, never elide: a failure line's tail is the
+                            // part that says what to DO about it — eliding it
+                            // is how "the invitation was refused" reached the
+                            // operator with no reason at all (2026-08-01)
+                            wrap: word-wrap;
                         }
                     }
                 }

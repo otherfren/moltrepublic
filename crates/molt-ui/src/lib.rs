@@ -2381,12 +2381,13 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // "only a proven circuit is green" rule stays a tested statement, and the
     // technical specifics ride along untranslated.
     ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
-    // a confirmed-but-session-locked pool is a DIFFERENT problem from an
-    // empty one, and telling the user to "confirm a relay" they already
-    // confirmed is advice that cannot help (review finding)
-    let session_locked = !sv.settings.relays.is_empty()
-        && sv.settings.relays.iter().any(|r| r.confirmed)
-        && molt_core::relay::dialable(&sv.settings.relays, sv.clearnet_session).is_empty();
+    // a confirmed-but-switched-off pool is a DIFFERENT problem from an empty
+    // one, and telling the user to "confirm a relay" they already confirmed
+    // is advice that cannot help (review finding). The classification is
+    // molt-core's single `pool_gap` — this used to hand-roll the same
+    // predicate, which is how three copies of it came to exist.
+    let session_locked = molt_core::relay::pool_gap(&sv.settings.relays, sv.clearnet_session)
+        == Some(molt_core::relay::PoolGap::NonOnionOff);
     ui.set_cfg_tor_test_text(
         tor_verdict_copy_for(lang, sv.tor_test.state, session_locked).into(),
     );
@@ -5533,12 +5534,12 @@ lexicon! {
     tor_v_no_target: "Nothing could be established: this Tor mode has no SOCKS address to probe, and there was no relay to dial through it.", "Es konnte nichts festgestellt werden: Dieser Tor-Modus hat keine SOCKS-Adresse zum Prüfen, und es gab kein Relay, das hindurch gewählt werden konnte.";
     tor_v_circuit_failed: "No connection to the relay through Tor. Either Tor is not working, or that relay is unreachable — the line below says which step failed.", "Keine Verbindung zum Relay durch Tor. Entweder funktioniert Tor nicht, oder das Relay ist nicht erreichbar — die Zeile darunter sagt, welcher Schritt scheiterte.";
     tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes — try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern — nach dem Bootstrap erneut versuchen.";
-    tor_v_proxy_only_locked: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Your confirmed relays are waiting for this session's activation.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays warten auf die Freigabe für diese Sitzung.";
+    tor_v_proxy_only_locked: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: connections outside Tor are switched off.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Verbindungen außerhalb Tor sind ausgeschaltet.";
     tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
     // added relay is idle, an onion relay connects by itself, a clearnet one
-    // needs the warning AND a per-session activation.
+    // needs the warning AND the (persisted) non-onion dialing switch.
     rp_title: "Relay Pool", "Relay-Pool";
     rp_in_use: "Relays in use:", "Relays in Benutzung:";
     rp_none_dialable: "No relay is in use — this node is not connected.", "Kein Relay ist in Benutzung — dieser Knoten ist nicht verbunden.";
@@ -5549,8 +5550,8 @@ lexicon! {
     rp_badge_local: "LOCAL", "LOKAL";
     rp_st_auto: "connects automatically", "verbindet automatisch";
     rp_st_unconfirmed: "not in use — confirm to enable", "nicht in Benutzung — zum Aktivieren bestätigen";
-    rp_st_locked: "confirmed — needs activation this session", "bestätigt — braucht Freigabe für diese Sitzung";
-    rp_st_active: "active this session", "in dieser Sitzung aktiv";
+    rp_st_locked: "confirmed — but clearnet/local dialing is switched off", "bestätigt — aber Clearnet-/Lokal-Verbindungen sind ausgeschaltet";
+    rp_st_active: "in use", "in Benutzung";
     rp_confirm: "Confirm", "Bestätigen";
     rp_revoke: "Withdraw", "Zurückziehen";
     rp_revoke_tip: "Withdraw the confirmation — the relay stays in the list but is no longer used", "Bestätigung zurückziehen — das Relay bleibt in der Liste, wird aber nicht mehr benutzt";
@@ -5577,12 +5578,12 @@ lexicon! {
     rp_cn_body_local: "This relay is on your machine or local network — reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz — es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
-    rp_cn_note: "Even then it is not dialed automatically: you activate it once per session.", "Auch dann wird es nicht automatisch angewählt: Du gibst es einmal pro Sitzung frei.";
-    rp_cn_session_title: "Relays outside Tor this session", "Relays außerhalb Tor in dieser Sitzung";
-    rp_cn_session_off: "Confirmed clearnet and local relays are not dialed automatically. Activate them when needed — the activation ends with the app.", "Bestätigte Clearnet- und lokale Relays werden nicht automatisch angewählt. Gib sie bei Bedarf frei — die Freigabe endet mit der App.";
-    rp_cn_session_on: "Active: confirmed clearnet and local relays are in use until you close the app.", "Aktiv: Bestätigte Clearnet- und lokale Relays werden benutzt, bis du die App schließt.";
-    rp_cn_activate: "Activate for this session", "Für diese Sitzung freigeben";
-    rp_cn_deactivate: "Deactivate", "Freigabe beenden";
+    rp_cn_note: "Confirming also switches connections outside Tor on and remembers that. You can switch them off again below at any time.", "Das Bestätigen schaltet Verbindungen außerhalb Tor zugleich ein und merkt sich das. Du kannst sie unten jederzeit wieder ausschalten.";
+    rp_cn_session_title: "Relays outside Tor", "Relays außerhalb Tor";
+    rp_cn_session_off: "Switched off: confirmed clearnet and local relays are not dialed at all — founding and joining over one is refused. Switching it on is remembered.", "Ausgeschaltet: Bestätigte Clearnet- und lokale Relays werden gar nicht angewählt — Gründen und Beitreten über so eines wird abgelehnt. Das Einschalten wird gemerkt.";
+    rp_cn_session_on: "On: confirmed clearnet and local relays are in use. This stays on until you switch it off.", "An: Bestätigte Clearnet- und lokale Relays werden benutzt. Das bleibt so, bis du es ausschaltest.";
+    rp_cn_activate: "Switch on", "Einschalten";
+    rp_cn_deactivate: "Switch off", "Ausschalten";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
     unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
     unsaved_save: "Save & continue", "Speichern & weiter";

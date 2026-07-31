@@ -1062,10 +1062,6 @@ impl State {
                 return self.cmd_net_join_failed(format!("transport: {e}"), Some(generation))
             }
         };
-        let dialable = molt_core::relay::dialable(
-            &self.session.settings.relays,
-            self.clearnet_session,
-        );
         // The join runs over the relays BOTH sides can use: the invite names
         // the group's set, this node dials only what its own operator
         // confirmed (ADR-0004 — a pasted link never makes us dial somewhere
@@ -1074,34 +1070,37 @@ impl State {
         // normal case (the founder runs an onion relay, the invitee a clearnet
         // one, …). The group's full list is still what gets persisted — only
         // the dialing is narrowed.
-        let dial_relays: Vec<String> = inv
-            .handover
-            .relays
+        //
+        // ONE judgement per relay, used for both the dial set and the refusal:
+        // two independent readings of "can this node dial this one" could
+        // disagree, and a refusal whose own detail lines contradict it is
+        // worse than the flat message it replaced.
+        let verdicts = molt_core::relay::diagnose_invite_relays(
+            &inv.handover.relays,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        let dial_relays: Vec<String> = verdicts
             .iter()
-            .filter(|r| dialable.contains(r))
-            .cloned()
+            .filter(|v| v.blocked.is_none())
+            .map(|v| v.url.clone())
             .collect();
         if dial_relays.is_empty() {
-            // name BOTH sides: the old message said "you have not confirmed
-            // it", which was wrong advice for a relay the operator HAD
-            // confirmed but not session-unlocked, and never said what this
-            // node could actually reach
-            let offered = inv.handover.relays.join(", ");
-            let mine = if dialable.is_empty() {
-                "nothing (no confirmed relay on this node)".to_string()
-            } else {
-                dialable.join(", ")
-            };
-            return self.cmd_net_join_failed(
-                format!(
-                    "no relay in common with this invite — it offers [{offered}], \
-                     this node can dial [{mine}]. Add and confirm one of the \
-                     invite's relays in the settings (a clearnet or local relay \
-                     also needs the per-session unlock), or ask for an invite \
-                     that names one of yours."
-                ),
-                Some(generation),
+            // Diagnose EVERY relay the invite names, individually. A flat "no
+            // relay in common" was actively misleading whenever the relay was
+            // in the operator's own pool but not dialable — the 2026-08-01
+            // report ("config3 joined, config2 did not") was a hand-written
+            // `confirmed = true` without `clearnet_enabled = true`, told it
+            // had "no confirmed relay on this node".
+            let refusal = crate::relay_msg::join_relay_refusal(
+                &verdicts,
+                &self.session.settings.relays,
+                self.clearnet_session,
             );
+            // one log line per relay (the log is rendered line by line, and
+            // a wall of text is not read), then the terminal ✗ summary
+            self.session.join.run.log.extend(refusal.detail);
+            return self.cmd_net_join_failed(refusal.headline, Some(generation));
         }
         // the human ratification gate: the task blocks on this channel until
         // cmd_join_confirm_charter / cmd_join_decline_charter releases it

@@ -433,6 +433,100 @@ async fn a_join_with_no_relay_in_common_is_refused_with_an_actionable_message() 
     );
 }
 
+/// A parseable invite naming exactly these relays — no founder needed, the
+/// relay gate refuses long before anything is dialed.
+fn link_naming(relays: &[String]) -> String {
+    molt_engine::FoundingInvite {
+        info: molt_core::InviteInfo {
+            republic: "Gated".to_string(),
+            threshold: 2,
+            members: 2,
+            inviter: "walter".to_string(),
+            ticket: "ab".repeat(32),
+        },
+        handover: molt_net::invite::InviteHandoverV2 {
+            seat: 0,
+            ticket: "ab".repeat(32),
+            npub: molt_net::nostr_identity(b"founder-entropy", "self-ticket").1,
+            relays: relays.to_vec(),
+        },
+    }
+    .render()
+    .expect("a well-formed handover renders")
+}
+
+/// The refusal line that mentions `url` — one per relay the invite names.
+fn line_about<'a>(log: &'a [String], url: &str) -> &'a str {
+    log.iter()
+        .find(|l| l.contains(url))
+        .unwrap_or_else(|| panic!("no line about {url} in the refusal: {log:?}"))
+        .as_str()
+}
+
+/// REGRESSION (user report, 2026-08-01 — "config3 could join, config2 could
+/// not; nothing in the log, the UI just said the invitation was refused").
+///
+/// A relay hand-written into `config.toml` as `confirmed = true` but WITHOUT
+/// `clearnet_enabled = true` is silently undialable, and the old refusal
+/// ("no relay in common … this node can dial [nothing]") told the operator to
+/// confirm a relay they had already confirmed — while the one thing that
+/// would have helped, "non-onion dialing is switched off", was never said.
+///
+/// The rule: when nothing is dialable, the refusal diagnoses EVERY relay the
+/// invite names, individually, against this node's own pool — each with the
+/// one action that would fix THAT relay. A flat "no relay in common" is only
+/// honest for a relay this node has never heard of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_refusal_diagnoses_every_invite_relay_individually() {
+    let absent = "wss://never-added.example".to_string();
+    let unconfirmed = "wss://added-but-unconfirmed.example".to_string();
+    let dark = "wss://confirmed-but-dark.example".to_string();
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let b = engine(&tmp.path().join("joiner"));
+    // in the pool, never confirmed
+    b.execute(Command::RelayAdd { url: unconfirmed.clone() }).await.expect("add");
+    // confirmed WITH the exposure acknowledgement — then non-onion dialing
+    // switched off again (the hand-written `confirmed = true` without
+    // `clearnet_enabled = true` reaches exactly this state)
+    adopt_relay(&b, &dark).await;
+    b.execute(Command::RelayClearnetSession { unlock: false })
+        .await
+        .expect("go dark");
+
+    b.execute(Command::JoinStart {
+        invite: link_naming(&[absent.clone(), unconfirmed.clone(), dark.clone()]),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the wizard arms");
+    let s = wait_for(&b, "the join to refuse", |s| s.join.run.outcome == 2).await;
+    let log = &s.join.run.log;
+
+    let l = line_about(log, &absent);
+    assert!(
+        l.contains("not in this node's relay pool") && l.contains("add"),
+        "an unknown relay is told to be added: {l}"
+    );
+    let l = line_about(log, &unconfirmed);
+    assert!(
+        l.contains("not confirmed") && !l.contains("not in this node's relay pool"),
+        "a relay the operator CAN see is not called unknown: {l}"
+    );
+    let l = line_about(log, &dark);
+    assert!(
+        l.contains("confirmed") && l.contains("clearnet_enabled"),
+        "the switched-off gate names itself AND the config key that lifts it: {l}"
+    );
+
+    // …and the terminal line no longer claims the pools merely do not overlap
+    let terminal = log.iter().find(|l| l.starts_with('✗')).expect("a ✗ line");
+    assert!(
+        !terminal.contains("no relay in common"),
+        "two of these three relays ARE in common — they are just not dialable: {terminal}"
+    );
+}
+
 /// NEGATIVE — the single-use ticket over the relay: a SECOND person
 /// activating the same link (valid MAC, different member) is told the link
 /// is spent — over its own gift-wrap inbox — and its join fails fast; the

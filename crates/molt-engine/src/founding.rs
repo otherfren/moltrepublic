@@ -427,17 +427,21 @@ impl State {
             let dialer = self
                 .dialer_for()
                 .map_err(|e| format!("transport: {e}"))?;
+            // …and when there is nothing to dial, say WHICH of the three
+            // reasons it is: an operator whose relay reads `confirmed = true`
+            // in their own config was told to confirm it again, while the
+            // switch that actually blocked them went unnamed (2026-08-01
+            // report). `pool_gap` is Some exactly when `dialable` is empty.
+            if let Some(gap) = molt_core::relay::pool_gap(
+                &self.session.settings.relays,
+                self.clearnet_session,
+            ) {
+                return Err(format!("cannot found: {}", crate::relay_msg::pool_gap_reason(gap)));
+            }
             let relays = molt_core::relay::dialable(
                 &self.session.settings.relays,
                 self.clearnet_session,
             );
-            if relays.is_empty() {
-                return Err(
-                    "no confirmed, dialable relay — add and confirm one in the settings \
-                     before founding (nothing is pre-configured, by design)"
-                        .to_string(),
-                );
-            }
             let net = molt_net::ritual_net::RitualNet::new(
                 dialer.clone(),
                 relays.clone(),

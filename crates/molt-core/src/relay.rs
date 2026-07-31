@@ -41,7 +41,8 @@ pub enum RelayKind {
     /// address (or `localhost`) — a self-hosted relay on the operator's own
     /// machine or network. Reached DIRECTLY, never over Tor, so it rides the
     /// same explicit gate as clearnet (§10.14, decided 2026-07-31): confirm
-    /// once, activate per session, never a silent dial.
+    /// with the exposure acknowledgement, which also switches non-onion
+    /// dialing on and remembers it — never a silent dial.
     Local,
 }
 
@@ -53,8 +54,14 @@ pub enum RelayBlock {
     /// The user has not confirmed this relay yet.
     Unconfirmed,
     /// A confirmed non-onion relay (clearnet or local — both are reached
-    /// outside Tor) that this session has not activated. The activation
-    /// deliberately does not survive a restart.
+    /// outside Tor) while this node does not dial outside Tor at all.
+    ///
+    /// The name is historical: the activation used to be session-only and
+    /// reset on every start. Since the ADR-0004 amendment (2026-08-01) the
+    /// decision is REMEMBERED in both directions — the variant is kept
+    /// (surfaces serialize it as `clearnet_session_locked`, and MCP agents
+    /// read that string) but it now means "the switch is off", not "the
+    /// switch has not been flipped this session".
     ClearnetSessionLocked,
 }
 
@@ -385,11 +392,13 @@ pub fn pool_status(pool: &[RelayEntry], clearnet_session: bool) -> Vec<RelayStat
 
 /// Why this entry may not be dialed right now — `None` means it is dialable.
 ///
-/// `clearnet_session` is the IN-SESSION activation of non-Tor dialing; it
-/// resets to `false` on every start, which is what makes "always an explicit
-/// confirmation before a connection outside Tor" true across restarts. It
-/// gates everything that is not an onion service: clearnet AND local
-/// relays (§10.14 — a local relay is reached directly, bypassing Tor).
+/// `clearnet_session` is the activation of non-Tor dialing. It gates
+/// everything that is not an onion service: clearnet AND local relays
+/// (§10.14 — a local relay is reached directly, bypassing Tor). Since the
+/// ADR-0004 amendment it is persisted (`[transport.nostr] clearnet_enabled`),
+/// so the operator decides once rather than after every restart; the
+/// parameter name is kept because every caller threads it through under that
+/// name.
 pub fn relay_block(entry: &RelayEntry, clearnet_session: bool) -> Option<RelayBlock> {
     if !entry.confirmed {
         return Some(RelayBlock::Unconfirmed);
@@ -407,6 +416,117 @@ pub fn dialable(pool: &[RelayEntry], clearnet_session: bool) -> Vec<String> {
     pool.iter()
         .filter(|e| relay_block(e, clearnet_session).is_none())
         .map(|e| e.url.clone())
+        .collect()
+}
+
+/// Why NOTHING in this pool can be dialed — the node-level counterpart to
+/// [`RelayBlock`], which answers the same question per entry.
+///
+/// This is the one classifier for that question. It used to exist three
+/// times — `tor_probe::target_gap`, an inline predicate in the GUI's Tor
+/// panel, and a third copy added with the join diagnosis — which is how a
+/// pool could be described one way by the Tor panel and another way by a
+/// refused founding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolGap {
+    /// No relay in the pool at all.
+    Empty,
+    /// Relays exist, none of them confirmed.
+    Unconfirmed,
+    /// Confirmed relays exist, but every one of them is non-onion while this
+    /// node does not dial outside Tor. The block an operator cannot deduce
+    /// from their own config, where the relay plainly reads `confirmed`.
+    NonOnionOff,
+}
+
+/// Classify a pool that yields no dialable relay. `None` = something IS
+/// dialable, so there is no gap to explain.
+///
+/// Derived, never assumed from the caller's context: a diagnosis that can be
+/// wrong is worse than none.
+pub fn pool_gap(pool: &[RelayEntry], clearnet_session: bool) -> Option<PoolGap> {
+    if pool.iter().any(|e| relay_block(e, clearnet_session).is_none()) {
+        return None;
+    }
+    if pool.is_empty() {
+        Some(PoolGap::Empty)
+    } else if !pool.iter().any(|e| e.confirmed) {
+        Some(PoolGap::Unconfirmed)
+    } else {
+        // a confirmed ONION relay is always dialable, so if nothing is and
+        // something is confirmed, every confirmed entry is non-onion and the
+        // switch is off
+        Some(PoolGap::NonOnionOff)
+    }
+}
+
+/// Why this node cannot dial a relay that somebody ELSE named — an invite's
+/// relay set measured against the local pool. `None` means "dialable".
+///
+/// This is [`RelayBlock`] plus the case a pool entry cannot express: a relay
+/// this node has never heard of. Keeping them in one verdict is the point —
+/// the three need three different next steps, and collapsing them into "no
+/// relay in common" is what made a refused join unactionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteRelayBlock {
+    /// This node's pool does not contain the relay at all.
+    NotInPool,
+    /// In the pool, but the operator has never confirmed it.
+    Unconfirmed,
+    /// Confirmed, but non-onion (clearnet or local) while this node does not
+    /// dial outside Tor.
+    ClearnetOff,
+}
+
+impl From<RelayBlock> for InviteRelayBlock {
+    /// The two blocks a pool entry can carry mean the same thing whether the
+    /// relay came from this node's settings or from somebody's invite — one
+    /// named place for that correspondence, so a new [`RelayBlock`] variant
+    /// breaks the build here instead of silently mis-classifying.
+    fn from(block: RelayBlock) -> Self {
+        match block {
+            RelayBlock::Unconfirmed => Self::Unconfirmed,
+            RelayBlock::ClearnetSessionLocked => Self::ClearnetOff,
+        }
+    }
+}
+
+/// One invite relay and this node's verdict on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteRelayVerdict {
+    /// The relay URL as the invite spells it.
+    pub url: String,
+    /// `None` = this node can dial it; otherwise why not.
+    pub blocked: Option<InviteRelayBlock>,
+}
+
+/// Judge every relay an invite names against this node's pool, in the
+/// invite's own order.
+///
+/// Both sides are normalized by the same [`normalize_relay_url`] gate (the
+/// invite at parse time, the pool at ingest and in [`sanitize_pool`]), so a
+/// plain string match is the whole comparison.
+///
+/// This is the CLASSIFICATION only. Turning a verdict into a sentence is the
+/// surfaces' job: the words name a settings tab and a config key, which a
+/// crate with no I/O has no business knowing, and the same verdict has to
+/// reach a German GUI, an English run log and an MCP agent.
+pub fn diagnose_invite_relays(
+    offered: &[String],
+    pool: &[RelayEntry],
+    clearnet_session: bool,
+) -> Vec<InviteRelayVerdict> {
+    offered
+        .iter()
+        .map(|url| {
+            let blocked = match pool.iter().find(|e| &e.url == url) {
+                None => Some(InviteRelayBlock::NotInPool),
+                Some(entry) => relay_block(entry, clearnet_session).map(Into::into),
+            };
+            InviteRelayVerdict { url: url.clone(), blocked }
+        })
         .collect()
 }
 
@@ -435,13 +555,67 @@ mod tests {
         assert_eq!(relay_block(&pool[0], true), Some(RelayBlock::Unconfirmed));
     }
 
-    /// KEYSTONE — onion connects by itself, clearnet never does. The clearnet
-    /// activation is per-session, so a restart re-arms the gate.
+    /// An empty dial set has three different causes and three different
+    /// fixes — and the one an operator cannot deduce from their own config
+    /// (where the relay plainly reads `confirmed = true`) is the node-level
+    /// switch. `None` means there is no gap to explain at all.
+    #[test]
+    fn an_empty_dial_set_is_classified_by_which_of_the_three_it_is() {
+        const ONION: &str =
+            "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        assert_eq!(pool_gap(&[], false), Some(PoolGap::Empty));
+
+        let unconfirmed = vec![entry("wss://relay.example.org", false)];
+        assert_eq!(pool_gap(&unconfirmed, true), Some(PoolGap::Unconfirmed));
+
+        let confirmed = vec![entry("wss://relay.example.org", true)];
+        assert_eq!(pool_gap(&confirmed, false), Some(PoolGap::NonOnionOff));
+        assert_eq!(pool_gap(&confirmed, true), None, "switched on, nothing to explain");
+
+        // a confirmed onion relay is dialable whatever the switch says, so a
+        // pool holding one has no gap even beside a blocked clearnet entry
+        let mixed = vec![entry(ONION, true), entry("wss://relay.example.org", true)];
+        assert_eq!(pool_gap(&mixed, false), None);
+    }
+
+    /// The three ways an invite's relay can be undialable here are three
+    /// DIFFERENT problems — the verdict must keep them apart, and must not
+    /// call a relay the operator can see in their own pool "not in common".
+    #[test]
+    fn every_invite_relay_is_judged_on_its_own_against_the_pool() {
+        const ONION: &str =
+            "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        let pool = vec![entry("wss://unconfirmed.example", false), entry("wss://dark.example", true)];
+        let offered = vec![
+            "wss://never-heard-of.example".to_string(),
+            "wss://unconfirmed.example".to_string(),
+            "wss://dark.example".to_string(),
+        ];
+        let v = diagnose_invite_relays(&offered, &pool, false);
+        assert_eq!(
+            v.iter().map(|v| v.blocked).collect::<Vec<_>>(),
+            vec![
+                Some(InviteRelayBlock::NotInPool),
+                Some(InviteRelayBlock::Unconfirmed),
+                Some(InviteRelayBlock::ClearnetOff),
+            ],
+            "the verdicts keep the invite's own order"
+        );
+        assert_eq!(v[0].url, offered[0], "each verdict carries its own relay");
+        // the clearnet switch is the ONLY thing between the third and a join
+        assert_eq!(diagnose_invite_relays(&offered, &pool, true)[2].blocked, None);
+        // an onion relay needs no switch at all
+        let pool = vec![entry(ONION, true)];
+        assert_eq!(diagnose_invite_relays(&[ONION.to_string()], &pool, false)[0].blocked, None);
+    }
+
+    /// KEYSTONE — onion connects by itself, clearnet never does without the
+    /// node-level non-onion dialing switch.
     #[test]
     fn onion_dials_automatically_but_clearnet_needs_the_session_unlock() {
         let onion = entry("wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion", true);
         let clearnet = entry("wss://relay.example.org", true);
-        // background/startup: no session unlock
+        // background/startup: non-onion dialing off
         assert_eq!(relay_block(&onion, false), None, "onion is background-dialable");
         assert_eq!(
             relay_block(&clearnet, false),
@@ -450,7 +624,7 @@ mod tests {
         );
         let pool = vec![onion.clone(), clearnet.clone()];
         assert_eq!(dialable(&pool, false), vec!["wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"]);
-        // the user actively unlocks clearnet for this session
+        // the user switches non-onion dialing on
         assert_eq!(relay_block(&clearnet, true), None);
         assert_eq!(
             dialable(&pool, true),
@@ -611,7 +785,7 @@ mod tests {
     /// KEYSTONE — §10.14 (user decision 2026-07-31): a relay on a private,
     /// loopback or link-local address is a legitimate self-host target. It is
     /// classified [`RelayKind::Local`], never dialed silently, and rides the
-    /// SAME per-session gate as clearnet — it bypasses Tor by nature, so the
+    /// SAME gate as clearnet — it bypasses Tor by nature, so the
     /// explicit activation is what keeps "no un-acknowledged non-Tor dial"
     /// true. Plaintext `ws://` is allowed here: no CA issues certificates for
     /// private addresses, the exposure is bounded to the local path, and the
@@ -639,7 +813,7 @@ mod tests {
             assert_eq!(
                 relay_block(&confirmed, false),
                 Some(RelayBlock::ClearnetSessionLocked),
-                "{local:?} must wait for the session unlock"
+                "{local:?} must wait for the non-onion dialing switch"
             );
             assert_eq!(relay_block(&confirmed, true), None, "{local:?} unlocks with the session");
             assert_eq!(

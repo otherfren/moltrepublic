@@ -410,6 +410,19 @@ fn session_settings(s: &Settings) -> SessionSettings {
                     }
                 }
             }
+            // The state an operator cannot read off their own file: entries
+            // that say `confirmed = true` while the node-level switch is off
+            // are never dialed. Say it when the config is LOADED, not only
+            // when a founding or join later fails on it (2026-08-01 report).
+            if molt_core::relay::pool_gap(&kept, s.clearnet_relays_enabled)
+                == Some(molt_core::relay::PoolGap::NonOnionOff)
+            {
+                tracing::warn!(
+                    "every confirmed relay is clearnet or local and \
+                     [transport.nostr] clearnet_enabled is false — this node \
+                     will dial NO relay; founding and joining will be refused"
+                );
+            }
             kept
         },
         clearnet_relays_enabled: s.clearnet_relays_enabled,

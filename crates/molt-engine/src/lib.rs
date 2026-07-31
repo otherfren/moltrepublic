@@ -39,6 +39,7 @@ mod net;
 mod nostr_ritual;
 mod proposals;
 mod recovery;
+mod relay_msg;
 mod session;
 mod transfer;
 
@@ -3687,8 +3688,47 @@ mod tests {
                 .await
                 .expect_err("no confirmed relay → no founding");
             assert!(
-                err.to_string().contains("no confirmed, dialable relay"),
+                err.to_string().contains("no relay is configured"),
                 "the honest prerequisite error surfaces: {err}"
+            );
+        });
+    }
+
+    /// …and the SAME refusal must not misdiagnose the pool it is looking at.
+    /// A confirmed clearnet relay with non-onion dialing switched off (the
+    /// hand-written `confirmed = true` without `clearnet_enabled = true`) was
+    /// told to "add and confirm one" — the one thing the operator had already
+    /// done, while the switch that was actually off went unmentioned.
+    #[test]
+    fn create_start_names_the_clearnet_switch_when_that_is_what_blocks_it() {
+        rt().block_on(async {
+            let w = spawn(GroupConfig::demo(), SessionView::default());
+            w.execute(Command::RelayAdd { url: "wss://relay.example.org".to_string() })
+                .await
+                .expect("add");
+            w.execute(Command::RelayConfirm {
+                url: "wss://relay.example.org".to_string(),
+                accept_clearnet: true,
+            })
+            .await
+            .expect("confirm");
+            // the operator (or their config file) leaves non-onion dialing off
+            w.execute(Command::RelayClearnetSession { unlock: false })
+                .await
+                .expect("dark");
+            let err = w
+                .execute(Command::CreateStart {
+                    name: "Gap".to_string(),
+                    member: "petra".to_string(),
+                    threshold: 2,
+                    members: 3,
+                })
+                .await
+                .expect_err("nothing dialable → no founding");
+            let err = err.to_string();
+            assert!(
+                err.contains("clearnet_enabled") && !err.contains("no relay is configured"),
+                "the refusal names the switch, not a confirmation that exists: {err}"
             );
         });
     }

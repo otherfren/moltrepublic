@@ -872,7 +872,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_confirm",
             command: "relay_confirm",
-            description: "Confirm a relay — the operator's persisted \"yes, use this one\". An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET or LOCAL relay is REFUSED unless accept_clearnet is true: a clearnet operator sees this node's subscriptions (and its IP address unless Tor is on); a local relay is reached directly on this machine or network, never over Tor. Even once confirmed, a non-onion relay is never dialed automatically — it additionally needs relay_clearnet_session in every session.",
+            description: "Confirm a relay — the operator's persisted \"yes, use this one\". An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET or LOCAL relay is REFUSED unless accept_clearnet is true: a clearnet operator sees this node's subscriptions (and its IP address unless Tor is on); a local relay is reached directly on this machine or network, never over Tor. Confirming a non-onion relay WITH accept_clearnet also switches non-onion dialing on and remembers that (ADR-0004 amendment) — relay_clearnet_session stays as the deliberate off switch.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -903,11 +903,11 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_clearnet_session",
             command: "relay_clearnet_session",
-            description: "Activate (or deactivate) non-Tor relays — CLEARNET and LOCAL — for this session only; never persisted, so after a restart no such packet leaves the machine until it is activated again. Onion relays are unaffected and always connect on their own. Confirmed clearnet/local relays stay blocked (read_session.relays shows \"clearnet_session_locked\") until this is unlocked.",
+            description: "Switch dialing of non-Tor relays — CLEARNET and LOCAL — on or off. BOTH decisions are persisted and survive a restart (ADR-0004 amendment): confirming such a relay with accept_clearnet already switches it on, and switching it off stays off. Onion relays are unaffected and always connect on their own. While it is off, confirmed clearnet/local relays are blocked (read_session.relays shows \"clearnet_session_locked\") and a join over one is refused with that reason.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "unlock": { "type": "boolean", "description": "true = allow dialing confirmed clearnet relays until shutdown" }
+                    "unlock": { "type": "boolean", "description": "true = dial confirmed clearnet and local relays; false = go dark. Remembered across restarts." }
                 },
                 "required": ["unlock"]
             }),
@@ -939,7 +939,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "net_test_tor",
             command: "net_test_tor",
-            description: "Test whether Tor is actually there and working (the anonymity settings panel's Test button). Reports the RUNG of evidence it reached in session.tor_test.state — never a bare yes/no: \"off\" (Tor is not enabled; nothing was sent), \"misconfigured\" (the fail-closed dialer refused the config; nothing was probed), \"no_proxy\" (nothing is listening at the SOCKS address — no Tor daemon there), \"proxy_only\" (a socket answered there, but NO traffic was routed through it, so no circuit is proven), \"circuit_failed\" (no connection to the relay through Tor — this does NOT single out Tor: the relay itself may be down or firewalled, see detail), \"circuit_timeout\" (no answer within the deadline — a first embedded-Tor start bootstraps the directory and can take minutes, so this is not a failure verdict), \"circuit\" (a relay from the confirmed pool completed a WebSocket handshake end to end through Tor — the only state that means Tor works, and it proves the RELAY answered, not merely that a SOCKS server said ok), \"no_target\" (nothing could be tested at all). session.tor_test also carries detail/proxy/target/ms. The probe never invents a host: with no confirmed, Tor-routable relay it stops at \"proxy_only\" — which also happens when confirmed relays are merely waiting for the per-session non-Tor activation. THE CALL RETURNS BEFORE THE PROBE FINISHES: poll read_session until tor_test.state leaves \"testing\". Omit fields to test the saved settings; pass them to test a draft.",
+            description: "Test whether Tor is actually there and working (the anonymity settings panel's Test button). Reports the RUNG of evidence it reached in session.tor_test.state — never a bare yes/no: \"off\" (Tor is not enabled; nothing was sent), \"misconfigured\" (the fail-closed dialer refused the config; nothing was probed), \"no_proxy\" (nothing is listening at the SOCKS address — no Tor daemon there), \"proxy_only\" (a socket answered there, but NO traffic was routed through it, so no circuit is proven), \"circuit_failed\" (no connection to the relay through Tor — this does NOT single out Tor: the relay itself may be down or firewalled, see detail), \"circuit_timeout\" (no answer within the deadline — a first embedded-Tor start bootstraps the directory and can take minutes, so this is not a failure verdict), \"circuit\" (a relay from the confirmed pool completed a WebSocket handshake end to end through Tor — the only state that means Tor works, and it proves the RELAY answered, not merely that a SOCKS server said ok), \"no_target\" (nothing could be tested at all). session.tor_test also carries detail/proxy/target/ms. The probe never invents a host: with no confirmed, Tor-routable relay it stops at \"proxy_only\" — which also happens when the relays ARE confirmed but non-onion dialing is switched off (relay_clearnet_session / [transport.nostr] clearnet_enabled). THE CALL RETURNS BEFORE THE PROBE FINISHES: poll read_session until tor_test.state leaves \"testing\". Omit fields to test the saved settings; pass them to test a draft.",
             schema: || json!({
                 "type": "object",
                 "properties": {

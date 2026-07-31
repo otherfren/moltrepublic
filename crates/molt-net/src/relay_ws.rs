@@ -82,7 +82,7 @@ impl AsyncWrite for MaybeTls {
 /// network: routing it through Tor cannot work (the proxy refuses private
 /// addresses) and would disclose the local address to the proxy. It is
 /// dialed DIRECTLY — which is exactly why it sits behind the same explicit
-/// per-session gate as clearnet. Everything else keeps the configured
+/// gate as clearnet. Everything else keeps the configured
 /// fail-closed dialer unchanged.
 pub(crate) fn dialer_for(dialer: &Dialer, url: &str) -> Dialer {
     if molt_core::relay::relay_kind(url) == molt_core::relay::RelayKind::Local {

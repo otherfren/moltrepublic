@@ -115,6 +115,43 @@ that sets `clearnet_enabled = true` AND confirms a clearnet relay does grant
 non-onion dialing — the file is the operator's own authority, and the pool
 stays visible in the settings where such an entry can be revoked.
 
+**A hand-written `confirmed = true` does NOT imply the clearnet decision**
+(decided 2026-08-01). The two flags stay independent: confirming a relay says
+"I want to use this one", switching non-onion dialing on says "this node may
+leave Tor at all" — the second is a property of the NODE, not of one entry,
+and a file edit must not grant it as a side effect. The cost of that
+separation is a state the operator cannot see the meaning of (a relay that
+looks confirmed but is never dialed), so the honest diagnosis is load-bearing
+and ships with the rule — in three places, because the state has to be legible
+wherever it is met:
+
+- **at load**, `molt-app`'s boot and the config watcher both `tracing::warn!`
+  when every confirmed relay is non-onion and `clearnet_enabled` is false —
+  the moment the state is created, not the moment something later fails on it;
+- **at the gate**, `relay::pool_gap` (founding) and
+  `relay::diagnose_invite_relays` (join) classify it, and the engine's
+  `relay_msg` renders one line per relay naming the switch and the config key;
+- **in the settings tab**, the entry itself reads "confirmed — but
+  clearnet/local dialing is switched off".
+
+## 3a. One classifier, three renderers
+
+`relay::pool_gap(pool, clearnet_session) -> Option<PoolGap>` is the ONE answer
+to "why can this node dial nothing" (`Empty` / `Unconfirmed` / `NonOnionOff`;
+`None` = something is dialable). It had grown three independent
+implementations — `tor_probe::target_gap`, an inline predicate in the GUI's
+Tor panel, and a third added with the join diagnosis — which is how one pool
+could be described one way by the Tor panel and another way by a refused
+founding. All three now delegate; `target_gap` layers on only its own extra
+rung (`LocalOnly`, relays that ARE dialable but bypass Tor by nature).
+
+**Classification lives in `molt-core`, prose does not.** The sentences name a
+GUI tab and a config key, which a no-I/O contract crate has no business
+knowing, and the same verdict must reach an English run log, a German GUI and
+an MCP agent. `molt-core` returns `PoolGap` / `InviteRelayBlock` (both
+`Serialize`), and `molt-engine::relay_msg` is the only place that turns them
+into words.
+
 ## 3. The gate — three rules, one pure function
 
 `molt_core::relay::dialable(pool, clearnet_session)` returns the relays the
@@ -126,12 +163,16 @@ than read the pool directly.
    what makes a fresh install offline.
 2. **Onion relays may be dialed automatically**, including at startup and in
    background reconnects.
-3. **A non-onion relay is never dialed automatically** — clearnet and local
-   alike (§10.14: both are reached outside Tor). On top of its persisted
-   `confirmed` flag it needs an *in-session* activation (`clearnet_session`),
-   which resets to off on every start. So "always a warning and an explicit
-   confirmation before a connection outside Tor" holds literally: after a
-   restart, no such packet leaves the machine until the user acts again.
+3. **A non-onion relay is never dialed without an explicit decision** —
+   clearnet and local alike (§10.14: both are reached outside Tor). On top of
+   its persisted `confirmed` flag it needs the non-onion dialing switch
+   (`clearnet_session`). Since the 2026-08-01 amendment that switch is
+   **persisted in both directions**: the acknowledged confirmation turns it
+   on and remembers it, and a deliberate off stays off across restarts. What
+   is given up, knowingly: "after a restart no clearnet packet leaves until a
+   human acts again" no longer holds for a node whose operator switched it
+   on. What is gained: the consent is a decision the operator makes once,
+   instead of a prompt they learn to click through.
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a
@@ -158,7 +199,7 @@ they are tools on both surfaces (co-equality rule) — never engine-internal:
 | `RelayMove { url, up }` | change priority by one position |
 | `RelayConfirm { url, accept_clearnet }` | persist the confirmation; the engine **refuses** a clearnet or local URL unless `accept_clearnet` is true |
 | `RelayRevoke { url }` | withdraw the confirmation |
-| `RelayClearnetSession { unlock }` | activate/deactivate clearnet dialing for THIS session only |
+| `RelayClearnetSession { unlock }` | switch non-onion (clearnet + local) dialing on or off — **persisted both ways** |
 
 `accept_clearnet` is enforced in the engine, not in the GUI: an MCP agent
 faces exactly the same gate as a human clicking through the warning dialog.
@@ -176,8 +217,8 @@ without touching the GUI. That is the developer-test path.
 [transport.nostr]
 # Relays this node may use, in priority order. EMPTY BY DEFAULT — the app
 # connects to nothing until you add a relay here (or in the GUI) and confirm
-# it. Onion relays connect automatically; a clearnet relay additionally needs
-# an explicit confirmation each session.
+# it. Onion relays connect automatically; a clearnet or local relay also needs
+# `clearnet_enabled = true` below, which its acknowledged confirmation sets.
 [[transport.nostr.relay]]
 url = "wss://your-relay.onion"
 confirmed = false
@@ -198,14 +239,19 @@ their format-preserving guarantee.
   IP address) and requires an explicit acknowledgement.
 - With no confirmed relay the network state reads honestly as "no relay
   confirmed — not connected", never as an error or a spinner.
-- Clearnet relays configured but not activated this session are shown as
-  exactly that, with the activation action next to them.
+- Clearnet relays confirmed while non-onion dialing is switched off are shown
+  as exactly that, with the switch next to them — and a join refused over such
+  a relay says so per relay, naming the switch and the `clearnet_enabled`
+  config key rather than a flat "no relay in common" (§7).
 
 ## 7. Keystones
 
 - an empty/unconfirmed pool yields an empty dial set
-- an onion relay is dialed automatically; a clearnet relay is not, until the
-  session is unlocked — and the unlock does not survive a restart
+- an onion relay is dialed automatically; a clearnet relay is not, until
+  non-onion dialing is switched on — and that decision survives a restart
+- a join whose invite names no dialable relay diagnoses EVERY named relay
+  individually (not in the pool / unconfirmed / non-onion dialing off), and
+  only calls the pools disjoint when every named relay is genuinely unknown
 - `RelayConfirm` on a clearnet URL without `accept_clearnet` is refused
 - `ws://` clearnet and malformed URLs are refused at ingest
 - priority order survives the config round-trip

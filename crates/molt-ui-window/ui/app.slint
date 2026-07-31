@@ -2588,8 +2588,17 @@ export component AppWindow inherits Window {
                                                 : Theme.dim;
                                             font-size: Theme.fs-cap;
                                             font-family: "monospace";
-                                            wrap: no-wrap;
-                                            overflow: elide;
+                                            // WRAP, never elide: a failure
+                                            // line's tail is the part that
+                                            // says what to DO about it, and
+                                            // this log has no horizontal
+                                            // scroll, so an elided tail was
+                                            // unrecoverable. (Duplicate of
+                                            // RunView's log block in
+                                            // parts.slint — they must be
+                                            // fixed together until one of
+                                            // them is extracted.)
+                                            wrap: word-wrap;
                                         }
                                     }
                                 }
@@ -7425,8 +7434,16 @@ export component AppWindow inherits Window {
     if root.toast-open: Rectangle {
             x: (parent.width - self.width) / 2;
             y: parent.height - self.height - 30px;
-            width: toast-label.preferred-width + 28px + 36px;
-            height: 38px;
+            // Short toasts ("copied") keep the one-line pill. A long one — an
+            // engine error surfaced by `issue()`, e.g. the founding's relay
+            // prerequisite, which runs past 200 characters — wraps inside a
+            // capped bubble instead of growing wider than the window and
+            // clipping its own tail (2026-08-01: the tail is the part that
+            // says what to do). preferred-width is the unwrapped natural
+            // width, so it does not depend on the width assigned back to the
+            // label — no layout cycle.
+            width: min(toast-label.preferred-width + 28px + 36px, parent.width - 80px);
+            height: max(38px, toast-label.preferred-height + 20px);
             border-radius: Theme.win95 ? 0px : 19px;
             background: Theme.raised;
             border-width: Theme.border-w;
@@ -7450,10 +7467,12 @@ export component AppWindow inherits Window {
             }
             toast-label := Text {
                 x: 28px;
+                width: parent.width - 28px - 36px;
                 height: 100%;
                 text: root.toast-text;
                 color: Theme.text;
                 font-size: Theme.fs-body;
+                wrap: word-wrap;
                 vertical-alignment: center;
             }
             // explicit close: a small × so dismissing is discoverable

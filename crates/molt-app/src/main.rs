@@ -182,6 +182,19 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // The state an operator cannot read off their own file: entries that
+        // say `confirmed = true` while the node-level switch is off are never
+        // dialed. Say it at LOAD time, not only when a founding or join later
+        // fails on it (2026-08-01 report).
+        if molt_core::relay::pool_gap(&kept, config.transport.nostr.clearnet_enabled)
+            == Some(molt_core::relay::PoolGap::NonOnionOff)
+        {
+            tracing::warn!(
+                "every confirmed relay is clearnet or local and [transport.nostr] \
+                 clearnet_enabled is false — this node will dial NO relay; founding \
+                 and joining will be refused"
+            );
+        }
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()

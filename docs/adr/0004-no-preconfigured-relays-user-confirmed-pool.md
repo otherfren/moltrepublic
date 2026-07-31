@@ -26,9 +26,14 @@ its operator has added a relay **and confirmed it**. On top of that:
 - **A clearnet relay is never dialed automatically.** Confirming one requires
   an explicit acknowledgement of the exposure (enforced in the engine, so an
   MCP agent faces the same gate as a human), and dialing it additionally
-  requires an **in-session activation that does not survive a restart** — so
-  "always a warning and an explicit confirmation before a clearnet connection"
-  holds literally, not just the first time.
+  requires a global non-onion dialing switch. ~~That activation is in-session
+  and does not survive a restart — so "always a warning and an explicit
+  confirmation before a clearnet connection" holds literally, not just the
+  first time.~~ **AMENDED 2026-08-01 (see below): the switch is persisted in
+  both directions.** The acknowledged confirmation turns it on and remembers
+  it; a deliberate off stays off. Confirming a relay and switching non-onion
+  dialing on remain two SEPARATE flags — a hand-written `confirmed = true` in
+  `config.toml` does not grant non-onion dialing (decided 2026-08-01).
 - The pool is **ordered, and the order is the dial priority**.
 - The onion/clearnet kind is **derived from the URL, never stored**, so a
   hand-edited config cannot mislabel a clearnet relay past the gate.
@@ -46,8 +51,11 @@ its operator has added a relay **and confirmed it**. On top of that:
 friction is real but recoverable (the operator pastes one URL); a default
 surveillance point is neither visible nor recoverable. Making the onion path
 the *frictionless* one — add, confirm, done, forever — while the clearnet path
-costs an acknowledgement plus a per-session act encodes the privacy preference
-in the product's ergonomics instead of in a recommendation nobody reads.
+costs an explicit, named acknowledgement encodes the privacy preference in the
+product's ergonomics instead of in a recommendation nobody reads. (As
+originally written this also charged a per-session act; the 2026-08-01
+amendment drops that — it bought no safety and taught the operator to click
+past the warning.)
 
 ## Consequences
 
@@ -114,3 +122,16 @@ a real but narrow case, and one the operator can still choose by switching
 clearnet off before shutdown (now remembered). Weighed against a gate that
 made the product unusable and trained its operator to click past warnings,
 remembering the decision is the better trade.
+
+**The follow-up the amendment owed (done 2026-08-01).** Persisting the
+decision leaves a state the operator cannot interpret on sight: a relay that
+reads `confirmed = true` in their own config and is still never dialed,
+because the *node-level* switch is off. Every surface that met that state was
+still narrating the removed session model — the GUI badge said "needs
+activation this session", the panel promised the activation "ends with the
+app", two MCP tool descriptions said it is "never persisted", and a join over
+such a relay was refused as "no confirmed relay on this node". All of them
+told the operator to repeat an act that no longer exists, and none named the
+switch that was actually off. Fixed together with the per-relay join
+diagnosis (`relay::invite_relay_refusal`) — a persisted decision needs a
+persistent explanation of its own state.

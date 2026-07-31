@@ -767,8 +767,10 @@ decided any time before ship.
 - **§10.1 — Relay default: RE-DECIDED 2026-07-31 (ADR-0004, supersedes
   ADR-0003's curated list)** — there is NO default relay: the pool ships empty
   and the node connects to nothing until the operator adds and confirms one.
-  Onion connects automatically; clearnet needs an acknowledgement plus a
-  per-session activation. BUILT — `docs/transport/relay_pool.md`.
+  Onion connects automatically; clearnet needs an acknowledgement plus the
+  node-level non-onion dialing switch, which the acknowledgement sets and
+  which is REMEMBERED (amendment 2026-08-01).
+  BUILT — `docs/transport/relay_pool.md`.
 - **§10.4 — Exporter-ring depth K: DECIDED — K = 3** (§6). Epochs change only on
   membership/recovery (rare); 3 covers recent ones, the resend layer covers the
   rest; small K bounds the leaked-secret window.
@@ -801,8 +803,8 @@ decided any time before ship.
   follow-up is closed.
 - **§10.14 — private/local relay addresses: DECIDED — gated like clearnet,
   not hard-rejected.** RFC1918/loopback/link-local/ULA relays go behind the
-  same ADR-0004 gate as clearnet (explicit acknowledgement + per-session
-  activation, never a silent dial — they bypass Tor by nature). A LAN
+  same ADR-0004 gate as clearnet (explicit acknowledgement + the non-onion
+  dialing switch, never a silent dial — they bypass Tor by nature). A LAN
   self-hosted relay stays possible, informed; MDK's hard-reject is not
   adopted. Lands with the `url`-based parser rebuild
   (`mdk_evaluation.md` §7.1/§7.2).

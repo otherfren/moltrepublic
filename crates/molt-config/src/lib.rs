@@ -598,7 +598,7 @@ theme = {theme}
 /// both writers: the generated template ([`render`]) and the retrofit that
 /// [`apply`] performs when an older config gains the section for the first
 /// time — so a hand-editing operator always finds the same instructions.
-const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically. A clearnet or local (LAN/\n# loopback) relay must be confirmed WITH its exposure acknowledgement; that\n# also sets clearnet_enabled below and is remembered, so you confirm once\n# rather than after every restart. Switch it off again in Settings > Nostr\n# relays or with the relay_clearnet_session MCP tool.\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n";
+const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically. A clearnet or local (LAN/\n# loopback) relay must be confirmed WITH its exposure acknowledgement; that\n# also sets clearnet_enabled below and is remembered, so you confirm once\n# rather than after every restart. Switch it off again in Settings > Nostr\n# relays or with the relay_clearnet_session MCP tool.\n#\n# EDITING THIS FILE BY HAND: confirmed and clearnet_enabled are two\n# separate decisions. Writing confirmed = true on a clearnet or local\n# relay does NOT grant dialing outside Tor — set clearnet_enabled = true\n# above as well, or the relay stays in the pool and is never dialed.\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n#                                    # (non-onion also needs clearnet_enabled)\n";
 
 /// The `[[transport.nostr.relay]]` tables for [`render`], in pool order —
 /// empty (not even a table header) when the pool is empty, so a generated
@@ -962,13 +962,25 @@ fn apply_relays(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     // the header decor is set after the table exists (a second navigation, so
     // the mutable borrow above is already released); an inline-table config
     // (`transport = { nostr = { … } }`) has no header to comment — skipped.
-    if fresh_section {
-        if let Some(table) = doc
-            .get_mut("transport")
-            .and_then(toml_edit::Item::as_table_like_mut)
-            .and_then(|t| t.get_mut("nostr"))
-            .and_then(toml_edit::Item::as_table_mut)
-        {
+    if let Some(table) = doc
+        .get_mut("transport")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|t| t.get_mut("nostr"))
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        // A section that already exists but carries NO comment of its own
+        // gets the explanation too: it was written by a version whose
+        // template predates it, and its operator is exactly the one who would
+        // otherwise hand-write `confirmed = true` and never learn that
+        // `clearnet_enabled` is a separate decision (2026-08-01 report).
+        // A prefix the OPERATOR wrote is never touched — the file's
+        // comment-preserving guarantee outranks our explanation.
+        let uncommented = table
+            .decor()
+            .prefix()
+            .and_then(toml_edit::RawString::as_str)
+            .map_or(true, |p| p.trim().is_empty());
+        if fresh_section || uncommented {
             table.decor_mut().set_prefix(format!("\n{RELAY_SECTION_DOC}"));
         }
     }
@@ -1207,6 +1219,44 @@ mod tests {
             twice.matches("NO RELAY SHIPS WITH THE APP").count(),
             1,
             "the explanation is written exactly once:\n{twice}"
+        );
+    }
+
+    /// The operator this explanation is FOR is the one hand-writing
+    /// `confirmed = true` — who by definition already has `[transport.nostr]`
+    /// and so never got the "fresh section" text. A section that carries no
+    /// comment of its own gains it; a comment the OPERATOR wrote is never
+    /// overwritten (the file's comment-preserving guarantee outranks ours).
+    #[test]
+    fn an_uncommented_relay_section_gains_the_explanation_but_never_clobbers_one() {
+        // hand-written, no comment above the section — the reported shape
+        let bare = "[transport.nostr]\nclearnet_enabled = false\n\n\
+                    [[transport.nostr.relay]]\nurl = \"wss://relay.example.org\"\n\
+                    confirmed = true\n";
+        let settings = salvage(bare);
+        assert_eq!(settings.relays.len(), 1, "the hand-written relay survives salvage");
+        let out = update(bare, &settings).expect("save");
+        assert!(
+            out.contains("EDITING THIS FILE BY HAND"),
+            "the two-flag warning reaches the operator who needs it:\n{out}"
+        );
+        assert!(out.contains("confirmed = true"), "their relay is untouched");
+        parse(&out).expect("strict-parses");
+        // and it is not stacked on the next save
+        assert_eq!(
+            update(&out, &settings).expect("second save").matches("EDITING THIS FILE BY HAND").count(),
+            1,
+            "written exactly once"
+        );
+
+        // an operator's OWN comment on the section is left alone
+        let mine = "# I wrote this myself, do not touch\n[transport.nostr]\n\
+                    clearnet_enabled = false\n";
+        let out = update(mine, &salvage(mine)).expect("save");
+        assert!(out.contains("# I wrote this myself, do not touch"), "kept:\n{out}");
+        assert!(
+            !out.contains("EDITING THIS FILE BY HAND"),
+            "our text does not displace theirs:\n{out}"
         );
     }
 

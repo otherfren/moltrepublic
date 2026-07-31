@@ -42,7 +42,7 @@
 
 use std::time::Duration;
 
-use molt_core::relay::{dialable, relay_kind, RelayEntry, RelayKind};
+use molt_core::relay::{dialable, relay_kind, PoolGap, RelayEntry, RelayKind};
 use molt_core::{TorTest, TorTestState};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -119,8 +119,15 @@ pub fn verdict(r: &RungReport) -> TorTest {
         // a socket answered — and that is ALL that was established.
         (Some(Ok(())), None) => TorTest {
             state: TorTestState::ProxyOnly,
-            detail: "no confirmed, Tor-routable relay in the pool — nothing was routed \
-                     through the proxy, so no circuit was proven"
+            // states only what this rung observed. It has no pool to look
+            // at, so it must NOT assert "nothing is confirmed" — that was the
+            // same misdiagnosis the join/founding refusals carried (an
+            // operator whose relays ARE confirmed, blocked by the non-onion
+            // switch, told they had confirmed none). TODO: thread
+            // `TargetGap` in so this can name the actual cause.
+            detail: "nothing was routed through the proxy, so no circuit was proven — \
+                     no relay from the pool was reachable through Tor (see the relay \
+                     settings for which of them this node may dial)"
                 .to_string(),
             proxy: r.proxy.clone(),
             target: String::new(),
@@ -129,7 +136,7 @@ pub fn verdict(r: &RungReport) -> TorTest {
         // no proxy to probe and nothing to dial: not a single rung ran.
         (None, None) => TorTest {
             state: TorTestState::NoTarget,
-            detail: "no SOCKS proxy to probe and no confirmed, Tor-routable relay to dial \
+            detail: "no SOCKS proxy to probe and no relay this node may dial through Tor \
                      — nothing about Tor could be established"
                 .to_string(),
             proxy: r.proxy.clone(),
@@ -142,7 +149,7 @@ pub fn verdict(r: &RungReport) -> TorTest {
 /// The relay this probe may dial, or `None`.
 ///
 /// It is the pool's OWN dial policy ([`dialable`] — confirmed, and clearnet
-/// or local only after the explicit per-session unlock), minus one rule that
+/// or local only once non-onion dialing is switched on), minus one rule that
 /// is specific to this test: a [`RelayKind::Local`] relay is reached
 /// DIRECTLY and never through Tor (`relay_ws::dialer_for`), so dialing it
 /// could never prove a circuit. Pool ORDER is the priority, here as
@@ -164,26 +171,30 @@ pub enum TargetGap {
     EmptyPool,
     /// Relays exist, none confirmed.
     Unconfirmed,
-    /// Confirmed, but waiting for this session's non-Tor activation — which
-    /// is ALSO the reason they would never prove a circuit.
+    /// Confirmed, but non-onion dialing is switched off — which is ALSO the
+    /// reason they would never prove a circuit. (Name kept from when the
+    /// switch was session-scoped; since the ADR-0004 amendment it is
+    /// persisted, so this is a standing state, not a per-start one.)
     SessionLocked,
     /// Only local relays, which bypass Tor by design.
     LocalOnly,
 }
 
 /// Classify why [`probe_target`] found nothing. Only called when it did.
+///
+/// The "why can this node dial nothing" part is [`molt_core::relay::pool_gap`]
+/// — the same classifier the founding and join refusals render — so the Tor
+/// panel and a refused founding can never describe one pool two ways. This
+/// adds only the rung that is specific to the probe: relays that ARE dialable
+/// but are all local, which bypass Tor by design and so could never prove a
+/// circuit.
 pub fn target_gap(relays: &[RelayEntry], clearnet_session: bool) -> TargetGap {
-    if relays.is_empty() {
-        return TargetGap::EmptyPool;
+    match molt_core::relay::pool_gap(relays, clearnet_session) {
+        Some(PoolGap::Empty) => TargetGap::EmptyPool,
+        Some(PoolGap::Unconfirmed) => TargetGap::Unconfirmed,
+        Some(PoolGap::NonOnionOff) => TargetGap::SessionLocked,
+        None => TargetGap::LocalOnly,
     }
-    if !relays.iter().any(|r| r.confirmed) {
-        return TargetGap::Unconfirmed;
-    }
-    let dialable_now = dialable(relays, clearnet_session);
-    if dialable_now.is_empty() {
-        return TargetGap::SessionLocked;
-    }
-    TargetGap::LocalOnly
 }
 
 /// The SOCKS address this dialer routes through, or `""` when it has none
