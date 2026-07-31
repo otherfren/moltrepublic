@@ -349,7 +349,9 @@ impl MlsMember {
                 .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
             parsed.push(validated);
         }
-        let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
+        // this add advances the epoch, so its outgoing exporter secret has
+        // to enter the ring — otherwise catch-up across a founding-time add
+        // hits a hole nobody can strip
         self.retire_exporter();
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         let (_commit, welcome, _group_info) = group
