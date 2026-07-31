@@ -289,6 +289,150 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     );
 }
 
+/// REGRESSION (user report, 2026-07-31) — **one relay in common is enough.**
+/// A founder publishes its whole dialable pool into the invite; an invitee
+/// almost never has that exact set (the founder runs an onion relay, the
+/// invitee a clearnet one, …). Requiring EVERY named relay to be dialable
+/// locally made joining impossible whenever the two pools merely overlapped
+/// instead of matching — the invitee saw "the invite names relay X, which
+/// this node has not confirmed" for a relay it never needed.
+///
+/// The rule: the join proceeds over the INTERSECTION and is refused only
+/// when that is empty. The group's own relay list (what the Welcome
+/// carries) is still persisted whole — this node just dials the subset it
+/// has confirmed, which is exactly the §6 "a workspace relay the operator
+/// has not confirmed is not dialed silently" contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
+    // an onion relay the founder can name but nobody in this test can dial
+    const FOUNDER_ONLY: &str =
+        "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // the founder's pool: the shared relay PLUS one only it has
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    adopt_relay(&a, FOUNDER_ONLY).await;
+    a.execute(Command::CreateStart {
+        name: "Overlap".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+    let inv = molt_engine::FoundingInvite::parse(&link).expect("joinable");
+    assert!(
+        inv.handover.relays.len() == 2 && inv.handover.relays.contains(&FOUNDER_ONLY.to_string()),
+        "the invite names BOTH founder relays: {:?}",
+        inv.handover.relays
+    );
+
+    // the joiner has ONLY the shared one — the overlap is a single relay
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+
+    // it must simply work: founder sees the join, charter is ratified, both seal
+    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Overlap".to_string(),
+        agenda: "meet on the relay we share".to_string(),
+    })
+    .await
+    .expect("proposed");
+    wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
+    let s = wait_for(&b, "the join to seal", |s| {
+        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+    })
+    .await;
+    let ws_id_b = s.active_workspace.clone();
+
+    // the joiner persists the GROUP's whole relay list (policy), even though
+    // it dialed only the subset it confirmed
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+    let dir_b = molt_storage::find_workspace_dir(&tmp.path().join("joiner"), &ws_id_b)
+        .expect("b dir");
+    let (ws_b, _) = molt_storage::open_workspace(&dir_b).expect("open b");
+    let ts_b = ws_b.read_transport_state();
+    assert_eq!(
+        ts_b.relays,
+        inv.handover.relays,
+        "the group's relay list is persisted whole — dialing is gated separately"
+    );
+}
+
+/// NEGATIVE — with NO relay in common the join is refused, and the message
+/// names both sides so the operator can actually act (the old message told
+/// them to confirm a relay they may have already confirmed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_with_no_relay_in_common_is_refused_with_an_actionable_message() {
+    // two REACHABLE relays with no overlap — each node's own pool works, the
+    // two simply never meet
+    let founder_relay = MockRelay::run().await.expect("founder relay");
+    let founder_only = founder_relay.url().await.to_string();
+    let joiner_relay = MockRelay::run().await.expect("joiner relay");
+    let url = joiner_relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &founder_only).await;
+    a.execute(Command::CreateStart {
+        name: "Disjoint".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+
+    // the joiner's only relay is one the invite does not name
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the wizard arms");
+    let s = wait_for(&b, "the join to refuse", |s| s.join.run.outcome == 2).await;
+    let log = s.join.run.log.join(" ");
+    assert!(
+        log.contains("no relay in common"),
+        "the refusal names the real problem: {log}"
+    );
+    assert!(
+        log.contains(&founder_only),
+        "…and lists what the invite asks for: {log}"
+    );
+    assert!(
+        log.contains(&url),
+        "…and what this node can actually dial: {log}"
+    );
+}
+
 /// NEGATIVE — the single-use ticket over the relay: a SECOND person
 /// activating the same link (valid MAC, different member) is told the link
 /// is spent — over its own gift-wrap inbox — and its join fails fast; the

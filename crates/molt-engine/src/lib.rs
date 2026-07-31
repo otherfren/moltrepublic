@@ -3857,9 +3857,9 @@ mod tests {
 
             // a real founding link (with the transport handover) arms the
             // wizard — and then fails HONESTLY: this build has no network
-            // relay-gate refusal: the link names a relay this node never
-            // confirmed (ADR-0004), so the run reports exactly that instead
-            // of dialing somewhere the operator never approved
+            // relay-gate refusal: this node shares NO relay with the invite
+            // (its pool is empty), so the run says exactly that — naming both
+            // sides — instead of dialing somewhere the operator never approved
             let link = crate::FoundingInvite {
                 info: molt_core::InviteInfo {
                     republic: "Chess Club".to_string(),
@@ -3889,9 +3889,9 @@ mod tests {
                     assert_eq!(s.join.republic, "Chess Club");
                     assert_eq!((s.join.rule_m, s.join.rule_n), (2, 2));
                     assert!(!s.join.seed.is_empty(), "the joiner's recovery phrase is shown");
-                    assert_eq!(s.join.run.outcome, 2, "unconfirmed relay → the run fails honestly");
+                    assert_eq!(s.join.run.outcome, 2, "no shared relay → the run fails honestly");
                     assert!(
-                        s.join.run.log.iter().any(|l| l.contains("not confirmed")),
+                        s.join.run.log.iter().any(|l| l.contains("no relay in common")),
                         "the honest relay-gate error is in the run log: {:?}",
                         s.join.run.log
                     );
@@ -3980,8 +3980,8 @@ mod tests {
                 .expect("start");
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
-                    assert_eq!(s.join.run.outcome, 2, "unconfirmed relay → honest failure");
-                    assert!(s.join.run.log.iter().any(|l| l.contains("not confirmed")));
+                    assert_eq!(s.join.run.outcome, 2, "no shared relay → honest failure");
+                    assert!(s.join.run.log.iter().any(|l| l.contains("no relay in common")));
                 }
                 other => panic!("unexpected: {other:?}"),
             }

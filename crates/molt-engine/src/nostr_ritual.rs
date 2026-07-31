@@ -46,6 +46,12 @@ pub(crate) struct SeatInvite {
 /// the wizard state at spawn time).
 pub(crate) struct JoinCtx {
     pub invite: crate::founding::FoundingInvite,
+    /// The relays this node may actually DIAL for the join: the invite's
+    /// list narrowed to what the operator confirmed (ADR-0004). Never empty
+    /// — `cmd_join_start` refuses the join before spawning us otherwise.
+    /// The invite's FULL list stays the group's policy (persisted, and what
+    /// the Welcome is checked against).
+    pub dial_relays: Vec<String>,
     pub member: String,
     pub phrase: String,
     pub generation: u64,
@@ -333,6 +339,9 @@ async fn member_join(
     let h = ctx.invite.handover;
     let seat = h.seat;
     let generation = Some(ctx.generation);
+    // what we DIAL (our confirmed subset) vs what the GROUP uses (the
+    // invite's full list) — the two are deliberately different
+    let dial_relays = ctx.dial_relays;
 
     // the joiner's identity — derived exactly as the ritual anchors it
     let (sk, pk) = crate::founding::member_identity(&ctx.phrase)?;
@@ -342,7 +351,7 @@ async fn member_join(
     zeroize::Zeroize::zeroize(&mut nostr_raw);
 
     // endpoint + inbox BEFORE announcing (subscribe-before-advertise)
-    let net = RitualNet::new(dialer.clone(), h.relays.clone(), &nostr_sk)
+    let net = RitualNet::new(dialer.clone(), dial_relays.clone(), &nostr_sk)
         .map_err(|e| format!("transport keys: {e}"))?;
     let mut inbox = net
         .inbox()
@@ -438,7 +447,7 @@ async fn member_join(
     mls.join_from_welcome(&payload.welcome)
         .map_err(|e| format!("mls welcome: {e}"))?;
     let group = Arc::new(Mutex::new(mls));
-    let chan = GroupChannel::new(dialer, payload.relays.clone(), payload.rotation_seed);
+    let chan = GroupChannel::new(dialer, dial_relays.clone(), payload.rotation_seed);
     let mut sub = chan
         .subscribe()
         .await

@@ -1066,17 +1066,42 @@ impl State {
             &self.session.settings.relays,
             self.clearnet_session,
         );
-        for r in &inv.handover.relays {
-            if !dialable.contains(r) {
-                return self.cmd_net_join_failed(
-                    format!(
-                        "the invite names relay {r}, which this node has not confirmed — \
-                         add and confirm it in the settings first (nothing is dialed \
-                         without your say-so)"
-                    ),
-                    Some(generation),
-                );
-            }
+        // The join runs over the relays BOTH sides can use: the invite names
+        // the group's set, this node dials only what its own operator
+        // confirmed (ADR-0004 — a pasted link never makes us dial somewhere
+        // unapproved). **One relay in common is enough**; demanding the whole
+        // set would refuse every join whose pools merely OVERLAP, which is the
+        // normal case (the founder runs an onion relay, the invitee a clearnet
+        // one, …). The group's full list is still what gets persisted — only
+        // the dialing is narrowed.
+        let dial_relays: Vec<String> = inv
+            .handover
+            .relays
+            .iter()
+            .filter(|r| dialable.contains(r))
+            .cloned()
+            .collect();
+        if dial_relays.is_empty() {
+            // name BOTH sides: the old message said "you have not confirmed
+            // it", which was wrong advice for a relay the operator HAD
+            // confirmed but not session-unlocked, and never said what this
+            // node could actually reach
+            let offered = inv.handover.relays.join(", ");
+            let mine = if dialable.is_empty() {
+                "nothing (no confirmed relay on this node)".to_string()
+            } else {
+                dialable.join(", ")
+            };
+            return self.cmd_net_join_failed(
+                format!(
+                    "no relay in common with this invite — it offers [{offered}], \
+                     this node can dial [{mine}]. Add and confirm one of the \
+                     invite's relays in the settings (a clearnet or local relay \
+                     also needs the per-session unlock), or ask for an invite \
+                     that names one of yours."
+                ),
+                Some(generation),
+            );
         }
         // the human ratification gate: the task blocks on this channel until
         // cmd_join_confirm_charter / cmd_join_decline_charter releases it
@@ -1095,6 +1120,7 @@ impl State {
             dialer,
             crate::nostr_ritual::JoinCtx {
                 invite: inv,
+                dial_relays,
                 member: self.session.join.member.clone(),
                 phrase: self.session.join.seed.clone(),
                 generation,
