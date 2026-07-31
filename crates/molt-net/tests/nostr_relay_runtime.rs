@@ -69,3 +69,36 @@ async fn relay_ws_publishes_and_reads_back() {
         other => panic!("expected EOSE, got {other:?}"),
     }
 }
+
+/// Step 2 KEYSTONE — publish is ≥1-OK (concept §11 N2): one live relay among
+/// dead ones is SUCCESS, with per-relay outcomes reported (never a silent
+/// partial); no live relay is a typed failure. Publishing the same event
+/// again stays success — a relay answering `OK:false "duplicate: …"` counts
+/// as published (MDK port #3), which is what makes a rewind-resend safe.
+#[tokio::test]
+async fn publish_is_one_ok_with_per_relay_outcomes() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let live = relay.url().await.to_string();
+    let dead = "ws://127.0.0.1:9".to_string(); // discard port — nothing listens
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let event = h_tagged_event(&keys, "6d6f6c74", "step2");
+
+    let rt = RelayRuntime::new(dialer.clone(), vec![live.clone(), dead.clone()]);
+    let report = rt.publish(&event).await.expect("one live relay is enough");
+    assert_eq!(report.accepted, vec![live.clone()], "the live relay OK'd");
+    assert_eq!(report.failed.len(), 1, "the dead relay is REPORTED, not hidden");
+    assert_eq!(report.failed[0].0, dead);
+
+    // the same event again: still success (duplicate-tolerant end to end)
+    let again = rt.publish(&event).await.expect("re-publish is success");
+    assert_eq!(again.accepted, vec![live]);
+
+    // no relay at all / no live relay: a typed failure, never a silent drop
+    let none = RelayRuntime::new(dialer.clone(), vec![]);
+    assert!(none.publish(&event).await.is_err(), "empty pool cannot publish");
+    let all_dead = RelayRuntime::new(dialer, vec![dead]);
+    assert!(all_dead.publish(&event).await.is_err(), "no OK anywhere is failure");
+}
