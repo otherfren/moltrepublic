@@ -71,7 +71,7 @@ fn counts_as_published(status: bool, message: &str) -> bool {
 
 /// The relay-pool runtime: everything the engine-facing transport will drive
 /// (publish now; subscribe/cursor/health in later N2 steps).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayRuntime {
     dialer: Dialer,
     /// Normalized relay URLs, in priority order — the output of
@@ -89,6 +89,23 @@ pub struct RelayRuntime {
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     /// Reconnect backoff (initial, cap) — overridable for tests.
     backoff: (Duration, Duration),
+    /// NIP-42 identity for the SUBSCRIBE connections (the per-republic
+    /// transport anchor). Publishing never authenticates — an authenticated
+    /// publish channel would link every ephemeral-key event to the member
+    /// (`mdk_evaluation.md` §5, concept §7.5).
+    auth_keys: Option<nostr::Keys>,
+}
+
+// manual: the auth keys hold a SECRET key — never in Debug output
+impl std::fmt::Debug for RelayRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayRuntime")
+            .field("urls", &self.urls)
+            .field("size_budget", &self.size_budget)
+            .field("backoff", &self.backoff)
+            .field("auth", &self.auth_keys.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One relay's connection state as the supervisors see it — the seed of the
@@ -115,7 +132,16 @@ impl RelayRuntime {
             size_budget: None,
             health: Arc::new(Mutex::new(std::collections::HashMap::new())),
             backoff: (Duration::from_secs(1), Duration::from_secs(60)),
+            auth_keys: None,
         }
+    }
+
+    /// Provide the NIP-42 identity for subscribe connections (the transport
+    /// anchor). Without it, an auth-required relay simply never syncs —
+    /// honestly visible via [`Subscription::synced`] and `health()`.
+    #[must_use]
+    pub fn with_auth_keys(self, keys: Option<nostr::Keys>) -> Self {
+        Self { auth_keys: keys, ..self }
     }
 
     /// Override the reconnect backoff (tests use milliseconds).
@@ -281,6 +307,7 @@ struct SubShared {
     eose_tx: Arc<tokio::sync::watch::Sender<usize>>,
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     backoff: (Duration, Duration),
+    auth_keys: Option<nostr::Keys>,
 }
 
 impl RelayRuntime {
@@ -309,6 +336,7 @@ impl RelayRuntime {
             eose_tx: Arc::new(eose_tx),
             health: self.health.clone(),
             backoff: self.backoff,
+            auth_keys: self.auth_keys.clone(),
         });
         let mut supervisors = Vec::new();
         let mut connected = 0usize;
@@ -343,6 +371,12 @@ impl RelayRuntime {
 /// future-dated events (concept §4.3).
 async fn connect_and_req(shared: &SubShared, url: &str) -> Result<RelayWs, NetError> {
     let mut ws = RelayWs::connect(&shared.dialer, url).await?;
+    place_req(shared, url, &mut ws).await?;
+    Ok(ws)
+}
+
+/// Place (or re-place, after a NIP-42 handshake) the subscription REQ.
+async fn place_req(shared: &SubShared, url: &str, ws: &mut RelayWs) -> Result<(), NetError> {
     let mut relay_filter = shared.filter.clone();
     if let Some(cursor) = shared.cursors.lock().await.get(url) {
         relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
@@ -350,8 +384,7 @@ async fn connect_and_req(shared: &SubShared, url: &str) -> Result<RelayWs, NetEr
         ));
     }
     ws.send(ClientMessage::req(SubscriptionId::generate(), vec![relay_filter]))
-        .await?;
-    Ok(ws)
+        .await
 }
 
 /// One relay's supervisor: read the live session until it dies, then
@@ -423,7 +456,27 @@ async fn read_session(
                     shared.eose_tx.send_modify(|n| *n += 1);
                 }
             }
-            // OK/NOTICE etc. — not subscription traffic
+            Ok(RelayMessage::Auth { challenge }) => {
+                // NIP-42 on the subscribe connection: answer with the
+                // transport anchor and RE-PLACE the REQ (the relay refused
+                // the pre-auth one). Without keys we stay connected and
+                // honestly unsynced — the caller sees it via synced().
+                if let Some(keys) = &shared.auth_keys {
+                    let auth_event = nostr::RelayUrl::parse(url).ok().and_then(|relay_url| {
+                        nostr::EventBuilder::auth(challenge.as_ref(), relay_url)
+                            .sign_with_keys(keys)
+                            .ok()
+                    });
+                    if let Some(auth_event) = auth_event {
+                        if ws.send(ClientMessage::auth(auth_event)).await.is_err()
+                            || place_req(shared, url, &mut ws).await.is_err()
+                        {
+                            return std::ops::ControlFlow::Continue(());
+                        }
+                    }
+                }
+            }
+            // OK/NOTICE/CLOSED etc. — not subscription traffic
             Ok(_) => {}
             // closed or idle past the bound — the session is over
             Err(_) => return std::ops::ControlFlow::Continue(()),
@@ -510,6 +563,14 @@ async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), Ne
             RelayMessage::Ok { event_id, status, message } if event_id == event.id => {
                 break if counts_as_published(status, &message) {
                     Ok(())
+                } else if message.starts_with("auth-required:") {
+                    // deliberate: the publish path NEVER authenticates —
+                    // an authed publish channel would link every
+                    // ephemeral-key event to the member (§7.5). Loud, so
+                    // the operator can pick a different relay.
+                    Err(NetError::Unreachable(format!(
+                        "relay requires AUTH to publish — refused to link the publish key: {message}"
+                    )))
                 } else {
                     Err(NetError::Unreachable(format!("relay refused: {message}")))
                 };

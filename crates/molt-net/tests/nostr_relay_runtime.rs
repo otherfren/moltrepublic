@@ -438,3 +438,50 @@ async fn a_dying_relay_reconnects_and_the_gap_is_healed() {
         "the healed relay reads Up"
     );
 }
+
+/// Step 9 KEYSTONE — NIP-42 on the SUBSCRIBE connection: an auth-required
+/// relay never replays to an unauthenticated REQ (the blind runtime
+/// honestly never syncs); with the transport anchor's keys the reader
+/// answers the challenge, re-places the REQ, and the backlog flows.
+/// Publishing stays unauthenticated by design (mdk_eval §5 — an
+/// authenticated publish channel would link every ephemeral-key event to
+/// the member).
+#[tokio::test]
+async fn nip42_auth_unlocks_an_auth_required_relay() {
+    use molt_net::relay_runtime::RelayRuntime;
+    use nostr_relay_builder::builder::{RelayBuilderNip42, RelayBuilderNip42Mode};
+    use nostr_relay_builder::{LocalRelay, RelayBuilder};
+
+    let relay = LocalRelay::new(
+        RelayBuilder::default()
+            .nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Read }),
+    );
+    relay.run().await.expect("run auth relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let anchor = Keys::generate(); // the per-republic transport anchor
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+
+    // mode Read: writing needs no auth — seed an event
+    let plain = RelayRuntime::new(dialer.clone(), vec![url.clone()]);
+    let ev = h_tagged_event(&keys, "6d6f6c74", "step9");
+    plain.publish(&ev).await.expect("unauthenticated write in Read mode");
+
+    // without auth keys: the REQ is placed but never replayed — no sync
+    let mut blind = plain.subscribe(filter.clone()).await.expect("blind subscribe");
+    assert!(
+        !blind.synced(Duration::from_secs(2)).await,
+        "an auth-required relay must not sync without keys"
+    );
+    drop(blind);
+
+    // with the anchor: challenge answered, REQ re-placed, backlog arrives
+    let authed = RelayRuntime::new(dialer, vec![url]).with_auth_keys(Some(anchor));
+    let mut sub = authed.subscribe(filter).await.expect("authed subscribe");
+    assert!(sub.synced(RECV_TIMEOUT).await, "authed sync completes");
+    assert_eq!(sub.recv(RECV_TIMEOUT).await.expect("the event").id, ev.id);
+}
