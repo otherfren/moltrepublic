@@ -408,6 +408,87 @@ founded Nostr workspace → honest classification, no supervisor, no crash.
    verification ladder (served-chain verify, head-anchor check, phrase
    re-derivation) is transport-agnostic and unchanged.
 
+### 8.8 N4b TDD order (execution-ready; anchors re-verified 2026-07-31)
+
+Each step is one commit, red test first, green on master before the next.
+
+1. **Seat proof v2** (`molt-net`/`molt-engine::founding` — `seat_proof_bytes`
+   / `make_seat_proof` / `verify_seat_proof` around `founding.rs:750-794`).
+   Tag `molt-seat-proof-v2`, layout
+   `ticket ‖ key_package ‖ republic_id ‖ new_nostr_pk`, length-prefixed per
+   the `hash-length-prefix-not-separators` rule. **Red:** a v1 proof must NOT
+   verify against a v2 seat; a proof whose `new_nostr_pk` was swapped must
+   fail. No back-compat path — nothing shipped a v1 recovery over Nostr.
+2. **`ChainChange::Membership` gains `nostr_pk: Option<String>`**
+   (`molt-core::chain`, additive `#[serde(default)]`). `approval_bytes` binds
+   it — so **bump `molt-chain-change-v1` → `-v2`** and update `verify_chain`
+   together (the CLAUDE.md versioned-layout rule; an unbumped change breaks
+   signatures silently). **Red:** byte-pin the new `approval_bytes` layout
+   (fixture computed independently), and a block whose `nostr_pk` was
+   tampered after signing must fail `verify_chain`.
+3. **Working-anchor projection** (`molt-engine::State`): `working_nostr_pk(
+   member) -> &str` = the roster anchor unless a later applied `Restored`
+   block overrode it. Built in `apply`/`after_block_applied` from the chain,
+   never persisted separately (it is a projection, like `chain_applied`).
+   **Red:** after a `Restored` block the projection returns the NEW key while
+   `identities[i].nostr_pk` still returns the founding anchor. Then make
+   EVERY gift-wrap send site resolve through it (grep `send_ritual` /
+   `send_welcome` callers) — a send that reaches for the raw roster field is
+   the bug this projection exists to prevent.
+4. **Recovery link v2** (`recovery.rs:35-111 RecoveryInvite`): reuse
+   `InviteHandoverV2`'s shape plus `republic_id`
+   (`{v:2, ticket, npub, relays, republic_id}`). **Red:** round-trip, v1
+   rejection with the honest "older build" message, the same relay caps.
+5. **Coordinator mint over relays**: `cmd_recover_invite_start`
+   (`net.rs:1497-1562`) currently REQUIRES `runtime_transport()` to mint a
+   queue — on Nostr it needs only the dialer + the workspace relay list, so
+   the mesh precondition becomes a kind check. `spawn_recovery_provisioning`
+   (`recovery.rs:179-257`) reduces to inbox-subscribe → `NetRecoverLinkReady`
+   (its `NetRecoverLinkFailed` ticket-unregistration path stays).
+6. **Rejoiner task**: the `RecoverStart` twin of N4a's `spawn_member_join` —
+   derive the ephemeral key from the RECOVERY ticket, subscribe the 1059
+   inbox, gift-wrap the `RecoverRequest` (with `new_nostr_pk` + seat proof
+   v2), wait the 15-min `RECOVERY_WELCOME_TIMEOUT` (`recovery.rs:25`,
+   absolute deadline — keep it), peel the 444, `join_from_welcome`, verify
+   the served chain, report `NetRecoverSealed`. Deletes the last
+   `NO_TRANSPORT_YET` raise (`lifecycles.rs:1365`).
+7. **Ingest + block**: `cmd_net_recover_requested` (`net.rs:1442-1485`) runs
+   `canonical_nostr_pk` on the wire `new_nostr_pk` at that choke point (the
+   doc comment at `net.rs:1432-1440` already demands it), enforces cross-seat
+   uniqueness, and — ticket spent only on a VERIFIED request — passes it into
+   `verify_and_propose_restore` (`chain.rs:910-941`) so the proposed
+   `Restored` block carries it.
+8. **Carrier stamp, both ends**: `restore_member_on_group`
+   (`net.rs:530-544`) stops passing `NO_CARRIER_STAMP` — `coordinator_rekey`
+   (`chain.rs:1273-1336`) picks the commit 445's `created_at` FIRST and
+   reuses it verbatim when publishing. **Red:** a keystone over the
+   PRODUCTION entry points (the N3 lesson — a keystone driving an API the
+   product does not call pins nothing) showing both ends compute the same
+   `CommitKey`.
+9. **Replay-safe window reset**: move the survivors' reset off the mesh
+   announce (`net.rs:1616-1664`) onto the applied `Restored` block, guarded
+   one-shot per `(member, block height)` in a set that lives with the chain
+   projection. **Red:** re-serving the same `Restored` block during catch-up
+   must NOT wipe a live accept window (the failure this guard exists for is
+   "everything is a duplicate" — the exact bug the reset was invented to
+   prevent).
+10. **Welcome size**: measure a real served chain in the 444 payload against
+    the 65408 cap. Under → carry it; over → carry the HEAD and fetch blocks
+    over 445 catch-up. **Decide by measurement, keystone either way** — and
+    if the fetch path is needed, it is N5 machinery and N4b must say so
+    rather than half-build it.
+11. **Capstone**: the recovery twin of `tests/nostr_founding.rs` — found a
+    2-of-3 over a MockRelay, hard-kill one member (the
+    `delivery_guarantee.rs:33 hard_kill` pattern: drop the handle, wait for
+    the LOCK), mint a recovery link on a survivor, rejoin on a FRESH engine
+    over the same relay, and assert: the rejoiner materializes with the
+    verified chain, its `transport.state.nostr_sk` pairs with the NEW
+    anchor in the `Restored` block, survivors' `working_nostr_pk` returns
+    that same new key, and a post-recovery gift-wrap reaches the recovered
+    seat. Negatives: a wrong phrase, a doctored link id, and a re-served
+    `Restored` block leaving the accept window intact.
+12. **Doc closeout** + the adversarial multi-lens review over the N4b diff.
+
 ## 8b. N4a — what actually landed (2026-07-31)
 
 Built and green on master across four commits (steps 1–3 + the core):
