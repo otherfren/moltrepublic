@@ -1174,8 +1174,9 @@ impl State {
             Command::NetSealSigned {
                 seat,
                 sig,
+                from,
                 generation,
-            } => self.cmd_net_seal_signed(seat, sig, generation),
+            } => self.cmd_net_seal_signed(seat, sig, from, generation),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
             Command::NetRecoverSealed {
@@ -1251,8 +1252,8 @@ impl State {
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
             Command::JoinDeclineCharter => self.cmd_join_decline_charter(),
-            Command::NetJoinDeclined { seat, generation } => {
-                self.cmd_net_join_declined(seat, generation)
+            Command::NetJoinDeclined { seat, from, generation } => {
+                self.cmd_net_join_declined(seat, from, generation)
             }
             Command::NetJoinAccepted { generation } => self.cmd_net_join_accepted(generation),
             Command::NetJoinCharterProposed {

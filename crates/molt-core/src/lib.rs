@@ -3397,6 +3397,13 @@ pub enum Command {
         seat: u32,
         /// The Ed25519 signature over the canonical table, lowercase hex.
         sig: String,
+        /// On Nostr: the MLS-authenticated author of the 445 that carried
+        /// this signature. The signature is verified against the seat's
+        /// anchored key anyway, so this is defence in depth — it refuses a
+        /// signature attributed to a seat its author does not hold. Empty
+        /// on the loopback path (a private queue authenticated it instead).
+        #[serde(default)]
+        from: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -3727,6 +3734,12 @@ pub enum Command {
     NetJoinDeclined {
         /// Which seat (0-based invite index) declined.
         seat: u32,
+        /// On Nostr: the MLS-authenticated author of the decline. A decline
+        /// carries NO signature, so this is its ONLY authentication —
+        /// without it any group member could abort the founding and frame
+        /// another seat for it. Empty on the loopback path.
+        #[serde(default)]
+        from: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

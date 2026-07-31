@@ -220,7 +220,7 @@ fn open_group_frame(
     group: &Arc<Mutex<molt_net::MlsMember>>,
     content: &str,
     created_at: u64,
-) -> Option<RitualMsg> {
+) -> Option<(RitualMsg, String)> {
     let mut g = group.lock().ok()?;
     let mut secrets = Vec::with_capacity(1 + molt_net::mls::EXPORTER_RING_K);
     if let Ok(current) = g.exporter_secret() {
@@ -235,8 +235,12 @@ fn open_group_frame(
         }
     };
     match g.decrypt_at(&wire, created_at) {
-        Ok(molt_net::MlsIncoming::Application { plaintext, .. }) => {
-            serde_json::from_slice(&plaintext).ok()
+        // `from` is the MLS-authenticated leaf credential — the ONLY
+        // authenticator a 445 has (the event itself is signed by a fresh
+        // ephemeral key by design). Dropping it is what let any group member
+        // impersonate the founder; every caller must use it.
+        Ok(molt_net::MlsIncoming::Application { from, plaintext }) => {
+            serde_json::from_slice(&plaintext).ok().map(|m| (m, from))
         }
         Ok(other) => {
             // no commit flies during ritual deliberation — anything else is
@@ -249,6 +253,69 @@ fn open_group_frame(
             None
         }
     }
+}
+
+/// What an inbound 445 ritual frame is, relative to the founder named in
+/// the invite link. Three-valued on purpose: "someone else published this"
+/// and "the founder published something wrong" must NOT be handled the
+/// same way — see [`check_proposal_provenance`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Provenance {
+    /// The founder's frame, describing the republic the link promised.
+    FromFounder,
+    /// Published by another member of the group. IGNORE it — never fail the
+    /// join, or any invitee could abort every other invitee's join at will.
+    NotTheFounder,
+    /// The FOUNDER sent something inconsistent with the invite. A real
+    /// failure the joiner must surface rather than sign.
+    Refused(String),
+}
+
+/// **The 445 proposer binding** (review 2026-08-01, CRITICAL).
+///
+/// On the loopback path `Seal`/`Genesis` arrived on the member's OWN reply
+/// queue, wrapped under a key it minted and handed only to the founder in
+/// its MAC-bound JoinRequest — the CHANNEL was the proposer authentication,
+/// so no code ever had to check it. The kind-445 group channel is shared by
+/// every welcomed seat, so that binding vanished in the fork and has to be
+/// re-established explicitly here.
+///
+/// `from` is the MLS-authenticated leaf credential — the handle the sender
+/// passed to `MlsMember::new`, which the founder set to its own member name.
+/// Everything else is cross-checked against what the LINK promised, because
+/// the link is the joiner's root of trust for "whose founding is this".
+pub(crate) fn check_proposal_provenance(
+    from: &str,
+    proposal: &molt_core::SealedRoster,
+    founder_npub: &str,
+    info: &molt_core::InviteInfo,
+) -> Provenance {
+    if from != info.inviter {
+        return Provenance::NotTheFounder;
+    }
+    if proposal.rule_m != info.threshold || proposal.rule_n != info.members {
+        return Provenance::Refused(format!(
+            "the proposed republic is {}-of-{}, but the invite promised {}-of-{}",
+            proposal.rule_m, proposal.rule_n, info.threshold, info.members
+        ));
+    }
+    let Some(founder_seat) = proposal
+        .identities
+        .iter()
+        .find(|i| i.member == info.inviter)
+    else {
+        return Provenance::Refused(
+            "the proposed roster does not seat the founder who invited us".to_string(),
+        );
+    };
+    if founder_seat.nostr_pk != founder_npub {
+        return Provenance::Refused(
+            "the founder's seat carries a transport key other than the one the \
+             invite link named"
+                .to_string(),
+        );
+    }
+    Provenance::FromFounder
 }
 
 /// The founder's 445 recv: `Signed`/`Declined` come back over the freshly
@@ -278,17 +345,26 @@ pub(crate) fn spawn_founder_group_recv(
             let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
                 continue;
             };
-            let Some(msg) = open_group_frame(&group, &content, created_at) else {
+            let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
                 continue;
             };
             let cmd = match msg {
+                // the signature is verified against the seat's ANCHORED key
+                // on the actor, so a forged `Signed` cannot be minted — but
+                // the authenticated author rides along so the actor can
+                // refuse a signature attributed to somebody else's seat
                 RitualMsg::Signed(s) => Command::NetSealSigned {
                     seat: s.seat,
                     sig: s.sig,
+                    from: from.clone(),
                     generation: Some(generation),
                 },
+                // a decline carries NO signature, so the MLS author is its
+                // only authentication: without it any member could abort the
+                // founding and frame another seat for it
                 RitualMsg::Declined { seat } => Command::NetJoinDeclined {
                     seat,
+                    from: from.clone(),
                     generation: Some(generation),
                 },
                 // our own Seal/Genesis echoes and anything else: not ours here
@@ -456,12 +532,28 @@ async fn member_join(
         let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
             continue;
         };
-        let Some(msg) = open_group_frame(&group, &content, created_at) else {
+        let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;
         };
         if let RitualMsg::Seal { proposal } = msg {
-            let sealed: molt_core::SealedRoster =
-                serde_json::from_str(&proposal).map_err(|e| format!("seal proposal: {e}"))?;
+            // a frame from a co-member is IGNORED, never fatal: parsing or
+            // verifying it before the author check would let any invitee
+            // abort every other invitee's join with one garbage frame
+            let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&proposal) else {
+                tracing::debug!(%from, "unparseable seal on the group channel — ignored");
+                continue;
+            };
+            match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
+                Provenance::NotTheFounder => {
+                    tracing::warn!(
+                        %from,
+                        "a group member other than the founder proposed a charter — ignored"
+                    );
+                    continue;
+                }
+                Provenance::Refused(why) => return Err(format!("seal proposal rejected: {why}")),
+                Provenance::FromFounder => {}
+            }
             let table =
                 crate::founding::verify_seal_proposal(&sealed, &ctx.member, &pk, &nostr_pk)
                     .map_err(|e| format!("seal proposal rejected: {e}"))?;
@@ -497,12 +589,27 @@ async fn member_join(
         let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
             continue;
         };
-        let Some(msg) = open_group_frame(&group, &content, created_at) else {
+        let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;
         };
         if let RitualMsg::Genesis { sealed, .. } = msg {
-            let sealed: molt_core::SealedRoster =
-                serde_json::from_str(&sealed).map_err(|e| format!("genesis: {e}"))?;
+            // same rule as the Seal: a co-member's frame is ignored, not
+            // fatal — otherwise one forged Genesis published first kills
+            // every honest joiner while blaming the founder
+            let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&sealed) else {
+                tracing::debug!(%from, "unparseable genesis on the group channel — ignored");
+                continue;
+            };
+            match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
+                Provenance::NotTheFounder => {
+                    tracing::warn!(%from, "a non-founder published a genesis — ignored");
+                    continue;
+                }
+                Provenance::Refused(why) => {
+                    return Err(format!("distributed sealed roster rejected: {why}"))
+                }
+                Provenance::FromFounder => {}
+            }
             let sealed_table =
                 crate::founding::verify_seal_proposal(&sealed, &ctx.member, &pk, &nostr_pk)
                     .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
@@ -536,4 +643,128 @@ async fn member_join(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(inviter: &str, m: u8, n: u8) -> molt_core::InviteInfo {
+        molt_core::InviteInfo {
+            republic: "R".to_string(),
+            threshold: m,
+            members: n,
+            inviter: inviter.to_string(),
+            ticket: "ab".repeat(5),
+        }
+    }
+
+    fn identity(member: &str, npk: &str) -> molt_core::MemberIdentity {
+        molt_core::MemberIdentity {
+            member: member.to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: npk.to_string(),
+        }
+    }
+
+    fn proposal(
+        inviter: &str,
+        founder_npk: &str,
+        m: u8,
+        n: u8,
+    ) -> molt_core::SealedRoster {
+        molt_core::SealedRoster {
+            name: "R".to_string(),
+            republic_id: "rid".to_string(),
+            rule_m: m,
+            rule_n: n,
+            roster: vec![inviter.to_string(), "petra".to_string()],
+            identities: vec![
+                identity(inviter, founder_npk),
+                identity("petra", &"cc".repeat(32)),
+            ],
+            attestations: Vec::new(),
+            agenda: String::new(),
+        }
+    }
+
+    const FOUNDER_NPK: &str = "dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11";
+
+    /// KEYSTONE (review 2026-08-01, CRITICAL) — on the loopback path the
+    /// `Seal` arrived on the member's OWN reply queue, which only the founder
+    /// held: that private channel WAS the proposer authentication. Over the
+    /// SHARED kind-445 group channel every welcomed seat can publish a
+    /// decryptable frame, so the binding has to be re-established explicitly.
+    ///
+    /// Without it a legitimate co-invitee can hand another invitee a roster
+    /// it wrote itself — same republic id math, the victim's own three
+    /// anchors intact, so `verify_seal_proposal` passes — and the victim
+    /// ratifies and materializes a republic the attacker alone governs.
+    #[test]
+    fn a_proposal_must_come_from_the_founder_named_in_the_link() {
+        let inv = info("walter", 2, 2);
+        let p = proposal("walter", FOUNDER_NPK, 2, 2);
+
+        assert_eq!(
+            check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv),
+            Provenance::FromFounder,
+            "the founder's own proposal passes"
+        );
+
+        // the attack: a co-invitee publishes its own table on the group
+        // channel. It must be IGNORED, not fatal — a fatal verdict would let
+        // any invitee kill every other invitee's join with one frame.
+        assert_eq!(
+            check_proposal_provenance("petra", &p, FOUNDER_NPK, &inv),
+            Provenance::NotTheFounder,
+            "a co-member's proposal is ignored, never signed and never fatal"
+        );
+    }
+
+    /// The founder's seat in the proposed table must carry the transport
+    /// anchor the LINK named. Otherwise an attacker who also controls the
+    /// handle (or a founder handle collision) could still swap the seat.
+    #[test]
+    fn the_proposal_must_anchor_the_founder_from_the_link() {
+        let inv = info("walter", 2, 2);
+        let mut p = proposal("walter", FOUNDER_NPK, 2, 2);
+        p.identities[0].nostr_pk = "ee".repeat(32);
+        let Provenance::Refused(err) =
+            check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv)
+        else {
+            panic!("a table anchoring a different founder key must be refused");
+        };
+        assert!(err.contains("transport key"), "{err}");
+
+        // …and the founder must actually BE in the table
+        let mut p = proposal("walter", FOUNDER_NPK, 2, 2);
+        p.identities.remove(0);
+        let Provenance::Refused(err) =
+            check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv)
+        else {
+            panic!("a table without the founder's seat must be refused");
+        };
+        assert!(err.contains("does not seat the founder"), "{err}");
+    }
+
+    /// The link promised an m-of-n republic; a table that quietly changes
+    /// the threshold (the 1-of-2 downgrade that hands one member total
+    /// control) must not pass, even when every anchor checks out.
+    #[test]
+    fn the_proposal_must_match_the_rule_the_link_promised() {
+        let inv = info("walter", 2, 2);
+        let p = proposal("walter", FOUNDER_NPK, 1, 2);
+        let Provenance::Refused(err) =
+            check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv)
+        else {
+            panic!("a downgraded threshold must be refused");
+        };
+        assert!(err.contains("2-of-2"), "the refusal names both rules: {err}");
+
+        let p = proposal("walter", FOUNDER_NPK, 2, 3);
+        assert!(matches!(
+            check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv),
+            Provenance::Refused(_)
+        ));
+    }
 }

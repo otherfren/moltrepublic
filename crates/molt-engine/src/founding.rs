@@ -619,10 +619,13 @@ fn spawn_founder_recv(
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
                     seat,
                     sig: s.sig,
+                    // the private reply queue authenticated this
+                    from: String::new(),
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Declined { .. } => Command::NetJoinDeclined {
                     seat,
+                    from: String::new(),
                     generation: Some(generation),
                 },
                 // a member's post-founding mesh handover — hand it to the
@@ -2257,12 +2260,36 @@ mod ritual_ops {
         pub(crate) fn cmd_net_join_declined(
             &mut self,
             seat: u32,
+            from: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
                 return Ok(molt_core::Reply::Ack);
             }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            // A decline carries no signature, so on Nostr the MLS author is
+            // its only authentication — a member may decline its OWN seat and
+            // no other, or any invitee could abort the founding and frame a
+            // peer for it. Empty `from` = the loopback path, where the seat's
+            // private reply queue already authenticated the sender.
+            if !from.is_empty() {
+                let owner = self
+                    .net_ritual
+                    .as_ref()
+                    .and_then(|r| r.seats.get(idx))
+                    .and_then(|s| s.identity.as_ref())
+                    .map(|i| i.member.clone());
+                if owner.as_deref() != Some(from.as_str()) {
+                    tracing::warn!(seat, %from, "decline refused: not that seat's member");
+                    self.session.create.run.log.push(format!(
+                        "✗ a decline for invite {} came from {from}, who does not hold \
+                         that seat — ignored",
+                        idx + 1
+                    ));
+                    self.emit_session(molt_core::SessionScope::Create);
+                    return Ok(molt_core::Reply::Ack);
+                }
+            }
             let who = self
                 .net_ritual
                 .as_ref()
@@ -2373,12 +2400,29 @@ mod ritual_ops {
             &mut self,
             seat: u32,
             sig: String,
+            from: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
                 return Ok(molt_core::Reply::Ack);
             }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            // defence in depth: the signature below is verified against the
+            // seat's ANCHORED key (so it cannot be forged), but a signature
+            // attributed to a seat its author does not hold is refused here
+            // rather than silently attributed. Empty `from` = loopback.
+            if !from.is_empty() {
+                let owner = self
+                    .net_ritual
+                    .as_ref()
+                    .and_then(|r| r.seats.get(idx))
+                    .and_then(|s| s.identity.as_ref())
+                    .map(|i| i.member.clone());
+                if owner.as_deref() != Some(from.as_str()) {
+                    tracing::warn!(seat, %from, "seal signature refused: not that seat's member");
+                    return Ok(molt_core::Reply::Ack);
+                }
+            }
             let (ok, member) = {
                 let Some(ritual) = &self.net_ritual else {
                     return Ok(molt_core::Reply::Ack);
