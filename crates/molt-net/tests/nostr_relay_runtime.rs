@@ -102,3 +102,46 @@ async fn publish_is_one_ok_with_per_relay_outcomes() {
     let all_dead = RelayRuntime::new(dialer, vec![dead]);
     assert!(all_dead.publish(&event).await.is_err(), "no OK anywhere is failure");
 }
+
+/// Step 3 KEYSTONE — one pooled subscription, event-id dedup: the SAME event
+/// held by two relays reaches the consumer ONCE; a new live event also
+/// arrives exactly once. The dedup is the runtime's job (concept §11 N2) —
+/// the consumer must never see relay-count copies.
+#[tokio::test]
+async fn subscription_dedups_across_two_relays() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let r1 = MockRelay::run().await.expect("relay 1");
+    let r2 = MockRelay::run().await.expect("relay 2");
+    let urls = vec![r1.url().await.to_string(), r2.url().await.to_string()];
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+
+    // seed the same event on BOTH relays before subscribing
+    let rt = RelayRuntime::new(dialer, urls);
+    let seeded = h_tagged_event(&keys, "6d6f6c74", "step3 stored");
+    let report = rt.publish(&seeded).await.expect("publish");
+    assert_eq!(report.accepted.len(), 2, "both relays hold the event");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+
+    let got = sub.recv(RECV_TIMEOUT).await.expect("the stored event, once");
+    assert_eq!(got.id, seeded.id);
+    assert!(
+        sub.recv(Duration::from_millis(400)).await.is_none(),
+        "the second relay's copy is deduplicated"
+    );
+
+    // a LIVE event published to both relays also arrives exactly once
+    let live = h_tagged_event(&keys, "6d6f6c74", "step3 live");
+    rt.publish(&live).await.expect("publish live");
+    let got = sub.recv(RECV_TIMEOUT).await.expect("the live event, once");
+    assert_eq!(got.id, live.id);
+    assert!(
+        sub.recv(Duration::from_millis(400)).await.is_none(),
+        "no duplicate of the live event either"
+    );
+}

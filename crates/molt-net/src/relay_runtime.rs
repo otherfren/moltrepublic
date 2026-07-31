@@ -6,9 +6,12 @@
 //! steps. The relay list ALWAYS arrives from `molt_core::relay::dialable`
 //! (ADR-0004) — this module never reads the pool or decides dial policy.
 
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
-use nostr::{ClientMessage, Event, RelayMessage};
+use nostr::{ClientMessage, Event, EventId, Filter, RelayMessage, SubscriptionId};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::dial::Dialer;
 use crate::relay_ws::RelayWs;
@@ -16,6 +19,15 @@ use crate::NetError;
 
 /// Per-relay deadline for one publish attempt (dial + upgrade + OK).
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A subscription reader's per-frame idle bound. Liveness/reconnect proper is
+/// plan step 7 — until then an hour of silence ends the reader instead of
+/// pinning a task forever.
+const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Dedup ring capacity: enough for the WP4a-horizon backlog of a busy
+/// republic, bounded so a hostile relay cannot balloon memory.
+const DEDUP_CAP: usize = 4096;
 
 /// How one publish went, per relay — ≥1 accepted relay makes the publish a
 /// success, but the failures are always REPORTED, never hidden (concept
@@ -92,6 +104,112 @@ impl RelayRuntime {
             )));
         }
         Ok(report)
+    }
+}
+
+/// The bounded first-seen event-id ring behind the subscription fan-in:
+/// relay-count copies collapse to ONE delivery.
+struct DedupRing {
+    seen: HashSet<EventId>,
+    order: VecDeque<EventId>,
+}
+
+impl DedupRing {
+    fn new() -> Self {
+        Self { seen: HashSet::new(), order: VecDeque::new() }
+    }
+
+    /// `true` iff this id was not seen before (and is now recorded).
+    fn fresh(&mut self, id: EventId) -> bool {
+        if !self.seen.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > DEDUP_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
+}
+
+/// A pooled subscription: one filter, every relay, ONE deduplicated stream
+/// out. Dropping it aborts the per-relay readers (the sanctioned inbound
+/// abort — outbound draining rules don't apply to pure readers).
+pub struct Subscription {
+    rx: mpsc::Receiver<Event>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Subscription {
+    /// The next deduplicated event, or `None` if nothing arrived within
+    /// `timeout` (also `None` once every reader has ended and the buffer is
+    /// drained).
+    pub async fn recv(&mut self, timeout: Duration) -> Option<Event> {
+        tokio::time::timeout(timeout, self.rx.recv()).await.ok().flatten()
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        for reader in &self.readers {
+            reader.abort();
+        }
+    }
+}
+
+impl RelayRuntime {
+    /// Subscribe the SAME filter on every reachable relay and fan the
+    /// deliveries into one deduplicated stream. Succeeds if at least one
+    /// relay accepted the REQ; unreachable relays are skipped (step 7 adds
+    /// reconnect/health).
+    pub async fn subscribe(&self, filter: Filter) -> Result<Subscription, NetError> {
+        if self.urls.is_empty() {
+            return Err(NetError::Unreachable(
+                "no dialable relay — the pool is empty or gated".into(),
+            ));
+        }
+        let (tx, rx) = mpsc::channel(256);
+        let dedup = Arc::new(Mutex::new(DedupRing::new()));
+        let mut readers = Vec::new();
+        for url in &self.urls {
+            let Ok(mut ws) = RelayWs::connect(&self.dialer, url).await else {
+                continue;
+            };
+            let sub_id = SubscriptionId::generate();
+            if ws
+                .send(ClientMessage::req(sub_id, vec![filter.clone()]))
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let tx = tx.clone();
+            let dedup = dedup.clone();
+            readers.push(tokio::spawn(async move {
+                loop {
+                    match ws.recv(SUB_IDLE_TIMEOUT).await {
+                        Ok(RelayMessage::Event { event, .. }) => {
+                            let fresh = dedup.lock().await.fresh(event.id);
+                            if fresh && tx.send(event.into_owned()).await.is_err() {
+                                break; // consumer gone
+                            }
+                        }
+                        // EOSE/OK/NOTICE etc. — the EOSE gate is plan step 5
+                        Ok(_) => {}
+                        // closed or idle past the bound — reader ends
+                        Err(_) => break,
+                    }
+                }
+            }));
+        }
+        if readers.is_empty() {
+            return Err(NetError::Unreachable(
+                "no relay accepted the subscription".into(),
+            ));
+        }
+        Ok(Subscription { rx, readers })
     }
 }
 
