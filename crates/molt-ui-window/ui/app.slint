@@ -187,13 +187,16 @@ component AnonNetworkGroup inherits DetailGroup {
     }
 }
 
-// The onion/clearnet badge of a relay row, derived from the URL (never
-// stored — see molt_core::relay). Onion reads as the private choice (good
-// tone), clearnet as the exposed one (warn tone); the pictogram rides in the
-// colorful Twemoji font, so a plain-text emoji never sneaks into a label.
+// The kind badge of a relay row, derived from the URL (never stored — see
+// molt_core::relay). Onion reads as the private choice (good tone), clearnet
+// as the exposed one (warn tone), local as your own box (accent tone — still
+// outside Tor, which is why it shares the clearnet gate); the pictogram
+// rides in the colorful Twemoji font, so a plain-text emoji never sneaks
+// into a label.
 component RelayBadge inherits Rectangle {
-    in property <bool> onion;
-    property <color> tone: root.onion ? Theme.good : Theme.warn;
+    in property <int> kind; // 0 = onion · 1 = clearnet · 2 = local
+    property <color> tone: root.kind == 0 ? Theme.good
+        : (root.kind == 2 ? Theme.accent : Theme.warn);
     // sized by its own content, like StatusPill: the row must never stretch
     // it (the padding is 8px on both sides of the x-anchored inner row)
     width: bd-row.preferred-width + 16px;
@@ -210,13 +213,14 @@ component RelayBadge inherits Rectangle {
         // preferred width (see the collapse trap in parts.slint)
         alignment: start;
         Text {
-            text: root.onion ? "🧅" : "🌐";
+            text: root.kind == 0 ? "🧅" : (root.kind == 2 ? "🏠" : "🌐");
             font-family: "Twemoji Mozilla";
             font-size: Theme.fs-cap;
             vertical-alignment: center;
         }
         Text {
-            text: root.onion ? Strings.rp-badge-onion : Strings.rp-badge-clearnet;
+            text: root.kind == 0 ? Strings.rp-badge-onion
+                : (root.kind == 2 ? Strings.rp-badge-local : Strings.rp-badge-clearnet);
             color: Theme.text;
             font-size: Theme.fs-cap;
             font-weight: 700;
@@ -232,12 +236,12 @@ component RelayBadge inherits Rectangle {
 component RelayRow inherits Rectangle {
     in property <RelayItem> r;
     callback moved(bool); // true = towards position 1 (higher priority)
-    callback confirm(string, bool); // url + onion: a clearnet relay must pass the warning first
+    callback confirm(string, int); // url + kind: a non-onion relay must pass the warning first
     callback revoke(string);
     callback removed(string);
     property <string> status: root.r.blocked == 1 ? Strings.rp-st-unconfirmed
         : (root.r.blocked == 2 ? Strings.rp-st-locked
-        : (root.r.onion ? Strings.rp-st-auto : Strings.rp-st-active));
+        : (root.r.kind == 0 ? Strings.rp-st-auto : Strings.rp-st-active));
     // in use = green, waiting for a decision of the user = amber, simply
     // not in use = faint (an unconfirmed relay is not a problem)
     property <color> tone: root.r.blocked == 1 ? Theme.faint
@@ -275,7 +279,7 @@ component RelayRow inherits Rectangle {
                     vertical-alignment: center;
                 }
                 RelayBadge {
-                    onion: root.r.onion;
+                    kind: root.r.kind;
                     y: (parent.height - self.height) / 2;
                 }
             }
@@ -315,7 +319,7 @@ component RelayRow inherits Rectangle {
             height: 26px;
             primary: true;
             clicked => {
-                root.confirm(root.r.url, root.r.onion);
+                root.confirm(root.r.url, root.r.kind);
             }
         }
         if root.r.confirmed: AppButton {
@@ -355,7 +359,7 @@ component RelayPoolGroup inherits DetailGroup {
     in property <string> error; // inline validation message under the field
     callback add(string);
     callback moved(string, bool);
-    callback confirm(string, bool);
+    callback confirm(string, int); // url + kind (0 onion · 1 clearnet · 2 local)
     callback revoke(string);
     callback removed(string);
     callback session(bool);
@@ -423,8 +427,8 @@ component RelayPoolGroup inherits DetailGroup {
                     moved(up) => {
                         root.moved(item.url, up);
                     }
-                    confirm(url, onion) => {
-                        root.confirm(url, onion);
+                    confirm(url, kind) => {
+                        root.confirm(url, kind);
                     }
                     revoke(url) => {
                         root.revoke(url);
@@ -1167,13 +1171,16 @@ export component AppWindow inherits Window {
     callback relay-confirm(string /* url */, bool /* accept-clearnet */);
     callback relay-revoke(string);
     callback relay-clearnet-session(bool /* unlock */);
-    // the clearnet warning: the ONLY path from the GUI to a confirmed
-    // clearnet relay. The acknowledgement starts unchecked on EVERY open.
+    // the outside-Tor warning: the ONLY path from the GUI to a confirmed
+    // clearnet or local relay. The acknowledgement starts unchecked on EVERY
+    // open; the body names the CONCRETE exposure of the relay's kind.
     property <bool> relay-clearnet-modal-open: false;
     property <string> relay-clearnet-url;
+    property <int> relay-clearnet-kind: 1; // 1 clearnet · 2 local
     property <bool> relay-clearnet-ack: false;
-    function open-clearnet-warning(url: string) {
+    function open-clearnet-warning(url: string, kind: int) {
         root.relay-clearnet-url = url;
+        root.relay-clearnet-kind = kind;
         root.relay-clearnet-ack = false;
         root.relay-clearnet-modal-open = true;
     }
@@ -5847,16 +5854,27 @@ export component AppWindow inherits Window {
                         if root.set-tab == 0: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
+                            // side by side the two groups SHARE the width and
+                            // the row height (no alignment:start): equal
+                            // panels with one right edge, instead of two
+                            // ragged preferred-width boxes
                             if set-pane.side-groups: HorizontalLayout {
                                 spacing: 14px;
-                                alignment: start;
+                                // pack: the equal ROW height comes from the
+                                // layout; inside, content hugs the top so the
+                                // shorter panel never sprays leftover height
+                                // between its rows (DetailGroup's own advice)
                                 LanguageAppearanceGroup {
+                                    horizontal-stretch: 1;
+                                    pack: true;
                                     lang-index: root.lang-index;
                                     set-language(i) => {
                                         root.set-language(i);
                                     }
                                 }
                                 SoundAlertsGroup {
+                                    horizontal-stretch: 1;
+                                    pack: true;
                                     message-index <=> root.cfg-sound-message-index;
                                     vote-index <=> root.cfg-sound-vote-index;
                                     test-sound(s) => {
@@ -5881,21 +5899,15 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // chat privacy: send/show per-message read receipts
-                            // (local switch; symmetric — off hides others' too)
-                            HorizontalLayout {
-                                vertical-stretch: 0;
-                                spacing: 18px;
-                                alignment: start;
-                                Text {
-                                    text: Strings.field-read-receipts;
-                                    color: Theme.text;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
+                            // (local switch; symmetric — off hides others' too).
+                            // Panelled like its neighbours, so the tab reads as
+                            // one grid instead of groups plus a loose row.
+                            DetailGroup {
+                                pack: true;
+                                title: Strings.field-read-receipts;
                                 AppCheck {
                                     label: Strings.set-read-receipts;
                                     checked <=> root.cfg-read-receipts;
-                                    y: (parent.height - self.height) / 2;
                                 }
                             }
                         }
@@ -6358,14 +6370,14 @@ export component AppWindow inherits Window {
                                     root.relay-move(url, up);
                                 }
                                 // an onion relay confirms straight through; a
-                                // clearnet one may only be confirmed after the
-                                // warning (and the engine refuses it without
-                                // the acknowledgement anyway)
-                                confirm(url, onion) => {
-                                    if (onion) {
+                                // clearnet or local one only after the warning
+                                // tailored to its kind (and the engine refuses
+                                // it without the acknowledgement anyway)
+                                confirm(url, kind) => {
+                                    if (kind == 0) {
                                         root.relay-confirm(url, false);
                                     } else {
-                                        root.open-clearnet-warning(url);
+                                        root.open-clearnet-warning(url, kind);
                                     }
                                 }
                                 revoke(url) => {
@@ -6464,9 +6476,15 @@ export component AppWindow inherits Window {
                         if root.set-tab == 6: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
-                            AppCheck {
-                                label: Strings.field-headless;
-                                checked <=> root.cfg-headless;
+                            // panelled like every other tab's content — no
+                            // loose checkbox floating in the pane
+                            DetailGroup {
+                                pack: true;
+                                title: Strings.set-tab-node;
+                                AppCheck {
+                                    label: Strings.field-headless;
+                                    checked <=> root.cfg-headless;
+                                }
                             }
                         }
                         // Chain-History: every committed block of the open
@@ -6666,14 +6684,16 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Modal: the clearnet relay warning — the one place the GUI may reach
+    // Modal: the outside-Tor relay warning — the one place the GUI may reach
     // RelayConfirm with the acknowledgement set. It names the CONCRETE
-    // exposure (tailored to whether Tor is on), the acknowledgement starts
-    // unchecked on every open, and cancelling does nothing at all.
+    // exposure (local box vs. clearnet operator, and whether Tor fronts the
+    // clearnet), the acknowledgement starts unchecked on every open, and
+    // cancelling does nothing at all.
     if root.relay-clearnet-modal-open: ConfirmModal {
         dialog-width: 520px;
-        title: Strings.rp-cn-title;
-        body: root.net-tor-active ? Strings.rp-cn-body-tor : Strings.rp-cn-body-plain;
+        title: root.relay-clearnet-kind == 2 ? Strings.rp-cn-title-local : Strings.rp-cn-title;
+        body: root.relay-clearnet-kind == 2 ? Strings.rp-cn-body-local
+            : (root.net-tor-active ? Strings.rp-cn-body-tor : Strings.rp-cn-body-plain);
         confirm-label: Strings.rp-cn-confirm;
         confirm-enabled: root.relay-clearnet-ack;
         dismissed => {

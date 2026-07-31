@@ -2378,7 +2378,11 @@ fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
         .enumerate()
         .map(|(i, r)| RelayItem {
             url: r.url.as_str().into(),
-            onion: r.kind == RelayKind::Onion,
+            kind: match r.kind {
+                RelayKind::Onion => 0,
+                RelayKind::Clearnet => 1,
+                RelayKind::Local => 2,
+            },
             confirmed: r.confirmed,
             blocked: match r.blocked {
                 None => 0,
@@ -4999,7 +5003,7 @@ lexicon! {
     field_mcp_allow: "Allowed client IPs", "Erlaubte Client-IPs";
     field_mcp_token: "API token", "API-Token";
     set_rotate: "Rotate", "Rotieren";
-    set_token_note: "Clients send this as the token in their initialize request. Rotating saves a fresh token to config.toml; the running MCP endpoint picks it up on the next restart.", "Clients senden dies als token im initialize-Request. Rotieren speichert ein frisches Token in die config.toml; der laufende MCP-Endpunkt übernimmt es beim nächsten Neustart.";
+    set_token_note: "Sent by clients as the token in initialize. Rotate writes a fresh token to config.toml; it takes effect on restart.", "Von Clients als token im initialize gesendet. Rotieren schreibt ein frisches Token in die config.toml; es gilt ab dem Neustart.";
     set_token_show: "Reveal", "Anzeigen";
     set_token_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";
@@ -5288,19 +5292,20 @@ lexicon! {
     field_sound_message: "New message", "Neue Nachricht";
     field_sound_vote: "New vote", "Neue Abstimmung";
     sound_off: "off", "aus";
-    set_tor_embedded_missing: "\"embedded\" is greyed out: this build was compiled without the embedded-tor feature (in-process Tor). Rebuild with --features embedded-tor, or use a local Tor daemon.", "\"embedded\" ist ausgegraut: dieses Binary wurde ohne das embedded-tor-Feature (In-Prozess-Tor) gebaut. Mit --features embedded-tor neu bauen oder einen lokalen Tor-Daemon nutzen.";
+    set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor — use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor — nutze stattdessen einen lokalen Tor-Daemon.";
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
     // added relay is idle, an onion relay connects by itself, a clearnet one
     // needs the warning AND a per-session activation.
     rp_title: "Relays", "Relays";
-    rp_hint: "Relays pass this node's encrypted messages on. Nothing is preset — you decide which relays this node uses, and in which order: the first one is tried first.", "Relays leiten die verschlüsselten Nachrichten dieses Knotens weiter. Nichts ist voreingestellt — du entscheidest, welche Relays dieser Knoten benutzt und in welcher Reihenfolge: Das erste wird zuerst versucht.";
+    rp_hint: "Nothing is preset — you decide which relays this node uses. The order is the dial priority.", "Nichts ist voreingestellt — du entscheidest, welche Relays dieser Knoten benutzt. Die Reihenfolge ist die Wählpriorität.";
     rp_in_use: "Relays in use:", "Relays in Benutzung:";
     rp_none_dialable: "No relay is in use — this node is not connected.", "Kein Relay ist in Benutzung — dieser Knoten ist nicht verbunden.";
     rp_empty_title: "No relay configured yet", "Noch kein Relay eingerichtet";
-    rp_empty_body: "This node is connected to no relay, so nothing leaves your machine. Enter the address of a relay you trust below and confirm it to put it to use. Addresses ending in .onion are the private choice: they are reached through Tor and connect on their own.", "Dieser Knoten ist mit keinem Relay verbunden, es verlässt also nichts deinen Rechner. Trage unten die Adresse eines Relays ein, dem du vertraust, und bestätige es, um es zu benutzen. Adressen auf .onion sind die private Wahl: Sie werden über Tor erreicht und verbinden sich von selbst.";
+    rp_empty_body: "This node is connected to nothing. Add a relay you trust and confirm it — .onion addresses are the private choice and connect on their own.", "Dieser Knoten ist mit nichts verbunden. Trag ein Relay ein, dem du vertraust, und bestätige es — .onion-Adressen sind die private Wahl und verbinden sich von selbst.";
     rp_badge_onion: "ONION", "ONION";
     rp_badge_clearnet: "CLEARNET", "CLEARNET";
+    rp_badge_local: "LOCAL", "LOKAL";
     rp_st_auto: "connects automatically", "verbindet automatisch";
     rp_st_unconfirmed: "not in use — confirm to enable", "nicht in Benutzung — zum Aktivieren bestätigen";
     rp_st_locked: "confirmed — needs activation this session", "bestätigt — braucht Freigabe für diese Sitzung";
@@ -5324,8 +5329,10 @@ lexicon! {
     rp_err_noncanon: "Write the address plainly — host, IP and port in their canonical form.", "Schreib die Adresse schlicht — Host, IP und Port in ihrer kanonischen Form.";
     rp_err_dup: "This relay is already in the list.", "Dieses Relay steht schon in der Liste.";
     rp_cn_title: "Use a clearnet relay?", "Ein Clearnet-Relay benutzen?";
-    rp_cn_body_tor: "This relay is not a .onion service. Its operator sees which conversations this node subscribes to and when it is online. Tor hides your IP address from them — but the relay stays a clearnet endpoint, run by someone you do not control.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse vor ihm — aber das Relay bleibt ein Clearnet-Endpunkt in fremder Hand.";
-    rp_cn_body_plain: "This relay is not a .onion service. Its operator sees your IP address, which conversations this node subscribes to and when it is online. The anonymity network is switched off, so nothing hides where you connect from.", "Dieses Relay ist kein .onion-Dienst. Sein Betreiber sieht deine IP-Adresse, welche Unterhaltungen dieser Knoten abonniert und wann er online ist. Das Anonymitäts-Netzwerk ist ausgeschaltet, es verbirgt also nichts, von wo aus du dich verbindest.";
+    rp_cn_title_local: "Use a local relay?", "Ein lokales Relay benutzen?";
+    rp_cn_body_tor: "Not a .onion service: its operator sees what this node subscribes to and when it is online. Tor hides your IP address — the endpoint stays in someone else's hands.", "Kein .onion-Dienst: Sein Betreiber sieht, was dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse — der Endpunkt bleibt in fremder Hand.";
+    rp_cn_body_plain: "Not a .onion service: its operator sees your IP address, what this node subscribes to and when it is online. Tor is off, so nothing hides where you connect from.", "Kein .onion-Dienst: Sein Betreiber sieht deine IP-Adresse, was dieser Knoten abonniert und wann er online ist. Tor ist aus, nichts verbirgt, von wo du dich verbindest.";
+    rp_cn_body_local: "This relay is on your machine or local network — reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz — es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
     rp_cn_note: "Even then it is not dialed automatically: you activate it once per session.", "Auch dann wird es nicht automatisch angewählt: Du gibst es einmal pro Sitzung frei.";
@@ -6836,26 +6843,29 @@ mod tests {
                 false,
                 Some(RelayBlock::Unconfirmed),
             ),
-            // confirmed clearnet, but this session has not activated it
+            // confirmed local (LAN self-host), but this session has not
+            // activated it — same gate as clearnet, own badge (kind 2)
             status(
-                "wss://other.example.org",
-                RelayKind::Clearnet,
+                "ws://192.168.1.5:7777",
+                RelayKind::Local,
                 true,
                 Some(RelayBlock::ClearnetSessionLocked),
             ),
         ]);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].pos, 1);
-        assert!(rows[0].onion && rows[0].confirmed);
+        assert_eq!(rows[0].kind, 0, "onion badge");
+        assert!(rows[0].confirmed);
         assert_eq!(rows[0].blocked, 0, "no block = in use right now");
         assert!(rows[0].first, "position 0 cannot move up");
         assert!(!rows[0].last);
         assert_eq!(rows[1].pos, 2);
-        assert!(!rows[1].onion);
+        assert_eq!(rows[1].kind, 1, "clearnet badge");
         assert_eq!(rows[1].blocked, 1, "unconfirmed");
         assert!(!rows[1].first && !rows[1].last, "the middle row moves both ways");
         assert_eq!(rows[2].pos, 3);
-        assert_eq!(rows[2].blocked, 2, "clearnet, not activated this session");
+        assert_eq!(rows[2].kind, 2, "local badge — never presented as clearnet");
+        assert_eq!(rows[2].blocked, 2, "outside Tor, not activated this session");
         assert!(rows[2].confirmed, "…yet confirmed: the two are independent");
         assert!(rows[2].last, "the bottom row cannot move down");
         // a single relay is BOTH ends — neither arrow may promise a move

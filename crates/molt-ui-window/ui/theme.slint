@@ -67,13 +67,13 @@ export struct ChainRow {
 
 // One relay of the Nostr relay pool, as Settings → Nostr relays renders it: the
 // stored facts (url, confirmed) plus what the ENGINE derived from them. The
-// GUI never re-decides the dial policy — `onion` and `blocked` arrive
+// GUI never re-decides the dial policy — `kind` and `blocked` arrive
 // decided (`docs/transport/relay_pool.md`), the panel only labels them.
 export struct RelayItem {
     url: string,
-    onion: bool, // derived from the URL, never stored
+    kind: int, // 0 = onion · 1 = clearnet · 2 = local — derived from the URL, never stored
     confirmed: bool, // the user's persisted "yes, use this relay"
-    blocked: int, // 0 = in use right now · 1 = unconfirmed · 2 = clearnet, not activated this session
+    blocked: int, // 0 = in use right now · 1 = unconfirmed · 2 = outside Tor, not activated this session
     pos: int, // 1-based priority position (the list ORDER is the priority)
     first: bool, // at the top — the "higher priority" control is dead
     last: bool, // at the bottom — the "lower priority" control is dead
@@ -700,6 +700,7 @@ export global Strings {
     in property <string> rp-empty-body;
     in property <string> rp-badge-onion;
     in property <string> rp-badge-clearnet;
+    in property <string> rp-badge-local;
     in property <string> rp-st-auto;
     in property <string> rp-st-unconfirmed;
     in property <string> rp-st-locked;
@@ -723,8 +724,10 @@ export global Strings {
     in property <string> rp-err-noncanon;
     in property <string> rp-err-dup;
     in property <string> rp-cn-title;
+    in property <string> rp-cn-title-local;
     in property <string> rp-cn-body-tor;
     in property <string> rp-cn-body-plain;
+    in property <string> rp-cn-body-local;
     in property <string> rp-cn-ack;
     in property <string> rp-cn-confirm;
     in property <string> rp-cn-note;

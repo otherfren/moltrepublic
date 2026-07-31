@@ -332,7 +332,7 @@ fn ipv6_kind(a: core::net::Ipv6Addr) -> Result<RelayKind, RelayUrlError> {
 pub struct RelayStatus {
     /// The relay URL (normalized).
     pub url: String,
-    /// Derived from the URL — onion or clearnet.
+    /// Derived from the URL — onion, clearnet or local.
     pub kind: RelayKind,
     /// The user's persisted confirmation.
     pub confirmed: bool,
