@@ -5483,7 +5483,9 @@ lexicon! {
     // except the last one — a listening SOCKS port proves a socket, not a
     // circuit (molt_core::TorTestState).
     set_tor_test: "Test Tor connection", "Tor-Verbindung testen";
-    tor_test_tip: "Probes the draft settings above: first whether anything answers at the Tor SOCKS address, then whether a relay from your own confirmed pool can be reached through it. Nothing else is contacted.", "Prüft die Entwurfs-Einstellungen oben: zuerst, ob an der Tor-SOCKS-Adresse überhaupt etwas antwortet, dann, ob ein Relay aus deinem eigenen bestätigten Pool darüber erreichbar ist. Es wird nichts anderes kontaktiert.";
+    // kept short on purpose: HoverTip does not wrap, and the verdict line
+    // under the button carries the full story anyway
+    tor_test_tip: "Probes the draft above: the Tor SOCKS address, then a relay from your own pool through it.", "Prüft den Entwurf oben: die Tor-SOCKS-Adresse, dann ein Relay aus deinem eigenen Pool hindurch.";
     tor_v_idle: "Tor has not been tested yet.", "Tor wurde noch nicht getestet.";
     tor_v_testing: "testing Tor…", "teste Tor…";
     tor_v_off: "Nothing was sent — the anonymity network is not set to Tor.", "Es wurde nichts gesendet — das Anonymitäts-Netzwerk steht nicht auf Tor.";

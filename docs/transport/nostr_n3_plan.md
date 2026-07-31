@@ -117,8 +117,37 @@ Contract as given in `nostr_n05_engine_inventory.md` §5: defined in
 molt-net, implemented by molt-engine, handed into the runtime. N3 defines
 the trait and the **drop-before-merge** rule (a group-data commit is
 authorized by a threshold-decided chain block BEFORE `merge_staged_commit`,
-never merge-then-reject) plus its hard-reject test. N6 fills in the block
-type.
+never merge-then-reject) plus its hard-reject test.
+
+**Honest status (review 2026-07-31): the seam is DEFINED, not WIRED.**
+`ChainOracle` has no implementor and `authorize_group_data` no caller —
+nothing today produces a group-data commit, so there is nothing to gate.
+What exists is the contract and its refusal semantics, pinned by a test.
+N6 supplies `ChainChange::TransportPolicy` and the engine-side implementor;
+until then no code path can claim the gate protects anything.
+
+## 5.5 Known debt carried out of N3 (review 2026-07-31)
+
+Reported, not yet fixed — recorded so N4 does not build on a false
+assumption:
+
+- **The exporter ring is runtime-only.** A restart empties it, so
+  cross-epoch catch-up falls back to the ACK/rewind layer until the node
+  has seen K epoch changes again. Persisting it is a snapshot-format
+  change; decide it with N4's transport-state work.
+- **The outer envelope binds no context** (`aad` is empty): a sealed frame
+  is not tied to its `h` tag, kind, or event id, so a group member could
+  replay one group event's ciphertext into another position. The inner MLS
+  layer still authenticates the sender and epoch, which bounds the damage
+  — but the binding belongs in the AAD.
+- **The ±1 h skew margin of §4.4 is documented and not implemented.** The
+  h-tag derivation has no tolerance at a window boundary yet.
+- **A live `Subscription` filter is immutable** (N2), so nothing follows
+  the 24 h h-tag rotation across a boundary; N5's runtime must resubscribe
+  per window.
+- **The rewind is in-memory only.** A crash inside the MLS persist debounce
+  can resurrect the losing branch. The race window is short and the
+  delivery guarantee absorbs the traffic, but the interaction is unpinned.
 
 ## 6. TDD order
 

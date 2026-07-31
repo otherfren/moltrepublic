@@ -110,6 +110,13 @@ pub enum MlsIncoming {
     /// The MLS-core milestone has no post-founding commits, but decrypt stays
     /// robust so a future recovery rejoin cannot wedge the receiver.
     Commit,
+    /// We had merged our OWN commit, a concurrent one won the tiebreak, and
+    /// we rewound onto it. **The work our commit carried is gone** — a
+    /// recovery re-key in particular, whose Welcome the rejoiner may already
+    /// hold for a branch nobody is on. The caller must re-issue it against
+    /// the new epoch; treating this like an ordinary merge strands the
+    /// member it was for (review finding 2026-07-31).
+    CommitRewound,
     /// A same-epoch commit that LOST the deterministic tiebreak
     /// ([`CommitKey`]): our own commit stands, this one is superseded. The
     /// sender will rewind to ours; its proposals are re-decided at the new
@@ -343,6 +350,8 @@ impl MlsMember {
             parsed.push(validated);
         }
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
+        self.retire_exporter();
+        let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         let (_commit, welcome, _group_info) = group
             .add_members(&self.provider, &self.signer, &parsed)
             .map_err(|e| MlsError::Mls(format!("adding members: {e:?}")))?;
@@ -535,10 +544,19 @@ impl MlsMember {
             .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
         let from = String::from_utf8_lossy(processed.credential().serialized_content()).into_owned();
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(MlsIncoming::Application {
-                from,
-                plaintext: app.into_bytes(),
-            }),
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                // THE RACE WINDOW CLOSES HERE (review finding): once traffic
+                // of the new epoch has been accepted, the group has visibly
+                // moved on and a rewind would drop delivered state. Without
+                // this, the slot lived forever and a REPLAYED epoch-N commit
+                // could roll a node back at any later time — an attacker
+                // needs only to re-send bytes the relay still holds.
+                self.prior = None;
+                Ok(MlsIncoming::Application {
+                    from,
+                    plaintext: app.into_bytes(),
+                })
+            }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let retiring = self.exporter_secret().ok();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
@@ -649,6 +667,8 @@ impl MlsMember {
         let rewound = MlsMember::restore(&snapshot)?;
         self.provider_swap(rewound);
         match self.decrypt_at(winner, created_at) {
+            // the winner merged — but say WHOSE work was dropped doing so
+            Ok(MlsIncoming::Commit) => Ok(MlsIncoming::CommitRewound),
             Ok(outcome) => Ok(outcome),
             Err(e) => {
                 // the "winner" did not apply after all — undo the rewind and
@@ -1250,14 +1270,16 @@ mod tests {
             "alice keeps her own winning commit: {to_alice:?}"
         );
         assert!(
-            matches!(to_bob, MlsIncoming::Commit),
-            "bob rewinds and applies alice's: {to_bob:?}"
+            matches!(to_bob, MlsIncoming::CommitRewound),
+            "bob rewinds onto alice's — and is TOLD his own was rolled back: {to_bob:?}"
         );
         assert!(
-            matches!(to_alice, MlsIncoming::Commit | MlsIncoming::CommitSuperseded),
+            matches!(
+                to_alice,
+                MlsIncoming::Commit | MlsIncoming::CommitSuperseded | MlsIncoming::CommitRewound
+            ),
             "a same-epoch commit is a known outcome, not an error: {to_alice:?}"
         );
-        assert!(matches!(to_bob, MlsIncoming::Commit | MlsIncoming::CommitSuperseded));
 
         assert_eq!(alice.epoch(), bob.epoch(), "the epochs must not diverge");
         // the real divergence detector: same epoch NUMBER means nothing if
@@ -1497,6 +1519,74 @@ mod tests {
         dana.decrypt(&commit_b).expect("dana takes bob's first");
         dana.decrypt(&commit_a).expect("…then alice's");
         assert_eq!(dana.epoch(), alice.epoch(), "order of arrival must not matter");
+    }
+
+    /// KEYSTONE (review findings 2026-07-31) — the race window CLOSES, and
+    /// the loser is TOLD.
+    ///
+    /// Without an expiry the prior-state slot held a full pre-eviction key
+    /// schedule forever, so replaying a commit the relay still holds could
+    /// roll a node back at any later time. And a coordinator whose re-key
+    /// lost the tiebreak saw an ordinary `Commit` — while the member it
+    /// re-keyed already held a Welcome for a branch nobody is on.
+    #[test]
+    fn the_race_window_closes_and_the_rewound_committer_is_told() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(3), "bob").expect("bob");
+        let carol = MlsMember::new(&key(4), "carol").expect("carol");
+        let dave = MlsMember::new(&key(5), "dave").expect("dave");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                bob.key_package().expect("kp"),
+                carol.key_package().expect("kp"),
+                dave.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        alice.join_from_welcome(&welcome).expect("alice joins");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
+        let dave_again = MlsMember::new(&key(5), "dave").expect("dave again");
+        let (commit_a, _w) = alice
+            .restore_member("carol", &carol_again.key_package().expect("kp"), 100)
+            .expect("alice commits");
+        let (commit_b, _w) = bob
+            .restore_member("dave", &dave_again.key_package().expect("kp"), 200)
+            .expect("bob commits");
+
+        // bob's stamp is higher, so bob LOSES and must hear about it: the
+        // dave re-key he already Welcomed is gone
+        assert!(
+            matches!(bob.decrypt_at(&commit_a, 100), Ok(MlsIncoming::CommitRewound)),
+            "a rewound committer must not see an ordinary merge"
+        );
+        assert!(matches!(
+            alice.decrypt_at(&commit_b, 200),
+            Ok(MlsIncoming::CommitSuperseded)
+        ));
+
+        // …and once traffic of the NEW epoch is accepted, the window is shut:
+        // replaying the losing commit can no longer roll anyone back
+        let live = alice.encrypt(b"new epoch traffic").expect("encrypt");
+        assert!(matches!(
+            bob.decrypt_at(&live, 300),
+            Ok(MlsIncoming::Application { .. })
+        ));
+        let settled = bob.epoch();
+        for stamp in [1u64, 50, 100] {
+            let _ = bob.decrypt_at(&commit_b, stamp);
+            assert_eq!(bob.epoch(), settled, "a replay must not roll the epoch back");
+        }
+        // the group still works after the replay attempts
+        let wire = alice.encrypt(b"still one group").expect("encrypt");
+        assert!(matches!(
+            bob.decrypt_at(&wire, 400),
+            Ok(MlsIncoming::Application { .. })
+        ));
     }
 
     /// building the group around a bogus member — and a real add still works

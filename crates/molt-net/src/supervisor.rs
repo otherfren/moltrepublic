@@ -184,6 +184,18 @@ impl MlsChannel {
             // here — but the epoch did not advance either, so this is not an
             // EpochAdvanced (N3 §1).
             Ok(MlsIncoming::CommitSuperseded) => MlsDecode::Discard,
+            // we rewound onto a concurrent commit: the epoch advanced, AND
+            // whatever our own commit carried (a recovery re-key) is gone.
+            // Loud, because the member it was for may hold a Welcome for a
+            // branch nobody is on — N4 re-issues it against the new epoch.
+            Ok(MlsIncoming::CommitRewound) => {
+                tracing::warn!(
+                    "a concurrent commit won the tiebreak — our own commit was rolled back; \
+                     any re-key it carried must be re-issued at the new epoch"
+                );
+                self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
+                MlsDecode::EpochAdvanced
+            }
             // proposals / replays / past-window / garbage: redelivery cannot help
             Ok(MlsIncoming::Proposal) | Err(_) => MlsDecode::Discard,
         }

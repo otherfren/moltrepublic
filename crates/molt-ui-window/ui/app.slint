@@ -130,8 +130,8 @@ component SoundAlertsGroup inherits DetailGroup {
 // That needs a floor. A word-wrapping Slint Text reports min-width 0, so the
 // row would otherwise shrink every tab — including the single-word ones, which
 // cannot wrap — until the letters are clipped. `floor` is the same title with
-// a newline at every break opportunity (Rust: `tab_title_floor`); a hidden,
-// non-wrapping Text of it has exactly the width of the widest unbreakable
+// a newline at every break opportunity (Rust: `tab_title_floor`); an unseen
+// Text of it has exactly the width of the widest unbreakable
 // chunk, measured in the real font, and that plus the padding is this tab's
 // minimum width. So: a single-word tab never shrinks at all, and a wrappable
 // one shrinks only down to its longest word — it wraps, it never clips.
@@ -149,11 +149,13 @@ component SettingsTab inherits AppButton {
     height: 38px;
     min-width: tab-floor.preferred-width + 2 * root.pad;
     primary: root.current == root.index;
-    // measured, never shown (the Clip that `visible: false` lowers to leaves
-    // the Text's own preferred-width intact)
+    // Measured, never seen: drawn transparent rather than `visible: false`,
+    // because that lowers to a Clip that expands to the button's geometry —
+    // it would clip nothing away. It carries the SAME font as the label, so
+    // its preferred width is the real floor in the real font.
     tab-floor := Text {
-        visible: false;
         text: root.floor;
+        color: transparent;
         font-size: Theme.fs-body;
         font-weight: 600;
     }
@@ -329,6 +331,9 @@ component RelayRow inherits Rectangle {
             pad: 0px;
             icon: @image-url("assets/copy.svg");
             icon-set: true;
+            // even icon in an even button: whole-pixel margins, or an
+            // icon-only button renders visibly off-centre (AppButton)
+            icon-size: 14px;
             tooltip: Strings.rp-copy;
             tooltip-left: true;
             clicked => {
@@ -6403,7 +6408,10 @@ export component AppWindow inherits Window {
                                         text: root.cfg-tor-test-detail;
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
-                                        wrap: word-wrap;
+                                        // char-wrap: this line carries relay
+                                        // URLs, and a .onion address offers no
+                                        // word boundary to break at
+                                        wrap: char-wrap;
                                         preferred-width: 0px;
                                     }
                                 }
