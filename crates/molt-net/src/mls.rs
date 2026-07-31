@@ -74,7 +74,7 @@ fn ratchet_window() -> SenderRatchetConfiguration {
 }
 
 /// The snapshot schema version (bumped on any incompatible blob layout).
-const SNAPSHOT_VERSION: u8 = 1;
+const SNAPSHOT_VERSION: u8 = 2;
 
 /// Everything that can go wrong inside the MLS layer. All variants are local
 /// bugs or corrupt/hostile wire input — never a transient network condition.
@@ -244,8 +244,24 @@ pub struct MlsMember {
 /// The self-contained persistence blob: the provider's whole key-value map plus
 /// the handles needed to rehydrate the signer and group. bincode (not JSON):
 /// the storage keys are `Vec<u8>`, which JSON object keys cannot represent.
+/// v2 (N4 §6.1) appends the exporter ring — bincode is positional, so the
+/// version byte at offset 0 is what [`MlsMember::restore`] dispatches on;
+/// never reorder the leading field.
 #[derive(Serialize, Deserialize)]
 struct MlsSnapshot {
+    version: u8,
+    name: String,
+    signer_pub: Vec<u8>,
+    group_id: Vec<u8>,
+    storage: Vec<u8>,
+    exporter_ring: Vec<[u8; EXPORTER_LEN]>,
+}
+
+/// The pre-N4 blob layout (no ring) — kept so every `transport.state.mls`
+/// written before the v2 bump keeps restoring, with the ring empty exactly
+/// as those builds behaved.
+#[derive(Serialize, Deserialize)]
+struct MlsSnapshotV1 {
     version: u8,
     name: String,
     signer_pub: Vec<u8>,
@@ -729,22 +745,39 @@ impl MlsMember {
             signer_pub: self.signer.public().to_vec(),
             group_id: group.group_id().as_slice().to_vec(),
             storage,
+            exporter_ring: self.exporter_ring.clone(),
         };
         bincode::serialize(&snap).map_err(|e| MlsError::Snapshot(format!("encoding snapshot: {e}")))
     }
 
     /// Rehydrate a member from a [`snapshot`](MlsMember::snapshot) blob. Fully
     /// self-contained: the signer's private half round-trips inside the provider
-    /// storage, so no external key is needed.
+    /// storage, so no external key is needed. Dispatches on the version byte
+    /// at offset 0: v2 carries the exporter ring (N4 §6.1); a v1 blob (pre-N4)
+    /// restores with an empty ring — past-epoch catch-up falls back to the
+    /// ACK/rewind layer until the ring re-fills, exactly as those builds ran.
     pub fn restore(blob: &[u8]) -> Result<MlsMember, MlsError> {
-        let snap: MlsSnapshot = bincode::deserialize(blob)
-            .map_err(|e| MlsError::Snapshot(format!("decoding snapshot: {e}")))?;
-        if snap.version != SNAPSHOT_VERSION {
-            return Err(MlsError::Snapshot(format!(
-                "unsupported snapshot version {}",
-                snap.version
-            )));
-        }
+        let snap: MlsSnapshot = match blob.first() {
+            Some(&SNAPSHOT_VERSION) => bincode::deserialize(blob)
+                .map_err(|e| MlsError::Snapshot(format!("decoding snapshot: {e}")))?,
+            Some(1) => {
+                let v1: MlsSnapshotV1 = bincode::deserialize(blob)
+                    .map_err(|e| MlsError::Snapshot(format!("decoding v1 snapshot: {e}")))?;
+                MlsSnapshot {
+                    version: SNAPSHOT_VERSION,
+                    name: v1.name,
+                    signer_pub: v1.signer_pub,
+                    group_id: v1.group_id,
+                    storage: v1.storage,
+                    exporter_ring: Vec::new(),
+                }
+            }
+            other => {
+                return Err(MlsError::Snapshot(format!(
+                    "unsupported snapshot version {other:?}"
+                )));
+            }
+        };
         let provider = OpenMlsRustCrypto::default();
         {
             let map: HashMap<Vec<u8>, Vec<u8>> = bincode::deserialize(&snap.storage)
@@ -769,10 +802,8 @@ impl MlsMember {
             group: Some(group),
             // a restored snapshot has no in-flight commit of its own
             prior: None,
-            // the ring is runtime-only: a restored node re-fills it as
-            // epochs advance, and past-epoch catch-up falls back to the
-            // ACK/rewind layer until then
-            exporter_ring: Vec::new(),
+            // v2 blobs carry the ring; a v1 blob restored it empty above
+            exporter_ring: snap.exporter_ring,
         })
     }
 }
@@ -818,6 +849,66 @@ mod tests {
             }
             other => panic!("expected an application message, got {other:?}"),
         }
+    }
+
+    /// N4 §6.1 (the N3 §5.5 debt): the exporter ring survives the
+    /// snapshot/restore cycle. Without this, a restarted node cannot strip
+    /// the outer layer of any 445 sealed under a recent prior epoch and the
+    /// catch-up silently degrades to the ACK/rewind layer.
+    #[test]
+    fn the_exporter_ring_survives_snapshot_and_restore() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        assert!(
+            !founder.exporter_ring().is_empty(),
+            "the add_members epoch change must have retired a secret into the ring"
+        );
+        let ring_before = founder.exporter_ring().to_vec();
+
+        let blob = founder.snapshot().expect("snapshot");
+        let restored = MlsMember::restore(&blob).expect("restore");
+        assert_eq!(
+            restored.exporter_ring(),
+            ring_before.as_slice(),
+            "the ring must round-trip through the snapshot"
+        );
+    }
+
+    /// A pre-N4 (version-1) snapshot blob still restores — with an empty
+    /// ring, exactly the old behavior. The version byte is the first byte of
+    /// the blob; nothing else about the v1 layout is reinterpreted.
+    #[test]
+    fn a_legacy_v1_snapshot_blob_still_restores_with_an_empty_ring() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+
+        let v2_blob = founder.snapshot().expect("snapshot");
+        let snap: MlsSnapshot = bincode::deserialize(&v2_blob).expect("decode own snapshot");
+        let v1_blob = bincode::serialize(&MlsSnapshotV1 {
+            version: 1,
+            name: snap.name,
+            signer_pub: snap.signer_pub,
+            group_id: snap.group_id,
+            storage: snap.storage,
+        })
+        .expect("encode v1 twin");
+
+        let restored = MlsMember::restore(&v1_blob).expect("a v1 blob must restore");
+        assert!(
+            restored.exporter_ring().is_empty(),
+            "a legacy blob carries no ring — it re-fills as epochs advance"
+        );
+        assert_eq!(restored.name(), "founder");
     }
 
     /// Delivery guarantee §4.6 (V5): a receiver must survive a FORWARD jump

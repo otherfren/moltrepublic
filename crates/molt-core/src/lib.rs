@@ -1346,8 +1346,23 @@ impl Default for WorkspacePrefs {
 /// Format marker of `transport.state` (the node-local encrypted transport
 /// bookkeeping file — concept-transport-simplex-tor.md §6). v2 added the
 /// `identity_sk` field (additive; a v1 file loads with it defaulting to
-/// `None`); v3 added `nostr_sk` the same way.
-pub const TRANSPORT_STATE_VERSION: u32 = 3;
+/// `None`); v3 added `nostr_sk` the same way; v4 added the Nostr transport
+/// shape (`kind`, `relays`, `rotation_seed`, `relay_cursors` — all additive,
+/// `nostr_transport_marmot.md` §4.1/N4).
+pub const TRANSPORT_STATE_VERSION: u32 = 4;
+
+/// Which transport family a workspace's `transport.state` describes. Absent
+/// (`None`) on every pre-N4 file — those are queue-shaped (the loopback test
+/// transport today; SMP historically) and keep being classified by their
+/// field shape. The discriminator exists so the resume/offline gates read
+/// KIND, not shape (`nostr_n05_engine_inventory.md` §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportKind {
+    /// A Nostr-relay workspace (N4+): group traffic as kind-445 events over
+    /// the workspace relay list; no queues, no per-pair mesh.
+    Nostr,
+}
 
 /// The outbound half of one delivery cursor: how far this node's log has
 /// been fanned out to one peer.
@@ -1613,6 +1628,27 @@ pub struct TransportState {
     /// everything arriving is fresh, exactly as before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub accepted: BTreeMap<MemberId, AcceptedWindow>,
+    /// The transport family (v4). `None` = a pre-N4 queue-shaped file; the
+    /// resume gates fall back to shape-classification exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TransportKind>,
+    /// The workspace's group relay list (normalized `ws://`/`wss://` URLs) —
+    /// what the group agreed to publish/subscribe on, recorded at
+    /// founding/join and (from N6) changed only by a `TransportPolicy` chain
+    /// block. Dialing still passes the operator's ADR-0004 pool gates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
+    /// The group's stable h-tag seed (32 bytes, `envelope::h_tag`), minted at
+    /// founding and delivered only inside the authenticated Welcome. Secret —
+    /// an observer holding it can compute every past and future window tag of
+    /// the group; lives only inside the already-encrypted `transport.state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_seed: Option<Vec<u8>>,
+    /// Per relay URL: the subscription cursor (`created_at` floor) the N5
+    /// runtime resumes from (`RelayRuntime::cursors()` shape). Strictly an
+    /// optimization — correctness rests on the ACK/rewind layer (§4.3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_cursors: BTreeMap<String, u64>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
@@ -4474,6 +4510,65 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- TransportState v4 (N4: the Nostr transport shape) ----------------
+
+    /// A v3-era `transport.state` (no `kind`, no relay fields) must load with
+    /// every N4 field at its default — the additive-evolution rule that lets
+    /// every pre-N4 workspace open unchanged.
+    #[test]
+    fn a_v3_transport_state_loads_with_the_n4_fields_defaulted() {
+        let v3 = serde_json::json!({
+            "version": 3,
+            "outbound": {},
+            "inbound": {},
+            "mls": null,
+            "mesh": [],
+            "smp_queues": null,
+            "identity_sk": [1, 2, 3],
+            "nostr_sk": null
+        });
+        let st: TransportState = serde_json::from_value(v3).expect("v3 state loads");
+        assert_eq!(st.kind, None, "no discriminator on a legacy file");
+        assert!(st.relays.is_empty());
+        assert_eq!(st.rotation_seed, None);
+        assert!(st.relay_cursors.is_empty());
+        assert_eq!(st.identity_sk, Some(vec![1, 2, 3]));
+    }
+
+    /// The v4 fields round-trip, and a default (legacy-shaped) state
+    /// serializes WITHOUT the new keys — old-shaped output stays old-shaped.
+    #[test]
+    fn transport_state_v4_round_trips_and_defaults_stay_invisible() {
+        let mut st = TransportState {
+            version: TRANSPORT_STATE_VERSION,
+            kind: Some(TransportKind::Nostr),
+            relays: vec!["wss://relay.example".to_string()],
+            rotation_seed: Some(vec![7u8; 32]),
+            ..TransportState::default()
+        };
+        st.relay_cursors.insert("wss://relay.example".to_string(), 1_753_900_000);
+        let json = serde_json::to_value(&st).expect("encode");
+        let back: TransportState = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, st, "v4 fields survive the round trip");
+
+        let legacy = serde_json::to_value(TransportState::default()).expect("encode default");
+        let obj = legacy.as_object().expect("object");
+        for key in ["kind", "relays", "rotation_seed", "relay_cursors"] {
+            assert!(
+                !obj.contains_key(key),
+                "default state must not serialize `{key}` — legacy shape preserved"
+            );
+        }
+    }
+
+    /// Version 4 is the current marker (v4 added `kind`/`relays`/
+    /// `rotation_seed`/`relay_cursors`); the storage read gate accepts
+    /// `<=` current, so this pin catches an unbumped field addition.
+    #[test]
+    fn transport_state_version_is_4() {
+        assert_eq!(TRANSPORT_STATE_VERSION, 4);
+    }
 
     // ---- Tor connectivity test (the honest ladder) ------------------------
 

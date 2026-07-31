@@ -804,7 +804,12 @@ impl State {
         // setting sets the health pill Down and skips the real mesh rather
         // than resuming over an unintended clearnet path.
         let dialer = self.resolve_dialer().ok();
+        // N4 §7.5: the discriminator is read FIRST — a Nostr workspace is
+        // never pushed through the queue-shaped resume (its state carries no
+        // queue creds or mesh links by design, not by damage).
+        let nostr_kind = transport_state.kind == Some(molt_core::TransportKind::Nostr);
         let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
+            _ if nostr_kind => None,
             (Some(mls), Some(creds), Some(_dialer)) if !transport_state.mesh.is_empty() => {
                 let transport = self.reopen_seam.clone().inspect(|seam| {
                     molt_net::Transport::import_creds(seam, creds);
@@ -828,6 +833,20 @@ impl State {
         // reason from resolve_dialer (the workspace is not detached —
         // fixing the setting + reopening resumes).
         let offline = if resumed_real || !self.persist || dialer.is_none() {
+            None
+        } else if nostr_kind {
+            // A Nostr workspace's founding/join completed and its state is
+            // whole — what is missing is the live relay runtime, which this
+            // build does not carry yet. Honest Down, but NOT "detached":
+            // "detached" means broken/absent transport evidence and its GUI
+            // copy recommends a recovery rejoin, which would be wrong advice
+            // here. Local reads/writes work; the outbox log holds traffic
+            // until the runtime exists.
+            self.session.net_health = molt_core::NetHealth::Down {
+                reason: "the Nostr relay runtime is not built yet — it lands with N5; \
+                         local reads/writes work and queued traffic delivers once it does"
+                    .to_string(),
+            };
             None
         } else if transport_state.mls.is_some()
             || transport_state.smp_queues.is_some()

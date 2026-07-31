@@ -417,3 +417,72 @@ async fn open_with_mls_but_no_creds_is_honestly_offline() {
         "offline-first local chat: {chat:?}"
     );
 }
+
+/// (4, N4 §7.5) A **Nostr** workspace (`transport.state.kind = Nostr`) is a
+/// different honest state than "detached": its founding worked, its group
+/// state is real, only the live relay runtime does not exist yet (N5). The
+/// open must NOT classify it by the queue-shaped triple (no creds, no mesh —
+/// which reads as "detached" for legacy files); it reports Down naming the
+/// missing runtime, keeps the notice clear of "detached", and local
+/// (offline-first) writes keep working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nostr_workspace_opens_honestly_pending_its_runtime() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("node-n");
+    let seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("gen"))
+        .expect("entropy");
+    let ws = molt_storage::create_workspace(&root, &seed, &genesis("ben")).expect("create");
+    let id = ws.manifest.workspace.id.clone();
+    // what an N4a founding/join leaves behind: kind + group state + relay
+    // material, NO queue creds, NO mesh links
+    ws.write_transport_state(&molt_core::TransportState {
+        kind: Some(molt_core::TransportKind::Nostr),
+        mls: Some(b"opaque-mls-snapshot".to_vec()),
+        relays: vec!["wss://relay.example".to_string()],
+        rotation_seed: Some(vec![9u8; 32]),
+        identity_sk: Some(vec![1u8; 32]),
+        nostr_sk: Some(vec![2u8; 32]),
+        ..molt_core::TransportState::default()
+    })
+    .expect("write transport.state");
+    drop(ws); // release the LOCK
+
+    let session = SessionView {
+        workspaces: molt_storage::scan_workspaces(&root)
+            .iter()
+            .map(molt_storage::ScanEntry::info)
+            .collect(),
+        settings: SessionSettings {
+            workspace_dir: root.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    let w = molt_engine::spawn_with_storage(molt_core::GroupConfig::demo(), session);
+    w.execute(Command::OpenWorkspace { id }).await.expect("open");
+
+    let sv = read_session(&w).await;
+    assert!(
+        matches!(&sv.net_health, NetHealth::Down { reason } if reason.contains("N5")),
+        "a Nostr workspace pends on its N5 runtime — Down must name it, got {:?}",
+        sv.net_health
+    );
+    assert_ne!(
+        sv.notice, "detached",
+        "a Nostr workspace is not detached — its state is complete, the runtime is pending"
+    );
+
+    // offline-first: the local log still accepts writes
+    w.execute(Command::Chat {
+        body: "queued for the N5 runtime".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("local chat appends");
+    let chat = read_chat(&w).await;
+    assert!(
+        chat.iter().any(|m| m["body"] == serde_json::json!("queued for the N5 runtime")),
+        "offline-first local chat: {chat:?}"
+    );
+}
