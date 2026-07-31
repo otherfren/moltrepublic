@@ -253,6 +253,7 @@ pub async fn bootstrap_over_mls<T: Transport>(
                     let kind = match other {
                         MlsIncoming::Application { .. } => "application",
                         MlsIncoming::Commit => "commit",
+                        MlsIncoming::CommitSuperseded => "superseded-commit",
                         MlsIncoming::Proposal => "proposal",
                         MlsIncoming::FutureEpoch => "future-epoch",
                     };

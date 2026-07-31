@@ -179,6 +179,11 @@ impl MlsChannel {
             }
             // its commit is still in flight — hold the SAME bytes and retry
             Ok(MlsIncoming::FutureEpoch) => MlsDecode::FutureEpoch,
+            // a concurrent same-epoch commit that LOST the tiebreak: our own
+            // commit stands and the sender rewinds to it, so nothing changed
+            // here — but the epoch did not advance either, so this is not an
+            // EpochAdvanced (N3 §1).
+            Ok(MlsIncoming::CommitSuperseded) => MlsDecode::Discard,
             // proposals / replays / past-window / garbage: redelivery cannot help
             Ok(MlsIncoming::Proposal) | Err(_) => MlsDecode::Discard,
         }

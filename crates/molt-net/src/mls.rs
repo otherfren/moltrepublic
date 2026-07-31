@@ -110,6 +110,11 @@ pub enum MlsIncoming {
     /// The MLS-core milestone has no post-founding commits, but decrypt stays
     /// robust so a future recovery rejoin cannot wedge the receiver.
     Commit,
+    /// A same-epoch commit that LOST the deterministic tiebreak
+    /// ([`CommitKey`]): our own commit stands, this one is superseded. The
+    /// sender will rewind to ours; its proposals are re-decided at the new
+    /// epoch by the chain layer, never replayed.
+    CommitSuperseded,
     /// A bare proposal was stored, awaiting its commit.
     Proposal,
     /// The message claims an epoch **ahead** of this group's — its re-key
@@ -121,6 +126,33 @@ pub enum MlsIncoming {
     FutureEpoch,
 }
 
+/// The deterministic total order over commits of the SAME epoch
+/// (`docs/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
+/// Every node computes it identically from the commit's own bytes and the
+/// timestamp its sender stamped, so all of them pick the same winner without
+/// talking: **lowest key wins**.
+///
+/// Timestamp first (concept §1: "lowest `created_at`, then lowest event id"),
+/// the digest LAST — a digest-first order would be grindable, since a
+/// committer can cheaply search for bytes that hash low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CommitKey {
+    /// The sender's `created_at` (seconds) — the carrier event's timestamp.
+    pub created_at: u64,
+    /// SHA-256 of the commit bytes: the tiebreak that no clock can forge and
+    /// that every node derives from the same bytes.
+    pub digest: [u8; 32],
+}
+
+impl CommitKey {
+    /// The key of `commit_bytes` stamped at `created_at`.
+    pub fn new(created_at: u64, commit_bytes: &[u8]) -> CommitKey {
+        use sha2::Digest as _;
+        let digest: [u8; 32] = sha2::Sha256::digest(commit_bytes).into();
+        CommitKey { created_at, digest }
+    }
+}
+
 /// One node's live MLS membership: the provider (holding all secret state), the
 /// signer built from the node's identity key, the node's own handle, and — once
 /// created or joined — the group.
@@ -128,6 +160,13 @@ pub struct MlsMember {
     provider: OpenMlsRustCrypto,
     signer: SignatureKeyPair,
     name: String,
+    /// The PRIOR-STATE SLOT (N3 §1): the snapshot taken immediately before
+    /// merging our OWN commit, the epoch it was built on, and that commit's
+    /// [`CommitKey`]. It lets us REWIND when a concurrent same-epoch commit
+    /// wins the tiebreak — without it, a losing committer would sit in a
+    /// state nobody else shares (a silent permanent fork). Cleared as soon
+    /// as the epoch moves on.
+    prior: Option<(u64, Vec<u8>, CommitKey)>,
     group: Option<MlsGroup>,
 }
 
@@ -167,6 +206,7 @@ impl MlsMember {
             signer,
             name: name.to_string(),
             group: None,
+            prior: None,
         })
     }
 
@@ -262,6 +302,22 @@ impl MlsMember {
         member: &str,
         new_key_package: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.restore_member_at(member, new_key_package, now)
+    }
+
+    /// [`restore_member`](MlsMember::restore_member) with an explicit
+    /// `created_at` — the stamp that enters this commit's [`CommitKey`]. The
+    /// caller passes the timestamp its carrier event will carry, so the
+    /// tiebreak every OTHER node computes matches ours exactly.
+    pub fn restore_member_at(
+        &mut self,
+        member: &str,
+        new_key_package: &[u8],
+        created_at: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
         let kp_in = KeyPackageIn::tls_deserialize_exact(new_key_package)
             .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
         let validated = kp_in
@@ -295,12 +351,17 @@ impl MlsMember {
             .stage_commit(&self.provider)
             .map_err(|e| MlsError::Mls(format!("staging restore commit: {e:?}")))?;
         let (commit, welcome, _group_info) = bundle.into_messages();
-        group
-            .merge_pending_commit(&self.provider)
-            .map_err(|e| MlsError::Mls(format!("merging restore commit: {e:?}")))?;
         let commit_bytes = commit
             .to_bytes()
             .map_err(|e| MlsError::Wire(format!("serializing restore commit: {e}")))?;
+        // PRIOR-STATE SLOT before we merge our own commit: a concurrent
+        // same-epoch commit may win the tiebreak, and then we must rewind to
+        // exactly this state instead of forking the group (N3 §1)
+        self.arm_prior_slot(created_at, &commit_bytes)?;
+        let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| MlsError::Mls(format!("merging restore commit: {e:?}")))?;
         let welcome_bytes = welcome
             .ok_or_else(|| MlsError::Mls("restore produced no welcome".into()))?
             .to_bytes()
@@ -359,6 +420,17 @@ impl MlsMember {
     /// reaches the engine (write-ahead, concept §6). Untrusted input: parse and
     /// verification failures are `Err`, never panics.
     pub fn decrypt(&mut self, wire: &[u8]) -> Result<MlsIncoming, MlsError> {
+        self.decrypt_at(wire, 0)
+    }
+
+    /// [`decrypt`](MlsMember::decrypt) with the carrier event's `created_at`.
+    ///
+    /// **Use this for anything that may carry a commit.** The timestamp is
+    /// half of the [`CommitKey`] that breaks a concurrent same-epoch commit
+    /// race, and it must be the value EVERY node sees — the wire timestamp,
+    /// never a local clock read, or two nodes could pick different winners
+    /// and fork exactly where this mechanism exists to converge (N3 §1).
+    pub fn decrypt_at(&mut self, wire: &[u8], created_at: u64) -> Result<MlsIncoming, MlsError> {
         let msg = MlsMessageIn::tls_deserialize_exact(wire)
             .map_err(|e| MlsError::Wire(format!("parsing message: {e}")))?;
         let protocol: ProtocolMessage = match msg.extract() {
@@ -375,6 +447,29 @@ impl MlsMember {
         if protocol.epoch().as_u64() > group.epoch().as_u64() {
             return Ok(MlsIncoming::FutureEpoch);
         }
+        // CONCURRENT COMMIT (N3 §1): a message built on the epoch our OWN
+        // in-flight commit was built on. Both commits are valid, both nodes
+        // merged their own — without a shared rule they now hold different
+        // key schedules under the same epoch number, forever and silently.
+        // The rule: lowest CommitKey wins. We either keep ours (the other
+        // side rewinds to it) or rewind to the state our commit was built on
+        // and apply theirs.
+        // …and ONLY for a commit: an application message of the prior epoch
+        // is a forward-secrecy question, not a race. Treating one as a
+        // commit would rewind the group into a state that can still read
+        // old traffic — the exact hole `max_past_epochs = 0` exists to
+        // close. The content type rides in the cleartext framing header.
+        if let Some((prior_epoch, _, own_key)) = &self.prior {
+            if protocol.epoch().as_u64() == *prior_epoch
+                && protocol.content_type() == openmls::framing::ContentType::Commit
+            {
+                let foreign = CommitKey::new(created_at, wire);
+                if *own_key <= foreign {
+                    return Ok(MlsIncoming::CommitSuperseded);
+                }
+                return self.rewind_and_apply(wire);
+            }
+        }
         let processed = group
             .process_message(&self.provider, protocol)
             .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
@@ -388,6 +483,7 @@ impl MlsMember {
                 group
                     .merge_staged_commit(&self.provider, *staged)
                     .map_err(|e| MlsError::Mls(format!("merging commit: {e:?}")))?;
+                self.prior = None; // the epoch moved on; nothing to rewind to
                 Ok(MlsIncoming::Commit)
             }
             ProcessedMessageContent::ProposalMessage(p) => {
@@ -398,6 +494,56 @@ impl MlsMember {
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(MlsIncoming::Proposal),
         }
+    }
+
+    /// Snapshot the CURRENT (pre-merge) state into the prior slot, so a
+    /// losing concurrent commit can be rewound (N3 §1).
+    fn arm_prior_slot(&mut self, created_at: u64, commit_bytes: &[u8]) -> Result<(), MlsError> {
+        let epoch = self.epoch();
+        let snapshot = self.snapshot()?;
+        self.prior = Some((epoch, snapshot, CommitKey::new(created_at, commit_bytes)));
+        Ok(())
+    }
+
+    /// Rewind to the prior slot and apply the WINNING foreign commit instead
+    /// of our own. The snapshot is the exact state our commit was built on,
+    /// so processing the winner there is what every node that never saw our
+    /// commit does.
+    fn rewind_and_apply(&mut self, winner: &[u8]) -> Result<MlsIncoming, MlsError> {
+        let Some((_, snapshot, _)) = self.prior.clone() else {
+            return Err(MlsError::NoGroup);
+        };
+        // TRANSACTIONAL: the "winner" is unauthenticated until it processes
+        // (the content type is cleartext framing, so anything can claim to
+        // be a commit). Keep the current state; only commit to the rewind
+        // once the winner really applies, otherwise a forged frame could
+        // roll a node back at will.
+        let current = self.snapshot()?;
+        let armed = self.prior.take(); // DISARM first: the winner re-enters
+                                       // decrypt, and a still-armed slot
+                                       // would send it straight back here
+        let rewound = MlsMember::restore(&snapshot)?;
+        self.provider_swap(rewound);
+        match self.decrypt_at(winner, 0) {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                // the "winner" did not apply after all — undo the rewind and
+                // re-arm, so a forged frame cannot roll this node back
+                let back = MlsMember::restore(&current)?;
+                self.provider_swap(back);
+                self.prior = armed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Adopt another member value's secret state (provider + signer + group)
+    /// into `self`, keeping the handle. The one place group state is
+    /// replaced wholesale — used by the rewind path only.
+    fn provider_swap(&mut self, other: MlsMember) {
+        self.provider = other.provider;
+        self.signer = other.signer;
+        self.group = other.group;
     }
 
     /// This node's own handle.
@@ -475,6 +621,8 @@ impl MlsMember {
             signer,
             name: snap.name,
             group: Some(group),
+            // a restored snapshot has no in-flight commit of its own
+            prior: None,
         })
     }
 }
@@ -917,6 +1065,123 @@ mod tests {
 
     /// A garbage KeyPackage (well-formed bytes, but not an MLS KeyPackage) is
     /// rejected before it touches the group — the founder cannot be tricked into
+    /// KEYSTONE (N3 §1, `mdk_evaluation.md` §2.4) — CONCURRENT COMMITS MUST
+    /// NOT FORK THE GROUP. Two members that each commit at the SAME epoch
+    /// without having seen the other (two recoveries running at once) end up
+    /// in different key schedules; if each merely merges its own and drops
+    /// the other's, the two states diverge **permanently and silently** —
+    /// same epoch number, different secrets, no error anywhere. Both nodes
+    /// must converge on the SAME commit and still be able to talk.
+    #[test]
+    fn concurrent_same_epoch_commits_converge_instead_of_forking() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(3), "bob").expect("bob");
+        let carol = MlsMember::new(&key(4), "carol").expect("carol");
+        let dave = MlsMember::new(&key(5), "dave").expect("dave");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                bob.key_package().expect("kp"),
+                carol.key_package().expect("kp"),
+                dave.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        alice.join_from_welcome(&welcome).expect("alice joins");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        // carol and dave return on fresh devices at the same time: alice
+        // coordinates carol's re-key, bob coordinates dave's — neither has
+        // seen the other's commit, so both are built on the SAME epoch
+        let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
+        let dave_again = MlsMember::new(&key(5), "dave").expect("dave again");
+        let epoch_before = alice.epoch();
+        assert_eq!(bob.epoch(), epoch_before, "both start from the same epoch");
+        // the stamps are the CARRIER EVENTS' created_at — the same values
+        // every node sees, which is what makes the tiebreak agree everywhere
+        let (stamp_a, stamp_b) = (1_760_000_000, 1_760_000_001);
+        let (commit_a, _w) = alice
+            .restore_member_at("carol", &carol_again.key_package().expect("kp"), stamp_a)
+            .expect("alice commits carol's re-key");
+        let (commit_b, _w) = bob
+            .restore_member_at("dave", &dave_again.key_package().expect("kp"), stamp_b)
+            .expect("bob commits dave's re-key");
+
+        // …and the commits cross on the wire
+        let to_alice = alice
+            .decrypt_at(&commit_b, stamp_b)
+            .expect("alice takes bob's commit");
+        let to_bob = bob
+            .decrypt_at(&commit_a, stamp_a)
+            .expect("bob takes alice's commit");
+        // alice's stamp is lower, so HER commit is the winner everywhere
+        assert!(
+            matches!(to_alice, MlsIncoming::CommitSuperseded),
+            "alice keeps her own winning commit: {to_alice:?}"
+        );
+        assert!(
+            matches!(to_bob, MlsIncoming::Commit),
+            "bob rewinds and applies alice's: {to_bob:?}"
+        );
+        assert!(
+            matches!(to_alice, MlsIncoming::Commit | MlsIncoming::CommitSuperseded),
+            "a same-epoch commit is a known outcome, not an error: {to_alice:?}"
+        );
+        assert!(matches!(to_bob, MlsIncoming::Commit | MlsIncoming::CommitSuperseded));
+
+        assert_eq!(alice.epoch(), bob.epoch(), "the epochs must not diverge");
+        // the real divergence detector: same epoch NUMBER means nothing if
+        // the key schedules differ — a message must still cross
+        let wire = alice.encrypt(b"are we still one group?").expect("alice encrypts");
+        match bob.decrypt(&wire).expect("bob decrypts") {
+            MlsIncoming::Application { from, plaintext } => {
+                assert_eq!(from, "alice");
+                assert_eq!(plaintext, b"are we still one group?");
+            }
+            other => panic!("the group forked — bob cannot read alice: {other:?}"),
+        }
+    }
+
+    /// The rewind is TRANSACTIONAL and the tiebreak is commit-only. The
+    /// content type rides in cleartext framing, so anything can CLAIM to be
+    /// a same-epoch commit; if such a frame could roll a node back, an
+    /// attacker would hold a state-reset button (and a rewound node can read
+    /// traffic its own commit had already sealed off). Garbage that claims
+    /// the race must leave the state exactly as it was.
+    #[test]
+    fn a_forged_same_epoch_commit_cannot_roll_the_state_back() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let carol = MlsMember::new(&key(4), "carol").expect("carol");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                carol.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        alice.join_from_welcome(&welcome).expect("alice joins");
+
+        let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
+        let (_commit, _w) = alice
+            .restore_member_at("carol", &carol_again.key_package().expect("kp"), 5_000)
+            .expect("alice commits");
+        let after = alice.epoch();
+
+        // a frame stamped BEFORE alice's commit (so it would win the
+        // tiebreak) but which is not a processable commit at all
+        for junk in [vec![0u8; 0], vec![0xde, 0xad, 0xbe, 0xef], vec![0x01; 64]] {
+            let _ = alice.decrypt_at(&junk, 1);
+            assert_eq!(alice.epoch(), after, "the state must not move");
+        }
+        // …and the real race still works afterwards: the slot is re-armed,
+        // so a genuine lower-keyed commit is still honoured
+        assert!(alice.encrypt(b"still me").is_ok(), "the group still works");
+    }
+
     /// building the group around a bogus member — and a real add still works
     /// afterwards (the group state was not left half-mutated).
     #[test]
