@@ -244,3 +244,65 @@ async fn synced_means_every_connected_relay_sent_eose() {
     assert!(sub.recv(RECV_TIMEOUT).await.is_some());
     assert!(sub.recv(Duration::from_millis(300)).await.is_none());
 }
+
+/// Step 6 KEYSTONE — the NIP-11 size budget: an event over the smallest
+/// relay cap is refused LOUDLY before any relay sees it (the oversized-
+/// CheckpointServed case, concept §7 wire-size cliff). The relay must never
+/// receive it — a partial publish that advances some cursor is exactly the
+/// silent divergence the budget exists to prevent.
+#[tokio::test]
+async fn an_oversized_event_is_refused_before_any_relay_sees_it() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+
+    let rt = RelayRuntime::new(dialer, vec![url]).with_size_budget(Some(1024));
+    let big = h_tagged_event(&keys, "6d6f6c74", &"x".repeat(2000));
+    let err = rt.publish(&big).await.expect_err("over budget must refuse");
+    let msg = format!("{err}");
+    assert!(msg.contains("1024"), "the refusal names the cap: {msg}");
+
+    // …and nothing reached the relay
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+    assert!(sub.synced(RECV_TIMEOUT).await);
+    assert!(
+        sub.recv(Duration::from_millis(300)).await.is_none(),
+        "the oversized event must never have been published"
+    );
+}
+
+/// Step 6 — the NIP-11 probe: one HTTP GET (Accept: application/nostr+json)
+/// over the SAME dial path reads the relay's advertised max_message_length.
+#[tokio::test]
+async fn nip11_probe_reads_the_relay_cap() {
+    use molt_net::relay_runtime::probe_nip11_max_message;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 2048];
+        let n = s.read(&mut buf).await.expect("request");
+        let req = String::from_utf8_lossy(&buf[..n]);
+        assert!(req.contains("application/nostr+json"), "NIP-11 Accept header: {req}");
+        let body = r#"{"name":"test","limitation":{"max_message_length":4096}}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(resp.as_bytes()).await.expect("response");
+    });
+
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let cap = probe_nip11_max_message(&dialer, &format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("probe succeeds");
+    assert_eq!(cap, Some(4096));
+}

@@ -56,6 +56,7 @@ hmac.workspace = true
 tokio-socks.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true # Sink/Stream adapters for the WS split (relay_ws)
+httparse.workspace = true # NIP-11 probe: parse the HTTP response head (relay_runtime)
 url.workspace = true # relay URL → host/port/path for the dialer (same parser as molt-core's policy)
 zeroize.workspace = true
 hex.workspace = true

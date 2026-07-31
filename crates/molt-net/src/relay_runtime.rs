@@ -10,7 +10,8 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr::{ClientMessage, Event, EventId, Filter, RelayMessage, SubscriptionId};
+use nostr::{ClientMessage, Event, EventId, Filter, JsonUtil, RelayMessage, SubscriptionId};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::dial::Dialer;
@@ -37,6 +38,15 @@ const CURSOR_SKEW: u64 = 3_600;
 /// timestamp-tweak width — without it, offline gift-wraps are permanently
 /// skipped (MDK port #2, `mdk_evaluation.md` §2.2).
 const CURSOR_OVERLAP: u64 = 172_800;
+
+/// The publish budget applied while no NIP-11 cap is known: the smallest
+/// `max_message_length` measured on public relays (nos.lol, N0 2026-07-30).
+/// Conservative — refuse rather than let one relay accept what another
+/// silently drops (the §7 wire-size cliff).
+const DEFAULT_SIZE_BUDGET: u64 = 128 * 1024;
+
+/// Bound on a NIP-11 response we are willing to read.
+const NIP11_MAX_RESPONSE: usize = 64 * 1024;
 
 /// How one publish went, per relay — ≥1 accepted relay makes the publish a
 /// success, but the failures are always REPORTED, never hidden (concept
@@ -70,6 +80,11 @@ pub struct RelayRuntime {
     /// Per-relay resume cursor: the max CLAMPED `created_at` delivered by
     /// that relay. What a reopen persists and reseeds ([`Self::with_cursors`]).
     cursors: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    /// The pool-wide publish size budget (bytes of the serialized event):
+    /// the SMALLEST configured relay's NIP-11 `max_message_length`, or the
+    /// conservative floor when unknown. `None` = not probed yet — publishes
+    /// then apply [`DEFAULT_SIZE_BUDGET`].
+    size_budget: Option<u64>,
 }
 
 impl RelayRuntime {
@@ -77,7 +92,20 @@ impl RelayRuntime {
     /// (a fresh install) — every operation then fails typed, and connects to
     /// nothing, silently (ADR-0004).
     pub fn new(dialer: Dialer, urls: Vec<String>) -> Self {
-        Self { dialer, urls, cursors: Arc::new(Mutex::new(std::collections::HashMap::new())) }
+        Self {
+            dialer,
+            urls,
+            cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            size_budget: None,
+        }
+    }
+
+    /// Override the publish size budget (tests, or the engine after probing
+    /// every relay's NIP-11 via [`probe_nip11_max_message`] and taking the
+    /// minimum). `None` keeps the conservative [`DEFAULT_SIZE_BUDGET`].
+    #[must_use]
+    pub fn with_size_budget(self, budget: Option<u64>) -> Self {
+        Self { size_budget: budget, ..self }
     }
 
     /// Reseed the per-relay cursors (the reopen path — cursors come from the
@@ -100,6 +128,16 @@ impl RelayRuntime {
             return Err(NetError::Unreachable(
                 "no dialable relay — the pool is empty or gated".into(),
             ));
+        }
+        // the size budget gates BEFORE any relay sees the event: one relay
+        // accepting what another drops is the §7 wire-size cliff (a cursor
+        // advances past an event a smaller relay never stored)
+        let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
+        let size = event.as_json().len() as u64;
+        if size > budget {
+            return Err(NetError::Framing(format!(
+                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
+            )));
         }
         let attempts = self.urls.iter().map(|url| {
             let dialer = self.dialer.clone();
@@ -290,6 +328,81 @@ impl RelayRuntime {
         let connected = readers.len();
         Ok(Subscription { rx, readers, connected, eose: eose_rx })
     }
+}
+
+/// Probe a relay's NIP-11 information document — one HTTP/1.1 GET with the
+/// `application/nostr+json` Accept header over the SAME fail-closed dial
+/// path the WS connection uses (never a second HTTP client stack; the
+/// response head is parsed with `httparse`, already in the tree via
+/// tungstenite). Returns the advertised `max_message_length`; `Ok(None)` =
+/// the relay answered but names no cap. On `Err` the caller keeps the
+/// conservative [`DEFAULT_SIZE_BUDGET`]. `wss://` probes ride the step-8
+/// TLS wiring — until then they fail honestly like the WS side.
+pub async fn probe_nip11_max_message(
+    dialer: &Dialer,
+    ws_url: &str,
+) -> Result<Option<u64>, NetError> {
+    let parsed = url::Url::parse(ws_url)
+        .map_err(|e| NetError::Framing(format!("relay url {ws_url}: {e}")))?;
+    if parsed.scheme() == "wss" {
+        return Err(NetError::Framing(
+            "wss:// NIP-11 probe rides the step-8 TLS wiring".into(),
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no host")))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no port")))?;
+    let mut stream = dialer.dial_host(&host, port).await?;
+    let request = format!(
+        "GET / HTTP/1.1\r\nhost: {host}\r\naccept: application/nostr+json\r\nconnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| NetError::Unreachable(format!("nip11 {ws_url}: {e}")))?;
+    // read to EOF, bounded
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let n = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
+            .await
+            .map_err(|_| NetError::Unreachable(format!("nip11 {ws_url}: timed out")))?
+            .map_err(|e| NetError::Unreachable(format!("nip11 {ws_url}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() > NIP11_MAX_RESPONSE {
+            return Err(NetError::Framing(format!("nip11 {ws_url}: response too large")));
+        }
+    }
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut response = httparse::Response::new(&mut headers);
+    let body_start = match response
+        .parse(&raw)
+        .map_err(|e| NetError::Framing(format!("nip11 {ws_url}: bad http: {e}")))?
+    {
+        httparse::Status::Complete(n) => n,
+        httparse::Status::Partial => {
+            return Err(NetError::Framing(format!("nip11 {ws_url}: truncated response")))
+        }
+    };
+    if response.code != Some(200) {
+        return Err(NetError::Unreachable(format!(
+            "nip11 {ws_url}: http {:?}",
+            response.code
+        )));
+    }
+    let doc: serde_json::Value = serde_json::from_slice(&raw[body_start..])
+        .map_err(|e| NetError::Framing(format!("nip11 {ws_url}: bad json: {e}")))?;
+    Ok(doc
+        .pointer("/limitation/max_message_length")
+        .and_then(serde_json::Value::as_u64))
 }
 
 /// One relay, one publish: connect, EVENT, await the OK for THIS event id.
