@@ -1,0 +1,187 @@
+# N4a review follow-ups — the fix plan
+
+Status: **IN PROGRESS.** Two independent adversarial review passes ran over
+the N4a change-set on 2026-08-01 (round 1: six code-dimension lenses +
+per-finding refutation; round 2: inert-keystone hunt, loopback differential,
+malicious-relay model, regression sweep + a 3-lens judge panel). 25 + 16 raw
+findings, **21 + 14 survived** refutation, with heavy overlap.
+
+This document is the execution plan for the survivors, clustered by root
+cause — several findings are the same defect seen from different angles, and
+fixing the cause once closes all of them. Work top-down: the order is by
+"what breaks the product or its security", not by reported severity.
+
+**Method note worth keeping:** both rounds found the CRITICAL independently
+(2 lenses in round 1, 3/3 judges in round 2). Round 2's framing — "what did
+the loopback path guarantee that the Nostr fork silently dropped?" — is what
+made the mechanism obvious, and is the question to ask on every future
+transport fork.
+
+---
+
+## A. 445 sender binding — CRITICAL — ✅ DONE (`63555dc`)
+
+The defect: on loopback, `Seal`/`Genesis` arrived on the member's own reply
+queue under a key only the founder held — **the channel was the proposer
+authentication**, so no code ever checked it. The shared kind-445 channel has
+no such property, and `open_group_frame` discarded the MLS-authenticated
+author, so any welcomed seat could impersonate the founder (hijack a peer
+into an attacker-governed 1-of-2 republic) or kill any peer's join with one
+garbage frame.
+
+Fixed: `open_group_frame` returns the author; `check_proposal_provenance` is
+three-valued (`FromFounder` / `NotTheFounder` = ignore, never fatal /
+`Refused` = the founder itself is inconsistent) and additionally binds the
+link's promise (founder seated with the link's npub, m/n as advertised).
+Declines and seal signatures are author-bound too.
+
+Closes: R1 CRITICAL ×2, R1 MEDIUM (Declined ×2, forged-Genesis strand, m/n
+vs link), R2 CRITICAL, R2 MEDIUM (Declined seat).
+
+## B. The joiner's relay gate — HIGH — ✅ DONE (`9fe600f`), one gap OPEN
+
+The gate demanded EVERY relay in the invite be locally dialable, so any node
+whose pool merely *overlapped* the founder's was refused. Fixed: the join
+runs over the intersection, refused only when empty.
+
+**OPEN — the operator-visible gap (reported from real use, config2 vs
+config3):** a relay hand-written into `config.toml` as `confirmed = true`
+but WITHOUT `clearnet_enabled = true` is silently undialable, and the
+refusal ("no relay in common … this node can dial [...]") does not say why
+the relay the operator can see in their pool is missing from that list.
+
+Fix (do this FIRST — it blocks real use): make the refusal diagnose each
+invite relay individually against the pool:
+- not in the pool → "add and confirm it"
+- in the pool, unconfirmed → "confirm it"
+- confirmed, non-onion, but non-onion dialing is off → "clearnet/local
+  dialing is off — enable it in Settings, or set `[transport.nostr]
+  clearnet_enabled = true`"
+A generic "no relay in common" is only correct when none of the three
+applies. Keystone per branch, driven through `Command::JoinStart`.
+
+**Decide while there:** should a hand-written `confirmed = true` on a
+non-onion relay imply the clearnet decision? ADR-0004 already treats the file
+as the operator's own authority (a hand-confirmed ONION relay dials
+automatically). Leaning no — a file edit should not silently grant non-onion
+dialing — but then the message above is load-bearing and must ship with it.
+
+## C. The inert publish-failure seam — HIGH ×3 + MEDIUM ×3
+
+`spawn_publish_frame_with`'s `fail` argument is **never once passed
+`Some(...)`** — the reporting path I wrote is dead code. A failed `Seal`
+publish therefore hangs BOTH sides forever: the founder shows "charter
+proposed", every member waits for a frame that was never accepted, and the
+`NetRitualFailed` sink that exists for exactly this is never reached. This is
+the project's signature failure mode (a seam that exists but is not wired),
+committed by me in the same change-set that documents the lesson.
+
+Related, same cluster:
+- `RitualNet::send_ritual` / `send_welcome` / `publish_frame` discard
+  `PublishReport`, so landing on 1 of N relays is indistinguishable from full
+  delivery — the per-relay outcomes N2 built are thrown away.
+- The Genesis 445 is a single fire-and-forget publish with no ack and an
+  unbounded member wait: one dropped frame strands every member while the
+  founder has already materialized (the "the member's own wait surfaces it"
+  claim in the N4a plan §8b is **false** — there is no such wait).
+
+Fix: pass the failure sink for every pre-seal leg (Seal, Welcome fan-out);
+surface partial-relay landings (at minimum log the report, and treat "landed
+on fewer relays than configured" as a warning the founding log shows); give
+the Genesis leg a real story — either an ack round or an explicit,
+surfaced-to-the-user retry, decided deliberately rather than by omission.
+Keystone: a founding whose Seal publish fails must reach `NetRitualFailed`,
+not hang.
+
+## D. Join-task lifecycle — HIGH + MEDIUM ×2
+
+`cmd_create_start` (and `cmd_recover_start`) do not invalidate an in-flight
+Nostr member-join task: `join_generation` is untouched and the task is not
+aborted, so a late `NetJoinSealed` from the abandoned join can land while the
+user is founding — hijacking the session into a workspace they did not create.
+`cmd_join_start` and `cmd_join_cancel` already do this correctly; the founding
+and recovery entry points were missed.
+
+Fix: bump `join_generation` and abort `join_task` in both, exactly as
+`cmd_join_cancel` does. Keystone: start a join, start a founding, feed the
+join's late sealed report → it must be dropped.
+
+## E. `GroupSub::recv` failure handling — MEDIUM ×3
+
+On a failed window-roll resubscribe the receiver returns `None` — which every
+caller reads as "idle tick" — so a node goes **permanently deaf** at a UTC
+midnight boundary while looking healthy, and the caller loops without backoff
+(busy-spin).
+
+Fix: distinguish "idle" from "resubscribe failed"; retry with backoff, and
+report loudly (G4) rather than returning a lie. Keystone with injected time
+across a boundary plus a refusing relay.
+
+## F. Honesty gaps — MEDIUM ×3
+
+1. A freshly founded/joined Nostr workspace still reports `NetHealth::Ok` —
+   the honest "no runtime until N5" state is only applied on REOPEN
+   (`session.rs`), not at founding/join time (`lifecycles.rs:1334`). The
+   green pill is a lie for the whole first session.
+2. A founder-side abort (`CreateCancel`) is never told to the group, so
+   members already inside the born MLS group wait forever. This is the same
+   root as my own `F-SELF-1` note (the unbounded post-accept waits): the
+   member has no way to learn a ritual died. Fix both together — publish an
+   abort frame AND make the member's wait legible (elapsed time surfaced, so
+   "still waiting" is distinguishable from "stuck").
+3. A legitimate retry of the same invite link is misdiagnosed as a second
+   activation and permanently refused (`founding.rs:1926`) — the same-member
+   idempotency arm compares `(member, identity_pk)` but a retry after a
+   transport hiccup re-derives the same identity, so this should be the
+   idempotent path, not the `LinkSpent` path. Re-check the comparison.
+
+## G. NIP-42 is inert on ritual subscriptions — MEDIUM ×2
+
+`with_auth_keys` is never called on the ritual runtimes, so an auth-required
+relay silently delivers nothing — the ritual just times out with no
+explanation. Also the subscribe-before-advertise gate ignores `live()`'s
+result, so links are published even when no relay accepted the REQ.
+
+Fix: wire the anchor keys into the ritual runtimes (noting the N2 §3.5
+correlation caveat: NIP-42 with the roster anchor is a correlation handle;
+prefer ephemeral-per-relay when that lands), and treat a failed `live()` as a
+provisioning failure instead of proceeding blind.
+
+## H. Unpinned security checks — the inert-keystone class — HIGH ×2 + MEDIUM ×2
+
+Round 2's most valuable output: checks that EXIST but no test would notice
+losing. Deleting the check leaves the suite green.
+
+- The §2.1 **proof-of-possession** gate on the founder's ingest is pinned by
+  no test. (It has since MOVED to the actor in `63555dc`, which makes it
+  state-level testable — do it.)
+- The **genesis sign-what-you-see byte comparison** is unpinned on the
+  shipping path (the N1 keystone covers the loopback twin only).
+- The joiner's founder-identity guards on the 1059 inbox (`sender == h.npub`)
+  are pinned by no test.
+- The §4.4 **window-roll resubscribe** is pinned by no test — a founding
+  spanning UTC midnight is untested.
+
+Fix: one keystone per item, each driving the PRODUCTION entry point, each
+verified red by deleting the check first. This is the etappe's real coverage
+debt and should not be deferred again.
+
+## I. Leftovers — LOW
+
+- The invite's untrusted-input relay cap (8) is enforced against the
+  FOUNDER's own pool, so an operator with >8 confirmed relays cannot render
+  a link at all (`invite.rs:220`). Cap what goes INTO the link (take the
+  first 8 in priority order) rather than refusing to build it.
+
+---
+
+## Suggested order
+
+1. **B-open** (blocks real use today) — the diagnosing relay message.
+2. **C** (silent hangs + the inert seam I wrote).
+3. **D** (session hijack by a stale join).
+4. **H** (the coverage debt — do it before more behavior lands on top).
+5. **F**, **E**, **G**, **I**.
+
+Each step: red test first over the production path, one commit, green on
+master before the next.
