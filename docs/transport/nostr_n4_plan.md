@@ -4,11 +4,12 @@ Status: **N4a BUILT (2026-07-31), N4b OPEN.** Executes the N4 etappe of
 `nostr_transport_marmot.md` §11 on top of the N2 relay runtime
 (`nostr_n2_plan.md`) and the N3 wire edge (`nostr_n3_plan.md`). Every design
 input is ratified (§4.2, §10.11–10.14, ADR-0004/0005/0006); this is the
-execution map. The one genuinely open product question lives in §8.3 (N4b
-re-anchoring) and is flagged for the user before N4b is built — nothing in
-N4a depends on its answer.
+execution map. §8.3's re-anchor question — the last genuinely open product
+point — was **decided by the user on 2026-07-31**: a recovered seat's new
+working transport key rides the threshold-signed `Restored` chain block.
+Nothing in N4a depended on that answer, and **N4b now has no open question.**
 
-Split: **N4a = founding + join** (this pass), **N4b = recovery** (next pass,
+Split: **N4a = founding + join** (built), **N4b = recovery** (next pass,
 planned in §8). The N0.5 inventory, re-verified against the current tree
 (2026-07-31), is the seam map; stale anchors from that doc are superseded by
 the ones here.
@@ -352,19 +353,40 @@ founded Nostr workspace → honest classification, no supervisor, no crash.
    The seat proof (`molt-seat-proof-v1`) grows the rejoin npub into its
    signed bytes (versioned bump v2) so the coordinator's Welcome cannot be
    redirected — and the wrap-author PoP (§2.1) applies to the rejoin key.
-3. **Re-anchor question (THE open product point — ask before building):**
-   the roster's `nostr_pk` anchor is genesis-signed and immutable, but the
-   recovered device cannot re-derive its secret (ticket died). Recommended:
-   persist the recovery-ticket-salted key as the seat's NEW working
-   transport key (`transport.state.nostr_sk`, `NetRecoverSealed` gains an
-   additive `nostr_sk` field), document that the roster anchor is the
-   FOUNDING anchor (historical identity binding) while the working key may
-   rotate through recoveries. Consequence to state honestly: post-recovery,
-   gift-wraps addressed by roster anchor would miss — every N4/N5 flow that
-   gift-wraps must address the WORKING key learned from live traffic
-   (recovery's own flow already does; founding never re-wraps after
-   genesis). Alternative (rejected unless the user overrides): no re-anchor,
-   recovered seats permanently lose gift-wrap reachability and NIP-42 keys.
+3. **Re-anchor — DECIDED 2026-07-31 (user-ratified): the new working key
+   rides the `Restored` CHAIN BLOCK.** The roster's `nostr_pk` stays the
+   genesis-signed **founding/historical** anchor, immutable forever; the
+   seat's **working transport key** is re-established through the
+   threshold-signed block recovery already produces:
+
+   - The rejoiner derives the new key from the RECOVERY ticket
+     (`nostr_identity(entropy, recovery_ticket)`) and carries its public
+     half in the `RecoverRequest`.
+   - **Seat proof v2** (`molt-seat-proof-v2`) signs
+     `ticket ‖ key_package ‖ republic_id ‖ new_nostr_pk` with the
+     re-derived IDENTITY key — so the new transport anchor is attested by
+     the one key the phrase reconstructs, and a relay-level attacker
+     cannot substitute its own. (Bump the tag; the v1 layout must not
+     verify against a v2 seat — the invite-MAC-v2 precedent.)
+   - `ChainChange::Membership { op: Restored, .. }` gains an **additive**
+     `nostr_pk: Option<String>` (`#[serde(default)]`, canonicalized via
+     `canonical_nostr_pk` at ingest, cross-seat-unique like every other
+     anchor). The coordinator puts the attested key there; survivors
+     threshold-approve the block; **every member learns the new anchor by
+     APPLYING the block** — authenticated, converged, no inference from
+     traffic.
+   - Engine state gains a working-anchor projection (roster anchor unless
+     a later `Restored` block overrode it); every gift-wrap send resolves
+     the recipient through THAT, never the raw roster field. Pin it with a
+     test that a post-recovery gift-wrap addresses the new key.
+
+   Rejected alternatives, recorded: (a) local-only working key with other
+   members inferring it from live traffic — the member→key mapping becomes
+   an implicit rule each node re-derives, and any sender that reaches for
+   the obvious roster anchor silently misses; (b) no re-anchor at all —
+   makes recovery one-shot per seat (no future Welcome, no second
+   recovery, no NIP-42), which contradicts recovery being the answer to a
+   lost device.
 4. **Welcome + chain**: the coordinator's 444 payload v2 carries
    `rotation_seed` + relays + the served chain (`ServedChainWire`), sizes
    checked against the 65408 cap — a big chain doesn't fit a gift wrap;
