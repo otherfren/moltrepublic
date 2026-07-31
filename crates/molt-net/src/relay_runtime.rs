@@ -85,6 +85,22 @@ pub struct RelayRuntime {
     /// conservative floor when unknown. `None` = not probed yet — publishes
     /// then apply [`DEFAULT_SIZE_BUDGET`].
     size_budget: Option<u64>,
+    /// Per-relay connection state, written by the subscription supervisors.
+    health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    /// Reconnect backoff (initial, cap) — overridable for tests.
+    backoff: (Duration, Duration),
+}
+
+/// One relay's connection state as the supervisors see it — the seed of the
+/// N5 `net_health` relay model ("relays, not members").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayHealth {
+    /// Connected, subscription live.
+    Up,
+    /// Between sessions — a (re)connect attempt is running.
+    Connecting,
+    /// The last attempt failed; the supervisor is backing off.
+    Down,
 }
 
 impl RelayRuntime {
@@ -97,7 +113,21 @@ impl RelayRuntime {
             urls,
             cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             size_budget: None,
+            health: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            backoff: (Duration::from_secs(1), Duration::from_secs(60)),
         }
+    }
+
+    /// Override the reconnect backoff (tests use milliseconds).
+    #[must_use]
+    pub fn with_backoff(self, initial: Duration, cap: Duration) -> Self {
+        Self { backoff: (initial, cap), ..self }
+    }
+
+    /// The supervisors' per-relay connection state — the honest input for
+    /// "relay status" surfaces (N5). Empty until a subscription runs.
+    pub async fn health(&self) -> std::collections::HashMap<String, RelayHealth> {
+        self.health.lock().await.clone()
     }
 
     /// Override the publish size budget (tests, or the engine after probing
@@ -240,11 +270,28 @@ impl Drop for Subscription {
     }
 }
 
+/// Everything a per-relay supervisor needs — shared across relays and
+/// reconnect sessions.
+struct SubShared {
+    dialer: Dialer,
+    filter: Filter,
+    tx: mpsc::Sender<Event>,
+    dedup: Arc<Mutex<DedupRing>>,
+    cursors: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    eose_tx: Arc<tokio::sync::watch::Sender<usize>>,
+    health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    backoff: (Duration, Duration),
+}
+
 impl RelayRuntime {
-    /// Subscribe the SAME filter on every reachable relay and fan the
-    /// deliveries into one deduplicated stream. Succeeds if at least one
-    /// relay accepted the REQ; unreachable relays are skipped (step 7 adds
-    /// reconnect/health).
+    /// Subscribe the SAME filter on every relay and fan the deliveries into
+    /// one deduplicated stream. Each relay gets a SUPERVISOR: on session
+    /// loss it goes `Down` in `health()`, reconnects with backoff, and
+    /// RE-SUBSCRIBES from the current cursor (minus the overlap) — the
+    /// dedup ring absorbs the overlap redeliveries. Succeeds if at least
+    /// one relay accepted the initial REQ; a relay that only comes alive
+    /// later is picked up by its supervisor but stays outside the EOSE
+    /// sync-gate denominator.
     pub async fn subscribe(&self, filter: Filter) -> Result<Subscription, NetError> {
         if self.urls.is_empty() {
             return Err(NetError::Unreachable(
@@ -252,81 +299,135 @@ impl RelayRuntime {
             ));
         }
         let (tx, rx) = mpsc::channel(256);
-        let dedup = Arc::new(Mutex::new(DedupRing::new()));
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
-        let eose_tx = Arc::new(eose_tx);
-        let stored = self.cursors.lock().await.clone();
-        let mut readers = Vec::new();
+        let shared = Arc::new(SubShared {
+            dialer: self.dialer.clone(),
+            filter,
+            tx,
+            dedup: Arc::new(Mutex::new(DedupRing::new())),
+            cursors: self.cursors.clone(),
+            eose_tx: Arc::new(eose_tx),
+            health: self.health.clone(),
+            backoff: self.backoff,
+        });
+        let mut supervisors = Vec::new();
+        let mut connected = 0usize;
         for url in &self.urls {
-            let Ok(mut ws) = RelayWs::connect(&self.dialer, url).await else {
-                continue;
-            };
-            // resume from this relay's cursor, widened by the overlap — the
-            // clamp on the WRITE side (below) is what keeps this `since`
-            // honest against future-dated events
-            let mut relay_filter = filter.clone();
-            if let Some(cursor) = stored.get(url) {
-                relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
-                    cursor.saturating_sub(CURSOR_OVERLAP),
-                ));
+            // the FIRST connect runs inline: it decides the EOSE denominator
+            // and gives subscribe() its ≥1-relay success criterion
+            let first = connect_and_req(&shared, url).await.ok();
+            let up = first.is_some();
+            if up {
+                connected += 1;
             }
-            let sub_id = SubscriptionId::generate();
-            if ws
-                .send(ClientMessage::req(sub_id, vec![relay_filter]))
+            shared
+                .health
+                .lock()
                 .await
-                .is_err()
-            {
-                continue;
-            }
-            let tx = tx.clone();
-            let dedup = dedup.clone();
-            let cursors = self.cursors.clone();
-            let eose_tx = eose_tx.clone();
+                .insert(url.clone(), if up { RelayHealth::Up } else { RelayHealth::Down });
+            let shared = shared.clone();
             let url = url.clone();
-            readers.push(tokio::spawn(async move {
-                let mut eose_sent = false;
-                loop {
-                    match ws.recv(SUB_IDLE_TIMEOUT).await {
-                        Ok(RelayMessage::Event { event, .. }) => {
-                            // this relay DELIVERED the event, so its cursor
-                            // advances (duplicates included) — but never past
-                            // local now + skew: a +24h `created_at` must not
-                            // blind the next reopen (concept §4.3)
-                            let clamp = nostr::Timestamp::now().as_secs() + CURSOR_SKEW;
-                            let stamp = event.created_at.as_secs().min(clamp);
-                            {
-                                let mut c = cursors.lock().await;
-                                let entry = c.entry(url.clone()).or_insert(0);
-                                *entry = (*entry).max(stamp);
-                            }
-                            let fresh = dedup.lock().await.fresh(event.id);
-                            if fresh && tx.send(event.into_owned()).await.is_err() {
-                                break; // consumer gone
-                            }
-                        }
-                        Ok(RelayMessage::EndOfStoredEvents(_)) => {
-                            // this relay's stored replay is complete — count
-                            // it exactly once toward the sync gate
-                            if !eose_sent {
-                                eose_sent = true;
-                                eose_tx.send_modify(|n| *n += 1);
-                            }
-                        }
-                        // OK/NOTICE etc. — not subscription traffic
-                        Ok(_) => {}
-                        // closed or idle past the bound — reader ends
-                        Err(_) => break,
-                    }
-                }
-            }));
+            supervisors.push(tokio::spawn(supervise(shared, url, first)));
         }
-        if readers.is_empty() {
+        if connected == 0 {
             return Err(NetError::Unreachable(
                 "no relay accepted the subscription".into(),
             ));
         }
-        let connected = readers.len();
-        Ok(Subscription { rx, readers, connected, eose: eose_rx })
+        Ok(Subscription { rx, readers: supervisors, connected, eose: eose_rx })
+    }
+}
+
+/// Connect one relay and place the REQ, resuming from the CURRENT cursor
+/// widened by the overlap — the write-side clamp keeps that honest against
+/// future-dated events (concept §4.3).
+async fn connect_and_req(shared: &SubShared, url: &str) -> Result<RelayWs, NetError> {
+    let mut ws = RelayWs::connect(&shared.dialer, url).await?;
+    let mut relay_filter = shared.filter.clone();
+    if let Some(cursor) = shared.cursors.lock().await.get(url) {
+        relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
+            cursor.saturating_sub(CURSOR_OVERLAP),
+        ));
+    }
+    ws.send(ClientMessage::req(SubscriptionId::generate(), vec![relay_filter]))
+        .await?;
+    Ok(ws)
+}
+
+/// One relay's supervisor: read the live session until it dies, then
+/// backoff-reconnect-resubscribe forever (the Subscription's drop aborts
+/// us — pure inbound, the sanctioned abort). The EOSE gate is counted at
+/// most ONCE per relay across all sessions, so a reconnect cannot inflate
+/// the denominator's numerator.
+async fn supervise(shared: Arc<SubShared>, url: String, first: Option<RelayWs>) {
+    let (initial, cap) = shared.backoff;
+    let mut backoff = initial;
+    let mut session = first;
+    let mut eose_counted = false;
+    loop {
+        let ws = match session.take() {
+            Some(ws) => ws,
+            None => {
+                shared.health.lock().await.insert(url.clone(), RelayHealth::Connecting);
+                match connect_and_req(&shared, &url).await {
+                    Ok(ws) => ws,
+                    Err(_) => {
+                        shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(cap);
+                        continue;
+                    }
+                }
+            }
+        };
+        shared.health.lock().await.insert(url.clone(), RelayHealth::Up);
+        backoff = initial;
+        if read_session(&shared, &url, ws, &mut eose_counted).await.is_break() {
+            return; // consumer gone — nothing left to supervise
+        }
+        shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(cap);
+    }
+}
+
+/// Drain one live session. `Break` = the consumer dropped the stream (stop
+/// supervising); `Continue` = the SESSION died (reconnect).
+async fn read_session(
+    shared: &SubShared,
+    url: &str,
+    mut ws: RelayWs,
+    eose_counted: &mut bool,
+) -> std::ops::ControlFlow<()> {
+    loop {
+        match ws.recv(SUB_IDLE_TIMEOUT).await {
+            Ok(RelayMessage::Event { event, .. }) => {
+                // this relay DELIVERED the event, so its cursor advances
+                // (duplicates included) — but never past local now + skew:
+                // a +24h `created_at` must not blind the next reopen
+                let clamp = nostr::Timestamp::now().as_secs() + CURSOR_SKEW;
+                let stamp = event.created_at.as_secs().min(clamp);
+                {
+                    let mut c = shared.cursors.lock().await;
+                    let entry = c.entry(url.to_string()).or_insert(0);
+                    *entry = (*entry).max(stamp);
+                }
+                let fresh = shared.dedup.lock().await.fresh(event.id);
+                if fresh && shared.tx.send(event.into_owned()).await.is_err() {
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            Ok(RelayMessage::EndOfStoredEvents(_)) => {
+                if !*eose_counted {
+                    *eose_counted = true;
+                    shared.eose_tx.send_modify(|n| *n += 1);
+                }
+            }
+            // OK/NOTICE etc. — not subscription traffic
+            Ok(_) => {}
+            // closed or idle past the bound — the session is over
+            Err(_) => return std::ops::ControlFlow::Continue(()),
+        }
     }
 }
 

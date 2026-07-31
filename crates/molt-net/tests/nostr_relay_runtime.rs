@@ -306,3 +306,135 @@ async fn nip11_probe_reads_the_relay_cap() {
         .expect("probe succeeds");
     assert_eq!(cap, Some(4096));
 }
+
+/// A cuttable TCP proxy in front of a relay: while enabled it forwards
+/// byte-for-byte; "cut" aborts every live forward and refuses new ones —
+/// the only way to take a MockRelay down and bring "it" back on the SAME
+/// port (the relay itself cannot rebind).
+mod proxy {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+
+    pub struct Cuttable {
+        pub port: u16,
+        enabled: Arc<AtomicBool>,
+        forwards: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl Cuttable {
+        pub async fn run(target: String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+            let port = listener.local_addr().expect("addr").port();
+            let enabled = Arc::new(AtomicBool::new(true));
+            let forwards: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let on = enabled.clone();
+            let fw = forwards.clone();
+            tokio::spawn(async move {
+                while let Ok((mut inbound, _)) = listener.accept().await {
+                    if !on.load(Ordering::SeqCst) {
+                        drop(inbound); // refuse while cut
+                        continue;
+                    }
+                    let target = target.clone();
+                    fw.lock().await.push(tokio::spawn(async move {
+                        if let Ok(mut outbound) = TcpStream::connect(&target).await {
+                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
+                                .await;
+                        }
+                    }));
+                }
+            });
+            Self { port, enabled, forwards }
+        }
+
+        pub async fn cut(&self) {
+            self.enabled.store(false, Ordering::SeqCst);
+            for f in self.forwards.lock().await.drain(..) {
+                f.abort();
+            }
+        }
+
+        pub fn restore(&self) {
+            self.enabled.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Step 7 KEYSTONE — supervision: a relay that dies mid-subscription goes
+/// Down in `health()`, the supervisor reconnects with backoff when it
+/// returns, RE-SUBSCRIBES from the cursor (overlap redeliveries absorbed by
+/// the dedup ring), and live events flow again. The gap event — published
+/// while the relay was cut — arrives after the heal: nothing is lost.
+#[tokio::test]
+async fn a_dying_relay_reconnects_and_the_gap_is_healed() {
+    use molt_net::relay_runtime::{RelayHealth, RelayRuntime};
+
+    let relay = MockRelay::run().await.expect("relay");
+    let direct = relay.url().await.to_string();
+    let target = direct.trim_start_matches("ws://").to_string();
+    let proxy = proxy::Cuttable::run(target).await;
+    let proxied = format!("ws://127.0.0.1:{}", proxy.port);
+
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+
+    // the runtime sees ONLY the proxied relay; publishing rides a direct
+    // second runtime (a different "device") so the proxy only carries the
+    // subscription under test
+    let rt = RelayRuntime::new(dialer.clone(), vec![proxied.clone()])
+        .with_backoff(Duration::from_millis(100), Duration::from_millis(400));
+    let publisher = RelayRuntime::new(dialer, vec![direct]);
+
+    let mut sub = rt.subscribe(filter).await.expect("subscribe via proxy");
+    assert!(sub.synced(RECV_TIMEOUT).await, "initial sync through the proxy");
+
+    let e1 = h_tagged_event(&keys, "6d6f6c74", "before the cut");
+    publisher.publish(&e1).await.expect("publish e1");
+    assert_eq!(
+        sub.recv(RECV_TIMEOUT).await.expect("e1 arrives").id,
+        e1.id
+    );
+
+    // the relay "dies"
+    proxy.cut().await;
+    let e2 = h_tagged_event(&keys, "6d6f6c74", "during the gap");
+    publisher.publish(&e2).await.expect("publish e2 while cut");
+    // the runtime notices: the proxied relay is not Up
+    let mut waited = 0;
+    loop {
+        let health = rt.health().await;
+        if health.get(&proxied) != Some(&RelayHealth::Up) {
+            break;
+        }
+        waited += 1;
+        assert!(waited < 100, "the dead relay never left Up: {health:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // the relay "returns" — the supervisor reconnects and resubscribes from
+    // the cursor, so the gap event arrives; the dedup ring absorbs overlap
+    // redeliveries of e1
+    proxy.restore();
+    let mut got_gap = false;
+    for _ in 0..100 {
+        if let Some(ev) = sub.recv(Duration::from_millis(200)).await {
+            if ev.id == e2.id {
+                got_gap = true;
+                break;
+            }
+            assert_eq!(ev.id, e1.id, "only e1 may be redelivered (dedup lets it through once at most)");
+        }
+    }
+    assert!(got_gap, "the gap event must arrive after the heal");
+    assert_eq!(
+        rt.health().await.get(&proxied),
+        Some(&RelayHealth::Up),
+        "the healed relay reads Up"
+    );
+}
