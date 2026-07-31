@@ -22,11 +22,11 @@ pub mod http;
 pub mod list;
 pub mod sigv4;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
