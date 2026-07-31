@@ -3858,13 +3858,15 @@ mod tests {
                     inviter: "walter".to_string(),
                     ticket: "ab".repeat(32),
                 },
-                server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
-                    .to_string(),
-                queue_id: "cd".repeat(12),
-                wrap: "ef".repeat(32),
-                seat: 0,
+                handover: molt_net::invite::InviteHandoverV2 {
+                    seat: 0,
+                    ticket: "ab".repeat(32),
+                    npub: molt_net::nostr_identity(b"test-founder-entropy", "self-ticket").1,
+                    relays: vec!["wss://no-such-relay.invalid".to_string()],
+                },
             }
-            .render();
+            .render()
+            .expect("a well-formed handover renders");
             w.execute(Command::JoinStart {
                 invite: link,
                 member: "petra".to_string(),
@@ -3891,8 +3893,8 @@ mod tests {
         });
     }
 
-    /// A joinable link with a bogus host — parseable, so `cmd_join_start`
-    /// arms the wizard before it fails honestly (no transport in this build).
+    /// A joinable link with an unreachable relay — parseable, so
+    /// `cmd_join_start` arms the wizard before it fails honestly.
     fn joinable_link() -> String {
         crate::FoundingInvite {
             info: molt_core::InviteInfo {
@@ -3902,13 +3904,15 @@ mod tests {
                 inviter: "walter".to_string(),
                 ticket: "ab".repeat(32),
             },
-            server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
-                .to_string(),
-            queue_id: "cd".repeat(12),
-            wrap: "ef".repeat(32),
-            seat: 0,
+            handover: molt_net::invite::InviteHandoverV2 {
+                seat: 0,
+                ticket: "ab".repeat(32),
+                npub: molt_net::nostr_identity(b"test-founder-entropy", "self-ticket").1,
+                relays: vec!["wss://no-such-relay.invalid".to_string()],
+            },
         }
         .render()
+        .expect("a well-formed handover renders")
     }
 
     /// Petra's nostr identity for the join fixtures — a REAL derived pair,

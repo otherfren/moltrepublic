@@ -2578,7 +2578,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
             // only offer the link once it is genuinely joinable (carries the
             // transport handover); until the queue is provisioned it is a
             // non-joinable preview, so show nothing to copy yet
-            let detail = if molt_engine::FoundingInvite::parse(&s.link).is_some() {
+            let detail = if molt_engine::FoundingInvite::parse(&s.link).is_ok() {
                 s.link.clone()
             } else {
                 String::new()

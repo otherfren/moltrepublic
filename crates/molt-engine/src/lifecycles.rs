@@ -951,13 +951,10 @@ impl State {
             return Err(MoltError::Join("the handle must not be empty".to_string()));
         }
         let invite = invite.trim().to_string();
-        // a real join needs a link that carries the transport handover —
-        // a bare preview link is not joinable
-        let Some(inv) = crate::founding::FoundingInvite::parse(&invite) else {
-            return Err(MoltError::Join(
-                "not a joinable invite link — it carries no transport details".to_string(),
-            ));
-        };
+        // a real join needs a link that carries the v2 transport handover —
+        // a bare preview link (or a pre-N4 queue-shaped one) is not joinable,
+        // and the parse error says which it was
+        let inv = crate::founding::FoundingInvite::parse(&invite).map_err(MoltError::Join)?;
         // starting a join abandons any founding the user had open — its
         // recv loops must not seal and hijack the session behind our back
         self.teardown_ritual();

@@ -621,53 +621,50 @@ pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
 }
 
 /// A full founding-invite link: the [`molt_core::InviteInfo`] display preview
-/// plus the transport handover a *separate node* (a second moltd, the GUI
-/// join flow) needs to join a founding. Rendered as the preview link with one
-/// extra hex-wrapped segment, so `InviteInfo::parse` still reads the preview
-/// and a joining node reads the whole thing here.
+/// plus the **v2 handover** ([`molt_net::invite::InviteHandoverV2`] — founder
+/// npub, invite relays, the FULL ticket) a *separate node* (a second moltd,
+/// the GUI join flow) needs to join a founding over Nostr. Rendered as the
+/// preview link with one extra hex-wrapped segment, so `InviteInfo::parse`
+/// still reads the preview and a joining node reads the whole thing here.
+/// The pre-N4 queue-shaped handover is REJECTED with an honest message —
+/// nothing real could ever join from it (it carried only a ticket prefix).
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct FoundingInvite {
-    /// The display preview (republic, m/n, inviter, ticket).
+    /// The display preview (republic, m/n, inviter, ticket prefix).
     pub info: molt_core::InviteInfo,
-    /// The founder's server (opaque transport address; empty on loopback).
-    pub server: String,
-    /// The invite queue's send-side id (where the member sends its join), hex.
-    pub queue_id: String,
-    /// The invite queue's wrap key, hex.
-    pub wrap: String,
-    /// The seat this invite fills.
-    pub seat: u32,
+    /// The Nostr transport handover (seat, full ticket, founder npub,
+    /// invite relays).
+    pub handover: molt_net::invite::InviteHandoverV2,
 }
 
 impl FoundingInvite {
-    /// Render the full joinable link: the preview link plus one extra path
-    /// segment, `hex(server\nqueue_id\nwrap\nseat)`. Hex keeps the handover a
-    /// single URL-safe segment (the server url's `//`/`@`/`=` don't leak).
-    pub fn render(&self) -> String {
-        let payload = format!(
-            "{}\n{}\n{}\n{}",
-            self.server, self.queue_id, self.wrap, self.seat
-        );
-        format!("{}/{}", self.info.render(), hex::encode(payload))
+    /// Render the full joinable link: the preview link plus the handover as
+    /// one URL-safe hex segment.
+    pub fn render(&self) -> Result<String, String> {
+        let blob = self.handover.encode().map_err(|e| e.to_string())?;
+        Ok(format!("{}/{}", self.info.render(), blob))
     }
 
-    /// Parse a full founding link; `None` if it lacks a valid handover.
-    pub fn parse(link: &str) -> Option<FoundingInvite> {
-        let info = molt_core::InviteInfo::parse(link)?;
-        let (_, blob) = link.trim().rsplit_once('/')?;
-        let payload = String::from_utf8(hex::decode(blob).ok()?).ok()?;
-        let mut fields = payload.split('\n');
-        let server = fields.next()?.to_string();
-        let queue_id = fields.next()?.to_string();
-        let wrap = fields.next()?.to_string();
-        let seat: u32 = fields.next()?.parse().ok()?;
-        Some(FoundingInvite {
-            info,
-            server,
-            queue_id,
-            wrap,
-            seat,
-        })
+    /// Parse a full founding link — the error is surfaced to the joiner, so
+    /// it distinguishes "no handover at all" (a bare preview link) from a
+    /// malformed/older handover.
+    pub fn parse(link: &str) -> Result<FoundingInvite, String> {
+        let info = molt_core::InviteInfo::parse(link)
+            .ok_or_else(|| "not an invite link".to_string())?;
+        let (head, blob) = link
+            .trim()
+            .rsplit_once('/')
+            .ok_or_else(|| "not an invite link".to_string())?;
+        // a bare preview link's last segment is the ticket prefix itself —
+        // the preview parse of `head` then fails, which tells them apart
+        // without guessing on the blob's shape
+        if molt_core::InviteInfo::parse(head).is_none() {
+            return Err("not a joinable invite link — it carries no transport details".into());
+        }
+        let handover =
+            molt_net::invite::InviteHandoverV2::decode(blob).map_err(|e| e.to_string())?;
+        Ok(FoundingInvite { info, handover })
     }
 }
 
@@ -2722,35 +2719,38 @@ mod tests {
                 inviter: "walter".into(),
                 ticket: "ab".repeat(32),
             },
-            server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@smp.example.org".into(),
-            queue_id: "cd".repeat(12),
-            wrap: "ef".repeat(32),
-            seat: 0,
+            handover: molt_net::invite::InviteHandoverV2 {
+                seat: 0,
+                ticket: "ab".repeat(32),
+                npub: molt_net::nostr_identity(b"walter-entropy", "self-ticket").1,
+                relays: vec!["wss://relay.example".to_string()],
+            },
         }
     }
 
     #[test]
     fn founding_invite_round_trips() {
-        let link = sample_invite().render();
+        let link = sample_invite().render().expect("renders");
         let back = FoundingInvite::parse(&link).expect("parses");
-        assert_eq!(back.server, sample_invite().server);
-        assert_eq!(back.queue_id, sample_invite().queue_id);
-        assert_eq!(back.wrap, sample_invite().wrap);
-        assert_eq!(back.seat, 0);
+        assert_eq!(back.handover, sample_invite().handover);
+        assert_eq!(back.info.republic, "Chess Club");
     }
 
+    /// The parse is fail-closed AND honest: a bare preview link, a
+    /// non-handover trailing segment, and a pre-N4 queue-shaped handover
+    /// each refuse with a message that says what the link is missing.
     #[test]
     fn founding_invite_parse_rejects_malformed_handovers() {
         let preview = sample_invite().info.render();
         // no handover segment at all (a bare preview link)
-        assert!(FoundingInvite::parse(&preview).is_none());
+        let err = FoundingInvite::parse(&preview).expect_err("preview is not joinable");
+        assert!(err.contains("no transport details"), "honest preview error: {err}");
         // trailing segment not valid hex
-        assert!(FoundingInvite::parse(&format!("{preview}/zzzz")).is_none());
-        // valid hex, but fewer than four newline-separated fields
-        let short = hex::encode("only\ntwo\nfields");
-        assert!(FoundingInvite::parse(&format!("{preview}/{short}")).is_none());
-        // valid hex + four fields, but a non-numeric seat
-        let bad_seat = hex::encode("smp://x@h\ncd\nef\nnotanumber");
-        assert!(FoundingInvite::parse(&format!("{preview}/{bad_seat}")).is_none());
+        assert!(FoundingInvite::parse(&format!("{preview}/zzzz")).is_err());
+        // a pre-N4 queue-shaped handover — honest "older build" rejection
+        let v1 = hex::encode("smp://x@h\ncd\nef\n0");
+        let err =
+            FoundingInvite::parse(&format!("{preview}/{v1}")).expect_err("v1 must refuse");
+        assert!(err.contains("older build"), "honest v1 error: {err}");
     }
 }

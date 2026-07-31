@@ -102,6 +102,138 @@ pub fn verify_join_mac(
         .is_ok()
 }
 
+/// The **v2 invite handover** (N4a, `nostr_n4_plan.md` §3): what a founding
+/// invite link carries beyond the display preview — everything a joining
+/// node needs to reach the founder over Nostr. Replaces the queue-shaped
+/// `server\nqueue_id\nwrap\nseat` blob of the pre-N4 link, which could not
+/// even authenticate a join (it carried only a ticket prefix).
+///
+/// In memory the npub is the CANONICAL hex anchor (the roster form); on the
+/// wire it travels as bech32 (`npub1…`, the link/UI form — concept §3). The
+/// decode side is strict and fail-closed: a link is untrusted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteHandoverV2 {
+    /// The seat this invite fills (0-based).
+    pub seat: u32,
+    /// The FULL single-use ticket (64 lowercase hex) — the MAC key material.
+    pub ticket: String,
+    /// The founder's transport anchor, canonical x-only hex (the gift-wrap
+    /// recipient for the JoinRequest).
+    pub npub: String,
+    /// The invite relays (normalized `ws://`/`wss://` URLs, 1..=
+    /// [`crate::welcome::MAX_PAYLOAD_RELAYS`]).
+    pub relays: Vec<String>,
+}
+
+const INVITE_HANDOVER_VERSION: u8 = 2;
+
+/// The wire form: versioned JSON, npub as bech32.
+#[derive(Serialize, Deserialize)]
+struct HandoverWire {
+    v: u8,
+    seat: u32,
+    ticket: String,
+    npub: String,
+    relays: Vec<String>,
+}
+
+fn is_lower_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+impl InviteHandoverV2 {
+    /// The pre-hex wire JSON — split from [`encode`](Self::encode) so tests
+    /// can tamper with individual fields.
+    fn wire(&self) -> Result<String, NetError> {
+        use nostr::nips::nip19::ToBech32;
+        let canonical = crate::nostr::canonical_nostr_pk(&self.npub)?;
+        let npub = nostr::PublicKey::from_hex(&canonical)
+            .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?
+            .to_bech32()
+            .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?;
+        let wire = HandoverWire {
+            v: INVITE_HANDOVER_VERSION,
+            seat: self.seat,
+            ticket: self.ticket.clone(),
+            npub,
+            relays: self.relays.clone(),
+        };
+        serde_json::to_string(&wire).map_err(|e| NetError::Framing(e.to_string()))
+    }
+
+    /// Render the handover as one URL-safe hex segment.
+    pub fn encode(&self) -> Result<String, NetError> {
+        if self.ticket.len() != 64 || !is_lower_hex(&self.ticket) {
+            return Err(NetError::Framing("invite ticket is malformed".into()));
+        }
+        Self::check_relays(&self.relays)?;
+        Ok(hex::encode(self.wire()?))
+    }
+
+    /// Parse and validate a handover segment — strict, fail-closed, and
+    /// honest about a pre-N4 (queue-shaped) link.
+    pub fn decode(blob: &str) -> Result<Self, NetError> {
+        let bytes = hex::decode(blob.trim())
+            .map_err(|_| NetError::Framing("not an invite handover segment".into()))?;
+        let wire = String::from_utf8(bytes)
+            .map_err(|_| NetError::Framing("not an invite handover segment".into()))?;
+        let parsed: HandoverWire = serde_json::from_str(&wire).map_err(|_| {
+            if wire.contains('\n') {
+                NetError::Framing(
+                    "this is a queue-shaped invite from an older build — \
+                     mint a fresh invite on this build"
+                        .into(),
+                )
+            } else {
+                NetError::Framing("not an invite handover".into())
+            }
+        })?;
+        if parsed.v != INVITE_HANDOVER_VERSION {
+            return Err(NetError::Framing(format!(
+                "unsupported invite handover version {} — this build reads v{INVITE_HANDOVER_VERSION}",
+                parsed.v
+            )));
+        }
+        if parsed.ticket.len() != 64 || !is_lower_hex(&parsed.ticket) {
+            return Err(NetError::Framing("invite ticket is malformed".into()));
+        }
+        use nostr::nips::nip19::FromBech32;
+        let pk = nostr::PublicKey::from_bech32(&parsed.npub)
+            .map_err(|e| NetError::Framing(format!("invite npub: {e}")))?;
+        // bech32 decoding does no curve validation either — canonicalize
+        // through the ONE anchor gate (normalize-or-reject)
+        let npub = crate::nostr::canonical_nostr_pk(&pk.to_hex())?;
+        let relays = Self::check_relays(&parsed.relays)?;
+        Ok(InviteHandoverV2 {
+            seat: parsed.seat,
+            ticket: parsed.ticket,
+            npub,
+            relays,
+        })
+    }
+
+    /// 1..=MAX relays, each normalized through the WHATWG-parser gate.
+    fn check_relays(relays: &[String]) -> Result<Vec<String>, NetError> {
+        if relays.is_empty() {
+            return Err(NetError::Framing("an invite must carry at least one relay".into()));
+        }
+        if relays.len() > crate::welcome::MAX_PAYLOAD_RELAYS {
+            return Err(NetError::Framing(format!(
+                "{} relays — more than the {} an invite may carry",
+                relays.len(),
+                crate::welcome::MAX_PAYLOAD_RELAYS
+            )));
+        }
+        relays
+            .iter()
+            .map(|r| {
+                molt_core::relay::normalize_relay_url(r)
+                    .map_err(|e| NetError::Framing(format!("invite relay {r:?}: {e}")))
+            })
+            .collect()
+    }
+}
+
 /// Where the founder sends the canonical table back: the reply queue the
 /// joining member created and subscribed to. In SMP each party owns the
 /// queue it *receives* on, so the reply queue belongs to the member and its
@@ -268,6 +400,130 @@ pub enum RitualMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- invite handover v2 (N4a step 3, nostr_n4_plan.md §3) -------------
+
+    /// bech32-encode an arbitrary x coordinate — `PublicKey::from_hex` does
+    /// no curve validation (the N1 lesson), which is exactly what lets the
+    /// test mint an npub for a non-point.
+    fn nostr_bech32_for_test(hex_x: &str) -> String {
+        use nostr::nips::nip19::ToBech32;
+        nostr::PublicKey::from_hex(hex_x)
+            .expect("from_hex is unvalidated")
+            .to_bech32()
+            .expect("bech32")
+    }
+
+    fn replace_npub(wire: &str, npub: &str) -> String {
+        let mut v: serde_json::Value = serde_json::from_str(wire).expect("json");
+        v["npub"] = serde_json::Value::String(npub.to_string());
+        serde_json::to_string(&v).expect("json")
+    }
+
+    fn handover() -> InviteHandoverV2 {
+        InviteHandoverV2 {
+            seat: 2,
+            ticket: "ab".repeat(32),
+            // a REAL x-only key — the decode side validates the curve point
+            npub: nostr::Keys::generate().public_key().to_hex(),
+            relays: vec!["wss://relay.example".to_string()],
+        }
+    }
+
+    /// KEYSTONE — the v2 handover round-trips through one URL-safe hex
+    /// segment; the npub travels as bech32 (the link/UI form, concept §3)
+    /// and comes back as the canonical hex anchor.
+    #[test]
+    fn the_v2_handover_round_trips_with_a_bech32_npub_on_the_wire() {
+        let h = handover();
+        let blob = h.encode().expect("encode");
+        assert!(
+            blob.chars().all(|c| c.is_ascii_hexdigit()),
+            "one URL-safe hex segment: {blob}"
+        );
+        let wire = String::from_utf8(hex::decode(&blob).expect("hex")).expect("utf8");
+        assert!(wire.contains("npub1"), "bech32 in the link form: {wire}");
+        assert!(!wire.contains(&h.npub), "never raw hex on the wire form");
+        assert_eq!(InviteHandoverV2::decode(&blob).expect("decode"), h);
+    }
+
+    /// KEYSTONE — a v1 (queue-shaped) handover blob is refused with an
+    /// error naming the older build; strict rejections for every malformed
+    /// field: bad version, bad ticket shape, invalid npub (not a curve
+    /// point), no relays, too many relays, an oversized/unnormalizable
+    /// relay URL.
+    #[test]
+    fn the_v2_handover_decode_is_fail_closed() {
+        // a genuine v1 blob: hex("server\nqueue\nwrap\nseat")
+        let v1 = hex::encode("smp://x\naa\nbb\n2");
+        let err = InviteHandoverV2::decode(&v1).expect_err("v1 must refuse");
+        assert!(
+            err.to_string().contains("older build"),
+            "the v1 rejection names the reason: {err}"
+        );
+
+        let cases: Vec<(&str, String)> = vec![
+            ("wrong version", {
+                let mut w = handover().wire().expect("wire");
+                w = w.replace("\"v\":2", "\"v\":3");
+                w
+            }),
+            ("short ticket", {
+                let mut h = handover();
+                h.ticket = "abcd".to_string();
+                h.wire().expect("wire")
+            }),
+            ("uppercase ticket", {
+                let mut h = handover();
+                h.ticket = "AB".repeat(32);
+                h.wire().expect("wire")
+            }),
+            ("npub that is not a point", {
+                // x = p-1 is not on the curve for even y in general; use an
+                // obviously-invalid all-ff x
+                let w = handover().wire().expect("wire");
+                let bad = nostr_bech32_for_test(&"ff".repeat(32));
+                replace_npub(&w, &bad)
+            }),
+            ("no relays", {
+                let mut h = handover();
+                h.relays.clear();
+                h.wire().expect("wire")
+            }),
+            ("too many relays", {
+                let mut h = handover();
+                h.relays = (0..9).map(|i| format!("wss://r{i}.example")).collect();
+                h.wire().expect("wire")
+            }),
+            ("unnormalizable relay", {
+                let mut h = handover();
+                h.relays = vec!["https://not-a-ws.example".to_string()];
+                h.wire().expect("wire")
+            }),
+        ];
+        for (what, wire) in cases {
+            let blob = hex::encode(&wire);
+            assert!(
+                InviteHandoverV2::decode(&blob).is_err(),
+                "{what} must refuse: {wire}"
+            );
+        }
+    }
+
+    /// The npub in a decoded handover is CANONICAL: bech32 for a valid
+    /// x-only key decodes to the same lowercase-hex form
+    /// `canonical_nostr_pk` mints — one key, one spelling, roster-wide.
+    #[test]
+    fn a_decoded_npub_is_the_canonical_anchor_form() {
+        let h = handover();
+        let blob = h.encode().expect("encode");
+        let back = InviteHandoverV2::decode(&blob).expect("decode");
+        assert_eq!(
+            back.npub,
+            crate::nostr::canonical_nostr_pk(&h.npub).expect("canonical"),
+            "decode yields the canonical hex anchor"
+        );
+    }
 
     #[test]
     fn a_recover_request_round_trips_tagged() {
