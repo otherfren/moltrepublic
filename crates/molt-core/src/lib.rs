@@ -3328,6 +3328,14 @@ pub enum Command {
         /// the legacy path where the founder pre-created the reply queue.
         #[serde(default)]
         reply: String,
+        /// On Nostr: the PROVEN sender of the gift wrap this request arrived
+        /// in (x-only hex — NIP-59 verifies the seal signature and that the
+        /// rumor's author is the sealer). The founder requires it to equal
+        /// the claimed `nostr_pk`, which is what makes the third anchor
+        /// proof-of-POSSESSED rather than merely chosen. Empty on the
+        /// loopback path, where the ritual has no wrap to prove anything.
+        #[serde(default)]
+        sender_npub: String,
         /// The member's MLS KeyPackage (hex of the wire bytes) so the founder
         /// can add it to the group. Empty on a pre-MLS path.
         #[serde(default)]

@@ -611,6 +611,8 @@ fn spawn_founder_recv(
                         .as_ref()
                         .and_then(|r| serde_json::to_string(r).ok())
                         .unwrap_or_default(),
+                    // loopback carries no gift wrap, so nothing is proven
+                    sender_npub: String::new(),
                     key_package: j.key_package,
                     generation: Some(generation),
                 },
@@ -1897,6 +1899,7 @@ mod ritual_ops {
             nostr_pk: String,
             proof: String,
             reply: String,
+            sender_npub: String,
             key_package: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
@@ -1973,8 +1976,39 @@ mod ritual_ops {
             let Some(s) = ritual.seats.get(idx) else {
                 return Ok(molt_core::Reply::Ack);
             };
+            // Every refusal below is now VISIBLE in the founding log, not
+            // only in a tracing::warn nobody sees: a silently ignored
+            // activation is indistinguishable from "the invitee never tried",
+            // which is exactly the state an operator cannot debug.
+            let is_nostr = ritual.nostr.is_some();
+            self.session.create.run.log.push(format!(
+                "· invite {} activated by {member} — checking",
+                idx + 1
+            ));
+            // PROOF OF POSSESSION (Nostr only): the request arrived inside a
+            // gift wrap whose seal NIP-59 verified, so `sender_npub` is a key
+            // the sender demonstrably holds. Requiring it to equal the
+            // claimed anchor is what upgrades the third anchor from "chosen"
+            // to "possessed". Checked BEFORE the ticket can be spent.
+            if is_nostr {
+                let claimed = molt_net::canonical_nostr_pk(&nostr_pk).ok();
+                if claimed.is_none() || claimed.as_deref() != Some(sender_npub.as_str()) {
+                    tracing::warn!(seat, %member, "founding join rejected: anchor is not the wrap's proven sealer");
+                    self.session.create.run.log.push(format!(
+                        "✗ invite {}: the request claims a transport key it did not                          sign with — refused (possible impersonation)",
+                        idx + 1
+                    ));
+                    self.emit_session(molt_core::SessionScope::Create);
+                    return Ok(molt_core::Reply::Ack);
+                }
+            }
             if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &nostr_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
+                self.session.create.run.log.push(format!(
+                    "✗ invite {}: the ticket code does not match — refused (wrong or                      edited link, or a link from a different founding)",
+                    idx + 1
+                ));
+                self.emit_session(molt_core::SessionScope::Create);
                 return Ok(molt_core::Reply::Ack);
             }
             // normalize-or-reject the wire anchor (concept §3, "normalize at
@@ -1988,6 +2022,12 @@ mod ritual_ops {
                 Ok(canonical) => canonical,
                 Err(e) => {
                     tracing::warn!(seat, %member, error = %e, "founding join rejected: invalid nostr transport anchor");
+                    self.session.create.run.log.push(format!(
+                        "✗ invite {}: malformed transport key ({e}) — refused; the \
+                         ticket stays usable for a correct retry",
+                        idx + 1
+                    ));
+                    self.emit_session(molt_core::SessionScope::Create);
                     return Ok(molt_core::Reply::Ack);
                 }
             };
@@ -2002,6 +2042,12 @@ mod ritual_ops {
                     .any(|other| other.identity.as_ref().is_some_and(|i| i.nostr_pk == nostr_pk));
             if duplicate {
                 tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
+                self.session.create.run.log.push(format!(
+                    "✗ invite {}: that transport key is already used by another seat — \
+                     refused (two seats may never share one)",
+                    idx + 1
+                ));
+                self.emit_session(molt_core::SessionScope::Create);
                 return Ok(molt_core::Reply::Ack);
             }
             // the reply address: on Nostr it IS the MAC-bound nostr anchor
@@ -2018,6 +2064,11 @@ mod ritual_ops {
                     Some(rq) => Some(rq),
                     None => {
                         tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
+                        self.session.create.run.log.push(format!(
+                            "✗ invite {}: no usable reply address in the request — refused",
+                            idx + 1
+                        ));
+                        self.emit_session(molt_core::SessionScope::Create);
                         return Ok(molt_core::Reply::Ack);
                     }
                 }
@@ -2036,6 +2087,12 @@ mod ritual_ops {
                 .is_some_and(|(id, sig)| id == member.as_bytes() && hex::encode(sig) == identity_pk);
             if !key_package_binds {
                 tracing::warn!(seat, %member, "founding join rejected: MLS key package does not match the anchored identity");
+                self.session.create.run.log.push(format!(
+                    "✗ invite {}: the encryption key package does not match the \
+                     identity in the request — refused",
+                    idx + 1
+                ));
+                self.emit_session(molt_core::SessionScope::Create);
                 return Ok(molt_core::Reply::Ack);
             }
             // keep a copy of the reply handover to ack the joiner below
@@ -2756,6 +2813,8 @@ mod tests {
                 npk.to_string(),
                 invite::join_mac(ticket, member, pk, npk),
                 reply.clone(),
+                // loopback ritual in this fixture: nothing is wrap-proven
+                String::new(),
                 kp.to_string(),
                 None,
             )

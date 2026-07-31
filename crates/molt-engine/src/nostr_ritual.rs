@@ -131,16 +131,10 @@ pub(crate) fn spawn_founder_inbox(
             let RitualDelivery::Msg(RitualMsg::Join(j), sender) = delivery else {
                 continue;
             };
-            match molt_net::canonical_nostr_pk(&j.nostr_pk) {
-                Ok(canonical) if canonical == sender => {}
-                _ => {
-                    tracing::warn!(
-                        %sender,
-                        "join request dropped: claimed nostr anchor is not the wrap's proven sealer"
-                    );
-                    continue;
-                }
-            }
+            // the proof-of-possession comparison itself lives in the ACTOR
+            // (`cmd_net_join_requested`), together with every other check —
+            // one validation ladder, one place that can explain a refusal in
+            // the founding log. This task only carries the proven sender.
             let cmd = Command::NetJoinRequested {
                 seat: j.seat,
                 member: j.name,
@@ -150,6 +144,7 @@ pub(crate) fn spawn_founder_inbox(
                 // no queue handover on Nostr — the MAC-bound anchor IS the
                 // reply address
                 reply: String::new(),
+                sender_npub: sender,
                 key_package: j.key_package,
                 generation: Some(generation),
             };

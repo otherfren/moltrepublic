@@ -1157,6 +1157,7 @@ impl State {
                 nostr_pk,
                 proof,
                 reply,
+                sender_npub,
                 key_package,
                 generation,
             } => self.cmd_net_join_requested(
@@ -1166,6 +1167,7 @@ impl State {
                 nostr_pk,
                 proof,
                 reply,
+                sender_npub,
                 key_package,
                 generation,
             ),
