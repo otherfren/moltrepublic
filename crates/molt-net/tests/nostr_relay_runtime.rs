@@ -485,3 +485,42 @@ async fn nip42_auth_unlocks_an_auth_required_relay() {
     assert!(sub.synced(RECV_TIMEOUT).await, "authed sync completes");
     assert_eq!(sub.recv(RECV_TIMEOUT).await.expect("the event").id, ev.id);
 }
+
+/// The real-network twin (N2 close-out): the SAME runtime — own WS client,
+/// TLS over the dialer, publish/subscribe/dedup/EOSE — against a relay the
+/// operator names EXPLICITLY (no default relay ships, ADR-0004):
+///
+/// ```text
+/// MOLT_NOSTR_RELAY=wss://… cargo test -p molt-net --test nostr_relay_runtime -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "real network — point MOLT_NOSTR_RELAY at a relay you trust"]
+async fn real_relay_roundtrip_over_the_own_runtime() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let url = std::env::var("MOLT_NOSTR_RELAY")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .expect("set MOLT_NOSTR_RELAY=wss://… (no default relay ships, ADR-0004)");
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    // a fresh h tag per run, so parallel runs and relay retention never collide
+    let h = keys.public_key().to_string()[..16].to_string();
+
+    let rt = RelayRuntime::new(dialer, vec![url]);
+    let ev = h_tagged_event(&keys, &h, "molt n2 runtime probe");
+    rt.publish(&ev).await.expect("publish to the real relay");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), h);
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+    assert!(sub.synced(Duration::from_secs(15)).await, "EOSE from the real relay");
+    loop {
+        match sub.recv(Duration::from_secs(15)).await {
+            Some(e) if e.id == ev.id => break,
+            Some(_) => continue,
+            None => panic!("the published event did not come back"),
+        }
+    }
+}

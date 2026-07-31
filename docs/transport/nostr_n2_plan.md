@@ -1,9 +1,15 @@
 # N2 execution plan — NostrTransport core (relay runtime)
 
-Status: **IN BUILD (started 2026-07-31).** Executes the N2 etappe of
-`nostr_transport_marmot.md` §11 under the decided stack (§10.12/ADR-0005:
-own WS client, no rust-nostr pool; ring stays out). Every design input is
-already ratified — this document is the execution map, not a discussion.
+Status: **CORE BUILT (2026-07-31, all 9 steps green on master).** Executes
+the N2 etappe of `nostr_transport_marmot.md` §11 under the decided stack
+(§10.12/ADR-0005: own WS client, no rust-nostr pool; ring stays out —
+guard test green throughout). Every §3 step landed as its own commit with
+its keystone; the real-relay `#[ignore]` twin
+(`real_relay_roundtrip_over_the_own_runtime`) closes §4. What N2
+deliberately leaves for the next etappen: the engine wiring
+(`TransportKind`, resume/offline readers — N4/N5), the decrypt-failure
+circuit breaker's CONSUMER (N3's envelope layer reports failures into the
+seam), and presence/health GUI copy (N5/N6).
 
 ## 0. Scope
 

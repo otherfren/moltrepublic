@@ -881,7 +881,9 @@ once. So:
   split-anchor attempt rejected, malformed/duplicate-anchor ingest + verify
   pins, the ratified-vs-sealed byte-comparison pin, the sk↔anchored-pk
   persistence pins (unit + `two_instances`).
-- **N2 — NostrTransport core:** the relay POOL/policy already exists
+- **N2 — NostrTransport core — ✅ CORE BUILT (2026-07-31,
+  `docs/transport/nostr_n2_plan.md`; engine wiring rides N4/N5):** the relay
+  POOL/policy already exists
   (`molt_core::relay`, ADR-0004 — N2 MUST dial through
   `relay::dialable(...)`, never read the pool directly, and must stay silent
   while it returns empty); relay runtime (connect/backoff/health) on the
