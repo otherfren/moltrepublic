@@ -3673,12 +3673,13 @@ pub enum Command {
 
     // --- joining via invite (shared, co-equal) ---
     /// Begin joining a republic from its `molt://invite/…` link. The link must
-    /// carry a transport handover (a bare preview link is rejected). There is
-    /// no network transport in this build (the Nostr transport lands with N4),
-    /// so a non-seam join fails honestly; the loopback seams serve the tests.
-    /// A join that runs shows the joiner's own recovery phrase and enters the
-    /// republic on its own once the founder seals — its outcome arrives as
-    /// `NetJoinSealed` / `NetJoinFailed`.
+    /// carry a v2 transport handover — a bare preview link, or a pre-N4
+    /// queue-shaped one, is rejected. Since N4a the join runs over Nostr: the
+    /// engine spawns the off-actor member task (gated on the operator's
+    /// confirmed relay pool), shows the joiner's own recovery phrase, and
+    /// enters the republic once the founder seals — the outcome arrives as
+    /// `NetJoinSealed` / `NetJoinFailed`. The loopback seams still serve the
+    /// state-level tests.
     JoinStart {
         /// The `molt://invite/…` link.
         invite: String,

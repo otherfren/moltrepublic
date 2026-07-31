@@ -80,12 +80,12 @@ const PRESENCE_TICK_MS: u64 = 30_000;
 /// safely inside the sender's 30 s resend timer.
 const DELIVERY_TICK_MS: u64 = 1_000;
 
-/// The honest N-demo→N4 gap error: SMP is demolished and the Nostr transport
-/// is not built yet, so a production founding/join/recovery has no network to
-/// run over. One string, surfaced through each flow's EXISTING failure path
-/// (create `Err`, join run log, recovery notice) — never a fake success.
-pub(crate) const NO_TRANSPORT_YET: &str = "no network transport in this build yet — the Nostr \
-     transport lands with N4 (founding/join) — loopback seams remain for tests";
+/// The honest gap error for the paths not yet over Nostr: founding and join
+/// run over relays since N4a, but **recovery** (the total-loss rejoin) does
+/// not — the recovery-link v2 story is N4b. Surfaced through recovery's
+/// EXISTING failure path (the recovery notice) — never a fake success.
+pub(crate) const NO_TRANSPORT_YET: &str = "recovery over Nostr is not built yet — the \
+     recovery-link v2 flow lands with N4b (founding and join already run over relays)";
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {

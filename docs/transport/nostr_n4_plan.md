@@ -1,6 +1,6 @@
 # N4 execution plan — the ritual over Nostr
 
-Status: **IN BUILD (started 2026-07-31).** Executes the N4 etappe of
+Status: **N4a BUILT (2026-07-31), N4b OPEN.** Executes the N4 etappe of
 `nostr_transport_marmot.md` §11 on top of the N2 relay runtime
 (`nostr_n2_plan.md`) and the N3 wire edge (`nostr_n3_plan.md`). Every design
 input is ratified (§4.2, §10.11–10.14, ADR-0004/0005/0006); this is the
@@ -385,6 +385,46 @@ founded Nostr workspace → honest classification, no supervisor, no crash.
 7. The rejoin state machine reuses the §5 channel seam; `run_rejoin`'s
    verification ladder (served-chain verify, head-anchor check, phrase
    re-derivation) is transport-agnostic and unchanged.
+
+## 8b. N4a — what actually landed (2026-07-31)
+
+Built and green on master across four commits (steps 1–3 + the core):
+
+- **v4 `TransportState`** (`TransportKind::Nostr`, `relays`,
+  `rotation_seed`, `relay_cursors`) + the kind-first resume gate (a Nostr
+  workspace opens honestly pending its N5 runtime, never "detached"); the
+  MLS snapshot is v2 and carries the exporter ring (a v1 blob restores with
+  an empty ring). The exporter-ring persistence debt (N3 §5.5) is **closed.**
+- **kind-446 `ritual_wrap`** (proven-sealer peel = PoP at join) and the
+  **444 Welcome payload v2** (seed + relays inside the authenticated
+  Welcome, oversize-refused at the NIP-44 cap).
+- **Invite link v2** (`InviteHandoverV2`): full ticket + founder npub
+  (bech32 on the wire, canonical hex in memory) + gated relay list; the
+  pre-N4 queue link is refused with an honest message.
+- **`molt-net::ritual_net`** — the engine-facing facade: `RitualNet`
+  (1059 inbox + gift-wrap sends), `GroupChannel` (445 publish/subscribe with
+  the §4.4 skew-margin window tags and the window-roll resubscribe). Built
+  by a delegated agent against a fixed contract; two minor deviations
+  (`live(&mut self)`, `window_tags` pub).
+- **`molt-engine::nostr_ritual`** — the founder inbox loop, the founder 445
+  recv, the shared 445 publish leg, and the whole **member join task** that
+  emits the once-dark `NetJoin*` lane. The group is born at all-joined; the
+  founder's genesis frame is **encrypted before the snapshot** (ratchet
+  coherence — the capstone caught a `SecretReuseError` here).
+- **Capstone** `tests/nostr_founding.rs`: two real engines over one
+  `MockRelay` found+join+deliberate+seal+persist+reopen; negatives for the
+  spent link and the declined charter. First engine-level test to drive the
+  relay runtime.
+
+Deviations from the plan as written, all deliberate:
+
+- The genesis is one **445** (not a per-seat send) AND is encrypted at
+  finalize time, not inside `distribute_genesis` — the ratchet-coherence
+  fix moved it. `distribute_genesis` stays the loopback-only path.
+- No new `Net*` command *names*; `NetJoinSealed` gained two additive fields
+  (`relays`, `rotation_seed`). Co-equality unaffected (INTERNAL unchanged).
+- `NO_TRANSPORT_YET` is retargeted to **recovery only** — founding and join
+  no longer use it.
 
 ## 9. TDD order (one commit per step, each green on master)
 

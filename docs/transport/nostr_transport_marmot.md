@@ -902,20 +902,26 @@ once. So:
   stage→publish→await→merge commit state machine + prior-state slot.
   **Keystones:** roundtrip vectors; exporter rotation with the ring
   (outer-strips/inner-rejects asymmetry); a concurrent-commit tiebreak heals.
-- **N4 — Ritual over Nostr (bigger than it looks, finding II-3):** invite-link
-  v2 + recovery-link v2; join/welcome/deliberation/seal end-to-end over the
-  in-process relay; recovery with the replay-safe window reset. This
-  re-implements the queue-based founder-seat machine, reply handover and
-  recovery handover (founding.rs + lifecycles.rs + recovery.rs are
-  ~6k engine lines, pinned by ~4.5k test lines) — "only the envelopes change"
-  is true of the flow, not the implementation. Consider splitting into
-  N4a (founding+join) and N4b (recovery). **Keystone:** the Nostr twin of the
-  `two_instances` founding + the recovery suite. **Coverage debt to repay
-  here (N-demo review):** the actor-level `NetJoinSealed` path (dispatch +
-  the parked `join_transport` reuse + the persist-side branch of
-  materialization) went dark when the SMP join e2e died — N4's join keystone
-  must run it end-to-end again; the handler core stays pinned state-level
-  meanwhile (`join_seals_into_the_republic_from_a_valid_roster`).
+- **N4 — Ritual over Nostr (bigger than it looks, finding II-3).** Split into
+  **N4a (founding+join) — ✅ BUILT 2026-07-31** and **N4b (recovery) — OPEN**;
+  execution map + landed-state in `docs/transport/nostr_n4_plan.md`.
+  - **N4a:** invite-link v2 (full ticket + founder npub + gated relay list);
+    the §4.2 restructured flow (gift-wrapped JoinRequest with nostr-key
+    proof-of-possession, the MLS group BORN at all-joined, payload-v2 444
+    Welcomes, deliberation/ratification/genesis as 445 group events opened
+    with the carrier stamp via `decrypt_at`); `TransportState` v4 + the
+    kind-first resume gate; the exporter-ring-in-snapshot persistence
+    (closing the N3 §5.5 debt). The **coverage debt is repaid**: the
+    actor-level `NetJoinSealed` path runs end-to-end in the two-real-engines
+    capstone (`crates/molt-engine/tests/nostr_founding.rs`), no injection.
+    The `NetJoinSealed`-persist branch, spent-link, and declined-charter
+    negatives are pinned there; the state-level
+    `join_seals_into_the_republic_from_a_valid_roster` stays.
+  - **N4b (OPEN):** recovery-link v2, the total-loss rejoin over an ephemeral
+    recovery-ticket key, the replay-safe window reset moved onto the Restored
+    chain block, and the re-anchor product decision (`nostr_n4_plan.md` §8.3
+    — ask the user before building). `NO_TRANSPORT_YET` now names recovery
+    only.
 - **N5 — Runtime + guarantee + presence:** NostrGroupRuntime on
   EngineSink/OutboxLog; AcceptedWindow/ACK/G7 over it with min-floor
   single-publish resend and amplification counting; traffic-derived presence
