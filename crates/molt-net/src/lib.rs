@@ -29,12 +29,18 @@
 //!   delivery into the engine). The engine never awaits the transport: it
 //!   appends to its log and *nudges* the supervisor.
 //! * [`dial`] — the fail-closed T4 dialer (direct / SOCKS5h-Tor / embedded
-//!   arti), shared by the S3 backup client and, next, N2's WebSocket relay
+//!   arti), shared by the S3 backup client and N2's WebSocket relay
 //!   connections.
+//! * [`relay_ws`] / [`relay_runtime`] — the N2 Nostr relay runtime: one
+//!   typed WebSocket connection, and the pool over it (publish ≥1-OK,
+//!   pooled subscription with dedup, per-relay cursors, health).
+//! * [`envelope`] — the N3 OUTER layer of a kind-445 event: sealing under
+//!   the epoch's exporter secret, opening across the bounded ring.
 
 pub mod block;
 pub mod chunk;
 pub mod dial;
+pub mod envelope;
 pub mod invite;
 pub mod loopback;
 pub mod mesh;

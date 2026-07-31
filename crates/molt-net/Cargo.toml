@@ -50,6 +50,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 chacha20poly1305.workspace = true
+# N3 outer envelope: the kind-445 content is base64(nonce ‖ AEAD) — promoted
+# into src/ with the envelope layer (envelope.rs)
+base64.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 hmac.workspace = true
@@ -108,6 +111,4 @@ nostr-relay-builder = { workspace = true }
 # byte-pin of the vectors' get_message_keys section: recompute the expected
 # ciphertext from the reference chacha/hmac keys (same 0.9 line nostr uses)
 chacha20 = { workspace = true }
-# the nip44 vector file carries base64 payloads (tests/nostr_vectors.rs).
-# Dev-only: nothing under src/ uses base64 — the runtime graph stays without it.
-base64 = { workspace = true }
+# (the nip44 vector file also carries base64 payloads, tests/nostr_vectors.rs)
