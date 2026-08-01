@@ -2172,6 +2172,22 @@ export component AppWindow inherits Window {
                     // the global anonymity setting — the ritual transport
                     // always comes from Settings → Anonymity network, never from a
                     // per-republic choice (tor doc §P8)
+                    // Relays are the one thing the founder can still choose
+                    // cheaply — once invites are out, a member who cannot
+                    // reach the group's relay has to be re-invited. Relays do
+                    // not federate, so this is a hard requirement, not advice.
+                    RestoreWay {
+                        title: Strings.cw-grp-relays;
+                        hint: Strings.cw-relays-hint;
+                        icon: @image-url("assets/cloud.svg");
+                        Text {
+                            text: Strings.cw-relays-rule;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                    }
+
                     RestoreWay {
                         title: Strings.cw-grp-transport;
                         hint: Strings.cw-transport-hint;

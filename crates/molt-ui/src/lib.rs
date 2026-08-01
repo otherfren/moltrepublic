@@ -2028,10 +2028,11 @@ enum RecoverNotice {
     LinkPending(String),
     /// Coordinator: the engine minted a single-use `molt://recover/…` link.
     Link(String),
-    /// Coordinator: the mint failed for an operational reason of THIS node
-    /// (`mesh-not-running`, or a transport failure) — the returning member's
-    /// presence is never involved. Rendered as the calm failed state of the
-    /// same link dialog, not as an error toast.
+    /// Coordinator: the mint failed for an operational reason of THIS node —
+    /// `mesh-not-running` on the legacy queue shape, or (on Nostr) a relay
+    /// reason naming the missing piece. The returning member's presence is
+    /// never involved. Rendered as the calm failed state of the same link
+    /// dialog, not as an error toast.
     LinkFailed(String),
     /// Rejoiner: the engine accepted link + phrase; the rejoin runs off the
     /// actor (it can span the survivors' human approval).
@@ -5266,6 +5267,12 @@ lexicon! {
     cw_rule_a: "Every gated change needs", "Jede geschützte Änderung braucht";
     cw_rule_b: "of", "von";
     cw_rule_c: "approvals.", "Stimmen.";
+    // Relays do not federate: two members hear each other only if they both
+    // dial a relay in common. Stated at CREATE time because that is the last
+    // moment the choice is cheap (§10.15, user-ratified 2026-08-02).
+    cw_grp_relays: "Relays", "Relays";
+    cw_relays_hint: "Every member must reach the same relay.", "Jedes Mitglied muss denselben Relay erreichen.";
+    cw_relays_rule: "A self-hosted relay must be in every member's pool before they join.", "Ein selbst betriebener Relay muss vor dem Beitritt im Pool jedes Mitglieds stehen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";
     // this panel is about the ANONYMITY layer only (tor/none) — never the
@@ -5439,7 +5446,7 @@ lexicon! {
     rlk_caution: "Caution: share this link only over a secret channel. It is single-use and becomes invalid again when this application restarts.", "Achtung, dieser Link sollte nur über einen geheimen Kanal geteilt werden. Er ist einmalig nutzbar und wird nach Neustart dieser Anwendung wieder ungültig.";
     rlk_pending: "Creating the link…", "Link wird erstellt…";
     rlk_pending_hint: "The returning member does not need to be online — a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein — ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
-    rlk_failed_mesh: "The link could not be created: this device is not connected to the republic's mesh right now. Close and reopen the republic to reconnect, then try again. The returning member does not need to be online for this.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist gerade nicht mit dem Mesh der Republik verbunden. Schließe die Republik und öffne sie erneut, dann versuche es noch einmal. Das zurückkehrende Mitglied muss dafür nicht online sein.";
+    rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";

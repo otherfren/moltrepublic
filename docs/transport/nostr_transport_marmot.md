@@ -809,41 +809,46 @@ decided any time before ship.
   adopted. Lands with the `url`-based parser rebuild
   (`mdk_evaluation.md` §7.1/§7.2).
 
-### 10.15 OPEN FINDING — the join gate proves the wrong condition (2026-08-01)
+### 10.15 DECIDED 2026-08-02 (user-ratified) — the group shares its relays, and says so
 
 **Nostr relays do not federate** (`relay_pool.md` §2.6), so two members hear
 each other only if they both actually dial a relay in common.
 
-What the join gate checks today is weaker: the joiner needs ≥1 relay in
+The gate built for N4a checks something weaker: the joiner needs ≥1 relay in
 common **with the FOUNDER**. Nothing checks that the members share one with
-*each other*. So:
+*each other*:
 
 > A confirms only relay X, B only relay Y, both in the founder's list.
 > Both join successfully. A publishes to X, B subscribes to Y.
 > They never hear each other — both "in", silently partitioned.
 
-It does not bite yet only because the N5 runtime is not built:
-`TransportState.relays` is written at founding/join and **read by nobody**
-(verified across the engine and storage — written at `lifecycles.rs:153`, no
-reader). Founding and join run over the ritual channels; no traffic flows
-afterwards.
+That premise ("it does not bite yet, nobody reads `TransportState.relays`") is
+**no longer true** as of N4b step 5: the recovery mint reads the group relay
+list to decide what it can advertise.
 
-**Decide before N5 builds on it.** Two candidate rules:
+**The ratified rules.**
 
-| rule | consequence |
-|---|---|
-| a member dials ALL group relays (gated by its own confirmations) | whoever confirmed only one is silently partitioned |
-| the group requires ONE relay every member dials, checked at join | stricter than today; kills the partition structurally |
+1. **Everyone must be able to reach the same relay.** Either all members join
+   over one common relay, or — when a member runs their own — that relay must
+   already be in every other member's pool before they join.
+2. **The founder has NO special standing.** Coordinating the opening ritual is
+   the whole of it; afterwards every member is equal. The founder's pool
+   seeding the initial list is coordination, not authority, and nothing may
+   grant the founder a lasting say over the group's relays.
+3. **Relays are exchangeable.** A member who moves to a new relay **re-joins**;
+   the others must have added that relay first, or the join fails.
+4. **The members keep a ledger of who knows which relay**, so a split is a
+   known state rather than a silence.
+5. **A split is communicated** — in the run log and in error messages, naming
+   the missing relay. Compact, per `CLAUDE.md`: name the missing thing, stop.
+6. **The Create-DAO dialog states rule 1 up front**, before invites are minted:
+   the founder is the one person who can still choose the relay cheaply.
 
-The second is the recommendation: today's gate proves the condition needed to
-JOIN, not the one needed to OPERATE — a condition that holds when it is
-checked and quietly stops holding later, which is the failure class this
-project keeps meeting.
+**A partitioned member believes they are connected**, which is why 4 and 5 are
+part of the rule and not a follow-up: the surface must say the state in a few
+large words in a signal colour, never a long technical line.
 
-**The UI is part of the fix, not a follow-up.** A partitioned member believes
-they are connected. Whatever rule is chosen, the surface must say the state in
-a few large words in a signal colour — not a long, small, technical line
-(`CLAUDE.md`, "User-facing text").
+Execution plan: `relay_topology_plan.md`.
 
 ## 11. Etappen (each green on master, TDD)
 
