@@ -130,7 +130,7 @@ can start; but a wrong guess is expensive in exactly these five places.
 | E | `GroupSub::recv` failure handling | ✅ (this session) |
 | F | Honesty gaps | ✅ (elapsed-wait deferred) |
 | G | NIP-42 inert on ritual subscriptions | ✅ (this session) |
-| H | Unpinned security checks | roster finding ✅ `1defd69`; coverage open |
+| H | Unpinned security checks | ✅ H2 (was semi-inert) + H4; H1/H3 need a hostile-peer harness |
 | I | Invite relay cap | ✅ `28456f7` |
 
 ## Cluster C — The inert publish-failure seam

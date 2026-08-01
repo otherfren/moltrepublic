@@ -325,24 +325,45 @@ Keystones: `ritual_endpoints_sync_and_deliver_on_an_auth_required_relay` and
 verified red-without, and it additionally pins that NO seat link is advertised
 over an inbox nothing replayed.
 
-## H. Unpinned security checks — the inert-keystone class — HIGH ×2 + MEDIUM ×2
+## H. Unpinned security checks — PARTIAL (headline ✅, two items open)
 
-Round 2's most valuable output: checks that EXIST but no test would notice
-losing. Deleting the check leaves the suite green.
+The inert-keystone class: checks that EXIST but no test would notice losing.
 
-- The §2.1 **proof-of-possession** gate on the founder's ingest is pinned by
-  no test. (It has since MOVED to the actor in `63555dc`, which makes it
-  state-level testable — do it.)
-- The **genesis sign-what-you-see byte comparison** is unpinned on the
-  shipping path (the N1 keystone covers the loopback twin only).
-- The joiner's founder-identity guards on the 1059 inbox (`sender == h.npub`)
-  are pinned by no test.
-- The §4.4 **window-roll resubscribe** is pinned by no test — a founding
-  spanning UTC midnight is untested.
+**✅ The headline finding, which was not even in the original list.** While
+verifying H, the investigation found `SealedRoster.roster` is a
+CONSTITUTIONAL field covered by no signature — see `1defd69`. Fixed with a
+cross-check in both `verify_sealed_roster` and `verify_seal_proposal`.
 
-Fix: one keystone per item, each driving the PRODUCTION entry point, each
-verified red by deleting the check first. This is the etappe's real coverage
-debt and should not be deferred again.
+**✅ H2, and it was worse than reported.** The keystone that supposedly pinned
+the genesis sign-what-you-see byte comparison
+(`a_sealed_roster_differing_from_the_ratified_proposal_is_rejected`) was
+SEMI-INERT: its evil-identity swap trips `verify_seal_proposal`'s "does not
+anchor our own (name, key)" check one gate EARLIER, and the test only asserted
+`is_err()` — so the byte comparison could be deleted and it stayed green. It
+was pinning a different gate than its name claims.
+
+Repaired by swapping the CHARTER instead: the republic id does not commit to
+the agenda, the member's three anchors are untouched, and the roster still
+matches the identities, so every other gate on that path passes and only the
+ratified-bytes comparison can fire. The assertion is now coupled to the
+reason, not just to failure. **Verified: deleting the check now turns it
+red**, where before it stayed green.
+
+**✅ H4 — the window-roll resubscribe** is pinned by cluster E's
+`nostr_window_roll.rs` in both crates (that work needed the same test seam).
+
+**OPEN — H1 and H3.** The proof-of-possession gate on the founder's ingest and
+the joiner's founder-identity guards on the 1059 inbox are still pinned by no
+test. Both need the same missing harness: a hand-written HOSTILE peer
+(`RitualNet` + `MlsMember` + `GroupChannel` over one relay) that can send a
+gift-wrapped JoinRequest under a key it does not hold, and a 1059 frame from
+somebody other than the link's founder. The existing state-level ingest test
+runs `nostr: None`, so the `if is_nostr` PoP branch never executes in it — a
+state-level pin would be inert for exactly the reason this cluster exists.
+
+That harness is worth building on its own (it is also what a hostile-relay
+suite would reuse), which is why it is recorded here rather than faked with a
+test that cannot reach the branch.
 
 ## I. Leftovers — ✅ DONE
 

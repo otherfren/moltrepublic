@@ -3426,20 +3426,30 @@ mod tests {
                 }
             }
 
-            // ❹ the SWAP: distribute a sealed roster whose "bob" seat is
-            // attacker-owned, every attestation self-signed over the swap
-            let (evil_sk, evil_pk) = molt_storage::derive_identity_key(&[8u8; 32], "evil");
-            let evil_npk = molt_net::nostr_identity(b"evil-entropy", "evil-ticket").1;
-            let mut evil_identities = identities.clone();
-            evil_identities[1].identity_pk = evil_pk;
-            evil_identities[1].nostr_pk = evil_npk;
+            // ❹ the SWAP — a CHARTER swap, chosen deliberately to isolate the
+            // byte comparison.
+            //
+            // This test used to swap bob's identity_pk for an attacker key.
+            // That is caught one gate EARLIER, by verify_seal_proposal's
+            // "does not anchor our own (name, key)" self-check, so the test
+            // stayed green with the byte comparison deleted — it was pinning
+            // verify_seal_proposal, not the thing it claims to pin.
+            //
+            // A different AGENDA passes every check verify_seal_proposal
+            // makes: the republic id does not commit to the agenda, bob's
+            // three anchors are untouched, and the roster still matches the
+            // identities. The ONLY thing that can catch it is that the
+            // distributed table's bytes differ from the ones bob ratified —
+            // which is exactly the tamper-evident-charter property.
+            let evil_sk = f_sk.clone();
+            let evil_identities = identities.clone();
             let evil_rid = molt_storage::republic_id("R", 2, 2, &evil_identities);
             let table = molt_core::roster_canonical_bytes(
                 &evil_rid,
                 2,
                 2,
                 &evil_identities,
-                "the ratified charter",
+                "a charter nobody ratified",
             );
             let sealed = SealedRoster {
                 name: "R".to_string(),
@@ -3458,14 +3468,26 @@ mod tests {
                         sig: molt_storage::identity_sign(&evil_sk, &table),
                     },
                 ],
-                agenda: "the ratified charter".to_string(),
+                agenda: "a charter nobody ratified".to_string(),
             };
-            // the forgery is fully self-consistent — the engine-side roster
-            // check CANNOT catch it; only the member's ratified-bytes
-            // comparison can
+            // The forgery must clear every OTHER gate on this path, or the
+            // test pins the wrong one — which is exactly what it did before:
+            // the old evil-identity swap tripped verify_seal_proposal's
+            // "does not anchor our own (name, key)" check first, so the byte
+            // comparison could be deleted and this test stayed green.
+            //
+            // A charter swap clears it: the republic id does not commit to
+            // the agenda, bob's three anchors are untouched, and the roster
+            // still matches the identities.
+            //
+            // (`verify_sealed_roster` is deliberately NOT asserted here.
+            // `run_ritual_member` never calls it — the actor does, later, as
+            // defence in depth — and a founder cannot forge bob's own
+            // attestation over the swapped table anyway. On THIS path the
+            // ratified-bytes comparison is the only gate that can fire.)
             assert!(
-                verify_sealed_roster(&sealed).is_ok(),
-                "the forged roster must pass the self-consistency check for this pin to bite"
+                verify_seal_proposal(&sealed, "bob", &join.identity_pk, &join.nostr_pk).is_ok(),
+                "the forgery must clear verify_seal_proposal for the byte pin to be the gate"
             );
             send(
                 invite::RitualMsg::Genesis {
@@ -3478,9 +3500,13 @@ mod tests {
 
             // ❺ the member must reject the join
             let outcome = member_task.await.expect("member task");
+            let Err(err) = outcome else {
+                panic!("a sealed roster differing from the ratified table must fail the join");
+            };
             assert!(
-                outcome.is_err(),
-                "a sealed roster differing from the ratified table must fail the join"
+                err.contains("not the table we ratified"),
+                "…and specifically at the ratified-bytes comparison, not an earlier \
+                 gate that happens to also refuse: {err}"
             );
         });
     }
