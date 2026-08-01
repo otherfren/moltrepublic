@@ -152,6 +152,31 @@ an MCP agent. `molt-core` returns `PoolGap` / `InviteRelayBlock` (both
 `Serialize`), and `molt-engine::relay_msg` is the only place that turns them
 into words.
 
+## 2.6 Why a shared relay is required at all
+
+**Nostr relays do not federate.** There is no gossip, no replication and no
+forwarding between them: a relay is an independent store, and an event
+published to relay A is invisible to anyone subscribed only to relay B. That
+is a property of the protocol, not a choice made here.
+
+So two participants can only reach each other if their pools INTERSECT — at
+least one relay both of them use. This is the reason the join gate exists at
+all, and it is why "we each run our own relay" is not by itself enough: each
+side must also know the other's, exactly as a normal Nostr client lists
+several relays including its peers'.
+
+Two self-hosted relays therefore work fine — the operators just have to put
+BOTH in BOTH pools (or agree on one shared third relay). What does not work is
+each side knowing only its own.
+
+**The invite already carries the founder's relay list**, and a refused join
+names every one of them with its own fault (`relay::diagnose_invite_relays`).
+What it deliberately does NOT do is adopt them: ADR-0004 says a pasted link
+must never make this node dial somewhere its operator has not confirmed. The
+rule is right; the FLOW is not — an operator should be offered the
+add-and-confirm at that moment, not sent to copy a URL out of a log line into
+the settings tab. Recorded as open UX work.
+
 ## 3. The gate — three rules, one pure function
 
 `molt_core::relay::dialable(pool, clearnet_session)` returns the relays the

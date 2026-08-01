@@ -107,6 +107,27 @@ impl State {
 
     /// Add a relay: validated + normalized, appended at the lowest priority,
     /// unconfirmed. Adding never connects — see `docs/transport/relay_pool.md`.
+    /// A live founding minted its invites from the pool as it was at
+    /// `CreateStart` — changing the pool now does NOT retro-fit them.
+    ///
+    /// Reported from real use (2026-08-01): a founder whose joiner was refused
+    /// with "no relay in common" added a shared relay, watched the pool go
+    /// green on both sides, and the SAME invite kept being refused. Nothing
+    /// said the links in their hand were stale. Said once per change, in the
+    /// founding log where the links are.
+    fn note_if_invites_went_stale(&mut self) {
+        if self.net_ritual.is_none() || self.session.create.run.outcome != 0 {
+            return;
+        }
+        let line = "⚠ the relay pool changed — the invites already minted still name the \
+                    OLD relays. Cancel and re-mint to hand out links that carry this pool."
+            .to_string();
+        if self.session.create.run.log.last() == Some(&line) {
+            return;
+        }
+        self.session.create.run.log.push(line);
+    }
+
     pub(crate) fn cmd_relay_add(&mut self, url: String) -> Result<Reply, MoltError> {
         let url = molt_core::relay::normalize_relay_url(&url)
             .map_err(|e| MoltError::Settings(e.to_string()))?;
@@ -119,6 +140,7 @@ impl State {
             .settings
             .relays
             .push(molt_core::relay::RelayEntry { url, confirmed: false });
+        self.note_if_invites_went_stale();
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -130,6 +152,7 @@ impl State {
             .map_err(|e| MoltError::Settings(e.to_string()))?;
         let before = self.session.settings.relays.len();
         self.session.settings.relays.retain(|r| r.url != url);
+        self.note_if_invites_went_stale();
         if self.session.settings.relays.len() == before {
             return Err(MoltError::Settings(format!("{url} is not in the relay pool")));
         }
@@ -197,6 +220,7 @@ impl State {
             .find(|r| r.url == url)
             .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
         entry.confirmed = true;
+        self.note_if_invites_went_stale();
         // ADR-0004 amendment (2026-07-31): the acknowledgement IS the
         // consent, and consent is REMEMBERED. Confirming a non-onion relay
         // with `accept_clearnet` therefore also activates non-onion dialing
@@ -229,6 +253,7 @@ impl State {
             .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
         entry.confirmed = false;
         self.persist_settings(false);
+        self.note_if_invites_went_stale();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -246,6 +271,7 @@ impl State {
         self.clearnet_session = unlock;
         self.session.settings.clearnet_relays_enabled = unlock;
         self.persist_settings(false);
+        self.note_if_invites_went_stale();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

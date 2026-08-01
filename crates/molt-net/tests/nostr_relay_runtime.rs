@@ -774,3 +774,42 @@ async fn a_connect_failure_names_the_relay_the_route_and_the_error() {
         "the tor route names the proxy address:\n{out}"
     );
 }
+
+/// FIELD DIAGNOSTIC (2026-08-01, user report "no relay handshake through
+/// Tor"): dial the operator's own relay through their own Tor proxy, on the
+/// exact path the transport uses. `#[ignore]` — it needs a live Tor and the
+/// public internet, like the other real-network twins.
+#[tokio::test]
+#[ignore]
+async fn probe_relay_through_local_tor() {
+    let url = std::env::var("MOLT_PROBE_RELAY")
+        .unwrap_or_else(|_| "wss://relay.damus.io".to_string());
+    let port: u16 = std::env::var("MOLT_TOR_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(9050);
+    let dialer = Dialer::resolve("tor", "local", port).expect("tor dialer");
+    match RelayWs::connect(&dialer, &url).await {
+        Ok(ws) => {
+            ws.close().await;
+            println!("REACHABLE: {url} through 127.0.0.1:{port}");
+        }
+        Err(e) => println!("UNREACHABLE: {url} through 127.0.0.1:{port} -> {e}"),
+    }
+}
+
+/// FIELD DIAGNOSTIC — the DIRECT (no Tor) path to the operator's relay.
+#[tokio::test]
+#[ignore]
+async fn probe_relay_direct() {
+    let url = std::env::var("MOLT_PROBE_RELAY")
+        .unwrap_or_else(|_| "wss://relay.damus.io".to_string());
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    match RelayWs::connect(&dialer, &url).await {
+        Ok(ws) => {
+            ws.close().await;
+            println!("REACHABLE-DIRECT: {url}");
+        }
+        Err(e) => println!("UNREACHABLE-DIRECT: {url} -> {e}"),
+    }
+}

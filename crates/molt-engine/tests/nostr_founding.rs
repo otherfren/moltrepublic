@@ -1427,3 +1427,58 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
         s.create.run.log
     );
 }
+
+/// REGRESSION (field report, 2026-08-01) — changing the relay pool during a
+/// live founding must SAY that the already-minted invites are now stale.
+///
+/// The invites carry the pool as it was at `CreateStart`. An operator whose
+/// joiner was refused with "no relay in common" added a shared relay, watched
+/// both pools go green, and the SAME invite kept being refused — because the
+/// link in their hand still named the old relays. Nothing said so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changing_the_pool_during_a_founding_says_the_invites_are_stale() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Stale".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    // the operator adds another relay mid-founding, trying to fix a refused join
+    a.execute(Command::RelayAdd { url: "wss://later.example".to_string() })
+        .await
+        .expect("add");
+    let s = read_session(&a).await;
+    assert!(
+        s.create.run.log.iter().any(|l| l.contains("already minted still name")),
+        "the founding log must say the outstanding links are stale: {:?}",
+        s.create.run.log
+    );
+    // …and confirming it does not stack a second identical line
+    a.execute(Command::RelayConfirm {
+        url: "wss://later.example".to_string(),
+        accept_clearnet: true,
+    })
+    .await
+    .expect("confirm");
+    let s = read_session(&a).await;
+    assert_eq!(
+        s.create.run.log.iter().filter(|l| l.contains("already minted still name")).count(),
+        1,
+        "the warning must not stack per pool edit: {:?}",
+        s.create.run.log
+    );
+}
