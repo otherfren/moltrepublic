@@ -127,10 +127,22 @@ those problems are the same on both sides of the encryption line.
 
 ## 5. Adoption candidates
 
-Ranked by value to us. Effort ratings are rough and exist to be challenged in
-the planning session.
+Ranked by value as the analysis stood, before the planning session. Each item
+opens with the verdict it was given on 2026-08-01; the ranking below it is left
+as written, because two of the items were reordered or removed by decisions
+rather than by argument, and that is worth being able to see. §8 summarises.
 
 ### S1 — Agent access without a roster seat (their NIP-AA / NIP-OA)
+
+**Decided (2026-08-01): dropped.** There are no agents, only seats. From a
+member's point of view it is irrelevant whether a human types or that member's
+agent acts in their name: a member either operates the app or instructs an
+agent to operate it for them, under the same seat and the same keys. Safety
+comes from the m-of-n threshold — other seats must approve — not from roles,
+so the delegate rung Buzz needs has no job here. The chain-height binding falls
+with it; it was the repair of an expiry that no longer exists. The agent runs
+on the member's own machine and drives the app through MCP, which co-equality
+already guarantees. No work package.
 
 **Their design.** NIP-OA defines an optional `auth` tag carried on an ordinary
 event: `["auth", "<owner-pubkey-hex>", "<conditions>", "<sig-hex>"]`. The owner
@@ -183,7 +195,7 @@ from the first test.
 validation, a `Command` pair for mint/revoke that must land on both surfaces per
 co-equality, and UI to show which seat vouched for which agent.
 
-**Open questions for planning.**
+**Open questions at the time** — closed by the decision above.
 - Does an agent get an MLS credential of its own, or does it ride the owner's
   MLS client? The former means a real group member and a commit; the latter
   means the owner's device must be online to relay. This is the fork that
@@ -197,6 +209,17 @@ co-equality, and UI to show which seat vouched for which agent.
   governance stays with human seats.
 
 ### S2 — Cross-device read state (their NIP-RS)
+
+**Decided: adopt, reshaped.** One machine per seat makes the cross-device sync
+moot, so almost none of NIP-RS survives. What does survive came out of the
+inspection: the unread ledger lives in `crates/molt-ui/src/lib.rs`
+(`UnreadLedger`, in-memory, its own comment calls persistence "the B5 stretch
+package"), and the word *unread* appears nowhere in `molt-engine` or
+`molt-mcp`. So it dies on restart, and an agent driving the same seat cannot
+ask what is new — the question every agent session opens with. Move it
+engine-side, address by `MessageId` (it keys by position today, which
+compaction shifts), and persist it. The GUI derives its counter from the
+cursor; the agent gets the messages after it.
 
 **Their design.** Read positions sync across a user's devices through encrypted
 `kind:30078` addressable events. Each client has a stable `client_id` and
@@ -242,7 +265,7 @@ per-`client_id` slot design is only fully exercised once it does.
 **Effort.** Small-to-medium, and mostly test work: the merge rules want a
 property test that throws arbitrary interleavings at them.
 
-**Open questions for planning.**
+**Open questions at the time** — closed by the decision above.
 - Is read state per-member-private or shared with the group? Note our read
   receipts already publish per-message read dots on own sent messages, so some
   of this is *deliberately* shared. Where is the line?
@@ -250,6 +273,14 @@ property test that throws arbitrary interleavings at them.
   is emphatically not chain material.
 
 ### S3 — Push notifications without metadata leakage (their NIP-PL)
+
+**Decided: parked, with one rule fixed now.** No mobile client, so there is
+nothing to build; a desktop node either runs and notifies natively or catches
+up on reconnect under the delivery guarantee. The rule that must survive to the
+day mobile arrives: a notification carries exactly one meaning, *reconnect* —
+never content, never a sender name. That is the constraint someone relaxes two
+years later because "just the sender" seems harmless, and that is how the
+social graph ends up at Apple.
 
 **Their design.** A "push lease" is a signed, expiring authorization telling a
 relay to watch events on a client's behalf while its socket is closed, and to
@@ -289,7 +320,7 @@ constraint as a hard rule, not as a v1 simplification to be relaxed later.
 than S1/S2 in sequencing, higher in "decide the shape before anyone builds
 something worse."
 
-**Open questions for planning.**
+**Open questions at the time** — closed by the decision above.
 - Does a lease go to a relay we do not trust? The lease encrypts its filters to
   the executor, but the executor still learns activity timing per installation.
   Is that acceptable, or does it want a dedicated gateway?
@@ -298,6 +329,12 @@ something worse."
   clearnet relays.
 
 ### S4 — Kind-space discipline
+
+**Decided: adopt, small.** We use 443, 444, 445 and 1059; exactly one of them
+is a named constant (`KIND_GROUP` in `crates/molt-net/src/ritual_net.rs:45`,
+module-private) and the rest are bare numbers in code and comments. A
+`kinds.rs` with named constants and a uniqueness test, landed before N5 adds
+further frame types.
 
 **Their design.** The kind integer is the sole routing key, and adding a feature
 means adding a kind — *"a zero-migration extensibility model."* They partition
@@ -320,6 +357,10 @@ store AUTH" as a convention, but as a rejection that a test proves.
 **Effort.** Small. Good candidate for a warm-up task at the start of the plan.
 
 ### S5 — Specs with fixtures as a standing rule
+
+**Decided: adopt as a standing rule, not as a project.** No retrofit of the
+existing layouts. Every *new* canonical byte layout gets prose plus
+accept/reject fixtures from the start.
 
 **Their design.** Fifteen custom NIP specs live in `docs/nips/`, and at least one
 ships machine-readable conformance data alongside the prose: `NIP-MP.fixtures.json`
@@ -354,6 +395,22 @@ rather than as a retrofit project.
 
 ### S6 — Their server limits, mirrored as our client defences
 
+**Decided: adopt, narrowed — the IP checklist is dropped.** Verified:
+`IpAddr`, `Ipv4`, `Ipv6`, `to_socket_addrs` and `lookup_host` appear nowhere in
+`molt-net`. Hostnames are handed to the SOCKS proxy and resolved inside the Tor
+circuit — that *is* the no-leak property, and resolving them ourselves would be
+the leak. The only literal IPs in the crate are our own proxy endpoints. Buzz
+needs SSRF guards because their workflow engine fetches arbitrary URLs; we have
+no webhooks. What remains, and remains fully: the hostile-relay bounds — frame
+size, event flood against a single REQ, subscription count, and a connection
+that only dribbles.
+
+Residual, noted rather than planned: an invite ticket carries attacker-supplied
+relay URLs (`invite.rs`), and in `Direct` (clearnet) mode a `ws://localhost:…`
+entry would be dialled by the OS resolver. Under Tor it is moot, since Tor
+refuses private ranges. The defence at that layer is the WHATWG parser gate,
+which is already in place after the two CRITICAL host-parser bugs.
+
 **Their design.** As documented: `MAX_FRAME_BYTES = 65_536`, `MAX_SUBSCRIPTIONS =
 1024` per connection, `MAX_HISTORICAL_LIMIT = 500` per filter, a handler
 semaphore of 1024 concurrent EVENT/REQ, a connection semaphore, and a slow-client
@@ -384,6 +441,11 @@ recursion case is precisely the kind of edge we should confirm we handle.
 
 ### S7 — A relay conformance probe
 
+**Decided: adopt as a product feature.** Mandatory at add-time, so an unusable
+relay never enters the list rather than being diagnosed later. The result is a
+verdict plus the single reason it failed, not a full protocol log. A `Command`
+on both surfaces, so an agent can vet a relay too.
+
 **Their design.** A dedicated `buzz-conformance` crate plus
 `docs/multi-tenant-conformance.md`: a suite that can be run against a relay to
 verify it behaves to spec, including tenant isolation.
@@ -404,11 +466,25 @@ half of the same effort.
 **Effort.** Medium, and unusually high value per unit of work because it reuses
 the dialer and the WS client we already have.
 
-**Open question.** Is the probe a `Command` on both surfaces (it is a human
-decision aid, so per co-equality it likely is a tool), or an internal step of
-adding a relay?
+**Open question at the time** — closed by the decision above: it is a `Command`
+on both surfaces, and it runs as a mandatory step of adding a relay rather than
+as an optional check.
 
 ### S8 — The moderation model
+
+**Decided: rejected — we already hold the two principles that matter, and hold
+them harder.** Their model rests on an Owner/Admin/Member/Guest/Bot hierarchy
+we do not have and do not want. Enforcement at the identity layer is already
+ours: removing a member is a `ChainChange::Membership`, decided m-of-n rather
+than by admin fiat. Honest tombstones are already ours: a delete leaves a
+tombstone that keeps `from`, carries neither reactions nor read receipts, and
+still counts toward ordinals. One UI decision taken here: the tombstone stays
+visible and names who deleted.
+
+Their principle binds harder for us than for them. Every member holds the group
+key and runs their own client, so a render-time filter is theatre — swap the
+client and it is gone. Only what the group cryptographically refuses is
+actually enforced.
 
 **Their design** (`VISION_MODERATION.md`) splits community moderation
 (subjective, per-community, owner/admin authority, never extends beyond the
@@ -449,6 +525,14 @@ safety" may not map at all onto a self-hosted republic with no platform operator
 — that is a real question, not a detail.
 
 ### S9 — Smaller items worth logging
+
+**Decided: mesh transfer stays, Blossom is not adopted.** No third party sees
+even encrypted blocks, no new dependency, and the delivery guarantee already
+covers the path. Device pairing is moot under the S1 decision — kept on record
+for the day mobile or a server-resident agent arrives. Git-over-Nostr, huddles
+and the YAML workflow engine stay out of scope; the workflow engine especially,
+because with agents as full seats the automation *is* the agent, and a
+declarative layer beside it would rebuild the same capability more weakly.
 
 - **Device pairing.** They ship `buzz-pair-relay` and `buzz-pairing-cli` as
   dedicated components. We are single-device by construction: the workspace key
@@ -527,23 +611,33 @@ are where the value is — several are more finished than the implementations
 behind them, which is the opposite of the usual failure mode and rather to their
 credit.
 
-## 8. Proposed agenda for the planning session
+## 8. Decisions
 
-1. **S1 agent credential** — resolve the MLS fork (own credential vs. riding the
-   owner), fix the condition grammar, confirm chain-height binding, decide
-   whether agents may sign approvals. This is the largest design decision here.
-2. **S4 kind registry + S5 spec-with-fixtures rule** — adopt both as standing
-   conventions first, so S1 is the first thing built under them.
-3. **S2 read state** — close B5 using their merge rules; decide private vs.
-   shared.
-4. **S6 client-side limits audit** — bound `relay_ws.rs` against their yardstick.
-5. **S7 relay conformance probe** — scope it as a user-facing feature and decide
-   its surface.
-6. **S3 push leases** — decide the shape now, build when there is a mobile
-   client.
-7. **S8 moderation** — product conversation: does the community/platform split
-   mean anything for a self-hosted republic?
-8. **S9** — log; revisit device pairing and Blossom when the above lands.
-9. **Vendor or reimplement, per component (§2)** — wherever we would otherwise
-   clean-room a design of theirs, decide deliberately rather than by reflex: the
-   Apache-2.0 patent grant travels with the code and not with the idea.
+Walked through candidate by candidate on 2026-08-01; each verdict is recorded
+above, at the item it belongs to. Summary:
+
+| | Verdict |
+|---|---|
+| S1 agent access | **Dropped** — no agents, only seats; the agent drives its own seat locally over MCP, which exists |
+| S2 read state | **Adopt, reshaped** — engine-side, `MessageId`-addressed, persisted; GUI derives the counter, the agent gets the messages |
+| S3 push | **Parked** — no mobile client; the notification-carries-no-content rule is fixed now |
+| S4 kind registry | **Adopt** — named constants plus a uniqueness test |
+| S5 spec with fixtures | **Adopt as a rule** — every new byte layout, no retrofit |
+| S6 client bounds | **Adopt, narrowed** — hostile-relay limits only; the IP checklist does not apply to us |
+| S7 relay probe | **Adopt** — mandatory at add-time, verdict plus reason, both surfaces |
+| S8 moderation | **Rejected** — both principles already held, and held harder |
+| S9 remainder | **Mesh stays**, Blossom declined; pairing, git, voice and YAML recorded only |
+
+Four work packages fall out — S2, S4, S6, S7 — plus S5 as a standing convention
+and two small rules (S3's payload constraint, S8's visible tombstone). They are
+planned in `buzz_followups.md`.
+
+Two of the decisions are worth remembering for their shape rather than their
+content. S1, which this document ranked first, was removed outright by a
+product decision that made Buzz's cleverest construction unnecessary — their
+delegate credential exists to tell a relay who is knocking, and no relay
+decides anything here. And S2, ranked second for what Buzz had built, turned
+out to matter for something else entirely: the inspection it prompted found
+that our unread state is GUI-only and invisible to the MCP surface, which the
+agent decision had just turned into a blocker. The comparison earned its keep
+by what it made us look at, not by what it let us take.
