@@ -694,7 +694,7 @@ impl State {
         // any prior ritual/mesh belongs to a different context
         self.teardown_ritual();
         self.ritual_attestations.clear();
-        let links = self
+        let crate::founding::RitualStart { links, notes } = self
             .start_ritual(&name, &member, threshold, members, &seed)
             .map_err(MoltError::Create)?;
 
@@ -727,6 +727,10 @@ impl State {
             "→ ritual opened · {member} (founder) · {threshold}-of-{members} · {} invite(s) minted",
             usize::from(members).saturating_sub(1)
         ));
+        // …then whatever start_ritual needed to tell the operator (the pool
+        // was capped to what a link may carry, …) — pushed HERE because the
+        // assignment above replaced the whole CreateState
+        self.session.create.run.log.extend(notes);
         if simulated {
             self.session.create.run.log.push(
                 "→ SIMULATION — no real network in this build (the Nostr transport \

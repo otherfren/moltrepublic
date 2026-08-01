@@ -339,10 +339,19 @@ impl RitualRuntime {
     }
 }
 
+/// What a started ritual hands back: the seat links, plus run-log notes the
+/// caller must apply itself (`cmd_create_start` replaces `session.create`
+/// wholesale, so a line pushed inside `start_ritual` would be wiped).
+pub(crate) struct RitualStart {
+    pub(crate) links: Vec<String>,
+    pub(crate) notes: Vec<String>,
+}
+
 impl State {
     /// Begin the founding ritual: derive the founder's identity, mint the
     /// invites, open the per-seat transport, and start the simulated
-    /// members. Returns the invite preview links (for the seat rows).
+    /// members. Returns the invite preview links (for the seat rows) plus
+    /// any run-log notes the caller must apply.
     pub(crate) fn start_ritual(
         &mut self,
         name: &str,
@@ -350,7 +359,11 @@ impl State {
         rule_m: u8,
         rule_n: u8,
         seed_phrase: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<RitualStart, String> {
+        // notes the CALLER must apply: `cmd_create_start` replaces
+        // `session.create` wholesale after this returns, so a run-log line
+        // pushed from in here would be discarded
+        let mut notes: Vec<String> = Vec::new();
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| e.to_string())?;
         let ws_id = molt_storage::derive_workspace_id(&entropy, founder_name);
         let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&entropy, &ws_id);
@@ -438,10 +451,35 @@ impl State {
             ) {
                 return Err(format!("cannot found: {}", crate::relay_msg::pool_gap_reason(gap)));
             }
-            let relays = molt_core::relay::dialable(
+            // An invite link and a Welcome payload are UNTRUSTED INPUT at the
+            // far end, and both cap the relay list at MAX_PAYLOAD_RELAYS. That
+            // cap was being applied to the founder's OWN pool, so an operator
+            // who confirmed nine relays could not render a link at all and the
+            // founding aborted. Cap what goes IN instead — in the pool's own
+            // priority order (relay_pool.md: the order IS the priority).
+            //
+            // ONCE, here, upstream of every consumer: the joiner requires the
+            // invite's relay set and the Welcome's to be byte-identical
+            // (`nostr_ritual.rs` member_join), so capping in two places would
+            // break every join over a >8 pool.
+            let dialable = molt_core::relay::dialable(
                 &self.session.settings.relays,
                 self.clearnet_session,
             );
+            let over = dialable.len().saturating_sub(molt_net::welcome::MAX_PAYLOAD_RELAYS);
+            let relays: Vec<String> = dialable
+                .into_iter()
+                .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
+                .collect();
+            if over > 0 {
+                // never truncate silently: the operator must be able to tell
+                // "using my whole pool" from "using the first eight of it"
+                notes.push(format!(
+                    "→ this node has {} dialable relays; the invite and the Welcome carry the                      first {} (the pool order is the priority — reorder in Settings to change                      which)",
+                    relays.len() + over,
+                    molt_net::welcome::MAX_PAYLOAD_RELAYS
+                ));
+            }
             let net = molt_net::ritual_net::RitualNet::new(
                 dialer.clone(),
                 relays.clone(),
@@ -538,7 +576,7 @@ impl State {
             seq: std::sync::atomic::AtomicU64::new(0),
             nostr,
         });
-        Ok(links)
+        Ok(RitualStart { links, notes })
     }
 
     /// Tear the ritual down (cancel or completion): drops the hub, its

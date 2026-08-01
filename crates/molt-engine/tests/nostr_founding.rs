@@ -636,3 +636,102 @@ async fn a_declined_charter_aborts_both_sides() {
     assert_eq!(s.create.seats[0].state, 3, "the seat is marked declined");
     assert!(s.workspaces.is_empty(), "nothing materialized on the founder");
 }
+
+/// REGRESSION (cluster I) — a founder with MORE relays than an invite may
+/// carry still founds, over its first eight.
+///
+/// The 8-relay cap is untrusted-INPUT enforcement: it bounds what a pasted
+/// link may make this node dial. It was being applied to the FOUNDER'S OWN
+/// pool, so an operator who confirmed nine relays got no link at all and the
+/// founding aborted outright ("9 relays — more than the 8 an invite may
+/// carry"). Cap what goes IN, in the pool's own priority order.
+///
+/// The cap must be applied EXACTLY ONCE, upstream of both consumers: the
+/// joiner requires the invite's relay set and the Welcome's to be identical,
+/// so a link-only fix would move the failure to group birth. That is why this
+/// test drives the whole choreography through to a sealed join rather than
+/// stopping at "a link rendered".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
+    const CAP: usize = 8;
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    // the live relay FIRST (pool order is the dial priority), then eight
+    // syntactically valid but unreachable v3 onions. Onion pads fail
+    // fail-closed and INSTANTLY under the direct dialer — a clearnet or
+    // .invalid pad would stall every publish on a real resolver.
+    adopt_relay(&a, &url).await;
+    let pads: Vec<String> = "bcdefghi"
+        .chars()
+        .map(|c| format!("wss://{}{}.onion", "a".repeat(55), c))
+        .collect();
+    for p in &pads {
+        adopt_relay(&a, p).await;
+    }
+
+    a.execute(Command::CreateStart {
+        name: "Overflow".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+
+    // fail fast on the red run: surface the real refusal instead of a 30 s wait
+    let s = wait_for(&a, "a joinable link (or an honest refusal)", |s| {
+        s.create.run.outcome == 2
+            || (!s.create.seats.is_empty()
+                && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok())
+    })
+    .await;
+    assert_ne!(
+        s.create.run.outcome, 2,
+        "the founding must not abort on the operator's own pool size: {:?}",
+        s.create.run.log
+    );
+    let link = s.create.seats[0].link.clone();
+    let inv = molt_engine::FoundingInvite::parse(&link).expect("joinable");
+
+    // exactly the first eight, in pool order
+    let mut expected: Vec<String> = vec![url.clone()];
+    expected.extend(pads.iter().take(CAP - 1).cloned());
+    assert_eq!(inv.handover.relays, expected, "the first {CAP} in priority order");
+    assert!(
+        !inv.handover.relays.contains(pads.last().expect("a ninth relay")),
+        "the ninth relay is dropped, not carried"
+    );
+    // …and the operator is TOLD, so a silent truncation cannot read as
+    // "the app is using my whole pool"
+    assert!(
+        s.create.run.log.iter().any(|l| l.contains("9") && l.contains(&CAP.to_string())),
+        "the founding log names how many of the pool the invite carries: {:?}",
+        s.create.run.log
+    );
+
+    // the whole choreography must still complete — this is what pins the
+    // WELCOME leg (capped identically) and the joiner's invite-set ==
+    // Welcome-set equality check
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart { invite: link, member: "petra".to_string() })
+        .await
+        .expect("join starts");
+    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Overflow".to_string(),
+        agenda: "found over a pool bigger than a link".to_string(),
+    })
+    .await
+    .expect("proposed");
+    wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
+    wait_for(&b, "the join to seal", |s| {
+        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+    })
+    .await;
+}

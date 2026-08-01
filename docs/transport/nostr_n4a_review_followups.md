@@ -208,12 +208,30 @@ Fix: one keystone per item, each driving the PRODUCTION entry point, each
 verified red by deleting the check first. This is the etappe's real coverage
 debt and should not be deferred again.
 
-## I. Leftovers — LOW
+## I. Leftovers — ✅ DONE
 
-- The invite's untrusted-input relay cap (8) is enforced against the
-  FOUNDER's own pool, so an operator with >8 confirmed relays cannot render
-  a link at all (`invite.rs:220`). Cap what goes INTO the link (take the
-  first 8 in priority order) rather than refusing to build it.
+The invite's untrusted-input relay cap (8) was enforced against the FOUNDER's
+own pool, so an operator with >8 confirmed relays could not render a link at
+all — and it was worse than reported: `spawn_founder_inbox` turned the render
+refusal into a FATAL `NetRitualFailed`, so the founding aborted outright.
+
+Fixed at the single source (`founding.rs::start_ritual`): the founder takes
+the first `MAX_PAYLOAD_RELAYS` of `relay::dialable` in pool (= priority)
+order, and the SAME capped list feeds the invite, the Welcome payload, the
+group channel and the persisted `TransportState.relays`. Capping ONCE is
+load-bearing — the joiner requires the invite's relay set and the Welcome's to
+be identical, so a link-only fix would have moved the failure to group birth.
+`invite.rs`/`welcome.rs` keep their build-side refusal as the fail-loud
+backstop.
+
+Truncation is never silent: the founding log names how many of the pool the
+invite carries and points at the pool order. **Behaviour change worth
+knowing:** the founder now also subscribes/publishes on only those first
+eight — an operator whose top 8 are dead and whose 9th is live must reorder.
+
+Keystone `a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight`
+drives a 9-relay founder through the whole choreography to a sealed join, so
+it pins the Welcome leg too, not just the rendered link.
 
 ---
 
