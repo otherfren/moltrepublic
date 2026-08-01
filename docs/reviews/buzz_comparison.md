@@ -1,4 +1,4 @@
-# Buzz (`block/buzz`) — what it is, and what is worth taking
+# Buzz (`block/buzz`) — comparison and adoption candidates
 
 Date: 2026-08-01. Subject: <https://github.com/block/buzz>, Apache-2.0, Block Inc.
 
@@ -12,13 +12,13 @@ axis we care most about — privacy.
 
 That combination makes it valuable. Where a design of theirs is orthogonal to
 the trust model, they have usually already solved a problem we still have, and
-we can take the solution outright. Where a design only works because a server
-reads plaintext, it is poison for us regardless of how polished it looks.
+we can adopt the solution outright. Where a design only works because a server
+reads plaintext, it is unusable for us regardless of how polished it looks.
 
 This document sorts their work into those two buckets and records, per item,
 what we would have to build. It is input for a planning session, not a plan:
-each steal candidate ends with the open questions that must be decided before it
-can become a work package.
+each candidate ends with the open questions that must be decided before it can
+become a work package.
 
 **Sourcing caveat.** Everything below is drawn from their published documents —
 `README.md`, `ARCHITECTURE.md`, `VISION.md`, `VISION_MODERATION.md`, the custom
@@ -28,7 +28,54 @@ are good enough to reason about and to use as an audit yardstick, but must be
 re-verified against their code before anything of ours depends on an exact
 value.
 
-## 2. What Buzz is
+## 2. Licensing and provenance
+
+Buzz is Apache-2.0, "Copyright 2026 Block, Inc.", with no `NOTICE` file in the
+repository. MoltRepublic is **GPL-3.0-or-later** — `COPYING` is the plain
+GPLv3, and the workspace manifest carries `license = "GPL-3.0-or-later"`. Not
+Affero.
+
+Apache-2.0 is **one-way compatible** with GPLv3: Apache-2.0 code may be
+incorporated into a GPLv3 work, and the combined work is then GPLv3. The
+reverse is not permitted. The direction we care about is the open one.
+
+What this document proposes, though, is almost never a code copy. It is reading
+published specifications and reimplementing them against our own trust model —
+usually with different primitives, and in S1's case with a deliberately
+different binding. That raises no licensing question at all: a protocol design,
+an architecture, an ordering of validation steps are not copyrightable; only
+their expression is. Quoting a passage with attribution, as this document does
+throughout, is ordinary citation.
+
+Two obligations are worth writing down before anyone reaches for one of their
+files:
+
+- **If we ever vendor actual Apache-2.0 source**, §4 of that licence applies:
+  keep the copyright, patent, trademark and attribution notices, ship a copy of
+  the licence, and mark modified files as changed. There is no `NOTICE` file
+  today, so §4(d) is moot — verify that at the time rather than trusting this
+  sentence.
+- **If we lift substantial spec text** into our own documents instead of
+  paraphrasing, that is expression: attribute it and name the licence.
+
+One counterintuitive point to carry into the planning session. Apache-2.0 §3
+grants an express patent licence, and that grant travels **with the code**.
+Reimplementing an idea from the spec without taking any of their source means
+we never receive it. Block holds a substantial patent portfolio, so for a
+component where we would otherwise clean-room a design of theirs, taking the
+Apache-2.0 code can be the *safer* choice rather than the riskier one — the
+opposite of the usual instinct. Weigh it per component; it argues for vendoring
+in some places and changes nothing in most.
+
+Separately, and not a Buzz question at all: under GPLv3 someone who runs a
+modified MoltRepublic as a hosted service for others is not obliged to publish
+their changes, whereas AGPL §13 would require it. Whether that gap matters is a
+product decision, not a licensing accident to be corrected silently.
+
+None of this is legal advice. It is here so the question is answered once, in
+writing, rather than re-litigated per work package.
+
+## 3. What Buzz is
 
 A self-hosted workspace that merges chat, project management, code review, CI/CD
 and agent orchestration into one event log. Rust monorepo, 27 crates, Nostr
@@ -52,7 +99,7 @@ Their positioning line for agents is good and we should be aware of it, since it
 is the same ground we stand on: *"agents are members, not bots"* — individual
 keys, audit trails and scoped permissions identical to human teammates.
 
-## 3. The dividing axiom
+## 4. The dividing axiom
 
 Buzz has deliberately not built end-to-end encryption, and says why:
 
@@ -78,7 +125,7 @@ theirs and not transferable. A feature that touches *how a protocol extension is
 shaped, specified, bounded or synchronised* is very likely transferable, because
 those problems are the same on both sides of the encryption line.
 
-## 4. Steal candidates
+## 5. Adoption candidates
 
 Ranked by value to us. Effort ratings are rough and exist to be challenged in
 the planning session.
@@ -430,13 +477,13 @@ safety" may not map at all onto a self-hosted republic with no platform operator
   timeout, a 100-permit semaphore that returns `CapacityExceeded` immediately
   rather than queueing, and approval tokens that are CSPRNG UUIDs stored
   SHA-256-hashed and enforced single-use via `AND status = 'pending'` in the
-  UPDATE. Take the *shape*, not the substance — see §6. Our governance chain is
+  UPDATE. Take the *shape*, not the substance — see §7. Our governance chain is
   already the approval engine; what is missing is a declarative surface over it.
 - **Product language.** *"Zero is the default. You opt in to noise, not out."*
   and *"one workspace, one URL, one identity system"*. Both are lines we could
   have written and have not.
 
-## 5. Do not steal
+## 6. What does not transfer
 
 - **Relay as source of truth; membership as access control.** Their entire
   authorization model is server trust. Ours is MLS plus the sealed roster.
@@ -462,7 +509,7 @@ safety" may not map at all onto a self-hosted republic with no platform operator
   condition strings get right, and we should not reproduce it: authority should
   be per-credential and bounded, everywhere.
 
-## 6. Reality check before copying anything
+## 7. Reality check before adopting anything
 
 Their README shows ✅ where their own limitations table shows 🚧. From that
 table:
@@ -480,7 +527,7 @@ are where the value is — several are more finished than the implementations
 behind them, which is the opposite of the usual failure mode and rather to their
 credit.
 
-## 7. Proposed agenda for the planning session
+## 8. Proposed agenda for the planning session
 
 1. **S1 agent credential** — resolve the MLS fork (own credential vs. riding the
    owner), fix the condition grammar, confirm chain-height binding, decide
@@ -497,3 +544,6 @@ credit.
 7. **S8 moderation** — product conversation: does the community/platform split
    mean anything for a self-hosted republic?
 8. **S9** — log; revisit device pairing and Blossom when the above lands.
+9. **Vendor or reimplement, per component (§2)** — wherever we would otherwise
+   clean-room a design of theirs, decide deliberately rather than by reflex: the
+   Apache-2.0 patent grant travels with the code and not with the idea.
