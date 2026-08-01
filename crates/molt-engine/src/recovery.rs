@@ -419,13 +419,23 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
 
     // the seat proof: only the phrase-holder can sign it, and it binds this exact
     // fresh KeyPackage + the republic id carried in the link
-    let seat_proof = crate::founding::make_seat_proof(&sk, &inv.ticket, &kp_hex, &inv.republic_id);
+    // the loopback path carries no transport anchor, so the proof binds an
+    // empty one — the Nostr rejoiner (N4b step 6) signs its real new key here
+    let new_nostr_pk = String::new();
+    let seat_proof = crate::founding::make_seat_proof(
+        &sk,
+        &inv.ticket,
+        &kp_hex,
+        &inv.republic_id,
+        &new_nostr_pk,
+    );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         member: inv.member.clone(),
         identity_pk: pk.clone(),
         key_package: kp_hex,
         ticket: inv.ticket.clone(),
         seat_proof,
+        new_nostr_pk,
         reply: Some(invite::ReplyHandover {
             server: reply_q.snd.server.clone(),
             queue_id: hex::encode(&reply_q.snd.id.0),

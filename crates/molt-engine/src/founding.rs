@@ -774,6 +774,7 @@ pub(crate) fn recover_command(r: invite::RecoverRequest, generation: u64) -> Com
         key_package: r.key_package,
         ticket: r.ticket,
         seat_proof: r.seat_proof,
+        new_nostr_pk: r.new_nostr_pk,
         reply: r
             .reply
             .as_ref()
@@ -1034,16 +1035,29 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
 /// the ticket is spent on first use (replay is dead). Binding the KeyPackage
 /// ties the proof to exactly the credential being re-added to the group, and the
 /// republic id to exactly this workspace.
-pub(crate) fn seat_proof_bytes(ticket: &str, key_package_hex: &str, republic_id: &str) -> Vec<u8> {
+pub(crate) fn seat_proof_bytes(
+    ticket: &str,
+    key_package_hex: &str,
+    republic_id: &str,
+    new_nostr_pk: &str,
+) -> Vec<u8> {
+    // v2 (N4b): the NEW transport anchor is inside the signed bytes. Without
+    // it a captured proof could be replayed with somebody else's transport
+    // key substituted, re-anchoring the seat's traffic to them while every
+    // signature still verified.
+    //
+    // Length-prefixed, not separator-joined: a member supplies these fields,
+    // and a separator-only preimage lets one field's content impersonate the
+    // boundary (the N1 CRITICAL — see `hash-length-prefix-not-separators`).
     let mut m = Vec::with_capacity(
-        20 + ticket.len() + key_package_hex.len() + republic_id.len() + 2,
+        20 + ticket.len() + key_package_hex.len() + republic_id.len() + new_nostr_pk.len() + 16,
     );
-    m.extend_from_slice(b"molt-seat-proof-v1\0");
-    m.extend_from_slice(ticket.as_bytes());
-    m.push(0);
-    m.extend_from_slice(key_package_hex.as_bytes());
-    m.push(0);
-    m.extend_from_slice(republic_id.as_bytes());
+    m.extend_from_slice(b"molt-seat-proof-v2\0");
+    for field in [ticket, key_package_hex, republic_id, new_nostr_pk] {
+        let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+        m.extend_from_slice(&len.to_le_bytes());
+        m.extend_from_slice(field.as_bytes());
+    }
     m
 }
 
@@ -1054,10 +1068,11 @@ pub fn make_seat_proof(
     ticket: &str,
     key_package_hex: &str,
     republic_id: &str,
+    new_nostr_pk: &str,
 ) -> String {
     molt_storage::identity_sign(
         identity_sk,
-        &seat_proof_bytes(ticket, key_package_hex, republic_id),
+        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk),
     )
 }
 
@@ -1071,11 +1086,12 @@ pub fn verify_seat_proof(
     ticket: &str,
     key_package_hex: &str,
     republic_id: &str,
+    new_nostr_pk: &str,
     sig_hex: &str,
 ) -> bool {
     molt_storage::identity_verify(
         anchored_pk,
-        &seat_proof_bytes(ticket, key_package_hex, republic_id),
+        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk),
         sig_hex,
     )
 }
@@ -2946,6 +2962,7 @@ mod tests {
             key_package: "bb".to_string(),
             ticket: "cc".to_string(),
             seat_proof: "dd".to_string(),
+            new_nostr_pk: String::new(),
             reply: Some(invite::ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),
@@ -2978,6 +2995,7 @@ mod tests {
             key_package: String::new(),
             ticket: String::new(),
             seat_proof: String::new(),
+            new_nostr_pk: String::new(),
             reply: None,
         };
         let Command::NetRecoverRequested { reply, .. } = recover_command(bare, 1) else {
@@ -2989,16 +3007,16 @@ mod tests {
     #[test]
     fn seat_proof_binds_ticket_key_package_and_republic() {
         let (sk, pk) = molt_storage::derive_identity_key(&[7u8; 32], "ws");
-        let sig = make_seat_proof(&sk, "ticket-abc", "aabbcc", "rep-id-1");
+        let sig = make_seat_proof(&sk, "ticket-abc", "aabbcc", "rep-id-1", "");
         // the genuine proof verifies against the anchored key
-        assert!(verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-1", &sig));
+        assert!(verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-1", "", &sig));
         // tampering ANY of the three bound fields breaks it
-        assert!(!verify_seat_proof(&pk, "other", "aabbcc", "rep-id-1", &sig));
-        assert!(!verify_seat_proof(&pk, "ticket-abc", "ffff", "rep-id-1", &sig));
-        assert!(!verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-2", &sig));
+        assert!(!verify_seat_proof(&pk, "other", "aabbcc", "rep-id-1", "", &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "ffff", "rep-id-1", "", &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-2", "", &sig));
         // a different identity key (a leaked link without the phrase) can't forge it
         let (_, pk2) = molt_storage::derive_identity_key(&[8u8; 32], "ws");
-        assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", &sig));
+        assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", "", &sig));
     }
 
     /// A real, canonical nostr anchor for the founder-seat fixtures.
@@ -3051,6 +3069,62 @@ mod tests {
     /// A fully-signed 2-member sealed roster with real keys.
     fn valid_roster() -> SealedRoster {
         signed_roster_with(&npk_founder(), &npk_member())
+    }
+
+    /// N4b step 1 — the seat proof binds the NEW transport anchor.
+    ///
+    /// A recovered seat's working key rides the threshold-signed `Restored`
+    /// block, attested by the re-derived IDENTITY key. If the proof did not
+    /// cover `new_nostr_pk`, anyone able to replay a captured proof could
+    /// substitute their OWN transport key into the re-anchoring — the seat's
+    /// traffic would then be addressed to them while every signature checked
+    /// out. So the anchor is inside the signed bytes, and the tag is bumped
+    /// (`molt-seat-proof-v2`) rather than silently re-used: an unbumped
+    /// layout change breaks signatures without anyone noticing.
+    #[test]
+    fn a_seat_proof_binds_the_new_transport_anchor() {
+        let (sk, pk) = molt_storage::derive_identity_key(&[11u8; 32], "dora");
+        let npk = molt_net::nostr_identity(b"dora-entropy", "recovery-ticket").1;
+        let other = molt_net::nostr_identity(b"attacker-entropy", "recovery-ticket").1;
+        let (ticket, kp, rid) = ("ab".repeat(8), "cc".repeat(20), "f00d".to_string());
+
+        let proof = make_seat_proof(&sk, &ticket, &kp, &rid, &npk);
+        assert!(
+            verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &proof),
+            "the honest proof verifies"
+        );
+        // the whole point: the anchor cannot be swapped after signing
+        assert!(
+            !verify_seat_proof(&pk, &ticket, &kp, &rid, &other, &proof),
+            "a proof must NOT verify against a different transport anchor"
+        );
+        // …and every other bound field still binds
+        assert!(!verify_seat_proof(&pk, "ff".repeat(8).as_str(), &kp, &rid, &npk, &proof));
+        assert!(!verify_seat_proof(&pk, &ticket, "dd".repeat(20).as_str(), &rid, &npk, &proof));
+        assert!(!verify_seat_proof(&pk, &ticket, &kp, "beef", &npk, &proof));
+    }
+
+    /// A v1 proof must not verify against a v2 seat — the tag bump is what
+    /// makes that true, and nothing shipped a v1 recovery over Nostr, so
+    /// there is deliberately no back-compat path.
+    #[test]
+    fn a_v1_seat_proof_does_not_verify_against_v2() {
+        let (sk, pk) = molt_storage::derive_identity_key(&[12u8; 32], "dora");
+        let npk = molt_net::nostr_identity(b"dora-entropy", "t").1;
+        let (ticket, kp, rid) = ("ab".repeat(8), "cc".repeat(20), "f00d".to_string());
+        // the v1 preimage, byte for byte as it shipped
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(b"molt-seat-proof-v1\0");
+        v1.extend_from_slice(ticket.as_bytes());
+        v1.push(0);
+        v1.extend_from_slice(kp.as_bytes());
+        v1.push(0);
+        v1.extend_from_slice(rid.as_bytes());
+        let v1_sig = molt_storage::identity_sign(&sk, &v1);
+        assert!(
+            !verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &v1_sig),
+            "a v1 signature must be refused by the v2 verifier"
+        );
     }
 
     #[test]

@@ -3380,8 +3380,14 @@ pub enum Command {
         key_package: String,
         /// The recovery ticket the seat proof is bound to.
         ticket: String,
-        /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id)`.
+        /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id
+        /// ‖ new_nostr_pk)` under `molt-seat-proof-v2`.
         seat_proof: String,
+        /// The rejoiner's NEW transport anchor (N4b §8.3), bound by the seat
+        /// proof. Empty on the loopback path. Validated at the ingest choke
+        /// point before it can reach a chain block.
+        #[serde(default)]
+        new_nostr_pk: String,
         /// The member's reply-queue handover, for the coordinator to send the
         /// Welcome back once re-admission commits. Opaque here.
         #[serde(default)]

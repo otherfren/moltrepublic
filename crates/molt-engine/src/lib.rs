@@ -1205,6 +1205,7 @@ impl State {
             Command::NetRecoverRequested {
                 member,
                 identity_pk,
+                new_nostr_pk,
                 key_package,
                 ticket,
                 seat_proof,
@@ -1216,6 +1217,7 @@ impl State {
                 key_package,
                 ticket,
                 seat_proof,
+                new_nostr_pk,
                 reply,
                 generation,
             ),

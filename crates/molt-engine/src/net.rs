@@ -1446,6 +1446,7 @@ impl State {
         key_package: String,
         ticket: String,
         seat_proof: String,
+        new_nostr_pk: String,
         reply: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
@@ -1462,12 +1463,39 @@ impl State {
         // NB: on a verified request, verify_and_propose_restore registers the
         // pending recovery BEFORE proposing (a lone coordinator commits the
         // block synchronously inside the propose, which consumes that entry)
+        // NORMALIZE-OR-REJECT at the choke point, exactly like the founding
+        // ingest: an anchor that is not a canonical curve point must never
+        // reach a chain block, and it must not spend the ticket either. Empty
+        // stays empty (the loopback path has no transport anchor).
+        let canonical = if new_nostr_pk.is_empty() {
+            String::new()
+        } else {
+            match molt_net::canonical_nostr_pk(&new_nostr_pk) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(%member, error = %e, "recovery request with a malformed transport anchor — dropped");
+                    return Ok(Reply::Ack);
+                }
+            }
+        };
+        // …and it must not collide with a seat that already holds it
+        if !canonical.is_empty() {
+            let taken = self
+                .replica
+                .as_ref()
+                .is_some_and(|r| r.identities.iter().any(|i| i.nostr_pk == canonical));
+            if taken {
+                tracing::warn!(%member, "recovery request reuses an anchored transport key — dropped");
+                return Ok(Reply::Ack);
+            }
+        }
         match self.verify_and_propose_restore(
             &member,
             &identity_pk,
             &key_package,
             &ticket,
             &seat_proof,
+            &canonical,
             &reply,
         ) {
             Ok(_id) => {

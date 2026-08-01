@@ -290,8 +290,17 @@ pub struct RecoverRequest {
     pub key_package: String,
     /// The single-use recovery ticket the seat proof is bound to.
     pub ticket: String,
-    /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id)`, hex.
+    /// The seat proof: `sign(identity, ticket ‖ key_package ‖ republic_id ‖
+    /// new_nostr_pk)` under `molt-seat-proof-v2`, hex.
     pub seat_proof: String,
+    /// The rejoiner's NEW transport anchor (N4b §8.3). The founding anchor is
+    /// ticket-salted and cannot be re-derived once the ticket is gone, so a
+    /// recovered seat brings a fresh key — carried here, bound by the seat
+    /// proof, and made authoritative by riding the threshold-signed
+    /// `Restored` block. Empty on the loopback path, which has no transport
+    /// anchor at all.
+    #[serde(default)]
+    pub new_nostr_pk: String,
     /// The member's reply queue, so the coordinator can send the Welcome back.
     #[serde(default)]
     pub reply: Option<ReplyHandover>,
@@ -554,6 +563,7 @@ mod tests {
             key_package: "bb".to_string(),
             ticket: "cc".to_string(),
             seat_proof: "dd".to_string(),
+            new_nostr_pk: String::new(),
             reply: Some(ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),
