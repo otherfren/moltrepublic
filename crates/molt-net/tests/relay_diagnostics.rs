@@ -77,8 +77,15 @@ fn dead_port() -> u16 {
 }
 
 /// KEYSTONE — a relay that cannot be reached logs the RELAY, the ROUTE and
-/// the REASON. Delete the `Ok(Err(e))` arm in `supervise` and this goes red;
-/// before the fix the whole failure was a bare `_` and nothing was emitted.
+/// the REASON on ONE line. Verified red by deleting the `Ok(Err(e))` arm in
+/// `subscribe`'s first-connect; before the fix that arm was
+/// `.ok().and_then(Result::ok)` and nothing was emitted at all.
+///
+/// KNOWN GAP: this pins the FIRST connect (what an operator meets at
+/// startup). `supervise`'s reconnect reports through the same shape but is
+/// not pinned here — that needs a relay that connects and then dies, i.e.
+/// the cuttable proxy in `tests/nostr_relay_runtime.rs::proxy`. Deleting the
+/// supervise warn alone leaves this test green.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreachable_relay_logs_the_reason_not_silence() {
     let buf = capture_logs();
@@ -95,19 +102,20 @@ async fn an_unreachable_relay_logs_the_reason_not_silence() {
     let _keep = sub;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    // ONE line must carry relay + route + cause TOGETHER. Asserting the three
+    // separately is how a diagnostics test lies about itself: the url and
+    // `via=` also appear in unrelated DEBUG dial lines, so the weak form
+    // stays green with the connect-failure report deleted.
     let log = logged(&buf);
+    let reported = log.lines().find(|l| {
+        (l.contains("relay connect failed") || l.contains("relay connect timed out"))
+            && l.contains(&url)
+            && l.contains("via=direct")
+            && (l.contains("error=") || l.contains("after_s="))
+    });
     assert!(
-        log.contains("relay connect failed") || log.contains("relay connect timed out"),
-        "a failed connect must be reported, got:\n{log}"
-    );
-    assert!(log.contains(&url), "…naming the relay: {log}");
-    assert!(
-        log.contains("via=direct") || log.contains("via=\"direct\""),
-        "…and the route it was dialed over: {log}"
-    );
-    assert!(
-        log.contains("error=") || log.contains("after_s="),
-        "…and the actual reason, not just that it failed: {log}"
+        reported.is_some(),
+        "no single line carries relay + route + cause, got:\n{log}"
     );
 }
 

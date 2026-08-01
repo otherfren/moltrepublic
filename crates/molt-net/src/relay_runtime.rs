@@ -562,6 +562,9 @@ async fn supervise(
     // operator says "Tor runs but the client will not connect"
     let via = crate::relay_ws::dialer_for(&shared.dialer, &url).route();
     let mut attempt: u32 = 0;
+    // the last failure reported at WARN — an identical repeat stays on
+    // DEBUG so a permanently dead relay does not bury everything else
+    let mut last_reason: Option<String> = None;
     loop {
         let ws = match session.take() {
             Some(ws) => ws,
@@ -583,16 +586,28 @@ async fn supervise(
                             ms = began.elapsed().as_millis(),
                             "relay connected"
                         );
+                        // a fresh failure after a good session is loud again
+                        last_reason = None;
                         ws
                     }
                     Ok(Err(e)) => {
                         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
-                        tracing::warn!(
-                            relay = %url, via = %via, attempt,
-                            retry_in_s = backoff.as_secs(),
-                            error = %e,
-                            "relay connect failed"
-                        );
+                        let reason = e.to_string();
+                        let repeat = last_reason.as_deref() == Some(reason.as_str());
+                        if repeat {
+                            tracing::debug!(
+                                relay = %url, via = %via, attempt,
+                                retry_in_s = backoff.as_secs(), error = %reason,
+                                "relay connect failed again"
+                            );
+                        } else {
+                            tracing::warn!(
+                                relay = %url, via = %via, attempt,
+                                retry_in_s = backoff.as_secs(), error = %reason,
+                                "relay connect failed"
+                            );
+                            last_reason = Some(reason);
+                        }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(cap);
                         continue;
