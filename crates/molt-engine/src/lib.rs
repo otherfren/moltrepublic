@@ -1278,7 +1278,8 @@ impl State {
                 accepted,
                 failed,
                 generation,
-            } => self.cmd_net_ritual_published(&what, &accepted, &failed, generation),
+                workspace,
+            } => self.cmd_net_ritual_published(&what, &accepted, &failed, generation, &workspace),
             Command::NetRitualFailed { error, generation } => {
                 self.cmd_net_ritual_failed(error, generation)
             }

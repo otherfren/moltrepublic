@@ -639,6 +639,7 @@ impl State {
                         // farewell would fail whatever founding is running
                         // ~30 s later
                         Some(gen),
+                        String::new(),
                     );
                 }
             }
@@ -1828,6 +1829,7 @@ mod ritual_ops {
             accepted: &[String],
             failed: &[String],
             generation: Option<u64>,
+            workspace: &str,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             let detail = failed.join(" · ");
             if accepted.is_empty() {
@@ -1836,12 +1838,35 @@ mod ritual_ops {
                 // gating it would drop the report and recreate the exact
                 // inertness this cluster exists to remove.
                 if what == "genesis" {
-                    tracing::error!(%detail, "the genesis frame reached no relay");
+                    tracing::error!(%workspace, %detail, "the genesis frame reached no relay");
+                    // The genesis retries for ~45 s, so this can land after
+                    // the operator started a DIFFERENT founding. It is
+                    // therefore attributed by workspace id, never to whatever
+                    // run happens to be on screen.
+                    let ours = self.active.as_ref().is_some_and(|a| a.id == workspace);
+                    if !ours {
+                        tracing::error!(
+                            %workspace,
+                            "…and its workspace is no longer open — reopen it to see the notice"
+                        );
+                        return Ok(molt_core::Reply::Ack);
+                    }
                     self.session.notice = format!("genesis-undelivered:{detail}");
-                    self.session.create.run.log.push(format!(
-                        "✗ the genesis reached no relay ({detail}) — this republic exists here, \
-                         but the other members were never told"
-                    ));
+                    // …and a DURABLE line inside the republic itself: the
+                    // toast is edge-triggered and one-shot, so without this
+                    // the only message saying "your republic exists here but
+                    // nobody else was told" flashes once and is gone.
+                    if let Err(e) = self.post_message_with_kind(
+                        String::new(),
+                        format!(
+                            "⚠ the founding genesis reached no relay ({detail}). The other                              members were never told this republic exists; they cannot join                              until it is published."
+                        ),
+                        None,
+                        molt_core::ChannelRef::Group,
+                        molt_core::ChatKind::System,
+                    ) {
+                        tracing::warn!(error = %e, "could not post the undelivered-genesis notice");
+                    }
                     self.emit_session(molt_core::SessionScope::Full);
                     return Ok(molt_core::Reply::Ack);
                 }
@@ -2239,6 +2264,20 @@ mod ritual_ops {
                     return Ok(molt_core::Reply::Ack);
                 }
                 if !re_anchoring && !same && mac_ok {
+                    // WHY it is refused travels with the frame: "ask for your
+                    // own link" is right for a second PERSON and wrong for
+                    // the same person retrying after the group already formed
+                    // (a fresh link cannot help them — the founding must be
+                    // re-minted). The member used to render one text for both.
+                    let why = if anchored_member == member {
+                        "this founding has already formed its group around your first \
+                         attempt — the founder must cancel and re-mint it"
+                            .to_string()
+                    } else {
+                        "that link was already used by someone else — ask the founder for \
+                         your own, unused link"
+                            .to_string()
+                    };
                     // tell the second activator its link is spent — over its
                     // OWN claimed transport address: the gift-wrap anchor on
                     // Nostr (canonicalized; an invalid one gets no reply),
@@ -2248,7 +2287,13 @@ mod ritual_ops {
                             let net = nostr.net.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = net
-                                    .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
+                                    .send_ritual(
+                                        &target,
+                                        &invite::RitualMsg::LinkSpent {
+                                            seat,
+                                            reason: why,
+                                        },
+                                    )
                                     .await
                                 {
                                     tracing::warn!(error = %e, "link-spent notice did not publish");
@@ -2259,7 +2304,10 @@ mod ritual_ops {
                         (parse_reply_handover(&reply), &self.net_ritual)
                     {
                         if let Ok(payload) =
-                            serde_json::to_vec(&invite::RitualMsg::LinkSpent { seat })
+                            serde_json::to_vec(&invite::RitualMsg::LinkSpent {
+                                seat,
+                                reason: why.clone(),
+                            })
                         {
                             let transport = ritual.transport.clone();
                             let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
@@ -2481,7 +2529,16 @@ mod ritual_ops {
                         let net = nostr.net.clone();
                         tokio::spawn(async move {
                             if let Err(e) = net
-                                .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
+                                .send_ritual(
+                                    &target,
+                                    &invite::RitualMsg::LinkSpent {
+                                        seat,
+                                        reason: "you re-activated this invite from another \
+                                                 device or attempt; that newer attempt now \
+                                                 holds the seat"
+                                            .to_string(),
+                                    },
+                                )
                                 .await
                             {
                                 tracing::warn!(error = %e, "displaced-anchor notice did not publish");
@@ -2761,6 +2818,7 @@ mod ritual_ops {
                         crate::nostr_ritual::RetryPolicy::PRE_SEAL,
                         tx.downgrade(),
                         Some(generation),
+                        String::new(),
                     );
                 } else {
                     // group birth failed or has not happened — never silent

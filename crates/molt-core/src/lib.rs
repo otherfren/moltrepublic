@@ -3643,6 +3643,11 @@ pub enum Command {
         /// ritual was already taken (the genesis).
         #[serde(default)]
         generation: Option<u64>,
+        /// Which workspace this leg belongs to, for legs published AFTER the
+        /// ritual was taken. Without it a genesis report landing ~45 s later
+        /// is attributed to whatever founding is on screen by then.
+        #[serde(default)]
+        workspace: String,
     },
     /// A real SMP join completed: the off-actor join task verified the sealed
     /// roster the founder distributed (engine-internal). The engine writes the

@@ -117,7 +117,7 @@ async fn foreign_traffic_is_skipped_not_fatal() {
 
     // a wrap addressed to a THIRD key — the founder's #p filter excludes it
     joiner
-        .send_ritual(&third_pk, &RitualMsg::LinkSpent { seat: 0 })
+        .send_ritual(&third_pk, &RitualMsg::LinkSpent { seat: 0, reason: String::new() })
         .await
         .expect("send to the third key");
     // …and a 1059 that MATCHES the filter but does not peel (junk content):
@@ -305,7 +305,7 @@ async fn ritual_endpoints_sync_and_deliver_on_an_auth_required_relay() {
         "the ritual inbox must replay on an auth-required relay"
     );
     joiner
-        .send_ritual(&founder_pk, &RitualMsg::LinkSpent { seat: 0 })
+        .send_ritual(&founder_pk, &RitualMsg::LinkSpent { seat: 0, reason: String::new() })
         .await
         .expect("the wrap publishes");
     let got = inbox.recv(RECV_TIMEOUT).await.expect("the wrap is delivered");
@@ -349,7 +349,7 @@ async fn the_publish_path_refuses_to_authenticate() {
     let net = RitualNet::new(dialer(), vec![url], &sk).expect("endpoint");
 
     let err = net
-        .send_ritual(&to, &RitualMsg::LinkSpent { seat: 0 })
+        .send_ritual(&to, &RitualMsg::LinkSpent { seat: 0, reason: String::new() })
         .await
         .expect_err("the publish must NOT silently authenticate");
     let msg = err.to_string();

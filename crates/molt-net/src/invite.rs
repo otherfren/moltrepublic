@@ -347,6 +347,14 @@ pub enum RitualMsg {
     LinkSpent {
         /// Which invite this answers (0-based seat index).
         seat: u32,
+        /// WHY, in the founder's words. The founder distinguishes three very
+        /// different situations that all end in this frame — a second person
+        /// on one link, a retry after the group already formed, and a seat
+        /// displaced by its own owner's re-activation — and only the first is
+        /// fixed by asking for a fresh link. Additive: an older peer decodes
+        /// it as absent and falls back to its old wording.
+        #[serde(default)]
+        reason: String,
     },
     /// founder → member: this founding is OVER — the founder cancelled, or it
     /// failed on the founder's side. Sent so a member stops waiting instead

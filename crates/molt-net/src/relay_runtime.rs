@@ -647,12 +647,30 @@ async fn supervise(
                     }
                     Err(_) => {
                         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
-                        tracing::warn!(
-                            relay = %url, via = %via, attempt,
-                            after_s = CONNECT_TIMEOUT.as_secs(),
-                            retry_in_s = backoff.as_secs(),
-                            "relay connect timed out"
-                        );
+                        // the SAME repeat suppression as the error arm. A
+                        // firewalled or blackholed relay (or a dead SOCKS
+                        // port) is the most common PERMANENT failure, and it
+                        // lands here — unsuppressed it warned every
+                        // CONNECT_TIMEOUT + backoff forever, burying the
+                        // diagnostics this reporting exists to surface.
+                        const TIMED_OUT: &str = "connect timed out";
+                        let repeat = last_reason.as_deref() == Some(TIMED_OUT);
+                        if repeat {
+                            tracing::debug!(
+                                relay = %url, via = %via, attempt,
+                                after_s = CONNECT_TIMEOUT.as_secs(),
+                                retry_in_s = backoff.as_secs(),
+                                "relay connect timed out again"
+                            );
+                        } else {
+                            tracing::warn!(
+                                relay = %url, via = %via, attempt,
+                                after_s = CONNECT_TIMEOUT.as_secs(),
+                                retry_in_s = backoff.as_secs(),
+                                "relay connect timed out"
+                            );
+                            last_reason = Some(TIMED_OUT.to_string());
+                        }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(cap);
                         continue;

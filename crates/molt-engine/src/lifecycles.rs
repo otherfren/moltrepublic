@@ -972,6 +972,7 @@ impl State {
         //
         // (The old comment here claimed "the member's own open wait surfaces a
         // relays-down condition". It does not: that wait is unbounded.)
+        let ws_id = id.clone();
         if let Some((ct, exporter)) = nostr_genesis_frame {
             if let (Some(chan), Some(tx)) = (ritual.nostr_chan(), self.cmd_tx.upgrade()) {
                 crate::nostr_ritual::spawn_publish_frame(
@@ -981,6 +982,9 @@ impl State {
                     crate::nostr_ritual::RetryPolicy::GENESIS,
                     tx.downgrade(),
                     None,
+                    // the genesis outlives the ritual, so it carries the
+                    // workspace it belongs to instead
+                    ws_id.clone(),
                 );
             }
         } else if let Ok(json) = serde_json::to_string(&sealed) {

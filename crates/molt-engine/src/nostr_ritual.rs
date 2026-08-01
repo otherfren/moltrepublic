@@ -255,6 +255,10 @@ pub(crate) fn spawn_publish_frame(
     retry: RetryPolicy,
     tx: mpsc::WeakSender<Envelope>,
     generation: Option<u64>,
+    // which workspace this leg belongs to — carried for legs published after
+    // the ritual was taken (the genesis), so a late report cannot be
+    // attributed to a founding that started meanwhile
+    workspace: String,
 ) {
     tokio::spawn(async move {
         // encrypt ONCE — see FramePayload
@@ -280,6 +284,7 @@ pub(crate) fn spawn_publish_frame(
                         accepted: Vec::new(),
                         failed: vec![format!("encrypt: {e}")],
                         generation,
+                        workspace,
                     },
                 )
                 .await;
@@ -304,6 +309,7 @@ pub(crate) fn spawn_publish_frame(
                             accepted: report.accepted.clone(),
                             failed,
                             generation,
+                            workspace,
                         },
                     )
                     .await;
@@ -331,6 +337,7 @@ pub(crate) fn spawn_publish_frame(
                 accepted: Vec::new(),
                 failed: last,
                 generation,
+                workspace,
             },
         )
         .await;
@@ -664,14 +671,18 @@ async fn member_join(
                 let _ = send_cmd(tx, Command::NetJoinAccepted { generation }).await;
                 break;
             }
-            Some(RitualDelivery::Msg(RitualMsg::LinkSpent { .. }, sender))
+            Some(RitualDelivery::Msg(RitualMsg::LinkSpent { reason, .. }, sender))
                 if sender == h.npub =>
             {
-                return Err(
+                // the founder's OWN words: "ask for your own link" is wrong
+                // advice when the group already formed around a first attempt
+                return Err(if reason.is_empty() {
                     "this invite link was already used by someone else — ask the founder \
                      for a fresh, unused link"
-                        .to_string(),
-                );
+                        .to_string()
+                } else {
+                    format!("the founder refused this activation: {reason}")
+                });
             }
             // the founder gave up: stop waiting instead of sitting here until
             // the accept deadline with no idea why
@@ -695,10 +706,14 @@ async fn member_join(
         None => loop {
             match inbox.recv(RECV_SLICE).await {
                 Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
-                Some(RitualDelivery::Msg(RitualMsg::LinkSpent { .. }, sender))
+                Some(RitualDelivery::Msg(RitualMsg::LinkSpent { reason, .. }, sender))
                     if sender == h.npub =>
                 {
-                    return Err("the founder voided this seat — the link was re-used".to_string());
+                    return Err(if reason.is_empty() {
+                        "the founder voided this seat — the link was re-used".to_string()
+                    } else {
+                        format!("the founder voided this seat: {reason}")
+                    });
                 }
                 // …the same, in the wait that really is unbounded
                 Some(RitualDelivery::Msg(RitualMsg::Aborted { reason }, sender))

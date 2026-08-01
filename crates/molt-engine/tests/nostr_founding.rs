@@ -587,6 +587,15 @@ async fn a_second_activation_of_the_same_link_fails_as_spent() {
         "the spent-link reason reaches the second activator: {:?}",
         s.join.run.log
     );
+    // …and it is the reason for HER situation. A second PERSON needs her own
+    // link; the same person retrying after group birth needs the founding
+    // re-minted, and telling her to ask for a fresh link would be wrong
+    // advice. The frame used to carry no reason at all, so both got one text.
+    assert!(
+        s.join.run.log.iter().any(|l| l.contains("your own")),
+        "a second PERSON is told to ask for her own link: {:?}",
+        s.join.run.log
+    );
 
     // the anchored seat is still petra's
     let s = read_session(&a).await;

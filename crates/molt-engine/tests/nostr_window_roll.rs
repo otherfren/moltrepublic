@@ -187,6 +187,29 @@ async fn a_deaf_group_channel_is_surfaced_to_both_wizards_and_heals() {
     // …and the deafness was survivable: heal, then finish the founding
     proxy.restore();
     shift_window_clock_for_tests(0);
+
+    // Once frames flow again the pair must SETTLE, not alternate. `deaf` used
+    // to be cleared only by a successful re-placement, so a delivered frame
+    // left it set: every caller printed "the group channel is back" on the
+    // frame and "cannot hear the group channel" on the next budget expiry,
+    // both false when written, two lines every RECV_SLICE forever. The
+    // last-line dedup collapses repeats but not an alternating pair.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let settled = read_session(&b).await;
+    let flapping = settled
+        .join
+        .run
+        .log
+        .windows(2)
+        .filter(|w| {
+            w[0].contains("group channel is back") && w[1].contains("cannot hear the group channel")
+        })
+        .count();
+    assert_eq!(
+        flapping, 0,
+        "the deaf/back pair must not alternate once frames flow: {:?}",
+        settled.join.run.log
+    );
     a.execute(Command::CreatePropose {
         name: "Rolling".to_string(),
         agenda: "survive a window roll".to_string(),

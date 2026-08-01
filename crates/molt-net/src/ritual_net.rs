@@ -520,7 +520,13 @@ impl GroupSub {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let current = window_tags(&self.channel.rotation_seed, now_secs());
-            if current != self.tags && tokio::time::Instant::now() >= self.retry_at {
+            // A re-placement is only NEEDED when the live subscription does
+            // not already cover the wanted tags. `window_tags` NARROWS as the
+            // skew margin passes ([W, W-1] -> [W]), so a plain `!=` called a
+            // strict superset "stale" — and a failed re-placement then
+            // reported deafness while reception was in fact complete.
+            let covered = current.iter().all(|t| self.tags.contains(t));
+            if !covered && tokio::time::Instant::now() >= self.retry_at {
                 match self.channel.subscribe_tags(&current).await {
                     Ok(sub) => {
                         // the old subscription drops here — its supervisors
@@ -561,6 +567,12 @@ impl GroupSub {
                 event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
             match envelope::parse_445_tags(&tags) {
                 Ok((h, _expiration)) if self.tags.contains(&h) => {
+                    // a DELIVERED frame is the honest proof of reception:
+                    // whatever the roll did, this channel is being heard.
+                    // Without this the flag survived the frame and the
+                    // caller's "the group channel is back" / "cannot hear it"
+                    // pair alternated forever, both false when written.
+                    self.deaf = None;
                     return GroupRecv::Frame {
                         content: event.content,
                         created_at: event.created_at.as_secs(),

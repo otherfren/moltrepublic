@@ -32,6 +32,11 @@ user could mistake for real.
   ritual/crypto/chain — the invariants belong in a red test first.)
 - **Proceed on greenlit multi-step work — don't keep asking "weiter?".** Once a
   task is agreed, carry it through; commit at meaningful checkpoints.
+- **Never invent a time limit.** Nobody has given you a deadline. "I ran out of
+  time" is not a real constraint — it is a decision to stop, dressed up as one.
+  When a task list is agreed, work it to the end; if something genuinely cannot
+  be finished (blocked, needs a decision, would be unsafe to guess), say THAT
+  and name the blocker. The user being away is not a deadline either.
 - **Code-review every finished change-set, then land it green on master.**
   After finishing a chunk of work, run a code review over the diff (and fix
   the findings) BEFORE merging; the end state of a session is always
