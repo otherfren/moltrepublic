@@ -550,7 +550,35 @@ Each step is one commit, red test first, green on master before the next.
    must NOT wipe a live accept window (the failure this guard exists for is
    "everything is a duplicate" — the exact bug the reset was invented to
    prevent).
-10. **Welcome size**: measure a real served chain in the 444 payload against
+10. ✅ **MEASURED 2026-08-02 — the Welcome CANNOT carry the chain.** Keystone:
+    `crates/molt-engine/tests/welcome_chain_budget.rs`.
+
+    | case | cost | cap |
+    |---|---|---|
+    | ordinary governance block | 1061 B → ~61 blocks fit | 65408 B |
+    | **one** `set_image` with a 25 KiB logo | **69318 B for that one block** | 65408 B |
+
+    A `set_image` proposal EMBEDS the picture (`payload.bytes_b64`,
+    `proposals.rs::image_bytes`) and the payload rides the applied chain block —
+    that is how every device materializes the logo. Images are capped by
+    DIMENSION (8192×8192), never by bytes, so one ordinary logo exceeds the
+    whole gift-wrap budget by itself: base64 ×1.33, payload hex ×2.
+
+    So "the chain fits in a Welcome" is not a property of chain LENGTH a
+    republic could stay under — it is **one proposal away from false, forever**.
+    Even without images the ceiling is ~61 blocks.
+
+    **Decision: the Welcome carries the chain HEAD; the rejoiner fetches blocks
+    over 445 catch-up.** Which is N5 machinery — so, as this step itself
+    demands, N4b says so rather than half-building it:
+
+    > **N4b step 6 cannot deliver a working recovery before the 445 catch-up
+    > exists.** Either N5's catch-up moves ahead of step 6, or N4b builds a
+    > minimal fetch and N5 generalizes it. This is a sequencing decision, not a
+    > coding one — it is recorded here because the old ordering (6 before 10)
+    > silently assumed the opposite answer.
+
+11. ~~**Welcome size**~~: measure a real served chain in the 444 payload against
     the 65408 cap. Under → carry it; over → carry the HEAD and fetch blocks
     over 445 catch-up. **Decide by measurement, keystone either way** — and
     if the fetch path is needed, it is N5 machinery and N4b must say so
