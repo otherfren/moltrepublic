@@ -444,6 +444,38 @@ impl GroupChannel {
         })
     }
 
+    /// Subscribe the windows a returning member slept through — every `h` tag
+    /// from `since_secs` ago through now, oldest first, capped to the newest
+    /// `max_windows`.
+    ///
+    /// This exists because [`Self::subscribe`] names only the CURRENT window's
+    /// tag (plus one adjacent inside the skew margin), and an `h` tag is
+    /// `SHA256(seed ‖ le64(unix / H_WINDOW))`. A frame from three days ago
+    /// therefore sits under a tag the live subscription never asks for — it is
+    /// unreachable **because we do not ask**, not because the relay pruned it.
+    /// The 445 filter carries no `since`/`until`/`limit`, so naming the right
+    /// tags IS the history query.
+    ///
+    /// Returns its own type, not a [`GroupSub`]: that one re-places the
+    /// subscription with exactly the current window's tags whenever they are
+    /// not covered, which would discard the whole catch-up range on the first
+    /// `recv` — immediately, if placed near a UTC boundary.
+    pub async fn subscribe_since(
+        &self,
+        since_secs: u64,
+        max_windows: usize,
+    ) -> Result<CatchupSub, NetError> {
+        let now = now_secs();
+        let tags = envelope::h_tags_for_catchup(
+            &self.rotation_seed,
+            now.saturating_sub(since_secs),
+            now,
+            max_windows,
+        );
+        let sub = self.subscribe_tags(&tags).await?;
+        Ok(CatchupSub { sub, tags })
+    }
+
     /// Place one pooled 445 subscription over exactly `tags`.
     async fn subscribe_tags(&self, tags: &[String]) -> Result<Subscription, NetError> {
         let filter = Filter::new()
@@ -461,6 +493,68 @@ impl GroupChannel {
             .with_auth_keys(Some(Keys::generate()))
             .subscribe(filter)
             .await
+    }
+}
+
+/// A catch-up subscription over a FIXED set of past `h` windows.
+///
+/// Deliberately not a [`GroupSub`]: it must never re-place itself under the
+/// current window's tags, because that is precisely what would throw away the
+/// range it was opened for. It also holds no channel — there is nothing to
+/// re-place, so nothing to hold it for. Drop it when the replay is done
+/// ([`Self::live`] is the completion signal the relay gives us).
+pub struct CatchupSub {
+    sub: Subscription,
+    /// The past windows this subscription names; fixed for its lifetime.
+    tags: Vec<String>,
+}
+
+impl std::fmt::Debug for CatchupSub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatchupSub")
+            .field("windows", &self.tags.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatchupSub {
+    /// Whether at least one relay has finished replaying (EOSE) — "the
+    /// history we asked for has been served", as far as a relay can say it.
+    pub async fn live(&mut self, timeout: Duration) -> bool {
+        self.sub.synced(timeout).await
+    }
+
+    /// The per-relay replay counts behind [`Self::live`], so a caller can tell
+    /// "no relay served the range" from "one of three lagged".
+    pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
+        self.sub.sync_state(timeout).await
+    }
+
+    /// The next valid 445 under one of the catch-up windows. Same strict tag
+    /// gate as [`GroupSub::recv`] — and no roll check, by design.
+    pub async fn recv(&mut self, timeout: Duration) -> GroupRecv {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return GroupRecv::Idle;
+            }
+            let Some(event) = self.sub.recv(deadline.saturating_duration_since(now)).await else {
+                return GroupRecv::Idle;
+            };
+            let tags: Vec<Vec<String>> =
+                event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+            match envelope::parse_445_tags(&tags) {
+                Ok((h, _expiration)) if self.tags.contains(&h) => {
+                    return GroupRecv::Frame {
+                        content: event.content,
+                        created_at: event.created_at.as_secs(),
+                    };
+                }
+                Ok((h, _)) => tracing::debug!(h = %h, "catch-up: skipping a foreign h tag"),
+                Err(e) => tracing::debug!(error = %e, "catch-up: skipping an invalid tag shape"),
+            }
+        }
     }
 }
 
