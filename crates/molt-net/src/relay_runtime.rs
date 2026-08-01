@@ -346,15 +346,48 @@ impl Subscription {
     /// Wait until EVERY connected relay sent EOSE (MDK port #6) — only then
     /// is the stored backlog complete. `false` on timeout.
     pub async fn synced(&mut self, timeout: Duration) -> bool {
+        self.sync_state(timeout).await.full()
+    }
+
+    /// How many relays actually replayed, out of how many accepted the REQ.
+    ///
+    /// `synced()` collapses "none replayed" and "some replayed" into one
+    /// `false`, which is the difference between a provisioning FAILURE and a
+    /// warning: a single lagging relay in a healthy pool must not kill a
+    /// founding, but a pool where NOTHING is readable must not be proceeded
+    /// through blind.
+    pub async fn sync_state(&mut self, timeout: Duration) -> SyncState {
         let deadline = tokio::time::Instant::now() + timeout;
         while *self.eose.borrow() < self.connected {
             match tokio::time::timeout_at(deadline, self.eose.changed()).await {
                 Ok(Ok(())) => {}
                 // timeout, or every sender gone without reaching the count
-                _ => return false,
+                _ => break,
             }
         }
-        true
+        SyncState { synced: *self.eose.borrow(), connected: self.connected }
+    }
+}
+
+/// How much of a subscription is proven readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncState {
+    /// Relays that replayed their stored events (sent EOSE).
+    pub synced: usize,
+    /// Relays that accepted the REQ at all.
+    pub connected: usize,
+}
+
+impl SyncState {
+    /// At least one relay is proven readable — the ≥1 rule, mirroring the
+    /// pool's ≥1-OK publish semantics. Below this, nothing may proceed.
+    pub fn any(&self) -> bool {
+        self.synced > 0
+    }
+
+    /// Every relay that accepted the REQ replayed.
+    pub fn full(&self) -> bool {
+        self.synced >= self.connected
     }
 }
 

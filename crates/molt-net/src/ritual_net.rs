@@ -32,7 +32,7 @@ use nostr::{
 use crate::dial::Dialer;
 use crate::envelope::{self, H_WINDOW};
 use crate::invite::RitualMsg;
-use crate::relay_runtime::{PublishReport, RelayRuntime, Subscription};
+use crate::relay_runtime::{PublishReport, RelayRuntime, Subscription, SyncState};
 use crate::ritual_wrap::{self, RitualWrapError};
 use crate::welcome::{self, WelcomeError, WelcomePayload};
 use crate::NetError;
@@ -174,6 +174,11 @@ impl RitualNet {
     /// Publish one signed event with ≥1-OK semantics over a fresh runtime,
     /// returning the PER-RELAY outcome.
     ///
+    /// This runtime stays UNAUTHENTICATED on purpose (§7.5): an authenticated
+    /// publish channel would link every ephemeral-key event we send to the
+    /// member behind it. `publish_one` refuses an `auth-required:` OK loudly
+    /// rather than quietly authenticating.
+    ///
     /// The report used to be discarded here (`.map(|_report| ())`), which made
     /// "landed on 1 of 5 relays" indistinguishable from full delivery — the
     /// per-relay outcomes N2 built were thrown away one layer above where they
@@ -222,7 +227,14 @@ impl RitualNet {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_GIFT_WRAP))
             .pubkey(self.keys.public_key());
+        // NIP-42 with OUR ANCHOR here, deliberately: the filter is
+        // `#p = our anchor`, so the relay already learns this key from the
+        // REQ itself — authenticating with the same key discloses nothing the
+        // subscription did not. Without it an auth-required relay keeps a
+        // live, silent connection and the whole ritual times out with no
+        // error anywhere.
         let sub = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
+            .with_auth_keys(Some(self.keys.clone()))
             .subscribe(filter)
             .await?;
         Ok(RitualInbox { sub, keys: self.keys.clone() })
@@ -250,6 +262,14 @@ impl RitualInbox {
     /// not).
     pub async fn live(&mut self, timeout: Duration) -> bool {
         self.sub.synced(timeout).await
+    }
+
+    /// The replay counts behind [`Self::live`] — so a caller can tell "no
+    /// relay is readable" (a provisioning failure) from "one of three lagged"
+    /// (a warning). Proceeding blind on the first is how a ritual times out
+    /// with no error anywhere.
+    pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
+        self.sub.sync_state(timeout).await
     }
 
     /// The next peeled delivery, or `None` when nothing arrives within
@@ -375,7 +395,16 @@ impl GroupChannel {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_GROUP))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), tags.iter().cloned());
+        // A FRESH ephemeral key per placement (and per window-roll
+        // re-placement) — NOT the roster anchor. The 445 filter names only an
+        // h tag, so it is anonymous; authenticating it with the anchor would
+        // hand every relay operator the anchor→group-id link for the life of
+        // the republic, and that link would survive into the N5 runtime
+        // subscriptions. The cost is a relay that WHITELISTS known pubkeys
+        // refusing us — which fails loudly and visibly, unlike a silent,
+        // permanent deanonymization.
         RelayRuntime::new(self.dialer.clone(), self.relays.clone())
+            .with_auth_keys(Some(Keys::generate()))
             .subscribe(filter)
             .await
     }
@@ -406,6 +435,14 @@ impl GroupSub {
     /// Best-effort replay gate, like [`RitualInbox::live`].
     pub async fn live(&mut self, timeout: Duration) -> bool {
         self.sub.synced(timeout).await
+    }
+
+    /// The replay counts behind [`Self::live`] — so a caller can tell "no
+    /// relay is readable" (a provisioning failure) from "one of three lagged"
+    /// (a warning). Proceeding blind on the first is how a ritual times out
+    /// with no error anywhere.
+    pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
+        self.sub.sync_state(timeout).await
     }
 
     /// The next VALID kind-445 frame as `(sealed content, created_at)`, or

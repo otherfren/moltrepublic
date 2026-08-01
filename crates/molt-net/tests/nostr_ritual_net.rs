@@ -267,3 +267,89 @@ async fn publish_frame_reports_the_relay_that_refused() {
         "…with a reason, not just a flag: {report:?}"
     );
 }
+
+/// Cluster G — the ritual's SUBSCRIPTIONS must authenticate.
+///
+/// `with_auth_keys` had zero production callers, so every ritual subscription
+/// was built unauthenticated. Against an auth-required relay the supervisor
+/// drops the challenge (`let Some(keys) = … else { continue }`) and the
+/// session stays connected-but-silent — no EOSE, no events — so the ritual
+/// simply times out with no error anywhere.
+///
+/// `Read` mode on purpose: it leaves WRITES unauthenticated, which is what
+/// the publish path relies on (see the guard below). Write/Both would refuse
+/// the publishes and this would be red for the wrong reason.
+#[tokio::test]
+async fn ritual_endpoints_sync_and_deliver_on_an_auth_required_relay() {
+    use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
+    use nostr_relay_builder::LocalRelay;
+
+    let relay = LocalRelay::new(
+        RelayBuilder::default().nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Read }),
+    );
+    relay.run().await.expect("auth-required relay runs");
+    let url = relay.url().await.to_string();
+
+    let (founder_sk, founder_pk) = nostr_identity(b"founder-entropy", "aa11");
+    let (joiner_sk, _) = nostr_identity(b"joiner-entropy", "bb22");
+    let founder = RitualNet::new(dialer(), vec![url.clone()], &founder_sk).expect("founder");
+    let joiner = RitualNet::new(dialer(), vec![url.clone()], &joiner_sk).expect("joiner");
+
+    // the 1059 inbox must become readable — it authenticates with the anchor,
+    // which the relay already learns from the `#p` filter anyway
+    let mut inbox = founder.inbox().await.expect("inbox subscribes");
+    assert!(
+        inbox.live(RECV_TIMEOUT).await,
+        "the ritual inbox must replay on an auth-required relay"
+    );
+    joiner
+        .send_ritual(&founder_pk, &RitualMsg::LinkSpent { seat: 0 })
+        .await
+        .expect("the wrap publishes");
+    let got = inbox.recv(RECV_TIMEOUT).await.expect("the wrap is delivered");
+    assert!(matches!(got, RitualDelivery::Msg(RitualMsg::LinkSpent { .. }, _)));
+
+    // …and so must the 445 group channel
+    let chan = GroupChannel::new(dialer(), vec![url], [4u8; 32]);
+    let mut sub = chan.subscribe().await.expect("group subscribes");
+    assert!(
+        sub.live(RECV_TIMEOUT).await,
+        "the group channel must replay on an auth-required relay"
+    );
+    chan.publish_frame(&[7u8; 32], b"authed frame").await.expect("frame publishes");
+    assert!(sub.recv(RECV_TIMEOUT).await.is_some(), "the frame is delivered");
+}
+
+/// Cluster G, the OTHER direction — the publish path must stay
+/// UNAUTHENTICATED, and fail loudly rather than quietly authenticate.
+///
+/// Subscriptions authenticate; publishes must not. An authed publish channel
+/// links every ephemeral-key event we send to the member behind it (§7.5).
+/// This is the guard on step 2: adding `with_auth_keys` to `RitualNet::publish`
+/// makes it go red.
+#[tokio::test]
+async fn the_publish_path_refuses_to_authenticate() {
+    use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
+    use nostr_relay_builder::LocalRelay;
+
+    // Write mode: the relay demands AUTH to PUBLISH
+    let relay = LocalRelay::new(
+        RelayBuilder::default().nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Write }),
+    );
+    relay.run().await.expect("write-auth relay runs");
+    let url = relay.url().await.to_string();
+
+    let (sk, _) = nostr_identity(b"founder-entropy", "aa11");
+    let (_, to) = nostr_identity(b"joiner-entropy", "bb22");
+    let net = RitualNet::new(dialer(), vec![url], &sk).expect("endpoint");
+
+    let err = net
+        .send_ritual(&to, &RitualMsg::LinkSpent { seat: 0 })
+        .await
+        .expect_err("the publish must NOT silently authenticate");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("auth") || msg.contains("refused"),
+        "…and must say why, loudly: {msg}"
+    );
+}

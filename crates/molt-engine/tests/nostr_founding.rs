@@ -1199,3 +1199,64 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     c.execute(Command::JoinConfirmCharter).await.expect("carol ratifies");
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
 }
+
+/// Rejects every REQ, while still accepting writes — the relay that is
+/// connected and silent, which is the shape auth-required / rate-limited
+/// relays actually present.
+#[derive(Debug)]
+struct RejectEveryReq;
+
+impl nostr_relay_builder::builder::QueryPolicy for RejectEveryReq {
+    fn admit_query<'a>(
+        &'a self,
+        _query: &'a nostr_relay_builder::prelude::Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move { PolicyResult::Reject("no reqs".to_string()) })
+    }
+}
+
+/// REGRESSION (cluster G) — a founding must REFUSE when its inbox is not
+/// readable, instead of publishing invite links over it.
+///
+/// `subscribe()` succeeds as soon as a relay accepts the REQ; it says nothing
+/// about whether the relay will ever REPLAY. The three `let _ = live(...)`
+/// sites discarded exactly that answer, so "subscribe before advertise"
+/// degraded to "advertise blind": links went out over an inbox nothing would
+/// ever answer on, and the founding then timed out with no error anywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
+    let relay = LocalRelay::new(RelayBuilder::default().query_policy(RejectEveryReq));
+    relay.run().await.expect("silent relay runs");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Unreadable".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+
+    let s = wait_for(&a, "the founding to refuse the unreadable inbox", |s| {
+        s.create.run.outcome == 2
+    })
+    .await;
+    assert!(
+        s.create.run.log.iter().any(|l| l.contains("not readable")),
+        "the refusal names the unreadable subscription: {:?}",
+        s.create.run.log
+    );
+    // …and NO seat link was ever advertised over it
+    assert!(
+        s.create
+            .seats
+            .iter()
+            .all(|x| molt_engine::FoundingInvite::parse(&x.link).is_err()),
+        "no joinable link may be published over an inbox nothing replayed"
+    );
+}

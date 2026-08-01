@@ -92,7 +92,33 @@ pub(crate) fn spawn_founder_inbox(
                 return;
             }
         };
-        let _ = inbox.live(LIVE_WAIT).await;
+        // subscribe-BEFORE-advertise only means something if the
+        // subscription is proven READABLE. A relay that accepts the
+        // connection and the REQ but never replays (auth required, rate
+        // limited, CLOSED-then-refused) left us publishing seat links over an
+        // inbox nothing would ever answer on.
+        let st = inbox.live_state(LIVE_WAIT).await;
+        if !st.any() {
+            let _ = send_cmd(
+                &tx,
+                Command::NetRitualFailed {
+                    error: "the founding inbox is not readable on any relay — no relay \
+                            replayed the subscription (auth required, rate limited, or \
+                            refused). No invite was published."
+                        .to_string(),
+                    generation: Some(generation),
+                },
+            )
+            .await;
+            return;
+        }
+        if !st.full() {
+            tracing::warn!(
+                synced = st.synced,
+                connected = st.connected,
+                "the founding inbox replayed on only some relays"
+            );
+        }
         for s in &seats {
             let link = crate::founding::FoundingInvite {
                 info: s.info.clone(),
@@ -452,6 +478,23 @@ pub(crate) fn spawn_founder_group_recv(
                 return;
             }
         };
+        // this gate was MISSING entirely: a founder whose 445 subscription
+        // never replays waits forever for Signed frames that can never arrive
+        let st = sub.live_state(LIVE_WAIT).await;
+        if !st.any() {
+            let _ = send_cmd(
+                &tx,
+                Command::NetRitualFailed {
+                    error: "the group channel is not readable on any relay — no relay \
+                            replayed the subscription (auth required, rate limited, or \
+                            refused)"
+                        .to_string(),
+                    generation: Some(generation),
+                },
+            )
+            .await;
+            return;
+        }
         loop {
             let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
                 continue;
@@ -539,7 +582,16 @@ async fn member_join(
         .inbox()
         .await
         .map_err(|e| format!("inbox subscribe: {e}"))?;
-    let _ = inbox.live(LIVE_WAIT).await;
+    // announcing a JoinRequest over an unreadable inbox means the founder's
+    // reply lands nowhere and the join hangs with no reason
+    let st = inbox.live_state(LIVE_WAIT).await;
+    if !st.any() {
+        return Err(
+            "the join inbox is not readable on any relay — no relay replayed the \
+             subscription (auth required, rate limited, or refused)"
+                .to_string(),
+        );
+    }
 
     // MLS identity + KeyPackage, then the MAC-bound JoinRequest to the
     // founder's anchor
@@ -647,7 +699,16 @@ async fn member_join(
         .subscribe()
         .await
         .map_err(|e| format!("group subscribe: {e}"))?;
-    let _ = sub.live(LIVE_WAIT).await;
+    // …and the same before the Seal wait, which is unbounded: a
+    // never-readable 445 subscription would hang the join forever in silence
+    let st = sub.live_state(LIVE_WAIT).await;
+    if !st.any() {
+        return Err(
+            "the group channel is not readable on any relay — no relay replayed the \
+             subscription (auth required, rate limited, or refused)"
+                .to_string(),
+        );
+    }
 
     // Seal wait: the founder's charter proposal as a 445 in the born group.
     // verify_seal_proposal is THE ladder (content-derived id, our 3-anchor

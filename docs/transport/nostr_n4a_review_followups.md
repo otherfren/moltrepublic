@@ -256,17 +256,48 @@ founding from a slow one. What remains is only making a genuinely slow one
 legible, and it needs the `clock_override` seam and an in-crate harness. Worth
 doing; not worth holding this change-set for.
 
-## G. NIP-42 is inert on ritual subscriptions — MEDIUM ×2
+## G. NIP-42 inert on ritual subscriptions — ✅ DONE
 
-`with_auth_keys` is never called on the ritual runtimes, so an auth-required
-relay silently delivers nothing — the ritual just times out with no
-explanation. Also the subscribe-before-advertise gate ignores `live()`'s
-result, so links are published even when no relay accepted the REQ.
+`with_auth_keys` had ZERO production callers, so every ritual subscription was
+built unauthenticated. Against an auth-required relay the supervisor drops the
+challenge and keeps a live, SILENT session — no EOSE, no events — and the
+ritual simply times out with no error anywhere.
 
-Fix: wire the anchor keys into the ritual runtimes (noting the N2 §3.5
-correlation caveat: NIP-42 with the roster anchor is a correlation handle;
-prefer ephemeral-per-relay when that lands), and treat a failed `live()` as a
-provisioning failure instead of proceeding blind.
+**Two identities, decided deliberately (2026-08-01):**
+- the **1059 inbox authenticates with the roster anchor**. Its filter is
+  `#p = our anchor`, so the relay already learns that key from the REQ —
+  authenticating with the same key discloses nothing the subscription did not.
+- the **445 group channel uses a FRESH ephemeral key per placement** (and per
+  window-roll re-placement). That filter names only an h tag, so it is
+  anonymous; the anchor would hand every relay operator the anchor→group-id
+  link for the life of the republic, and it would survive into the N5 runtime
+  subscriptions. The cost — a relay that WHITELISTS known pubkeys refuses us —
+  fails loudly and visibly, which is the right trade against a silent,
+  irreversible deanonymization.
+- the **publish path stays unauthenticated** (§7.5): an authed publish channel
+  links every ephemeral-key event to the member behind it. Guarded by a test
+  that goes red if `with_auth_keys` is ever added to it.
+
+**The second half — proceeding blind.** `subscribe()` succeeds as soon as a
+relay accepts the REQ; it says nothing about whether that relay will ever
+REPLAY. Three `let _ = live(...)` sites discarded exactly that answer, so
+subscribe-before-advertise degraded to advertise-blind, and the founder's own
+445 recv had no gate at all. New `SyncState { synced, connected }` carries the
+counts, and the **≥1 rule** applies: `synced == 0` is a provisioning failure
+(refuse, name the unreadable subscription), `0 < synced < connected` is a
+warning — failing on any unsynced relay would let one lagging relay in a
+healthy pool kill every founding.
+
+One correction to the backlog's wording: a HARD subscribe failure was never
+ignored (`subscribe()` returns Err and both call sites reported it). The gap
+was the relay that ACCEPTS and never becomes readable.
+
+Keystones: `ritual_endpoints_sync_and_deliver_on_an_auth_required_relay` and
+`the_publish_path_refuses_to_authenticate` (molt-net, fast), plus
+`a_founding_refuses_when_its_inbox_never_becomes_readable` driven through
+`Command::CreateStart` against a relay whose query policy refuses every REQ —
+verified red-without, and it additionally pins that NO seat link is advertised
+over an inbox nothing replayed.
 
 ## H. Unpinned security checks — the inert-keystone class — HIGH ×2 + MEDIUM ×2
 
