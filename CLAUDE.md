@@ -79,6 +79,29 @@ await I/O. Off-actor work (transport round-trips, the join ritual) runs in spawn
 tasks that feed results back as engine-internal `Net*`/`Command` variants — the
 same pattern as the tickers.
 
+## User-facing text: compact and to the point
+
+**Every string a human reads — error messages, run-log lines, toasts, status
+copy, log output — states the ONE important thing and stops.** No explanatory
+prose around it, no re-teaching the concept, no repeating the fix once per
+item. People tire of walls of text within seconds and then read nothing at
+all, so a verbose message is not "more helpful", it is *less* read than a
+short one.
+
+Concretely:
+- Name the fault, not the lecture: `not confirmed` beats `in this node's pool,
+  but not confirmed — confirm it under Settings › X (a clearnet or local relay
+  needs the exposure acknowledgement)`.
+- One item per line, aligned and scannable, when there are several.
+- The remedy appears ONCE — in the summary line — not attached to every item.
+- Mention a config key or a settings path only where it is the actual missing
+  piece, and then just the key.
+- Diagnostics in logs are structured fields, not sentences
+  (`relay=… via=… error=…`), so they stay greppable and one line long.
+
+This is a REVIEW CRITERION: prose creeping back into a user-facing string is a
+finding, the same as a bug.
+
 ## Conventions that will trip you up
 
 - **clippy is kept at 0, including tests.** `unwrap_used = "warn"` applies to all

@@ -18,62 +18,44 @@
 
 use molt_core::relay::{InviteRelayBlock, InviteRelayVerdict, PoolGap, RelayEntry};
 
-/// Where the switch and the confirmation live, named once. A renamed tab or
-/// config key is one edit, not six.
-const SETTINGS_TAB: &str = "Settings › Nostr relays";
-const CLEARNET_FIX: &str = "switch that on under Settings › Nostr relays, or set \
-                            clearnet_enabled = true under [transport.nostr] in config.toml";
+/// The config key that lifts the non-onion block — named once, in the summary
+/// line, never repeated per relay.
+const CLEARNET_KEY: &str = "[transport.nostr] clearnet_enabled";
 
 /// Why this node has nothing to dial at all — for the founding/recovery
 /// prerequisites, which fail before any invite is involved.
 pub(crate) fn pool_gap_reason(gap: PoolGap) -> String {
     match gap {
-        PoolGap::Empty => format!(
-            "no relay is configured — add one under {SETTINGS_TAB} and confirm \
-             it (nothing is pre-configured, by design)"
-        ),
-        PoolGap::Unconfirmed => {
-            format!("no relay is confirmed — confirm one under {SETTINGS_TAB}")
+        PoolGap::Empty => "no relay configured".to_string(),
+        PoolGap::Unconfirmed => "no relay confirmed".to_string(),
+        PoolGap::NonOnionOff => {
+            format!("clearnet/local dialing off ({CLEARNET_KEY})")
         }
-        // the case the old message could not say: the operator DID confirm,
-        // and the block is a node-level switch they never saw
-        PoolGap::NonOnionOff => format!(
-            "the confirmed relays are all clearnet or local, and this node does \
-             not dial outside Tor — {CLEARNET_FIX}"
-        ),
     }
 }
 
-/// The single action that would make THIS relay usable.
-fn action_for(blocked: Option<InviteRelayBlock>) -> String {
+/// The per-relay fault — two or three words, aligned into a scannable column.
+/// Not an instruction: the remedy belongs in the summary line once.
+fn fault_for(blocked: Option<InviteRelayBlock>) -> &'static str {
     match blocked {
-        None => "this node can dial this one".to_string(),
-        Some(InviteRelayBlock::NotInPool) => {
-            format!("not in this node's relay pool — add it under {SETTINGS_TAB}, then confirm it")
-        }
-        Some(InviteRelayBlock::Unconfirmed) => format!(
-            "in this node's pool, but not confirmed — confirm it under \
-             {SETTINGS_TAB} (a clearnet or local relay needs the exposure \
-             acknowledgement)"
-        ),
-        Some(InviteRelayBlock::ClearnetOff) => format!(
-            "confirmed, but this node does not dial clearnet or local relays — \
-             {CLEARNET_FIX}"
-        ),
+        None => "dialable",
+        Some(InviteRelayBlock::NotInPool) => "not in relay pool",
+        Some(InviteRelayBlock::Unconfirmed) => "not confirmed",
+        Some(InviteRelayBlock::ClearnetOff) => "clearnet/local dialing off",
     }
 }
 
 /// The refusal for a join whose invite names no relay this node can dial.
 ///
-/// Line-oriented because the run log is rendered one line at a time, and a
-/// paragraph naming three relays and three different fixes is a wall of text
-/// nobody reads to the end. The `→ `/`✗ ` prefixes are the run log's own tone
-/// protocol (molt-ui colours each line from its first character).
+/// One line per relay, `url` then a two-word fault, aligned into a column so
+/// the eye finds the odd one out without reading. The remedy is ONE summary
+/// line — repeating it per relay is what made the previous version a wall of
+/// text. The `→ `/`✗ ` prefixes are the run log's tone protocol (molt-ui
+/// colours each line from its first character).
 pub(crate) struct JoinRelayRefusal {
-    /// One line per relay the invite names, in the invite's order, plus what
-    /// this node CAN dial when that is not nothing.
+    /// One line per relay the invite names, in the invite's order.
     pub(crate) detail: Vec<String>,
-    /// The terminal `✗ join failed: …` summary.
+    /// The terminal `✗ join failed: …` summary — the only line carrying a fix.
     pub(crate) headline: String,
 }
 
@@ -85,31 +67,33 @@ pub(crate) fn join_relay_refusal(
     pool: &[RelayEntry],
     clearnet_session: bool,
 ) -> JoinRelayRefusal {
+    // align the fault column: the relay that differs should be findable
+    // without reading a single word
+    let width = verdicts.iter().map(|v| v.url.chars().count()).max().unwrap_or(0);
     let mut detail: Vec<String> = verdicts
         .iter()
-        .map(|v| format!("→ {} — {}", v.url, action_for(v.blocked)))
+        .map(|v| format!("→ {:<width$}  {}", v.url, fault_for(v.blocked), width = width))
         .collect();
     let dialable = molt_core::relay::dialable(pool, clearnet_session);
     if !dialable.is_empty() {
-        detail.push(format!("→ this node can dial: {}", dialable.join(", ")));
+        detail.push(format!("→ dialable here: {}", dialable.join(", ")));
     }
     // "no relay in common" is only true when every named relay is unknown
-    // here. A relay the operator can SEE in their own settings IS in common —
-    // it is merely not dialable, and calling that "no relay in common" sends
-    // them looking for the wrong problem.
+    // here — a relay the operator can SEE in their settings IS in common, it
+    // is merely not dialable.
     let all_unknown = verdicts
         .iter()
         .all(|v| v.blocked == Some(InviteRelayBlock::NotInPool));
-    let n = verdicts.len();
+    let switch_blocks = verdicts
+        .iter()
+        .any(|v| v.blocked == Some(InviteRelayBlock::ClearnetOff));
     let headline = if all_unknown {
-        format!(
-            "no relay in common with this invite — it names {n} relay(s), none \
-             of them in this node's pool"
-        )
+        "no relay in common with this invite".to_string()
+    } else if switch_blocks {
+        // the one case the operator cannot deduce from their own config
+        format!("no dialable relay — clearnet/local dialing off ({CLEARNET_KEY})")
     } else {
-        // claims nothing about "none is dialable", so it stays true even if a
-        // caller ever renders a partially-blocked set
-        format!("this invite's {n} relay(s) are not usable on this node — the lines above say what each one needs")
+        "no dialable relay for this invite".to_string()
     };
     JoinRelayRefusal { detail, headline }
 }
@@ -123,11 +107,11 @@ mod tests {
         RelayEntry { url: url.to_string(), confirmed }
     }
 
-    /// Each verdict names the ONE action that fixes it — and the summary may
-    /// only claim "no relay in common" when every named relay really is
-    /// unknown here.
+    /// Each relay gets its own two-word fault, the remedy appears once, and
+    /// the summary may only claim "no relay in common" when every named relay
+    /// really is unknown here.
     #[test]
-    fn every_relay_gets_its_own_fix_and_the_summary_overclaims_nothing() {
+    fn each_relay_gets_a_short_fault_and_the_fix_is_stated_once() {
         let pool = vec![entry("wss://unconfirmed.example", false), entry("wss://dark.example", true)];
         let offered = vec![
             "wss://never-heard-of.example".to_string(),
@@ -136,41 +120,39 @@ mod tests {
         ];
         let v = diagnose_invite_relays(&offered, &pool, false);
         let r = join_relay_refusal(&v, &pool, false);
-        assert_eq!(r.detail.len(), 3, "one line per relay, never one paragraph");
-        assert!(r.detail[0].contains("not in this node's relay pool"), "{}", r.detail[0]);
-        assert!(r.detail[1].contains("not confirmed"), "{}", r.detail[1]);
-        assert!(r.detail[2].contains("clearnet_enabled = true"), "{}", r.detail[2]);
-        assert!(
-            !r.headline.contains("no relay in common"),
-            "two of the three ARE in common: {}",
-            r.headline
-        );
-
-        // a genuinely disjoint pair still says exactly that, and names what
-        // this node CAN dial
-        let mine = vec![entry("wss://mine.example", true)];
-        let offered = vec!["wss://never-heard-of.example".to_string()];
-        let v = diagnose_invite_relays(&offered, &mine, true);
-        let r = join_relay_refusal(&v, &mine, true);
-        assert!(r.headline.contains("no relay in common"), "{}", r.headline);
-        assert!(
-            r.detail.iter().any(|l| l.contains("can dial: wss://mine.example")),
-            "{:?}",
+        assert_eq!(r.detail.len(), 3, "one line per relay");
+        assert!(r.detail[0].ends_with("not in relay pool"), "{}", r.detail[0]);
+        assert!(r.detail[1].ends_with("not confirmed"), "{}", r.detail[1]);
+        assert!(r.detail[2].ends_with("clearnet/local dialing off"), "{}", r.detail[2]);
+        // compact: a detail line is the url plus a short fault, nothing more
+        for l in &r.detail {
+            assert!(l.len() < 70, "detail line is not prose: {l}");
+        }
+        // the remedy is stated ONCE, in the summary
+        assert_eq!(
+            r.detail.iter().filter(|l| l.contains("clearnet_enabled")).count(),
+            0,
+            "the config key never repeats per relay: {:?}",
             r.detail
         );
+        assert!(r.headline.contains("clearnet_enabled"), "{}", r.headline);
+        assert!(!r.headline.contains("no relay in common"), "two ARE in common: {}", r.headline);
+
+        // a genuinely disjoint pair says exactly that, and names what IS dialable
+        let mine = vec![entry("wss://mine.example", true)];
+        let v = diagnose_invite_relays(&["wss://never-heard-of.example".to_string()], &mine, true);
+        let r = join_relay_refusal(&v, &mine, true);
+        assert_eq!(r.headline, "no relay in common with this invite");
+        assert!(r.detail.iter().any(|l| l.contains("dialable here: wss://mine.example")), "{:?}", r.detail);
     }
 
-    /// The founding prerequisite must not re-demand a confirmation that
-    /// exists — the switch is the block, so the switch is what it names.
+    /// The founding prerequisite names the fault in three words — and the
+    /// switch, not a confirmation that already exists.
     #[test]
-    fn the_pool_gap_reason_names_the_switch_not_the_confirmation() {
-        assert!(pool_gap_reason(PoolGap::Empty).contains("no relay is configured"));
-        let r = pool_gap_reason(PoolGap::Unconfirmed);
-        assert!(r.contains("no relay is confirmed") && !r.contains("clearnet_enabled"), "{r}");
+    fn the_pool_gap_reason_is_short_and_names_the_switch() {
+        assert_eq!(pool_gap_reason(PoolGap::Empty), "no relay configured");
+        assert_eq!(pool_gap_reason(PoolGap::Unconfirmed), "no relay confirmed");
         let r = pool_gap_reason(PoolGap::NonOnionOff);
-        assert!(
-            r.contains("clearnet_enabled = true") && !r.contains("confirm one"),
-            "the switch is named, the existing confirmation is not re-demanded: {r}"
-        );
+        assert!(r.contains("clearnet_enabled") && r.len() < 70, "{r}");
     }
 }

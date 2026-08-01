@@ -503,27 +503,22 @@ async fn the_relay_refusal_diagnoses_every_invite_relay_individually() {
     let s = wait_for(&b, "the join to refuse", |s| s.join.run.outcome == 2).await;
     let log = &s.join.run.log;
 
+    // one short fault per relay — no instructions in the per-relay lines
     let l = line_about(log, &absent);
-    assert!(
-        l.contains("not in this node's relay pool") && l.contains("add"),
-        "an unknown relay is told to be added: {l}"
-    );
+    assert!(l.ends_with("not in relay pool"), "unknown relay: {l}");
     let l = line_about(log, &unconfirmed);
-    assert!(
-        l.contains("not confirmed") && !l.contains("not in this node's relay pool"),
-        "a relay the operator CAN see is not called unknown: {l}"
-    );
+    assert!(l.ends_with("not confirmed"), "a relay the operator CAN see: {l}");
     let l = line_about(log, &dark);
-    assert!(
-        l.contains("confirmed") && l.contains("clearnet_enabled"),
-        "the switched-off gate names itself AND the config key that lifts it: {l}"
-    );
+    assert!(l.ends_with("clearnet/local dialing off"), "the switched-off gate: {l}");
 
-    // …and the terminal line no longer claims the pools merely do not overlap
+    // the terminal line carries the fix ONCE, and no longer claims the pools
+    // merely fail to overlap (two of these three ARE in common)
     let terminal = log.iter().find(|l| l.starts_with('✗')).expect("a ✗ line");
+    assert!(!terminal.contains("no relay in common"), "{terminal}");
+    assert!(terminal.contains("clearnet_enabled"), "the key that lifts it: {terminal}");
     assert!(
-        !terminal.contains("no relay in common"),
-        "two of these three relays ARE in common — they are just not dialable: {terminal}"
+        log.iter().filter(|l| l.contains("clearnet_enabled")).count() == 1,
+        "the remedy is stated exactly once, not per relay: {log:?}"
     );
 }
 

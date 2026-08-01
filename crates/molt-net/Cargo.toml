@@ -111,4 +111,8 @@ nostr-relay-builder = { workspace = true }
 # byte-pin of the vectors' get_message_keys section: recompute the expected
 # ciphertext from the reference chacha/hmac keys (same 0.9 line nostr uses)
 chacha20 = { workspace = true }
+# capture tracing output in tests/relay_diagnostics.rs: a connect failure
+# that logs nothing is how "it just says it cannot connect" happens, so the
+# diagnostic is pinned like any other behaviour
+tracing-subscriber = { workspace = true }
 # (the nip44 vector file also carries base64 payloads, tests/nostr_vectors.rs)

@@ -249,6 +249,20 @@ impl Dialer {
         ))
     }
 
+    /// A short, log-shaped description of the route: `direct`,
+    /// `socks5://127.0.0.1:9050`, `arti`. Every connection diagnostic carries
+    /// it, because "cannot connect" means something entirely different
+    /// depending on whether a proxy was even involved — and the layer that
+    /// reports the failure does not otherwise know which route was taken.
+    pub fn route(&self) -> String {
+        match self {
+            Dialer::Direct => "direct".to_string(),
+            Dialer::Socks5 { proxy, .. } => format!("socks5://{proxy}"),
+            #[cfg(feature = "embedded-tor")]
+            Dialer::Arti(_) => "arti".to_string(),
+        }
+    }
+
     /// Whether this dialer routes over Tor (so `.onion` alternates are
     /// preferred and local DNS never happens).
     pub fn tor_on(&self) -> bool {
@@ -267,6 +281,19 @@ impl Dialer {
     /// (never a clearnet dial/DNS leak), SOCKS circuits are per-host
     /// isolated, and the connect deadline is Tor-sized.
     pub async fn dial_host(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
+        let started = std::time::Instant::now();
+        let out = self.dial_host_inner(host, port).await;
+        // the socket layer is the only place that knows the ROUTE, so it is
+        // the only place that can say "via socks5://… " — one line, fields
+        let ms = started.elapsed().as_millis();
+        match &out {
+            Ok(_) => tracing::debug!(host, port, via = %self.route(), ms, "dial ok"),
+            Err(e) => tracing::debug!(host, port, via = %self.route(), ms, error = %e, "dial failed"),
+        }
+        out
+    }
+
+    async fn dial_host_inner(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
         match self {
             Dialer::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail

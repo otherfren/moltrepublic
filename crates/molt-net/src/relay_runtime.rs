@@ -140,6 +140,15 @@ impl RelayRuntime {
     /// (a fresh install) — every operation then fails typed, and connects to
     /// nothing, silently (ADR-0004).
     pub fn new(dialer: Dialer, urls: Vec<String>) -> Self {
+        // The dial PLAN, once, before anything is attempted. Without it an
+        // operator cannot tell "Tor is broken" from "this node was never
+        // going to dial anything" — and an empty pool connects to nothing by
+        // design, which looks identical to a failure from the outside.
+        if urls.is_empty() {
+            tracing::warn!(via = %dialer.route(), "no dialable relay — nothing will be contacted");
+        } else {
+            tracing::info!(relays = urls.len(), via = %dialer.route(), targets = %urls.join(" "), "relay runtime");
+        }
         Self {
             dialer,
             urls,
@@ -235,11 +244,36 @@ impl RelayRuntime {
                 Err(e) => report.failed.push((url, e.to_string())),
             }
         }
+        // the per-relay reasons belong in the LOG (one greppable line each),
+        // not stuffed into an error string the GUI has to render — a `{:?}`
+        // dump of every failure is exactly the wall of text nobody reads
+        for (url, e) in &report.failed {
+            tracing::warn!(relay = %url, error = %e, "publish rejected");
+        }
         if report.accepted.is_empty() {
+            // the WHY belongs in the message — it is the one important thing.
+            // What does not belong is a `{:?}` dump of (url, reason) tuples:
+            // collapse to the DISTINCT reasons, which for the common case
+            // (every relay refusing for the same cause) is a single clause.
+            let mut reasons: Vec<&str> = Vec::new();
+            for (_, e) in &report.failed {
+                let r = e.as_str();
+                if !reasons.contains(&r) {
+                    reasons.push(r);
+                }
+            }
             return Err(NetError::Unreachable(format!(
-                "no relay accepted the event: {:?}",
-                report.failed
+                "no relay accepted the event ({} tried): {}",
+                report.failed.len(),
+                reasons.join("; ")
             )));
+        }
+        if !report.failed.is_empty() {
+            tracing::warn!(
+                accepted = report.accepted.len(),
+                failed = report.failed.len(),
+                "event landed on some relays only"
+            );
         }
         Ok(report)
     }
@@ -389,11 +423,36 @@ impl RelayRuntime {
         // finding, HIGH)
         let firsts = futures_util::future::join_all(self.urls.iter().map(|url| {
             let shared = shared.clone();
+            let via = crate::relay_ws::dialer_for(&self.dialer, url).route();
             async move {
-                tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, url))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
+                let began = tokio::time::Instant::now();
+                // This is the connect an operator actually watches — the one
+                // at startup. It used to end in `.ok().and_then(Result::ok)`,
+                // throwing away BOTH the timeout and the reason, so a node
+                // that reached no relay said nothing about why. Report every
+                // outcome; the Option is what the caller still needs.
+                match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, url)).await {
+                    Ok(Ok(ws)) => {
+                        tracing::info!(
+                            relay = %url, via = %via,
+                            ms = began.elapsed().as_millis(),
+                            "relay connected"
+                        );
+                        Some(ws)
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(relay = %url, via = %via, error = %e, "relay connect failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            relay = %url, via = %via,
+                            after_s = CONNECT_TIMEOUT.as_secs(),
+                            "relay connect timed out"
+                        );
+                        None
+                    }
+                }
             }
         }))
         .await;
@@ -427,6 +486,14 @@ impl RelayRuntime {
             for s in supervisors {
                 s.abort();
             }
+            // the per-relay reasons are already on WARN above; this line ties
+            // them together so the operator sees the verdict, not just N
+            // individual complaints
+            tracing::warn!(
+                tried = self.urls.len(),
+                via = %self.dialer.route(),
+                "no relay accepted the subscription"
+            );
             return Err(NetError::Unreachable(
                 "no relay accepted the subscription".into(),
             ));
@@ -490,16 +557,54 @@ async fn supervise(
     // relays that were down at subscribe time are NOT in the gate's
     // denominator, so they must never increment its numerator either
     let mut eose_counted = !counts_toward_eose;
+    // the route this relay actually takes (a Local relay is dialed direct
+    // even under Tor, §10.14) — the single most useful field when an
+    // operator says "Tor runs but the client will not connect"
+    let via = crate::relay_ws::dialer_for(&shared.dialer, &url).route();
+    let mut attempt: u32 = 0;
     loop {
         let ws = match session.take() {
             Some(ws) => ws,
             None => {
+                attempt += 1;
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Connecting);
-                match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, &url)).await {
-                    Ok(Ok(ws)) => ws,
-                    // failed or hung past the connect deadline
-                    _ => {
+                let began = tokio::time::Instant::now();
+                let outcome =
+                    tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, &url)).await;
+                // NEVER discard the reason. This arm used to be a bare `_`,
+                // so every connect failure — proxy refused, TLS rejected, WS
+                // upgrade 4xx, auth required — vanished and the loop retried
+                // forever in silence. That silence IS the bug an operator
+                // reports as "it just says it cannot connect".
+                match outcome {
+                    Ok(Ok(ws)) => {
+                        tracing::info!(
+                            relay = %url, via = %via, attempt,
+                            ms = began.elapsed().as_millis(),
+                            "relay connected"
+                        );
+                        ws
+                    }
+                    Ok(Err(e)) => {
                         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                        tracing::warn!(
+                            relay = %url, via = %via, attempt,
+                            retry_in_s = backoff.as_secs(),
+                            error = %e,
+                            "relay connect failed"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(cap);
+                        continue;
+                    }
+                    Err(_) => {
+                        shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                        tracing::warn!(
+                            relay = %url, via = %via, attempt,
+                            after_s = CONNECT_TIMEOUT.as_secs(),
+                            retry_in_s = backoff.as_secs(),
+                            "relay connect timed out"
+                        );
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(cap);
                         continue;
@@ -520,6 +625,14 @@ async fn supervise(
             backoff = initial;
         }
         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+        // a session that dies instantly, over and over, is the signature of a
+        // relay that accepts then bans; say so instead of only going Down
+        tracing::warn!(
+            relay = %url, via = %via,
+            lived_s = started.elapsed().as_secs(),
+            retry_in_s = backoff.as_secs(),
+            "relay session ended"
+        );
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(cap);
     }

@@ -3688,7 +3688,7 @@ mod tests {
                 .await
                 .expect_err("no confirmed relay → no founding");
             assert!(
-                err.to_string().contains("no relay is configured"),
+                err.to_string().contains("no relay configured"),
                 "the honest prerequisite error surfaces: {err}"
             );
         });
@@ -3727,7 +3727,7 @@ mod tests {
                 .expect_err("nothing dialable → no founding");
             let err = err.to_string();
             assert!(
-                err.contains("clearnet_enabled") && !err.contains("no relay is configured"),
+                err.contains("clearnet_enabled") && !err.contains("no relay configured"),
                 "the refusal names the switch, not a confirmation that exists: {err}"
             );
         });

@@ -105,6 +105,7 @@ pub(crate) async fn dial_maybe_tls(
     if !tls {
         return Ok(MaybeTls::Plain(stream));
     }
+    tracing::debug!(host, port, via = %dialer.route(), "tcp up, starting tls");
     let connector = tokio_rustls::TlsConnector::from(crate::dial::public_tls_config()?);
     // an IP literal is a valid server name too (rustls distinguishes DNS
     // names from IP addresses; `try_from(&str)` handles both)
@@ -164,7 +165,9 @@ impl RelayWs {
         let port = parsed
             .port_or_known_default()
             .ok_or_else(|| NetError::Framing(format!("relay url {url}: no port")))?;
-        let stream = dial_maybe_tls(&dialer_for(dialer, url), &host, port, scheme == "wss").await?;
+        let route = dialer_for(dialer, url);
+        tracing::debug!(relay = %url, host = %host, port, tls = scheme == "wss", via = %route.route(), "relay dial");
+        let stream = dial_maybe_tls(&route, &host, port, scheme == "wss").await?;
         // Bound what a hostile relay may make us allocate: tungstenite's
         // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
         // anything this client exchanges (the publish budget is ≤128 KiB).
