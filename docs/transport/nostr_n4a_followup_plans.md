@@ -27,6 +27,10 @@ Two warnings, because this document ages badly:
 Clusters D and I have since LANDED. Their plans are kept as the reasoning
 behind those commits, not as work to do.
 
+**One claim HAS been verified by hand** — cluster H's `SealedRoster.roster`
+finding, see "Open decisions" below. It holds, with a narrower severity than
+the investigator implied. The other plans have NOT been re-verified.
+
 ## Ownership (agreed 2026-08-01)
 
 Two sessions work this backlog in parallel. The split exists because the same
@@ -74,15 +78,45 @@ can start; but a wrong guess is expensive in exactly these five places.
   known pubkeys, plausibly our own recommended self-hosted onion relay.
   (b) the member's roster anchor — works when whitelisted, but permanently
   links the subscription to the member.
-- **H — `SealedRoster.roster` is an UNSIGNED constitutional field.** It is
-  absent from `roster_canonical_bytes` (`molt-roster-v3`) and from
-  `republic_id` (`molt-republic-id-v2`), yet it becomes the materialized
-  member list. **This is a finding in its own right, not a coverage gap** —
-  treat it as such. Options: (a) cheap and additive — cross-check `roster`
+- **H — `SealedRoster.roster` is an UNSIGNED constitutional field.**
+  **VERIFIED 2026-08-01 against `fb7e5fe` — the finding is real, and the
+  severity is narrower than the investigator implied.** What was checked:
+  - `roster_canonical_bytes` (`molt-roster-v3`) hashes `ws_id`, `rule_m`,
+    `rule_n`, each identity's `(member, identity_pk, nostr_pk)` and `agenda`.
+    `roster` is absent. ✔ claim holds.
+  - `republic_id` (`molt-republic-id-v2`) hashes name, m, n and the sorted
+    `(identity_pk, nostr_pk)` pairs. `roster` is absent. ✔ claim holds.
+  - `verify_sealed_roster` (`founding.rs`) never reads `s.roster` at all —
+    it checks the republic id, the anchors, the attestation count and the
+    signatures over `identities` + `agenda`. ✔ no cross-check exists.
+  - `SealedRoster::into_genesis` copies `self.roster.clone()` straight into
+    `WorkspaceEvent::Founded`, which becomes `replica.roster` and therefore
+    `State::roster()`. ✔ the wire value is materialized unverified.
+  - The N1 genesis-time self-check does NOT constrain it either: it compares
+    CANONICAL BYTES, and `roster` is not in them.
+
+  **What it is NOT.** It is not a chain-authorization hole: `verify_chain`
+  authorizes signers from `identities`, not from `roster`, and MLS membership
+  binds credentials independently. `net.rs`'s `roster().contains(&from)` is
+  only the fallback when no mesh is up (the primary is `peer_names`).
+
+  **What it IS.** A founder can seal a republic whose materialized membership
+  differs from the table every member cryptographically ratified — members
+  sign `identities` and store `roster`. It drives the displayed member list,
+  `rule_detail` (`replica.roster.len()`), the proposal/compaction paths and
+  that fallback membership check. A sign-what-you-see gap in a constitutional
+  field, so: **HIGH, not CRITICAL.**
+
+  **Recommended fix — option (a), cheap and additive:** cross-check `roster`
   against `identities` (same set, same order) inside `verify_sealed_roster`
-  and `verify_seal_proposal`, no byte-layout change; (b) drop the field and
-  derive from `identities` everywhere (~15 sites); (c) bind it into the
-  canonical bytes, which means a `molt-roster-v4` tag and the full ripple.
+  AND `verify_seal_proposal`. No byte-layout change, no `molt-roster-v4`, no
+  ~15-site ripple. It also matches what the codebase already does elsewhere:
+  `recovery.rs::sealed_roster_from_blob` DERIVES `roster` from `identities`
+  rather than trusting a separate field. Options (b) drop-the-field and (c)
+  bind-into-the-bytes remain open but cost far more for the same guarantee.
+
+  **This is a finding, not coverage debt — it should be fixed on its own,
+  ahead of the rest of H.**
 
 
 ## Status
