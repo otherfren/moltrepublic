@@ -21,7 +21,7 @@ use crate::invite::RitualMsg;
 use crate::welcome::GIFT_PLAINTEXT_MAX;
 
 /// Our gift-wrapped ritual-message rumor kind.
-pub const KIND_RITUAL: u16 = 446;
+pub use crate::kinds::KIND_RITUAL;
 
 /// What went wrong wrapping or peeling a ritual message.
 #[derive(Debug, thiserror::Error)]

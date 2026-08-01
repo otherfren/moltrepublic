@@ -31,7 +31,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 
 /// The NIP-EE Welcome kind.
-pub const KIND_WELCOME: u16 = 444;
+pub use crate::kinds::KIND_WELCOME;
 
 /// rust-nostr refuses NIP-44 plaintexts above this (its documented deviation
 /// from the 65535-byte spec cap, pinned by the N0 canary in

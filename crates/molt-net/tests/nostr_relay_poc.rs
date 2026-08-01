@@ -26,7 +26,7 @@ use nostr_relay_pool::pool::{RelayPool, RelayPoolNotification};
 use nostr_relay_pool::relay::options::{RelayOptions, SubscribeOptions};
 
 /// The group-message kind NIP-EE uses (Marmot: MLS application messages).
-const KIND_GROUP_MESSAGE: Kind = Kind::Custom(445);
+const KIND_GROUP_MESSAGE: Kind = Kind::Custom(molt_net::kinds::KIND_GROUP);
 
 /// Publish an h-tagged kind-445-style event carrying NIP-44 ciphertext from
 /// one pool, receive it on a second pool subscribed to the same `h` tag, and

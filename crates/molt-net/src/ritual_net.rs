@@ -37,12 +37,9 @@ use crate::ritual_wrap::{self, RitualWrapError};
 use crate::welcome::{self, WelcomeError, WelcomePayload};
 use crate::NetError;
 
-/// The NIP-59 gift-wrap kind — the OUTER event both ritual rumors (446)
-/// and Welcomes (444) arrive under.
-const KIND_GIFT_WRAP: u16 = 1_059;
-
-/// The kind-445 group-event kind (NIP-EE group messages).
-const KIND_GROUP: u16 = 445;
+// The kinds this module publishes under (gift wrap 1059, group 445) now live
+// in `crate::kinds` — one registry, so two work packages cannot allocate the
+// same number in parallel.
 
 /// The §4.4 clock-skew margin around a UTC h-window boundary: within this
 /// distance of a boundary the subscription also covers the adjacent
@@ -225,7 +222,7 @@ impl RitualNet {
     /// on the full replay.
     pub async fn inbox(&self) -> Result<RitualInbox, NetError> {
         let filter = Filter::new()
-            .kind(Kind::Custom(KIND_GIFT_WRAP))
+            .kind(Kind::Custom(crate::kinds::KIND_GIFT_WRAP))
             .pubkey(self.keys.public_key());
         // NIP-42 with OUR ANCHOR here, deliberately: the filter is
         // `#p = our anchor`, so the relay already learns this key from the
@@ -419,7 +416,7 @@ impl GroupChannel {
         let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
         let h = Tag::parse(["h", tag.as_str()])
             .map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
-        let event = EventBuilder::new(Kind::Custom(KIND_GROUP), sealed)
+        let event = EventBuilder::new(Kind::Custom(crate::kinds::KIND_GROUP), sealed)
             .tag(h)
             .custom_created_at(now)
             .sign_with_keys(&Keys::generate())
@@ -450,7 +447,7 @@ impl GroupChannel {
     /// Place one pooled 445 subscription over exactly `tags`.
     async fn subscribe_tags(&self, tags: &[String]) -> Result<Subscription, NetError> {
         let filter = Filter::new()
-            .kind(Kind::Custom(KIND_GROUP))
+            .kind(Kind::Custom(crate::kinds::KIND_GROUP))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), tags.iter().cloned());
         // A FRESH ephemeral key per placement (and per window-roll
         // re-placement) — NOT the roster anchor. The 445 filter names only an

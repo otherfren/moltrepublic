@@ -42,6 +42,7 @@ pub mod chunk;
 pub mod dial;
 pub mod envelope;
 pub mod invite;
+pub mod kinds;
 pub mod loopback;
 pub mod mesh;
 pub mod mls;
