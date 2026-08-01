@@ -439,7 +439,19 @@ Each step is one commit, red test first, green on master before the next.
    `InviteHandoverV2`'s shape plus `republic_id`
    (`{v:2, ticket, npub, relays, republic_id}`). **Red:** round-trip, v1
    rejection with the honest "older build" message, the same relay caps.
-5. **Coordinator mint over relays**: `cmd_recover_invite_start`
+5. ✅ **LANDED 2026-08-02.** `State` adopts the Nostr material at both bring-up
+   paths (5a); `mint_recovery_link_over_relays` + `spawn_recovery_inbox`
+   replace the queue mint on a Nostr republic (5b); `sender_npub` reaches the
+   ingest and gates deliverability there (5c). Keystones in
+   `crates/molt-engine/tests/nostr_recovery.rs`. **Still owed:** the PoP gate
+   has no end-to-end test — a forged request fails the SEAT PROOF first, so a
+   test written today would pass for the wrong reason (the inert-keystone
+   trap). It is pinned when step 6 can produce a correctly-signed request with
+   a mismatched wrap author. Also deferred: the relay set advertised in the
+   link is this node's dialable pool ∩ the group's relays, which is the
+   conservative reading of §10.15 but does NOT resolve it.
+
+   **Coordinator mint over relays**: `cmd_recover_invite_start`
    (`net.rs:1526`, precondition at `:1561-1567`) currently REQUIRES
    `runtime_transport()` to mint a queue — on Nostr it needs only the dialer
    + the workspace relay list, so the mesh precondition becomes a kind check.

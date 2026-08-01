@@ -3407,6 +3407,17 @@ pub enum Command {
         /// Welcome back once re-admission commits. Opaque here.
         #[serde(default)]
         reply: String,
+        /// The gift wrap's PROVEN author, filled by the transport task that
+        /// peeled it — never by the sender's own claim (the founding twin
+        /// `NetJoinRequested.sender_npub` works the same way).
+        ///
+        /// It is the proof-of-possession for `new_nostr_pk`: a secp256k1 key
+        /// that appears in a request signs nothing by itself, so without this
+        /// a relay-level attacker could redirect the coordinator's Welcome to
+        /// a key it does not hold. Empty on the loopback path, which has no
+        /// wrap author.
+        #[serde(default)]
+        sender_npub: String,
         /// Ritual incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

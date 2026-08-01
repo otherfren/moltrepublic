@@ -1151,7 +1151,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_invite_start",
             command: "recover_invite_start",
-            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online — the link exists precisely because they are unreachable. The engine opens a dedicated recovery queue on this node's running mesh transport and listens; the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' (e.g. mesh-not-running — reopen the republic so this node's own mesh is up). The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
+            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online. The engine listens for their request — on Nostr over the republic's relays, on the legacy shape over a fresh mesh queue — and the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' naming what this node is missing. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
             schema: || json!({
                 "type": "object",
                 "properties": {

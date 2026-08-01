@@ -143,6 +143,16 @@ impl State {
         // fire-and-forget save could drop it (queue full / crash) leaving a
         // workspace that can never decrypt. The dir is fresh, so a state carrying
         // the MLS blob + mesh is complete.
+        // the same material the sealed state below gets, kept for the LIVE
+        // actor: `transport.state` is what a reopen reads, but this session
+        // must be able to speak as itself immediately (N4b §8.8 step 5a)
+        let adopt_kind = shape.kind;
+        let adopt_relays = shape.relays.clone();
+        let adopt_nostr_sk: Option<zeroize::Zeroizing<Vec<u8>>> = if chain.is_empty() {
+            None
+        } else {
+            nostr_sk.clone().map(zeroize::Zeroizing::new)
+        };
         if mls_snapshot.is_some() || !mesh.is_empty() || !chain.is_empty() {
             let ts = molt_core::TransportState {
                 mls: mls_snapshot,
@@ -190,6 +200,11 @@ impl State {
             self.adopt_chain(chain);
             self.note_governance_readiness();
         }
+        self.adopt_nostr_transport(
+            adopt_kind,
+            adopt_nostr_sk.as_ref().map(|sk| sk.as_slice()),
+            &adopt_relays,
+        );
         let prefs = opened.prefs.clone();
         self.active = Some(ActiveStorage {
             id: id.clone(),

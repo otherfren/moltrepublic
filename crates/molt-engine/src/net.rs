@@ -1430,15 +1430,11 @@ impl State {
     /// propose the threshold re-admission, remembering the fresh KeyPackage +
     /// reply queue for the MLS re-key once the `Restored` block commits.
     ///
-    /// Nostr third anchor: recovery ingests NO wire-supplied `nostr_pk` —
-    /// `RecoverRequest` does not carry one, the `Restored` membership block
-    /// binds only `identity_pk` (and `apply_membership` keeps the seat's
-    /// anchored `nostr_pk` untouched), and the rejoiner materializes with
-    /// `nostr_sk = None` honestly (the salting ticket died with the lost
-    /// device; recovery-link v2 / N4b re-establishes the anchor). If a
-    /// future increment ever adds a nostr anchor to this wire, it must run
-    /// `molt_net::canonical_nostr_pk` at THIS choke point, exactly like
-    /// `cmd_net_join_requested`.
+    /// Nostr third anchor: this IS the choke point. `RecoverRequest` carries
+    /// the rejoiner's NEW anchor (N4b step 1), and it is canonicalized,
+    /// checked for cross-seat collision and proven-possessed HERE — before
+    /// the ticket is spent and before it can reach a `Restored` block —
+    /// exactly like `cmd_net_join_requested`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_recover_requested(
         &mut self,
@@ -1449,6 +1445,7 @@ impl State {
         seat_proof: String,
         new_nostr_pk: String,
         reply: String,
+        sender_npub: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if !self.net_scope_current(generation) {
@@ -1489,6 +1486,25 @@ impl State {
                 tracing::warn!(%member, "recovery request reuses an anchored transport key — dropped");
                 return Ok(Reply::Ack);
             }
+        }
+        // PROOF-OF-POSSESSION (§2.1, the founding twin at `cmd_net_join_requested`):
+        // the anchor claimed here must BE the key that sealed the gift wrap.
+        // The seat proof already binds it under the identity key, so this does
+        // not gate authenticity — it gates DELIVERABILITY: without it a
+        // relay-level attacker could re-address the coordinator's Welcome to a
+        // key nobody holds and strand the seat.
+        //
+        // Gated on THIS node's transport kind, which no remote can influence —
+        // not on the field being non-empty, which would let a missing proof
+        // read as "loopback, nothing to check".
+        if self.transport_kind == Some(molt_core::TransportKind::Nostr)
+            && (sender_npub.is_empty() || canonical != sender_npub)
+        {
+            tracing::warn!(
+                %member,
+                "recovery request claims a transport key it did not sign with — refused (possible impersonation)"
+            );
+            return Ok(Reply::Ack);
         }
         match self.verify_and_propose_restore(
             &member,
@@ -1553,6 +1569,14 @@ impl State {
         // edge-triggers on every attempt
         self.session.notice = format!("recovery-link-pending:{member}");
         self.emit_session(molt_core::SessionScope::Full);
+        // N4b step 5: a Nostr republic has no mesh and needs none — the mint
+        // wants only a dialer, this seat's transport secret and the group's
+        // relays. The discriminator is read FIRST, so a Nostr workspace is
+        // never pushed down the queue-shaped path (whose absence of creds is
+        // by design, not damage) and never refused with "mesh-not-running".
+        if self.transport_kind == Some(molt_core::TransportKind::Nostr) {
+            return self.mint_recovery_link_over_relays(member, republic, republic_id);
+        }
         // the recovery queue is minted on the RUNTIME transport (a clone shares
         // its Arc, so this node can both create the queue and subscribe to it).
         // No runtime mesh (e.g. the workspace was reopened without a resumable
@@ -1587,6 +1611,118 @@ impl State {
             cmd_tx,
             self.recovery_material_sink.clone(),
         );
+        Ok(Reply::Ack)
+    }
+
+    /// The Nostr half of [`Self::cmd_recover_invite_start`] (N4b §8.8 step 5).
+    ///
+    /// The relay set is the group's list INTERSECTED with what this node may
+    /// actually dial. Advertising a relay this coordinator cannot reach would
+    /// hand the returning member an address nobody is listening on — and
+    /// relays do not federate (`relay_pool.md` §2.6), so "the group uses it"
+    /// is not the same question as "I am reachable there". Capped like every
+    /// other advertised list.
+    ///
+    /// Every refusal is an operational state of THIS node, not a caller error:
+    /// it rides the recovery notice, never a command error.
+    fn mint_recovery_link_over_relays(
+        &mut self,
+        member: MemberId,
+        republic: String,
+        republic_id: String,
+    ) -> Result<Reply, MoltError> {
+        let Some(nostr) = self.nostr.as_ref() else {
+            // the kind says Nostr but the material did not load — its own
+            // fault, not "no mesh"
+            return self.cmd_net_recover_link_failed(
+                member,
+                "no transport key for this seat".to_string(),
+                String::new(),
+                None,
+            );
+        };
+        let group_relays = nostr.relays.clone();
+        let sk = nostr.sk.clone();
+        // `dialer_for`, NOT `resolve_dialer`: the latter writes
+        // `session.net_health = Ok` on success, and a Nostr workspace sits at
+        // `Down { NOSTR_RUNTIME_PENDING }` on purpose until N5 exists.
+        // Minting a link would have turned the pill green for the rest of the
+        // session — promising a runtime that is not there. Same choice the
+        // founding and join paths already make.
+        let dialer = match self.dialer_for() {
+            Ok(d) => d,
+            Err(e) => {
+                return self.cmd_net_recover_link_failed(
+                    member,
+                    format!("transport: {e}"),
+                    String::new(),
+                    None,
+                )
+            }
+        };
+        let verdicts = molt_core::relay::diagnose_invite_relays(
+            &group_relays,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        let relays: Vec<String> = verdicts
+            .iter()
+            .filter(|v| v.blocked.is_none())
+            .map(|v| v.url.clone())
+            .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
+            .collect();
+        if relays.is_empty() {
+            // classified from THESE relays' verdicts — "my pool is empty" and
+            // "my pool shares nothing with this republic" are different
+            // faults with different fixes, and the whole-pool verdict cannot
+            // tell them apart
+            let reason = crate::relay_msg::republic_relay_reason(&verdicts);
+            return self.cmd_net_recover_link_failed(member, reason, String::new(), None);
+        }
+        let net = match molt_net::ritual_net::RitualNet::new(dialer, relays, &sk) {
+            Ok(n) => n,
+            Err(e) => {
+                return self.cmd_net_recover_link_failed(
+                    member,
+                    format!("transport keys: {e}"),
+                    String::new(),
+                    None,
+                )
+            }
+        };
+        // the sender is taken BEFORE the ticket is minted: every lane that
+        // registers a ticket must go on to either use it or unregister it,
+        // and this one cannot do either
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Recover("engine stopped".to_string()));
+        };
+        let ticket =
+            molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
+        // register BEFORE the inbox can carry a request, so the spend-once
+        // guard is armed the moment the returning member answers
+        self.recovery_tickets.insert(ticket.clone());
+        // ONE inbox per open workspace. Every mint subscribes the same filter
+        // on the same anchor (kind 1059, #p = this seat), so a second
+        // subscription would duplicate every delivery and add another set of
+        // forever-redialing relay supervisors. The actor validates by TICKET,
+        // not by which task delivered the request, so one inbox serves every
+        // outstanding link.
+        for old in self.recovery_inboxes.drain(..) {
+            old.abort();
+        }
+        let task = crate::nostr_ritual::spawn_recovery_inbox(
+            net,
+            member,
+            ticket,
+            republic,
+            republic_id,
+            // recovery loops are scoped to the open WORKSPACE
+            self.net_scope,
+            cmd_tx.downgrade(),
+        );
+        // parked so the close path can abort it — a relay subscription does
+        // not end on its own the way a dead queue does
+        self.recovery_inboxes.push(task);
         Ok(Reply::Ack)
     }
 

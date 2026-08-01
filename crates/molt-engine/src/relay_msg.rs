@@ -96,7 +96,11 @@ pub(crate) fn join_relay_refusal(
         .iter()
         .any(|v| v.blocked == Some(InviteRelayBlock::ClearnetOff));
     let headline = if all_unknown {
-        "no relay in common with this invite".to_string()
+        // the detail lines above name every relay this republic uses, so the
+        // remedy is "one of them" — stated ONCE, here, not per relay. Relays
+        // do not federate: joining means dialing a relay the others dial,
+        // and nothing else will do (§10.15).
+        "no relay in common with this invite — add one of them".to_string()
     } else if switch_blocks {
         // the one case the operator cannot deduce from their own config
         format!("no dialable relay — clearnet/local dialing off ({CLEARNET_KEY})")
@@ -104,6 +108,42 @@ pub(crate) fn join_relay_refusal(
         "no dialable relay for this invite".to_string()
     };
     JoinRelayRefusal { detail, headline }
+}
+
+/// Why none of a REPUBLIC's own relays can be dialed here.
+///
+/// Derived from the per-relay verdicts, never from the whole-pool
+/// [`molt_core::relay::pool_gap`]: that one answers "can this node dial
+/// anything at all", which is a different question. A coordinator holding one
+/// perfectly dialable relay can still share none with this republic — and
+/// answering "no relay in common" while the republic's relay sits in Settings
+/// behind a switch names the wrong fix, which is the 2026-08-01 report this
+/// module exists to prevent.
+pub(crate) fn republic_relay_reason(verdicts: &[InviteRelayVerdict]) -> String {
+    if verdicts.is_empty() {
+        return "no relay recorded for this republic".to_string();
+    }
+    if verdicts
+        .iter()
+        .all(|v| v.blocked == Some(InviteRelayBlock::NotInPool))
+    {
+        // the one the operator must fix by ADDING a relay, not by flipping a
+        // switch: this node has never heard of the republic's relays
+        return "no relay in common with this republic".to_string();
+    }
+    if verdicts
+        .iter()
+        .any(|v| v.blocked == Some(InviteRelayBlock::ClearnetOff))
+    {
+        return format!("this republic's relay needs {CLEARNET_KEY}");
+    }
+    if verdicts
+        .iter()
+        .any(|v| v.blocked == Some(InviteRelayBlock::Unconfirmed))
+    {
+        return "this republic's relay is not confirmed".to_string();
+    }
+    "no dialable relay for this republic".to_string()
 }
 
 /// The failure in a FEW WORDS — what gets rendered large and in the signal
@@ -286,7 +326,12 @@ mod tests {
         let mine = vec![entry("wss://mine.example", true)];
         let v = diagnose_invite_relays(&["wss://never-heard-of.example".to_string()], &mine, true);
         let r = join_relay_refusal(&v, &mine, true);
-        assert_eq!(r.headline, "no relay in common with this invite");
+        // …and the summary carries the remedy ONCE: the detail lines already
+        // name every relay the republic uses, so "one of them" is actionable
+        assert_eq!(
+            r.headline,
+            "no relay in common with this invite — add one of them"
+        );
         assert!(r.detail.iter().any(|l| l.contains("dialable here: wss://mine.example")), "{:?}", r.detail);
     }
 

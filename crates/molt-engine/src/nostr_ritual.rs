@@ -181,6 +181,113 @@ pub(crate) fn spawn_founder_inbox(
     })
 }
 
+/// The recovery coordinator's 1059 inbox — the recovery twin of
+/// [`spawn_founder_inbox`] (N4b §8.8 step 5b).
+///
+/// Same order, for the same reason: subscribe FIRST, prove the subscription is
+/// READABLE, and only then surface the link. A recovery link advertised over an
+/// inbox no relay would ever answer on sends the returning member to a dead
+/// address, and recovery is the one flow whose user has already lost their
+/// device — there is no second channel to notice on.
+///
+/// The inbox lives until the WORKSPACE CLOSES, which is also exactly how long
+/// its ticket stays spendable — `RECOVERY_WELCOME_TIMEOUT` is the rejoiner's
+/// wait, not a deadline on this side. It therefore holds only a WEAK sender:
+/// the loop must never keep a dropped engine's actor (writer thread,
+/// workspace flock) alive.
+pub(crate) fn spawn_recovery_inbox(
+    net: RitualNet,
+    member: String,
+    ticket: String,
+    republic: String,
+    republic_id: String,
+    generation: u64,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // every early exit unregisters the ticket through the SAME failure
+        // lane the queue path uses, so a dead mint never leaves a live ticket
+        // behind for a replayed request to spend
+        let fail = |reason: String| Command::NetRecoverLinkFailed {
+            member: member.clone(),
+            reason,
+            ticket: ticket.clone(),
+            generation: Some(generation),
+        };
+        let mut inbox = match net.inbox().await {
+            Ok(i) => i,
+            Err(e) => {
+                let _ = send_cmd(&tx, fail(format!("relay inbox subscribe: {e}"))).await;
+                return;
+            }
+        };
+        let st = inbox.live_state(LIVE_WAIT).await;
+        if !st.any() {
+            let _ = send_cmd(&tx, fail("no relay replayed the subscription".to_string())).await;
+            return;
+        }
+        if !st.full() {
+            tracing::warn!(
+                synced = st.synced,
+                connected = st.connected,
+                "the recovery inbox replayed on only some relays"
+            );
+        }
+        let handover = invite::RecoveryHandoverV2 {
+            ticket: ticket.clone(),
+            npub: net.pk_hex(),
+            relays: net.relays().to_vec(),
+            republic_id: republic_id.clone(),
+        };
+        // encode EXPLICITLY: `RecoveryInvite::render` falls back to the legacy
+        // queue shape when the handover cannot encode, and with the empty
+        // queue fields below that fallback is `hex("\n\n\n<republic_id>")` — a
+        // link that parses as nothing, handed to the operator as a success.
+        if let Err(e) = handover.encode() {
+            let _ = send_cmd(&tx, fail(format!("rendering recovery link: {e}"))).await;
+            return;
+        }
+        let link = crate::recovery::RecoveryInvite {
+            republic,
+            member: member.clone(),
+            ticket: ticket.clone(),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            republic_id,
+            handover: Some(handover),
+        }
+        .render();
+        if !send_cmd(
+            &tx,
+            Command::NetRecoverLinkReady {
+                member,
+                link,
+                generation: Some(generation),
+            },
+        )
+        .await
+        {
+            return;
+        }
+        loop {
+            let Some(delivery) = inbox.recv(RECV_SLICE).await else {
+                continue; // idle slice
+            };
+            // only gift-wrapped Recover requests belong on this inbox
+            let RitualDelivery::Msg(RitualMsg::Recover(r), sender) = delivery else {
+                continue;
+            };
+            // the PoP comparison itself lives in the ACTOR, with every other
+            // check — one validation ladder, one place that can refuse. This
+            // task only carries the PROVEN sealer across.
+            if !send_cmd(&tx, crate::founding::recover_command(r, sender, generation)).await {
+                return;
+            }
+        }
+    })
+}
+
 /// MLS-encrypt one RitualMsg and publish it as a 445 frame, synchronously.
 /// The lock is dropped BEFORE the publish await (never hold a std mutex
 /// across await). Returns the carrier `created_at`.

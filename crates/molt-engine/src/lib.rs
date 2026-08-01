@@ -405,6 +405,24 @@ pub(crate) struct ActiveStorage {
 }
 
 /// All authoritative state, owned exclusively by the actor task.
+/// This seat's live Nostr transport material for the open workspace.
+///
+/// It exists because the sealed `transport.state` was being read at open and
+/// then thrown away except for `identity_sk`: a reopened survivor held its
+/// governance signing key but neither its own transport secret nor the group's
+/// relay list, so it could not build a [`molt_net::ritual_net::RitualNet`] at
+/// all — which is why minting a recovery link reported "mesh-not-running" on a
+/// republic that has no mesh and needs none (N4b §8.8 step 5a).
+pub(crate) struct NostrTransport {
+    /// This seat's WORKING transport secret — the 32-byte secp256k1 scalar
+    /// whose public half is the anchor other members address gift wraps to.
+    pub(crate) sk: zeroize::Zeroizing<Vec<u8>>,
+    /// The relays the GROUP agreed on at founding/join. What this node may
+    /// actually dial is its own confirmed pool intersected with these — the
+    /// two are deliberately different (`relay_pool.md` §3).
+    pub(crate) relays: Vec<String>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -469,6 +487,28 @@ pub(crate) struct State {
     /// approvals for the persistent chain; `None` when no chain-aware workspace
     /// is open (or a pre-chain workspace).
     pub(crate) identity_sk: Option<molt_storage::SigningKey>,
+    /// The open workspace's transport discriminator, from its sealed
+    /// `transport.state`. Read FIRST wherever the two shapes diverge — a
+    /// Nostr republic carries no queue creds or mesh links by design, not by
+    /// damage (N4 §7.5).
+    pub(crate) transport_kind: Option<molt_core::TransportKind>,
+    /// The open workspace's Nostr transport material, adopted alongside
+    /// [`State::identity_sk`] at founding/join and at every reopen.
+    ///
+    /// `None` on a legacy/loopback workspace, and on a Nostr one whose secret
+    /// is missing or malformed — the two are distinguished by
+    /// [`State::transport_kind`], because "this is not a Nostr republic" and
+    /// "this IS one but its transport secret did not load" are different
+    /// faults and must not share a refusal.
+    pub(crate) nostr: Option<NostrTransport>,
+    /// Live recovery-inbox tasks (N4b step 5), one per minted link.
+    ///
+    /// They MUST be aborted when the workspace closes. The loopback twin gets
+    /// away with forgetting its handle because that task dies with the ritual
+    /// transport; a relay subscription does not — the pool outlives the
+    /// workspace, so a forgotten task would sit on a relay socket forever and
+    /// every mint would add another.
+    pub(crate) recovery_inboxes: Vec<tokio::task::JoinHandle<()>>,
     /// The republic's persistent commit-block chain — the converged, verified
     /// governance record (`docs/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
@@ -803,6 +843,9 @@ impl State {
             next_seq: 1,
             replica: None,
             identity_sk: None,
+            transport_kind: None,
+            nostr: None,
+            recovery_inboxes: Vec::new(),
             chain: Vec::new(),
             chain_head: None,
             pending_served_blob: None,
@@ -1222,6 +1265,7 @@ impl State {
                 ticket,
                 seat_proof,
                 reply,
+                sender_npub,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -1231,6 +1275,7 @@ impl State {
                 seat_proof,
                 new_nostr_pk,
                 reply,
+                sender_npub,
                 generation,
             ),
             Command::NetRecoverLinkReady {

@@ -604,6 +604,14 @@ impl State {
         }
         self.replica = None;
         self.identity_sk = None;
+        self.transport_kind = None;
+        self.nostr = None;
+        // the recovery inboxes are INBOUND-only (they subscribe and read), so
+        // aborting is safe — there is no outbound frame in flight to drop,
+        // which is the one case the delivery guarantee forbids aborting
+        for task in self.recovery_inboxes.drain(..) {
+            task.abort();
+        }
         self.chain.clear();
         self.chain_head = None;
         self.checkpoint_blob = None;

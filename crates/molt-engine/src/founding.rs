@@ -767,7 +767,13 @@ fn spawn_founder_recv(
 /// [`Command::NetRecoverRequested`] — the coordinator recv loop's one decode.
 /// The reply-queue handover is re-serialized to the opaque string core carries.
 #[cfg_attr(not(test), allow(dead_code))] // wired by the recovery link-mint increment
-pub(crate) fn recover_command(r: invite::RecoverRequest, generation: u64) -> Command {
+/// `sender_npub` is the wrap's PROVEN author on the Nostr path, and empty on
+/// the loopback one (a queue delivery has no wrap author to prove).
+pub(crate) fn recover_command(
+    r: invite::RecoverRequest,
+    sender_npub: String,
+    generation: u64,
+) -> Command {
     Command::NetRecoverRequested {
         member: r.member,
         identity_pk: r.identity_pk,
@@ -780,6 +786,7 @@ pub(crate) fn recover_command(r: invite::RecoverRequest, generation: u64) -> Com
             .as_ref()
             .and_then(|h| serde_json::to_string(h).ok())
             .unwrap_or_default(),
+        sender_npub,
         generation: Some(generation),
     }
 }
@@ -817,7 +824,7 @@ pub(crate) fn spawn_coordinator_recv(
             // a recovery request, or — after the re-key — the rejoiner's mesh
             // announce (dynamic mesh membership); anything else is dropped
             let cmd = match serde_json::from_slice::<invite::RitualMsg>(&bytes) {
-                Ok(invite::RitualMsg::Recover(r)) => recover_command(r, generation),
+                Ok(invite::RitualMsg::Recover(r)) => recover_command(r, String::new(), generation),
                 Ok(invite::RitualMsg::MeshAnnounce { ct }) => Command::NetRecoverAnnounced {
                     ct,
                     generation: Some(generation),
@@ -2978,7 +2985,7 @@ mod tests {
             reply,
             generation,
             ..
-        } = recover_command(r, 7)
+        } = recover_command(r, "npub-of-the-wrap-author".to_string(), 7)
         else {
             panic!("expected NetRecoverRequested");
         };
@@ -2999,7 +3006,7 @@ mod tests {
             new_nostr_pk: String::new(),
             reply: None,
         };
-        let Command::NetRecoverRequested { reply, .. } = recover_command(bare, 1) else {
+        let Command::NetRecoverRequested { reply, .. } = recover_command(bare, String::new(), 1) else {
             panic!("expected NetRecoverRequested");
         };
         assert_eq!(reply, "");

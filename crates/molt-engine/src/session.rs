@@ -782,6 +782,37 @@ impl State {
         molt_net::dial::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
     }
 
+    /// Adopt this seat's Nostr transport material into the live actor state.
+    ///
+    /// Called from BOTH paths that bring a workspace up — the reopen
+    /// ([`Self::open_stored_workspace`]) and the founding/join seal
+    /// (`materialize_workspace`) — because a first session must be able to do
+    /// everything a reopened one can; the N4a honesty finding (F1) was the
+    /// same shape.
+    ///
+    /// `kind` is recorded even when the material is absent, so a Nostr
+    /// republic whose secret did not load refuses with its own reason instead
+    /// of impersonating a legacy queue-shaped one.
+    pub(crate) fn adopt_nostr_transport(
+        &mut self,
+        kind: Option<molt_core::TransportKind>,
+        nostr_sk: Option<&[u8]>,
+        relays: &[String],
+    ) {
+        self.transport_kind = kind;
+        // a 32-byte scalar is the shape check; whether it IS the anchored key
+        // is decided fail-closed by `RitualNet::new`, which owns that rule
+        self.nostr = match (kind, nostr_sk) {
+            (Some(molt_core::TransportKind::Nostr), Some(sk)) if sk.len() == 32 => {
+                Some(crate::NostrTransport {
+                    sk: zeroize::Zeroizing::new(sk.to_vec()),
+                    relays: relays.to_vec(),
+                })
+            }
+            _ => None,
+        };
+    }
+
     /// The display label for the EFFECTIVE global anonymity network — what
     /// `WorkspaceInfo.net` / `CreateState.net` show. Derived from the same
     /// settings [`Self::dialer_for`] resolves, never from a client-supplied
@@ -1045,6 +1076,15 @@ impl State {
             .as_deref()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
             .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
+        // …and, beside it, the Nostr transport material this seat needs to
+        // speak as itself after a reopen (N4b §8.8 step 5a). Without it a
+        // survivor holds its governance key but cannot address a gift wrap,
+        // and the recovery mint has nothing to build a RitualNet from.
+        self.adopt_nostr_transport(
+            transport_state.kind,
+            transport_state.nostr_sk.as_deref(),
+            &transport_state.relays,
+        );
         // a crash may have separated an Approved frame from its Applied frame;
         // re-decide thresholds that were already met (legacy path only)
         self.recover_pending_applies();
