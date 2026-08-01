@@ -871,6 +871,41 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
     Ok(())
 }
 
+/// The `roster` field must be exactly the identities' members, in order.
+///
+/// `SealedRoster.roster` is CONSTITUTIONAL — it becomes the `Founded` event's
+/// member list and thus `State::roster()` — but it is covered by NO signature:
+/// it is absent from `roster_canonical_bytes` (molt-roster-v3) and from
+/// `republic_id` (molt-republic-id-v2). Without this check every attestation
+/// can verify over an honest identity table while the member list a member
+/// actually reads names a different set.
+///
+/// Checked rather than bound into the signed bytes (user decision
+/// 2026-08-01): the field is fully DERIVABLE from `identities`, so equality
+/// closes the hole with no byte-layout bump and no recompute-site ripple.
+/// Recovery already derives it (`recovery.rs::sealed_roster_from_blob`).
+fn check_roster_matches_identities(
+    roster: &[String],
+    identities: &[molt_core::MemberIdentity],
+) -> Result<(), String> {
+    if roster.len() != identities.len() {
+        return Err(format!(
+            "the roster names {} member(s) but the signed identity table has {}",
+            roster.len(),
+            identities.len()
+        ));
+    }
+    for (seat, id) in roster.iter().zip(identities) {
+        if seat != &id.member {
+            return Err(format!(
+                "the roster names {seat} where the signed identity table has {}",
+                id.member
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify a distributed sealed roster before trusting it: the republic id
 /// must be the neutral content-derived value (v2 — committing to every
 /// member's identity/nostr anchor PAIR), every seat's nostr anchor must be
@@ -884,6 +919,9 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
         return Err("republic id does not match the roster content".to_string());
     }
     check_roster_anchors(&s.identities)?;
+    // the unsigned constitutional field: it must be exactly what the signed
+    // identity table says, or the member list diverges from what was ratified
+    check_roster_matches_identities(&s.roster, &s.identities)?;
     if s.attestations.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
@@ -990,6 +1028,9 @@ pub(crate) fn verify_seal_proposal(
     // our own anchor's VALUE, but we must never ratify a table that seals a
     // malformed or duplicated anchor for a peer
     check_roster_anchors(&proposal.identities)?;
+    // sign-what-you-see extends to the member list itself: a member must not
+    // ratify a table whose roster names a set its identities do not back
+    check_roster_matches_identities(&proposal.roster, &proposal.identities)?;
     let Some(our_seat) = proposal
         .identities
         .iter()
@@ -2643,6 +2684,55 @@ mod tests {
     #[test]
     fn verify_sealed_roster_accepts_a_valid_roster() {
         assert!(verify_sealed_roster(&valid_roster()).is_ok());
+    }
+
+    /// SECURITY — `SealedRoster.roster` is a CONSTITUTIONAL field that no
+    /// signature covers: it is absent from `roster_canonical_bytes`
+    /// (molt-roster-v3) and from `republic_id` (molt-republic-id-v2), yet
+    /// `into_genesis` copies it off the wire into the `Founded` event, where
+    /// it becomes `State::roster()` — the republic's member list.
+    ///
+    /// So every attestation can verify, the republic id can be the honest
+    /// content-derived value, and the member list can still be a different
+    /// set than the one everybody signed. Not a chain-authorization hole
+    /// (`verify_chain` authorizes over `identities`, and MLS binds credentials
+    /// separately) — but a sign-what-you-see hole in the one table a member
+    /// reads to know who they are governed with.
+    ///
+    /// Closed the cheap, additive way (user decision 2026-08-01): the field
+    /// must be exactly the identities' members, in order. No byte layout
+    /// moves, so no `molt-roster-v4` and no recompute-site ripple.
+    #[test]
+    fn verify_sealed_roster_rejects_a_roster_the_identities_do_not_back() {
+        // an extra name nobody signed for
+        let mut s = valid_roster();
+        s.roster.push("mallory".into());
+        assert!(
+            verify_sealed_roster(&s).is_err(),
+            "a member list longer than the signed identity table must be refused"
+        );
+
+        // a substituted name — same length, same signatures, different republic
+        let mut s = valid_roster();
+        s.roster = vec!["founder".into(), "mallory".into()];
+        assert!(
+            verify_sealed_roster(&s).is_err(),
+            "a seat renamed on the wire must be refused"
+        );
+
+        // reordered: the roster's order is what surfaces to the member, and
+        // it must match the table that was signed
+        let mut s = valid_roster();
+        s.roster = vec!["member".into(), "founder".into()];
+        assert!(
+            verify_sealed_roster(&s).is_err(),
+            "the order must match the signed identity table"
+        );
+
+        // dropped seat — a 2-of-2 republic silently presented as smaller
+        let mut s = valid_roster();
+        s.roster = vec!["founder".into()];
+        assert!(verify_sealed_roster(&s).is_err(), "a dropped seat must be refused");
     }
 
     #[test]
