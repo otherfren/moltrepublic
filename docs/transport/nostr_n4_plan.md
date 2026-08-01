@@ -578,6 +578,29 @@ Each step is one commit, red test first, green on master before the next.
     > coding one — it is recorded here because the old ordering (6 before 10)
     > silently assumed the opposite answer.
 
+    **RESOLVED 2026-08-02 — there is no bespoke catch-up to build.** The chain
+    catch-up already exists and is transport-agnostic:
+
+    - `receive_block` (`chain.rs:1716`) buffers an out-of-order block in
+      `pending_blocks` and calls `request_catchup(head+1)` on a gap;
+    - `request_catchup` (`chain.rs:1787`) emits
+      `WorkspaceEvent::ChainRequest { from_height }`, a survivor re-serves the
+      range as `Committed`, and `drain_buffered_blocks` applies them in order;
+    - `apply_next_block` verifies INCREMENTALLY (`verify_own` over the
+      extended chain), so blocks arriving in pieces are fine — the
+      all-or-nothing rule applies to the chain it accepts, not to the delivery;
+    - both `ChainRequest` and `Committed` are already in `crosses_wire`
+      (`net.rs:401-402`).
+
+    So step 6's blocker is **exactly N5's runtime** — the thing that carries
+    `WorkspaceEvent`s over 445 — and nothing else. Building a "minimal fetch"
+    inside N4b would duplicate `request_catchup`/the serve path and is
+    explicitly the wrong move. **N5's runtime moves ahead of step 6.**
+
+    The one thing the rejoiner still needs from the Welcome is the chain HEAD
+    (to know what it is catching up TO); the blocks themselves arrive over the
+    ordinary runtime once it is up.
+
 11. ~~**Welcome size**~~: measure a real served chain in the 444 payload against
     the 65408 cap. Under → carry it; over → carry the HEAD and fetch blocks
     over 445 catch-up. **Decide by measurement, keystone either way** — and
