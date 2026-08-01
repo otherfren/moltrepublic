@@ -118,6 +118,42 @@ pool — a different list), and `OrgSettingsCard` shows it beside the retention
 window. Read-only until R5 exists: a propose-pencil that proposed nothing
 would be a promise the engine cannot keep.
 
+### R2c — The founder PICKS the group's relays in the create dialog
+*(user idea, 2026-08-02 — and a prerequisite for R3)*
+
+Today the invite's relay list is an accident: `cmd_create_start`
+(`founding.rs:474`) takes `dialable(own pool)` and caps it at 8 **in pool
+order**. Nobody chose it, and the founder cannot see or change what the invite
+will carry.
+
+That is fine as a default and wrong as a mechanism, for two reasons:
+
+1. **R3 makes this set constitutional.** What every member signs into the
+   genesis must be a deliberate set, not whatever one node's settings page
+   happened to hold that afternoon.
+2. **It weakens the joiner's error message.** The refusal can name the relays
+   the invite carries, but not with authority — "the republic uses these" is
+   only true if the founder meant them. With an explicit pick, the joiner's
+   refusal states a fact about the REPUBLIC instead of a fact about the
+   founder's laptop.
+
+**Build:** a relay picker in the create wizard beside the rule text R1 already
+shows — the node's confirmed relays, each toggleable, defaulting to the current
+dialable set, capped at `MAX_PAYLOAD_RELAYS` with the existing
+"using the first eight" note. The picked set becomes the invite's
+`InviteHandoverV2.relays`, the Welcome's list, and (with R3) the signed
+genesis pool.
+
+- **Red:** a founder who deselects a relay mints an invite that does not name
+  it; a joiner refused against that invite names the PICKED relays and nothing
+  else.
+
+**Note the cap interacts with rule 1.** If a founder picks more relays than the
+payload can carry, the invite silently describes a smaller republic than the
+genesis would. Either the pick is capped at `MAX_PAYLOAD_RELAYS` in the UI (so
+the two can never disagree), or R3 must carry the full list some other way.
+Cap in the UI — the simpler invariant.
+
 ### R3 — The initial pool is signed by everyone
 The `molt-roster-v4` bump of §4.1, with the pool travelling from the founder's
 create-wizard choice into the founding table every member ratifies.
