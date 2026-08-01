@@ -953,6 +953,14 @@ impl State {
             name: eff.name,
             agenda: eff.agenda,
             chat_retention_days: eff.retention_days,
+            // the group's pool, from the live transport material — NOT this
+            // node's own settings pool, which is a different list (what I can
+            // dial vs. what the group agreed on)
+            relays: self
+                .nostr
+                .as_ref()
+                .map(|n| n.relays.clone())
+                .unwrap_or_default(),
             // recovery exists exactly here — the frontends key the per-member
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)

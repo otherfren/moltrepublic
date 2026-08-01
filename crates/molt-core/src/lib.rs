@@ -4330,6 +4330,16 @@ pub struct StatusView {
     /// hides chat messages and declined proposals older than this.
     #[serde(default = "default_chat_retention_days")]
     pub chat_retention_days: u64,
+    /// The GROUP's relay pool — the relays every member must be able to
+    /// reach (`nostr_transport_marmot.md` §10.15). Empty on a legacy
+    /// queue-shaped republic, which has no relays.
+    ///
+    /// A group setting like the name or the retention window, and shown
+    /// beside them: relays do not federate, so a member who cannot reach one
+    /// of these is partitioned, and the pool is the first thing to look at
+    /// when that happens.
+    #[serde(default)]
+    pub relays: Vec<String>,
     /// Whether the open workspace is a chain-governed republic. Recovery
     /// (link mint + rejoin) exists only here — a frontend offers the
     /// per-member "recovery link" action exactly when this is true (demo

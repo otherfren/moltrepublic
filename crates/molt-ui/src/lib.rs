@@ -2741,6 +2741,10 @@ struct OrgStats {
     /// `StatusView.chain_governed`) — the per-member "recovery link" action
     /// exists exactly there, so the Members table offers it only then.
     chain_governed: bool,
+    /// The GROUP's relay pool (engine `StatusView.relays`) — a group setting
+    /// shown beside the name and the retention window. Empty on a legacy
+    /// queue-shaped republic, which has no relays.
+    relays: Vec<String>,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -3088,6 +3092,7 @@ async fn push_surfaces(
                 image: s.image,
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
                 chain_governed: s.chain_governed,
+                relays: s.relays,
             },
         ),
         _ => return,
@@ -3653,6 +3658,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_chat_retention(b.org_stats.retention_days);
     // the Members table offers "recovery link" only where recovery exists
     ui.set_org_chain_governed(b.org_stats.chain_governed);
+    sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes rode the applied set_image proposal, so
@@ -5375,6 +5381,10 @@ lexicon! {
     cv_shrink: "Shrink", "Verkleinern";
     ocs_title: "Settings", "Einstellungen";
     ocs_chat_retention: "Delete chat after", "Chat löschen nach";
+    ocs_relays: "Relays", "Relays";
+    // relays do not federate — a member who cannot reach one of these is
+    // partitioned, so the pool is the first thing to look at (§10.15)
+    ocs_relays_hint: "Every member must reach one of these.", "Jedes Mitglied muss einen davon erreichen.";
     ocs_days: "days", "Tage";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";

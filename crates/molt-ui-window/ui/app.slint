@@ -613,8 +613,46 @@ component PagerRow inherits HorizontalLayout {
 // strip when the pane is wide enough, below the charter otherwise.
 component OrgSettingsCard inherits DetailGroup {
     in property <int> retention;
+    // the GROUP's relay pool — a group setting like the name or the
+    // retention window. Read-only until the threshold-approved pool change
+    // exists (relay_topology_plan.md R5): a pencil that proposed nothing
+    // would be a promise the engine cannot keep.
+    in property <[string]> relays;
     callback edit();
     title: Strings.ocs-title;
+    if root.relays.length > 0: VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: Strings.ocs-relays;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.relays.length;
+                color: Theme.dim;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+            }
+        }
+        for r in root.relays: Text {
+            text: r;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            overflow: elide;
+        }
+        // relays do not federate: a member who cannot reach one of these is
+        // partitioned, so the pool is the first thing to look at
+        Text {
+            text: Strings.ocs-relays-hint;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+    }
     HorizontalLayout {
         spacing: 8px;
         Text {
@@ -1187,6 +1225,9 @@ export component AppWindow inherits Window {
     // the effective "delete chat after" window — mirrored from the
     // engine's StatusView (an applied set_chat_retention changes it)
     in property <int> org-chat-retention: 7;
+    // the GROUP's relay pool (StatusView.relays), shown beside the other
+    // group settings — empty on a legacy queue-shaped republic
+    in property <[string]> org-relays;
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
 
@@ -4639,6 +4680,7 @@ export component AppWindow inherits Window {
                                     if os-row.side-settings: OrgSettingsCard {
                                         width: 300px;
                                         retention: root.org-chat-retention;
+                                        relays: root.org-relays;
                                         edit => {
                                             root.org-retention-draft = root.org-chat-retention;
                                             root.org-retention-modal-open = true;
@@ -4700,6 +4742,7 @@ export component AppWindow inherits Window {
                                 // narrow to seat the card beside the strip
                                 if !os-row.side-settings: OrgSettingsCard {
                                     retention: root.org-chat-retention;
+                                    relays: root.org-relays;
                                     edit => {
                                         root.org-retention-draft = root.org-chat-retention;
                                         root.org-retention-modal-open = true;

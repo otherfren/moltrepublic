@@ -52,32 +52,45 @@ because no other mechanism exists.
 
 `State.nostr.relays` (N4b step 5a) is the group list in the live actor.
 
-## 4. THE OPEN FORK — where the ledger lives
+## 4. DECIDED 2026-08-02 (user-ratified) — the pool is chain state
 
-Rule 4 says the members keep a ledger of who knows which relay. Two homes,
-and the choice changes everything downstream:
+**(a) Chain-borne.** Concretely:
 
-**(a) Chain-borne.** A member's relay set rides the membership machinery that
-already exists — `ChainChange::Membership` carries `nostr_pk` since N4b step 2,
-and a re-join is already a membership event. Threshold-approved, converged,
-authenticated, survives a reopen; every member computes the same ledger from
-the same blocks.
-*Cost:* a relay change needs m-of-n approval, so a member cannot fix their own
-connectivity alone. Blocks for an operational setting.
+- **The initial pool is the founder's**, written into the chain and **signed by
+  everyone**. Seeding it is coordination, not authority.
+- **Afterwards the founder holds no privilege over it.**
+- **Every later change needs threshold consent**, like any other gated change.
+- The ledger of who-knows-which-relay is therefore a **chain projection**, the
+  same shape as `working_nostr_pk` — computed from applied blocks, never
+  persisted separately, identical on every node.
 
-**(b) Ephemeral projection.** Each member announces its relay set; others
-record it in a runtime projection (like `chat_pos` / `chain_anchors`).
-*Cost:* not authenticated state — a peer's claimed relay set is hearsay, and
-the ledger diverges per node. But it costs no governance round-trip, and the
-announce is exactly the traffic that proves reachability anyway.
+Rejected: an ephemeral projection fed by each member announcing its own relay
+set. It would make "who can reach whom" depend on unauthenticated gossip —
+exactly the thing §10.15 was opened about — and the ledger would diverge per
+node.
 
-**Recommendation: (a), because rule 3 already routes a relay change through a
-re-join**, and a re-join is a membership event either way. The ledger is then
-a projection over the chain — the same shape as `working_nostr_pk` (step 3),
-computed, never persisted separately. (b) would make "who can reach whom"
-depend on unauthenticated gossip, which is the thing §10.15 was opened about.
+### 4.1 The consequence: `roster_canonical_bytes` must bump to v4
 
-**This fork must be settled before step R3.** R1/R2 below do not depend on it.
+"Signed by everyone" and "in the chain" together mean the genesis. Block 0's
+`approval_bytes` **is** `roster_canonical_bytes` (`persistent_chain.md`), and
+that layout (`molt-roster-v3`) does not carry relays today. So the initial pool
+has to be bound into those bytes → **`molt-roster-v4`**.
+
+This is the ~15-site ripple `CLAUDE.md` warns about: founder canonical,
+`verify_sealed_roster`, `verify_seal_proposal`, the byte-pin tests, and every
+harness that recomputes the signed table — all in ONE change, or signatures
+break silently. Length-prefix the relay list per the
+`hash-length-prefix-not-separators` rule; a separator-joined list of
+member-supplied URLs is forgeable.
+
+It also lands the pool in **sign-what-you-see**: members already ratify the
+name and agenda they were shown, and after this they ratify the relays too —
+which is right, because the relay set decides who can reach whom.
+
+**Alternative considered and rejected:** carry the initial pool as a separate
+n-of-n block at height 1. It avoids the v4 bump, but it leaves a window where
+the republic exists with no agreed relays, and it splits one constitutional
+fact across two blocks.
 
 ## 5. Steps (one commit each, red test first)
 
@@ -99,9 +112,24 @@ thing under rule 1, plus the headline.
 - `headline_for` already maps this to "No shared relay".
 - **Red:** the joiner's log names the republic's relay it does not have.
 
-### R3 — The ledger *(blocked on §4)*
-`State::member_relays(member) -> &[String]`, a projection like
-`working_nostr_pk`. Filled from whatever §4 decides.
+### R2b — The pool is visible where the other group settings are ✅ DONE
+`StatusView.relays` carries the GROUP's pool (not this node's own settings
+pool — a different list), and `OrgSettingsCard` shows it beside the retention
+window. Read-only until R5 exists: a propose-pencil that proposed nothing
+would be a promise the engine cannot keep.
+
+### R3 — The initial pool is signed by everyone
+The `molt-roster-v4` bump of §4.1, with the pool travelling from the founder's
+create-wizard choice into the founding table every member ratifies.
+- **Red:** a v3 table must not verify against a v4 seat; a sealed roster whose
+  relay list was altered after ratification must fail `verify_sealed_roster`;
+  the byte-pin fixture is recomputed independently.
+- Then `State::group_relays()` reads the VERIFIED genesis, not
+  `TransportState.relays`.
+
+### R3b — The ledger
+`State::member_relays(member) -> &[String]`, a projection over applied blocks,
+like `working_nostr_pk`. Filled from each member's join/re-join event.
 - **Red:** after a member joins over relay X, every OTHER member's ledger
   reports X for that member.
 
@@ -121,10 +149,17 @@ the new relay.
 - **Red:** a re-join whose new relay is in nobody else's pool fails with that
   relay named; adding it on the others makes the same re-join succeed.
 
-### R6 — The founder loses its standing
-The group relay list stops being "whatever the founder's pool was" and becomes
-group state changeable by the same rule as any other membership change.
-- **Red:** a non-founder can carry a relay change to completion.
+### R6 — The pool is editable under threshold, from the details window
+A new gated change (a `ChainChange` variant, additive) that edits the pool, and
+the propose-pencil in `OrgSettingsCard` that raises it — the same shape as the
+retention edit next to it: a change is a PROPOSAL, applied at m-of-n.
+
+This is what makes rule 2 real: the pool stops being "whatever the founder's
+pool was at founding" and becomes group state any member can move and no
+member can move alone.
+- **Red:** a non-founder can carry a pool change to completion; a change below
+  threshold does not alter `group_relays()`; removing the last relay a member
+  can reach is refused, or at minimum reported as the split it creates (R4).
 
 ## 6. Ordering against N4b
 
