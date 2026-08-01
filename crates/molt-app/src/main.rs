@@ -195,6 +195,47 @@ fn main() -> anyhow::Result<()> {
                  and joining will be refused"
             );
         }
+        // The transport POSTURE, once, at startup: the route this config
+        // actually resolves to, and one line per relay saying whether it will
+        // be dialed. The relay runtime reports the same `via=` — but only
+        // once something constructs it, which is after a workspace or a
+        // ritual opens. "My config.toml says X and nothing connects" is
+        // unanswerable at the moment the operator asks it without this.
+        let anonymity = &config.transport.anonymity;
+        let mode = anonymity.tor.mode.as_str();
+        match molt_net::dial::Dialer::resolve(anonymity.network.as_str(), mode, anonymity.tor.port)
+        {
+            Ok(d) => tracing::info!(
+                network = anonymity.network.as_str(),
+                via = %d.route(),
+                clearnet_enabled = config.transport.nostr.clearnet_enabled,
+                configured = kept.len(),
+                dialable =
+                    molt_core::relay::dialable(&kept, config.transport.nostr.clearnet_enabled).len(),
+                "transport posture"
+            ),
+            // fail-closed: nothing will connect until the settings are fixed,
+            // and the operator should not have to infer that from silence
+            Err(e) => tracing::error!(
+                network = anonymity.network.as_str(),
+                tor_mode = mode,
+                error = %e,
+                "the anonymity settings do not resolve to a usable dialer — NOTHING will connect"
+            ),
+        }
+        for e in &kept {
+            let kind = molt_core::relay::relay_kind(&e.url);
+            match molt_core::relay::relay_block(e, config.transport.nostr.clearnet_enabled) {
+                None => tracing::info!(relay = %e.url, ?kind, "relay: will dial"),
+                Some(b) => {
+                    tracing::warn!(relay = %e.url, ?kind, blocked = ?b, "relay: will NOT dial")
+                }
+            }
+        }
+        tracing::info!(
+            "for the full transport trace: RUST_LOG=molt_net=debug (dial, TLS, websocket, \
+             subscription and NIP-42 stages)"
+        );
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()

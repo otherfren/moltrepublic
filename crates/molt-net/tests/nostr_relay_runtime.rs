@@ -672,3 +672,105 @@ async fn a_connected_relay_that_never_replays_keeps_sync_false() {
         "one connected relay never replayed — the pool is NOT synced"
     );
 }
+
+/// A subscriber that captures formatted events, so a test can assert on what
+/// the OPERATOR actually reads.
+#[derive(Clone, Default)]
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// DIAGNOSTICS KEYSTONE (field report 2026-08-01: "Tor runs and the proxy
+/// works, but the client says it cannot connect" — with an empty console).
+///
+/// The two lines that ate every reason are fixed, but a diagnostic has no
+/// other guard: delete the reporting and every functional test still passes,
+/// which is exactly the inert-seam class this project has been bitten by
+/// twice. So assert on the rendered output an operator would read.
+///
+/// The bar is what separates the cases people actually confuse: WHICH relay,
+/// by WHICH route (a proxy was involved, or not), and the CONCRETE error.
+/// `via` is the field that distinguishes "my Tor is broken" from "that relay
+/// is down" — the whole substance of the report.
+#[tokio::test(flavor = "current_thread")]
+async fn a_connect_failure_names_the_relay_the_route_and_the_error() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let cap = CaptureWriter::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(cap.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+
+    // a SOCKS port nothing listens on: "Tor is configured, the proxy is not
+    // reachable" — indistinguishable from every other failure before the fix
+    let socks_port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let p = l.local_addr().expect("addr").port();
+        drop(l);
+        p
+    };
+    let via_tor = Dialer::resolve("tor", "local", socks_port).expect("tor dialer");
+    let dead = dead_relay_url().await;
+
+    {
+        // thread-local default that survives awaits: on a current-thread
+        // runtime every poll happens here
+        let _guard = tracing::subscriber::set_default(sub);
+        // the direct leg: a relay that is simply not there
+        let rt = RelayRuntime::new(
+            Dialer::resolve("none", "local", 0).expect("direct"),
+            vec![dead.clone()],
+        )
+        .with_backoff(Duration::from_millis(50), Duration::from_millis(100));
+        let _ = rt.subscribe(Filter::new().kind(Kind::Custom(445))).await;
+        // the tor leg: the proxy itself is unreachable
+        let _ = RelayWs::connect(&via_tor, "wss://relay.example.org").await;
+    }
+
+    let out = String::from_utf8(cap.0.lock().expect("lock").clone()).expect("utf8");
+
+    // ONE line must carry all three at once — relay, route, cause. Asserting
+    // them separately is what makes a diagnostics test inert: the url appears
+    // in unrelated debug lines, so `contains(url)` survives deleting the very
+    // report under test. (Verified: the loose form stayed green with the
+    // connect-failure warn removed.)
+    let reported = out.lines().find(|l| {
+        l.contains(&format!("relay={dead}")) && l.contains("via=") && l.contains("error=")
+    });
+    assert!(
+        reported.is_some(),
+        "no single line reports relay + route + cause for the refused connect:\n{out}"
+    );
+    let reported = reported.unwrap_or_default();
+    assert!(
+        reported.contains("direct"),
+        "the route says no proxy was involved:\n{reported}"
+    );
+    assert!(
+        reported.contains("refused") || reported.contains("unreachable"),
+        "the concrete cause survives to the console:\n{reported}"
+    );
+    // the tor leg names the proxy that could not be reached — "cannot
+    // connect" never distinguished a dead proxy from a dead relay
+    assert!(
+        out.contains(&format!("socks5://127.0.0.1:{socks_port}")),
+        "the tor route names the proxy address:\n{out}"
+    );
+}
