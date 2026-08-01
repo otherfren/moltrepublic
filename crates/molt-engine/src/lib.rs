@@ -491,6 +491,17 @@ pub(crate) struct State {
     /// `(proposal id, payload)` shape as [`State::applied`]; the id is always
     /// present here (every `Applied` block names its proposal).
     pub(crate) chain_applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
+    /// WORKING transport anchors — `member -> nostr_pk` for every seat a
+    /// `Restored` block re-anchored. A chain PROJECTION like
+    /// [`State::chain_applied`]: rebuilt from the chain, never persisted
+    /// separately, so it cannot drift from what the blocks say.
+    ///
+    /// The roster's anchor is the immutable FOUNDING record and stays that
+    /// way; this is where a recovered seat's current key lives. Read it
+    /// through [`State::working_nostr_pk`] — a send site that reaches for
+    /// `identities[i].nostr_pk` addresses a key the member no longer holds,
+    /// and does so silently.
+    pub(crate) chain_anchors: HashMap<MemberId, String>,
     /// Ephemeral per-proposal signature collection for chain governance
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
@@ -797,6 +808,7 @@ impl State {
             pending_served_blob: None,
             checkpoint_blob: None,
             chain_applied: HashMap::new(),
+            chain_anchors: HashMap::new(),
             pending_sigs: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),

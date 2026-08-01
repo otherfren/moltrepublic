@@ -737,6 +737,32 @@ impl State {
     /// (taken from the already-verified head, which evolved them across the
     /// membership blocks). Chat, [`State::applied`] and pending proposals are
     /// left untouched — they are ephemeral or legacy-owned.
+    /// The transport anchor to ADDRESS this member at right now: the seat's
+    /// re-anchored key if a `Restored` block gave it one, else the immutable
+    /// founding anchor from the roster. Empty for an unknown member — never
+    /// somebody else's key.
+    ///
+    /// Every gift-wrap send resolves through this. Reaching for
+    /// `identities[i].nostr_pk` directly addresses a key a recovered member
+    /// no longer holds, and the send simply vanishes.
+    // No production caller YET: every gift-wrap send today addresses a RITUAL
+    // SEAT during a founding, where no recovered seat can exist. The consumers
+    // arrive with N4b step 6 (the rejoiner/coordinator legs) and N5 (the
+    // runtime), and each MUST resolve through here. Pinned by
+    // `the_working_anchor_follows_a_restored_block_while_the_roster_does_not`
+    // so the projection cannot rot before its callers land.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn working_nostr_pk(&self, member: &str) -> String {
+        if let Some(pk) = self.chain_anchors.get(member) {
+            return pk.clone();
+        }
+        self.replica
+            .as_ref()
+            .and_then(|r| r.identities.iter().find(|i| i.member == member))
+            .map(|i| i.nostr_pk.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn apply_chain_to_state(&mut self) {
         let mut projected: std::collections::HashMap<
             Surface,
@@ -766,6 +792,23 @@ impl State {
             }
         }
         self.chain_applied = projected;
+        // …and the working transport anchors, folded in chain order so the
+        // LAST Restored block for a seat wins (a seat can recover twice)
+        let mut anchors: std::collections::HashMap<molt_core::MemberId, String> =
+            std::collections::HashMap::new();
+        for block in &self.chain {
+            if let ChainChange::Membership {
+                member,
+                nostr_pk: Some(pk),
+                ..
+            } = &block.change
+            {
+                if !pk.is_empty() {
+                    anchors.insert(member.clone(), pk.clone());
+                }
+            }
+        }
+        self.chain_anchors = anchors;
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {
@@ -2268,6 +2311,77 @@ mod tests {
     /// WP1: the chain projection feeds the snapshot's parallel id track —
     /// a committed `Applied` block's `proposal_id` reaches the read contract
     /// positionally next to its payload.
+    /// N4b step 3 — the WORKING transport anchor is a chain projection.
+    ///
+    /// A recovered seat's key changes; the roster's genesis anchor does not
+    /// (it is the immutable founding record). Every gift-wrap send must
+    /// resolve through the projection, because a sender reaching for the
+    /// obvious `identities[i].nostr_pk` would address a key the recovered
+    /// member no longer holds — SILENTLY, which is exactly why the plan
+    /// rejected "infer the anchor from live traffic".
+    #[test]
+    fn the_working_anchor_follows_a_restored_block_while_the_roster_does_not() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut st = crate::tests::plain_state();
+        st.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "walter".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: "play chess".to_string(),
+            republic_id: b.republic_id.clone(),
+            founded_ts: 0,
+        });
+        st.adopt_chain(b.blocks.clone());
+        let founding = st
+            .replica
+            .as_ref()
+            .and_then(|r| r.identities.iter().find(|i| i.member == "petra"))
+            .map(|i| i.nostr_pk.clone())
+            .expect("petra is anchored");
+        assert_eq!(
+            st.working_nostr_pk("petra"),
+            founding,
+            "before any recovery the projection IS the roster anchor"
+        );
+
+        // petra recovers with a FRESH transport key
+        let fresh = molt_net::nostr_identity(b"petra-recovered", "new-ticket").1;
+        let restored = b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: b.pk("petra"),
+                nostr_pk: Some(fresh.clone()),
+            },
+            &["petra", "walter"],
+        );
+        st.adopt_chain({
+            let mut c = b.blocks.clone();
+            c.push(restored);
+            c
+        });
+
+        assert_eq!(
+            st.working_nostr_pk("petra"),
+            fresh,
+            "after a Restored block the projection returns the NEW key"
+        );
+        assert_eq!(
+            st.replica
+                .as_ref()
+                .and_then(|r| r.identities.iter().find(|i| i.member == "petra"))
+                .map(|i| i.nostr_pk.clone())
+                .expect("still anchored"),
+            founding,
+            "…while the roster keeps the immutable FOUNDING anchor"
+        );
+        // an unknown member resolves to nothing, never to somebody else's key
+        assert_eq!(st.working_nostr_pk("nobody"), "");
+    }
+
     #[test]
     fn chain_applied_entries_carry_their_proposal_id() {
         let mut b = Builder::new(&["petra", "walter", "dora"], 2);
