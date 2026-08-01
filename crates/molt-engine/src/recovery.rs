@@ -1330,6 +1330,7 @@ mod tests {
             op: MembershipOp::Joined,
             member: "dave".to_string(),
             identity_pk: dave_pk.clone(),
+            nostr_pk: None,
         };
         let bytes = approval_bytes(&republic_id, 1, &change);
         let block1 = ChainBlock {

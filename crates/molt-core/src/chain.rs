@@ -101,6 +101,16 @@ pub enum ChainChange {
         member: MemberId,
         /// The member's anchored Ed25519 identity key, lowercase hex.
         identity_pk: String,
+        /// A RECOVERED seat's new transport anchor (N4b): the founding
+        /// anchor is ticket-salted and cannot be re-derived once the ticket
+        /// is gone, so a rejoiner brings a fresh key and this block is what
+        /// makes it authoritative. Inside `approval_bytes`, so it cannot be
+        /// swapped after the members signed.
+        ///
+        /// `None` for a `Joined` seat (its anchor is in the roster) and for
+        /// every block written before N4b.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nostr_pk: Option<String>,
     },
     /// WP4b: a threshold-signed compaction cut. m-of-n members signed the
     /// SHA-256 of the deterministically serialized republic state after
@@ -165,7 +175,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             payload,
         } => {
             let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v1\0");
+            out.extend_from_slice(b"molt-chain-change-v2\0");
             put_bytes(&mut out, republic_id.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
             out.push(1); // variant tag: applied
@@ -180,9 +190,10 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             op,
             member,
             identity_pk,
+            nostr_pk,
         } => {
             let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v1\0");
+            out.extend_from_slice(b"molt-chain-change-v2\0");
             put_bytes(&mut out, republic_id.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
             out.push(2); // variant tag: membership
@@ -192,11 +203,20 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             });
             put_bytes(&mut out, member.as_bytes());
             put_bytes(&mut out, identity_pk.as_bytes());
+            // presence is signed too: a 0/1 discriminator keeps `Some("")`
+            // and `None` from hashing to the same preimage
+            match nostr_pk {
+                None => out.push(0),
+                Some(pk) => {
+                    out.push(1);
+                    put_bytes(&mut out, pk.as_bytes());
+                }
+            }
             out
         }
         ChainChange::Checkpoint { upto, state_hash } => {
             let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v1\0");
+            out.extend_from_slice(b"molt-chain-change-v2\0");
             put_bytes(&mut out, republic_id.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
             out.push(3); // variant tag: checkpoint
@@ -375,6 +395,49 @@ mod tests {
         );
     }
 
+    /// N4b step 2 — the recovered seat's NEW transport anchor is INSIDE the
+    /// signed bytes, and the layout tag was bumped for it.
+    ///
+    /// The whole point of the re-anchor decision is that the working key
+    /// becomes authoritative by riding a threshold-signed block. If
+    /// `nostr_pk` sat OUTSIDE `approval_bytes`, a relay or a hostile
+    /// coordinator could swap it after the members signed and every signature
+    /// would still verify — re-addressing the seat's traffic with the
+    /// republic's own blessing.
+    ///
+    /// The tag bump is not cosmetic: reusing `-v1` for a changed layout makes
+    /// old and new nodes compute different bytes for the same block, so
+    /// signatures fail with nothing pointing at why.
+    #[test]
+    fn membership_approval_bytes_bind_the_transport_anchor() {
+        let mk = |npk: Option<&str>| ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: npk.map(str::to_string),
+        };
+        let with = mk(Some(&"bb".repeat(32)));
+        assert_ne!(
+            approval_bytes("f00", 4, &with),
+            approval_bytes("f00", 4, &mk(Some(&"cc".repeat(32)))),
+            "swapping the anchor after signing must change the signed bytes"
+        );
+        assert_ne!(
+            approval_bytes("f00", 4, &with),
+            approval_bytes("f00", 4, &mk(None)),
+            "an absent anchor must not collide with a present one"
+        );
+        assert_ne!(
+            approval_bytes("f00", 4, &mk(Some(""))),
+            approval_bytes("f00", 4, &mk(None)),
+            "present-but-empty must not collide with absent"
+        );
+        assert!(
+            approval_bytes("f00", 4, &with).starts_with(b"molt-chain-change-v2\0"),
+            "the layout tag must be bumped when the layout changes"
+        );
+    }
+
     /// Height is inside the signed bytes: the *same* change at a different
     /// sequence number signs different bytes (so it cannot be re-slotted
     /// without re-signing).
@@ -426,6 +489,7 @@ mod tests {
                 op: MembershipOp::Joined,
                 member: "dora".to_string(),
                 identity_pk: "cc".to_string(),
+                nostr_pk: None,
             },
             sigs,
         };

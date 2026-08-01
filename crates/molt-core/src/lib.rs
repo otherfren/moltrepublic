@@ -2030,6 +2030,12 @@ pub enum WorkspaceEvent {
         member: MemberId,
         /// The member's anchored identity pk the change carries.
         identity_pk: String,
+        /// A RESTORED seat's new transport anchor (N4b). It must travel with
+        /// the proposal: every member signs `approval_bytes` over the SAME
+        /// change, so a receiver that rebuilt the change without this field
+        /// would sign different bytes and its approval would never count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nostr_pk: Option<String>,
     },
     /// WP4b: a checkpoint cut was put forward — the gossip that lets every
     /// member recompute and co-sign the SAME state hash. Transport-only,

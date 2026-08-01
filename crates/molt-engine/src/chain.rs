@@ -300,6 +300,7 @@ fn verify_next(
         op,
         member,
         identity_pk,
+        ..
     } = &block.change
     {
         apply_membership(&mut identities, *op, member, identity_pk)?;
@@ -385,6 +386,7 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             op,
             member,
             identity_pk,
+            ..
         } => {
             apply_membership(&mut state.roster, *op, member, identity_pk)?;
         }
@@ -432,6 +434,7 @@ fn fold_state(
                 op,
                 member,
                 identity_pk,
+            ..
             } => {
                 apply_membership(&mut state.roster, *op, member, identity_pk)?;
             }
@@ -820,6 +823,7 @@ impl State {
         op: MembershipOp,
         member: &str,
         identity_pk: &str,
+        nostr_pk: Option<String>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -829,6 +833,7 @@ impl State {
                 op,
                 member: member.to_string(),
                 identity_pk: identity_pk.to_string(),
+                nostr_pk: nostr_pk.clone(),
             },
         );
         // announce the proposal over the mesh so every member registers + signs
@@ -841,6 +846,7 @@ impl State {
                 op,
                 member: member.to_string(),
                 identity_pk: identity_pk.to_string(),
+                nostr_pk: nostr_pk.clone(),
             },
         );
         self.record(env);
@@ -858,12 +864,14 @@ impl State {
         op: MembershipOp,
         member: &str,
         identity_pk: &str,
+        nostr_pk: Option<String>,
     ) {
         self.next_id = self.next_id.max(id.saturating_add(1));
         let change = ChainChange::Membership {
             op,
             member: member.to_string(),
             identity_pk: identity_pk.to_string(),
+            nostr_pk,
         };
         // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
         // to `proposal_changes` first, so registering a Membership under an
@@ -949,7 +957,15 @@ impl State {
                 reply: reply.to_string(),
             },
         );
-        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored))
+        // the verified new transport anchor rides the block — this is what
+        // makes it authoritative for every member that APPLIES it, rather
+        // than something each node infers from live traffic
+        let anchor = if new_nostr_pk.is_empty() {
+            None
+        } else {
+            Some(new_nostr_pk.to_string())
+        };
+        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor))
     }
 
     /// Distinct collected approvals for a proposal (for the UI progress).
@@ -2234,6 +2250,7 @@ mod tests {
             op: MembershipOp::Joined,
             member: "dora".to_string(),
             identity_pk: dora_pk,
+            nostr_pk: None,
         };
         let block = b.seal(height, join, &["petra", "walter"]);
         b.push(block);
@@ -2921,7 +2938,7 @@ mod tests {
         // honest surface proposal id 5, awaiting approvals
         walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}));
         // attacker gossips a membership change under the SAME id
-        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32));
+        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None);
         // the id still resolves to the SURFACE proposal — approving it can
         // never sign membership bytes
         assert!(matches!(
@@ -2930,7 +2947,7 @@ mod tests {
         ));
         // the reverse: a surface proposal cannot shadow a pending membership
         let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
-        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32));
+        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None);
         walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
         assert!(matches!(
             walter2.proposal_change(6),
@@ -2979,7 +2996,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
         // id already names a pending MEMBERSHIP change → refused, unsigned
-        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"));
+        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None);
         walter.receive_checkpoint_proposal(5, 1, &hash);
         assert!(
             !walter.pending_sigs.contains_key(&5),
@@ -3411,7 +3428,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
 
         // petra proposes re-admitting walter and co-signs (1 of 2 — pending)
-        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk);
+        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None);
         assert_eq!(
             petra.chain_head.as_ref().expect("head").height,
             0,
@@ -3419,7 +3436,7 @@ mod tests {
         );
 
         // walter learns the proposal + petra's signature, then co-signs
-        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk);
+        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None);
         let petra_sig = petra
             .pending_sigs
             .get(&id)
@@ -3513,6 +3530,7 @@ mod tests {
             op: MembershipOp::Restored,
             member: "walter".to_string(),
             identity_pk: walter_pk,
+            nostr_pk: None,
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         coord.receive_block(block);
@@ -3542,6 +3560,7 @@ mod tests {
             op: MembershipOp::Restored,
             member: "walter".to_string(),
             identity_pk: walter_pk.clone(),
+            nostr_pk: None,
         };
         // round 1: the first recovery attempt's Restored block commits …
         let block = b.seal(1, restored.clone(), &["petra", "walter"]);
@@ -3569,6 +3588,7 @@ mod tests {
             op: MembershipOp::Restored,
             member: "walter".to_string(),
             identity_pk: other_pk,
+            nostr_pk: None,
         };
         let block = b.seal(3, hijack, &["petra", "walter"]);
         b.push(block);
@@ -3608,6 +3628,7 @@ mod tests {
             op: MembershipOp::Restored,
             member: "walter".to_string(),
             identity_pk: walter_pk,
+            nostr_pk: None,
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         node.receive_block(block);
