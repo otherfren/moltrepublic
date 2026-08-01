@@ -114,32 +114,53 @@ only what it observed; threading `TargetGap` in is the real fix. The two
 run-log blocks should become one component. `TargetGap` itself is still
 uncalled.
 
-## C. The inert publish-failure seam — HIGH ×3 + MEDIUM ×3
+## C. The inert publish-failure seam — ✅ DONE
 
-`spawn_publish_frame_with`'s `fail` argument is **never once passed
-`Some(...)`** — the reporting path I wrote is dead code. A failed `Seal`
-publish therefore hangs BOTH sides forever: the founder shows "charter
-proposed", every member waits for a frame that was never accepted, and the
-`NetRitualFailed` sink that exists for exactly this is never reached. This is
-the project's signature failure mode (a seam that exists but is not wired),
-committed by me in the same change-set that documents the lesson.
+`spawn_publish_frame_with`'s `fail` argument had ZERO `Some(...)` callers, so
+the reporting path was dead code and a `Seal` no relay accepted hung BOTH
+sides: the founder sat on "charter proposed" while every member waited for a
+frame that was never accepted, and the `NetRitualFailed` sink that exists for
+exactly this was unreachable. Reproduced before the fix — the red run times
+out waiting for the founding to fail, which is the bug in one line.
 
-Related, same cluster:
-- `RitualNet::send_ritual` / `send_welcome` / `publish_frame` discard
-  `PublishReport`, so landing on 1 of N relays is indistinguishable from full
-  delivery — the per-relay outcomes N2 built are thrown away.
-- The Genesis 445 is a single fire-and-forget publish with no ack and an
-  unbounded member wait: one dropped frame strands every member while the
-  founder has already materialized (the "the member's own wait surfaces it"
-  claim in the N4a plan §8b is **false** — there is no such wait).
+**Fixed by deleting the optional seam, not by wiring it.** One
+`spawn_publish_frame(chan, payload, what, retry, tx, generation)` with a
+NON-optional sink: there is no longer an `Option` a future call site can
+forget to pass. It encrypts ONCE and retries only the publish (a re-encrypt
+would advance the ratchet past the snapshot `finalize_founding` takes, and
+every member would meet `SecretReuseError` on reopen), and it ALWAYS reports
+via the new engine-internal `Command::NetRitualPublished` — success, partial
+and total failure alike.
 
-Fix: pass the failure sink for every pre-seal leg (Seal, Welcome fan-out);
-surface partial-relay landings (at minimum log the report, and treat "landed
-on fewer relays than configured" as a warning the founding log shows); give
-the Genesis leg a real story — either an ack round or an explicit,
-surfaced-to-the-user retry, decided deliberately rather than by omission.
-Keystone: a founding whose Seal publish fails must reach `NetRitualFailed`,
-not hang.
+`RitualNet::publish` / `send_ritual` / `send_welcome` / `publish_frame` now
+return the `PublishReport` they were discarding, so "landed on 1 of 5 relays"
+is no longer indistinguishable from full delivery.
+
+**Four outcomes, three of them previously invisible:** nothing accepted on a
+pre-seal leg → the founding fails honestly; nothing accepted on the genesis →
+the founder HAS materialized, so the run is not failed, but
+`genesis-undelivered:` is surfaced (and toasted) because the members were
+never told; partial → a ⚠ line naming who refused; clean → debug only.
+
+**Two structural traps the fix had to respect.** The genesis report must NOT
+be generation-gated — `maybe_finalize` already `take()`n the ritual, so a
+gated report would vanish and recreate the exact inertness being removed; and
+`cmd_net_ritual_failed` early-returns once the run has an outcome, so the
+genesis could not reuse that sink. A `seal_published` once-guard was also
+needed: `maybe_seal` is reachable from two call sites, and a second Seal would
+double-report and advance the ratchet after the snapshot.
+
+**Two sub-findings RETIRED as misdiagnosed:** the Welcome fan-out was never
+inert (it already routed a failure into `NetRitualFailed` by hand), and the
+member's own `Signed` publish already failed loudly. Both only lacked the
+partial-landing report. The claim that "the member's own wait surfaces a
+relays-down condition" was FALSE — that wait is unbounded — and is struck
+here and in the two code comments that carried it.
+
+Keystones: `a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging`
+(two real engines against a relay whose write policy refuses kind-445, so the
+failure is a real wire outcome, not an injected one; verified red-without) and
+`publish_frame_reports_the_relay_that_refused` in molt-net.
 
 ## D. Join-task lifecycle — ✅ DONE
 

@@ -155,9 +155,13 @@ pub(crate) fn spawn_founder_inbox(
     })
 }
 
-/// MLS-encrypt one RitualMsg and publish it as a 445 frame. The lock is
-/// dropped BEFORE the publish await (never hold a std mutex across await).
-/// Returns the carrier `created_at`.
+/// MLS-encrypt one RitualMsg and publish it as a 445 frame, synchronously.
+/// The lock is dropped BEFORE the publish await (never hold a std mutex
+/// across await). Returns the carrier `created_at`.
+///
+/// This is the MEMBER's send path (`Signed`, `Declined`): it propagates its
+/// error to the caller, which already fails the join loudly — unlike the
+/// founder's fire-and-forget legs, which needed the reporting task below.
 async fn publish_frame_now(
     chan: &GroupChannel,
     group: &Arc<Mutex<molt_net::MlsMember>>,
@@ -170,44 +174,140 @@ async fn publish_frame_now(
         let exporter = g.exporter_secret().map_err(|e| e.to_string())?;
         (ct, exporter)
     };
-    chan.publish_frame(&exporter, &ct).await.map_err(|e| e.to_string())
+    chan.publish_frame(&exporter, &ct)
+        .await
+        .map(|(stamp, _report)| stamp)
+        .map_err(|e| e.to_string())
 }
 
-/// Fire-and-forget 445 publish for the founder's send legs (`Seal`,
-/// `Genesis`). `fail` routes a publish failure into `NetRitualFailed` where
-/// the founding must not silently hang (the pre-seal legs); `None` = log
-/// loudly only (the genesis leg — the founder has already materialized, and
-/// the member's own wait surfaces a relays-down condition).
+/// What a 445 publish task sends. Encrypted ONCE, before any retry.
+///
+/// Re-encrypting on retry would advance the MLS sender ratchet past the
+/// snapshot `finalize_founding` deliberately takes AFTER the genesis encrypt,
+/// and every member would meet `SecretReuseError` on reopen. So the retry
+/// republishes the SAME ciphertext — for an application frame that is safe:
+/// `decrypt_at`'s carrier stamp only feeds the concurrent-COMMIT tiebreak.
+pub(crate) enum FramePayload {
+    /// Encrypt this message against the group, then publish.
+    Encrypt(Arc<Mutex<molt_net::MlsMember>>, RitualMsg),
+    /// Already sealed by the caller (the genesis, encrypted before the group
+    /// snapshot) — publish these bytes as they are.
+    Sealed { ct: Vec<u8>, exporter: [u8; 32] },
+}
+
+/// How hard a leg tries before it reports failure.
+#[derive(Clone, Copy)]
+pub(crate) struct RetryPolicy {
+    /// Total publish attempts (1 = no retry).
+    pub(crate) attempts: u32,
+    /// Delay before the 2nd attempt; doubles each time.
+    pub(crate) backoff: Duration,
+}
+
+impl RetryPolicy {
+    /// Pre-seal legs: the founding is still live and a human is watching, so
+    /// fail fast enough to stay well inside a wizard's patience.
+    pub(crate) const PRE_SEAL: Self =
+        Self { attempts: 3, backoff: Duration::from_millis(700) };
+    /// The genesis: the founder has already materialized, so this frame is
+    /// the members' ONLY path into the republic. Try harder before giving up.
+    pub(crate) const GENESIS: Self =
+        Self { attempts: 4, backoff: Duration::from_millis(900) };
+}
+
+/// Publish one 445 frame, retrying the PUBLISH only, and ALWAYS report the
+/// per-relay outcome back to the actor.
+///
+/// The sink is not optional. It used to be `Option<...>`, every caller passed
+/// `None`, and the reporting path was dead code — so a refused Seal hung both
+/// sides in silence. Deleting the Option deletes the seam a future call site
+/// can forget to wire.
 pub(crate) fn spawn_publish_frame(
     chan: GroupChannel,
-    group: Arc<Mutex<molt_net::MlsMember>>,
-    msg: RitualMsg,
+    payload: FramePayload,
     what: &'static str,
-) {
-    spawn_publish_frame_with(chan, group, msg, what, None);
-}
-
-pub(crate) fn spawn_publish_frame_with(
-    chan: GroupChannel,
-    group: Arc<Mutex<molt_net::MlsMember>>,
-    msg: RitualMsg,
-    what: &'static str,
-    fail: Option<(mpsc::WeakSender<Envelope>, u64)>,
+    retry: RetryPolicy,
+    tx: mpsc::WeakSender<Envelope>,
+    generation: Option<u64>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = publish_frame_now(&chan, &group, &msg).await {
-            tracing::error!(what, error = %e, "ritual 445 frame did not publish");
-            if let Some((tx, generation)) = fail {
+        // encrypt ONCE — see FramePayload
+        let sealed: Result<(Vec<u8>, [u8; 32]), String> = match payload {
+            FramePayload::Sealed { ct, exporter } => Ok((ct, exporter)),
+            FramePayload::Encrypt(group, msg) => (|| {
+                let bytes = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
+                let mut g = group.lock().map_err(|_| "mls lock poisoned".to_string())?;
+                let ct = g.encrypt(&bytes).map_err(|e| e.to_string())?;
+                let exporter = g.exporter_secret().map_err(|e| e.to_string())?;
+                Ok((ct, exporter))
+            })(),
+        };
+        let (ct, exporter) = match sealed {
+            Ok(v) => v,
+            Err(e) => {
+                // encryption failed: no publish will ever help
+                tracing::error!(what, error = %e, "ritual 445 frame could not be encrypted");
                 let _ = send_cmd(
                     &tx,
-                    Command::NetRitualFailed {
-                        error: format!("{what} did not publish: {e}"),
-                        generation: Some(generation),
+                    Command::NetRitualPublished {
+                        what: what.to_string(),
+                        accepted: Vec::new(),
+                        failed: vec![format!("encrypt: {e}")],
+                        generation,
                     },
                 )
                 .await;
+                return;
+            }
+        };
+
+        let mut wait = retry.backoff;
+        let mut last: Vec<String> = Vec::new();
+        for attempt in 1..=retry.attempts {
+            match chan.publish_frame(&exporter, &ct).await {
+                Ok((_stamp, report)) => {
+                    let failed: Vec<String> = report
+                        .failed
+                        .iter()
+                        .map(|(url, why)| format!("{url}: {why}"))
+                        .collect();
+                    let _ = send_cmd(
+                        &tx,
+                        Command::NetRitualPublished {
+                            what: what.to_string(),
+                            accepted: report.accepted.clone(),
+                            failed,
+                            generation,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    last = vec![e.to_string()];
+                    tracing::warn!(
+                        what, attempt, of = retry.attempts, error = %e,
+                        "ritual 445 frame did not publish"
+                    );
+                    if attempt < retry.attempts {
+                        tokio::time::sleep(wait).await;
+                        wait = wait.saturating_mul(2);
+                    }
+                }
             }
         }
+        // every attempt refused: accepted stays EMPTY, which is what the
+        // handler reads as "nobody has this frame"
+        let _ = send_cmd(
+            &tx,
+            Command::NetRitualPublished {
+                what: what.to_string(),
+                accepted: Vec::new(),
+                failed: last,
+                generation,
+            },
+        )
+        .await;
     });
 }
 

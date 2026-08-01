@@ -640,6 +640,11 @@ pub(crate) struct State {
     /// The founding-ritual runtime (present only while a founding is in
     /// flight — the workspace does not exist yet).
     pub(crate) net_ritual: Option<founding::RitualRuntime>,
+    /// Whether THIS ritual already published its `Seal` 445. `maybe_seal` is
+    /// reachable from two call sites, and a second Seal would both
+    /// double-report and advance the MLS ratchet past the snapshot
+    /// `finalize_founding` takes. Reset with the ritual.
+    pub(crate) seal_published: bool,
     /// Seal signatures collected so far this ritual (founder first at
     /// finalize).
     pub(crate) ritual_attestations: Vec<molt_core::RosterAttestation>,
@@ -828,6 +833,7 @@ impl State {
             active: None,
             net,
             net_ritual: None,
+            seal_published: false,
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
             recovery_material_sink: None,
@@ -1263,6 +1269,12 @@ impl State {
                 generation,
             } => self.cmd_net_join_charter_proposed(name, agenda, generation),
             Command::JoinCancel => self.cmd_join_cancel(),
+            Command::NetRitualPublished {
+                what,
+                accepted,
+                failed,
+                generation,
+            } => self.cmd_net_ritual_published(&what, &accepted, &failed, generation),
             Command::NetRitualFailed { error, generation } => {
                 self.cmd_net_ritual_failed(error, generation)
             }

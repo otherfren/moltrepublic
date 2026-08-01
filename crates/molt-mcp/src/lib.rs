@@ -1316,7 +1316,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 45] = [
+        const INTERNAL: [&str; 46] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1352,6 +1352,10 @@ mod tests {
             "net_recover_link_failed",
             "net_ritual_link_ready",
             "net_ritual_failed",
+            // the publish task reporting its real per-relay outcome: an MCP
+            // agent must not be able to forge a relay result and thereby fail
+            // (or fake) a founding leg
+            "net_ritual_published",
             "net_join_sealed",
             "net_join_failed",
             "net_recover_sealed",

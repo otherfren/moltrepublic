@@ -944,18 +944,30 @@ impl State {
 
         // only now distribute the sealed roster so each member writes its
         // own workspace (own seed) and enters from the same constitution.
-        // Nostr: the frame was pre-encrypted above (ratchet coherence with
-        // the snapshot) — the task only publishes it. Publish failure is
-        // logged loudly, not routed to NetRitualFailed: the founder has
-        // already materialized, and the member's own open wait surfaces a
-        // relays-down condition.
+        //
+        // Nostr: the frame was pre-encrypted above (ratchet coherence with the
+        // snapshot) — the task only PUBLISHES it, and retries the publish
+        // without ever re-encrypting.
+        //
+        // This leg is the members' only path into the republic, and it runs
+        // AFTER the founder has materialized, so it cannot use the ritual's
+        // failure sink: `maybe_finalize` already `take()`n the ritual, so a
+        // generation-gated report would be dropped, and `cmd_net_ritual_failed`
+        // early-returns once the run has an outcome. It therefore reports with
+        // `generation: None` and gets its own surface.
+        //
+        // (The old comment here claimed "the member's own open wait surfaces a
+        // relays-down condition". It does not: that wait is unbounded.)
         if let Some((ct, exporter)) = nostr_genesis_frame {
-            if let Some(chan) = ritual.nostr_chan() {
-                tokio::spawn(async move {
-                    if let Err(e) = chan.publish_frame(&exporter, &ct).await {
-                        tracing::error!(error = %e, "genesis 445 did not publish");
-                    }
-                });
+            if let (Some(chan), Some(tx)) = (ritual.nostr_chan(), self.cmd_tx.upgrade()) {
+                crate::nostr_ritual::spawn_publish_frame(
+                    chan,
+                    crate::nostr_ritual::FramePayload::Sealed { ct, exporter },
+                    "genesis",
+                    crate::nostr_ritual::RetryPolicy::GENESIS,
+                    tx.downgrade(),
+                    None,
+                );
             }
         } else if let Ok(json) = serde_json::to_string(&sealed) {
             // loopback: the sealed roster + the MLS Welcome per reply queue

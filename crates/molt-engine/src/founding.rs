@@ -588,6 +588,8 @@ impl State {
         self.net_ritual = None;
         self.founder_mesh_in = None;
         self.runtime_transport = None;
+        // the once-guard belongs to the ritual that is going away
+        self.seal_published = false;
     }
 
     /// Whether a ritual command's incarnation is still current: the ritual
@@ -1704,6 +1706,66 @@ mod ritual_ops {
         /// N4's Nostr provisioning re-emits it): fail the create run and tear
         /// the ritual down, so the wizard shows the error instead of waiting
         /// for links that will never come.
+        /// A publish task reported its REAL per-relay outcome.
+        ///
+        /// Four outcomes, three of which used to be invisible:
+        /// - nothing accepted, pre-seal leg → the founding FAILS (this is the
+        ///   hang that made the cluster: the founder sat on "charter proposed"
+        ///   while every member waited for a frame no relay ever took);
+        /// - nothing accepted, genesis → the founder HAS materialized, so the
+        ///   run is not failed; the members were simply never told, and that
+        ///   is surfaced as a notice the GUI toasts;
+        /// - accepted by some, refused by others → a ⚠ line naming who
+        ///   refused. Landing on 1 of 5 relays is not a failure, but it is
+        ///   not the success the operator would otherwise assume;
+        /// - clean → debug only.
+        pub(crate) fn cmd_net_ritual_published(
+            &mut self,
+            what: &str,
+            accepted: &[String],
+            failed: &[String],
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            let detail = failed.join(" · ");
+            if accepted.is_empty() {
+                // The genesis is published AFTER maybe_finalize took the
+                // ritual, so it is deliberately NOT generation-gated —
+                // gating it would drop the report and recreate the exact
+                // inertness this cluster exists to remove.
+                if what == "genesis" {
+                    tracing::error!(%detail, "the genesis frame reached no relay");
+                    self.session.notice = format!("genesis-undelivered:{detail}");
+                    self.session.create.run.log.push(format!(
+                        "✗ the genesis reached no relay ({detail}) — this republic exists here, \
+                         but the other members were never told"
+                    ));
+                    self.emit_session(molt_core::SessionScope::Full);
+                    return Ok(molt_core::Reply::Ack);
+                }
+                if !self.ritual_generation_current(generation) {
+                    return Ok(molt_core::Reply::Ack);
+                }
+                return self.cmd_net_ritual_failed(
+                    format!("{what} did not publish: {detail}"),
+                    generation,
+                );
+            }
+            if !failed.is_empty() {
+                if what != "genesis" && !self.ritual_generation_current(generation) {
+                    return Ok(molt_core::Reply::Ack);
+                }
+                self.session.create.run.log.push(format!(
+                    "⚠ {what} landed on {} of {} relays — {detail}",
+                    accepted.len(),
+                    accepted.len() + failed.len()
+                ));
+                self.emit_session(molt_core::SessionScope::Full);
+                return Ok(molt_core::Reply::Ack);
+            }
+            tracing::debug!(what, relays = accepted.len(), "ritual frame published");
+            Ok(molt_core::Reply::Ack)
+        }
+
         pub(crate) fn cmd_net_ritual_failed(
             &mut self,
             error: String,
@@ -2443,20 +2505,45 @@ mod ritual_ops {
             let msg = invite::RitualMsg::Seal {
                 proposal: proposal_json,
             };
-            let Some(ritual) = &self.net_ritual else {
-                return;
-            };
             // Nostr (N4a): ONE 445 group event carries the proposal to every
-            // member (they joined the group at all-joined, before this).
-            if let Some(nostr) = &ritual.nostr {
-                if let (Some(group), Some(chan)) = (nostr.group.clone(), nostr.chan.clone()) {
-                    crate::nostr_ritual::spawn_publish_frame(chan, group, msg, "seal");
+            // member (they joined the group at all-joined, before this). The
+            // handles are lifted out first so the ritual borrow ends before
+            // the once-guard is written.
+            let nostr_leg = self.net_ritual.as_ref().and_then(|r| {
+                r.nostr
+                    .as_ref()
+                    .map(|n| (n.group.clone(), n.chan.clone(), r.generation()))
+            });
+            if let Some((group, chan, generation)) = nostr_leg {
+                if let (Some(group), Some(chan)) = (group, chan) {
+                    // ONCE per ritual: maybe_seal is reachable from two call
+                    // sites (a redelivered JoinRequest re-enters it), and a
+                    // second Seal would double-report AND advance the ratchet
+                    // past the snapshot finalize_founding takes
+                    if self.seal_published {
+                        return;
+                    }
+                    self.seal_published = true;
+                    let Some(tx) = self.cmd_tx.upgrade() else {
+                        return;
+                    };
+                    crate::nostr_ritual::spawn_publish_frame(
+                        chan,
+                        crate::nostr_ritual::FramePayload::Encrypt(group, msg),
+                        "seal",
+                        crate::nostr_ritual::RetryPolicy::PRE_SEAL,
+                        tx.downgrade(),
+                        Some(generation),
+                    );
                 } else {
                     // group birth failed or has not happened — never silent
                     tracing::error!("seal proposed but the Nostr group is not born");
                 }
                 return;
             }
+            let Some(ritual) = &self.net_ritual else {
+                return;
+            };
             let payload = match serde_json::to_vec(&msg) {
                 Ok(p) => p,
                 Err(_) => return,

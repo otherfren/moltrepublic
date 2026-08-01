@@ -32,7 +32,7 @@ use nostr::{
 use crate::dial::Dialer;
 use crate::envelope::{self, H_WINDOW};
 use crate::invite::RitualMsg;
-use crate::relay_runtime::{RelayRuntime, Subscription};
+use crate::relay_runtime::{PublishReport, RelayRuntime, Subscription};
 use crate::ritual_wrap::{self, RitualWrapError};
 use crate::welcome::{self, WelcomeError, WelcomePayload};
 use crate::NetError;
@@ -171,17 +171,28 @@ impl RitualNet {
         &self.relays
     }
 
-    /// Publish one signed event with ≥1-OK semantics over a fresh runtime.
-    async fn publish(&self, event: &nostr::Event) -> Result<(), NetError> {
+    /// Publish one signed event with ≥1-OK semantics over a fresh runtime,
+    /// returning the PER-RELAY outcome.
+    ///
+    /// The report used to be discarded here (`.map(|_report| ())`), which made
+    /// "landed on 1 of 5 relays" indistinguishable from full delivery — the
+    /// per-relay outcomes N2 built were thrown away one layer above where they
+    /// were computed. A ritual leg that lands on a single relay is not a
+    /// failure, but it is not a success the operator should be left to guess
+    /// at either.
+    async fn publish(&self, event: &nostr::Event) -> Result<PublishReport, NetError> {
         RelayRuntime::new(self.dialer.clone(), self.relays.clone())
             .publish(event)
             .await
-            .map(|_report| ())
     }
 
     /// Gift-wrap a [`RitualMsg`] (kind-446 rumor) to `to_pk_hex` and publish
     /// it — success once ≥1 relay accepted the wrap.
-    pub async fn send_ritual(&self, to_pk_hex: &str, msg: &RitualMsg) -> Result<(), NetError> {
+    pub async fn send_ritual(
+        &self,
+        to_pk_hex: &str,
+        msg: &RitualMsg,
+    ) -> Result<PublishReport, NetError> {
         let to = recipient(to_pk_hex)?;
         let wrap = ritual_wrap::wrap_ritual(&self.keys, &to, msg)
             .await
@@ -196,7 +207,7 @@ impl RitualNet {
         &self,
         to_pk_hex: &str,
         payload: &WelcomePayload,
-    ) -> Result<(), NetError> {
+    ) -> Result<PublishReport, NetError> {
         let to = recipient(to_pk_hex)?;
         let wrap = welcome::wrap_welcome(&self.keys, &to, payload)
             .await
@@ -329,7 +340,7 @@ impl GroupChannel {
         &self,
         exporter: &[u8; 32],
         mls_ciphertext: &[u8],
-    ) -> Result<u64, NetError> {
+    ) -> Result<(u64, PublishReport), NetError> {
         let sealed = envelope::seal_outer(exporter, mls_ciphertext)
             .map_err(|e| NetError::Crypto(format!("sealing the 445 frame: {e}")))?;
         // one `now` for tag and stamp: deriving them separately could
@@ -344,10 +355,10 @@ impl GroupChannel {
             .sign_with_keys(&Keys::generate())
             .map_err(|e| NetError::Crypto(format!("signing the 445 frame: {e}")))?;
         let stamp = event.created_at.as_secs();
-        RelayRuntime::new(self.dialer.clone(), self.relays.clone())
+        let report = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
             .publish(&event)
             .await?;
-        Ok(stamp)
+        Ok((stamp, report))
     }
 
     /// Subscribe kind-445 under the tags [`window_tags`] names right now —

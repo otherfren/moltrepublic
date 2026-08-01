@@ -166,10 +166,11 @@ async fn a_445_frame_round_trips_through_the_group_channel() {
     let mut sub = channel.subscribe().await.expect("group subscription");
     assert!(sub.live(RECV_TIMEOUT).await, "the group REQ replayed");
 
-    let stamp = channel
+    let (stamp, report) = channel
         .publish_frame(&[9u8; 32], b"the mls ciphertext")
         .await
         .expect("publish the frame");
+    assert_eq!(report.accepted.len(), 1, "the one relay took it: {report:?}");
 
     let (content, created_at) = sub.recv(RECV_TIMEOUT).await.expect("the frame");
     assert_eq!(created_at, stamp, "one carrier stamp on both ends");
@@ -229,5 +230,40 @@ fn window_tags_cover_the_skew_margin() {
         window_tags(&seed, after),
         vec![h_tag(&seed, after), h_tag(&seed, boundary - H_WINDOW)],
         "shortly after midnight the previous window is covered too"
+    );
+}
+
+/// Cluster C — `publish_frame` reports WHICH relay refused.
+///
+/// The per-relay outcome existed in `RelayRuntime::publish` and was thrown
+/// away one layer up (`.map(|_report| ())`, and `publish_frame` returning a
+/// bare stamp), so "landed on 1 of 2 relays" was indistinguishable from full
+/// delivery — and a ritual leg that reached nobody looked the same as one
+/// that reached everybody.
+#[tokio::test]
+async fn publish_frame_reports_the_relay_that_refused() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let live = relay.url().await.to_string();
+    // a port nothing listens on (bound then dropped — never port 9, a host
+    // running discard would silently invert this)
+    let dead = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let p = l.local_addr().expect("addr").port();
+        drop(l);
+        format!("ws://127.0.0.1:{p}")
+    };
+
+    let channel = GroupChannel::new(dialer(), vec![live.clone(), dead.clone()], [3u8; 32]);
+    let (_stamp, report) = channel
+        .publish_frame(&[9u8; 32], b"partial landing")
+        .await
+        .expect("≥1 relay accepted, so the publish succeeds");
+
+    assert_eq!(report.accepted, vec![live], "the live relay took it");
+    assert_eq!(report.failed.len(), 1, "…and the dead one is reported: {report:?}");
+    assert_eq!(report.failed[0].0, dead, "named by url");
+    assert!(
+        !report.failed[0].1.is_empty(),
+        "…with a reason, not just a flag: {report:?}"
     );
 }

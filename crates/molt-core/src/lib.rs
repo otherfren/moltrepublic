@@ -3601,6 +3601,27 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A ritual publish task reporting its REAL per-relay outcome
+    /// (engine-internal). Sent for every outcome — clean, partial and total
+    /// failure — so "landed on 1 of 5 relays" and "landed nowhere" stop being
+    /// indistinguishable from success. An empty `accepted` means nobody has
+    /// the frame. Never a tool: an MCP agent must not be able to forge a
+    /// relay outcome and thereby fail (or fake) a founding.
+    NetRitualPublished {
+        /// Which leg published — "seal", "genesis", …
+        what: String,
+        /// Relay URLs that accepted the event.
+        #[serde(default)]
+        accepted: Vec<String>,
+        /// Pre-formatted `"url: reason"` per relay that refused, so the
+        /// actor owns the wording.
+        #[serde(default)]
+        failed: Vec<String>,
+        /// Ritual incarnation, or `None` for a leg published after the
+        /// ritual was already taken (the genesis).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// A real SMP join completed: the off-actor join task verified the sealed
     /// roster the founder distributed (engine-internal). The engine writes the
     /// joiner's own workspace from it. Never an MCP tool.

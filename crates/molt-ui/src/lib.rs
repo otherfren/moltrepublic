@@ -2367,6 +2367,14 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
+        } else if let Some(err) = sv.notice.strip_prefix("genesis-undelivered:") {
+            // The republic EXISTS here but its members were never told: the
+            // genesis 445 reached no relay. Copy lives Rust-side (the
+            // tor_verdict_copy_for precedent) so this needs no Strings entry
+            // and no ~6 GiB molt-ui-window rebuild. Without a surface the
+            // engine's notice would itself be an inert seam — the exact sin
+            // this fix is about.
+            ui.invoke_show_toast_error(format!("{} {err}", genesis_undelivered_copy(lang)).into());
         }
     }
     // persistent restart warning: which changed keys only apply on restart
@@ -2644,6 +2652,18 @@ fn log_tones(log: &[String]) -> ModelRc<i32> {
             })
             .collect::<Vec<i32>>(),
     ))
+}
+
+/// The genesis frame reached no relay: the founding succeeded locally, but
+/// nobody else can learn of it until it is republished. Said plainly, because
+/// the operator's next action (check the relays, then re-found) depends on
+/// knowing which half failed.
+fn genesis_undelivered_copy(lang: i32) -> &'static str {
+    if lang == 1 {
+        "Die Republik wurde hier gegründet, aber der Genesis-Block erreichte kein Relay —          die anderen Mitglieder wissen nichts davon."
+    } else {
+        "The republic was founded here, but the genesis reached no relay — the other          members have not been told."
+    }
 }
 
 /// Plain, `Send` snapshot of all surfaces, built off the UI thread.

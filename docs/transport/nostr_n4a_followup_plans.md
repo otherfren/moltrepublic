@@ -125,12 +125,12 @@ can start; but a wrong guess is expensive in exactly these five places.
 |---|---|---|
 | A | 445 sender binding (CRITICAL) | ✅ `63555dc` |
 | B | Joiner's relay gate + diagnosis | ✅ `88dd854` |
-| C | The inert publish-failure seam | open |
+| C | The inert publish-failure seam | ✅ (this session) |
 | D | Join-task lifecycle | ✅ `9809f6f` |
 | E | `GroupSub::recv` failure handling | open |
 | F | Honesty gaps | open |
 | G | NIP-42 inert on ritual subscriptions | open |
-| H | Unpinned security checks | open |
+| H | Unpinned security checks | roster finding ✅ `1defd69`; coverage open |
 | I | Invite relay cap | ✅ `28456f7` |
 
 ## Cluster C — The inert publish-failure seam

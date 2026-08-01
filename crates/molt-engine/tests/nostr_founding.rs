@@ -937,3 +937,113 @@ async fn recovery_invalidates_an_in_flight_join() {
     );
     assert_ne!(s.screen, molt_core::Screen::Main, "the recovery keeps the screen");
 }
+
+// ---------------------------------------------------------------------------
+// Cluster C — a relay that REFUSES kind-445, so a publish failure is a real
+// wire outcome rather than an injected one.
+// ---------------------------------------------------------------------------
+
+use nostr_relay_builder::builder::{PolicyResult, RelayBuilder, WritePolicy};
+use nostr_relay_builder::prelude::{BoxedFuture, Event, Kind};
+use nostr_relay_builder::LocalRelay;
+
+/// Rejects kind-445 frames after `accept_first` of them. Filtering strictly on
+/// 445 keeps the 1059 gift-wrap traffic (join requests, Welcomes) out of the
+/// counter, so the count means what the test says it means.
+#[derive(Debug)]
+struct Reject445After(std::sync::atomic::AtomicUsize, usize);
+
+impl Reject445After {
+    fn new(accept_first: usize) -> Self {
+        Self(std::sync::atomic::AtomicUsize::new(0), accept_first)
+    }
+}
+
+impl WritePolicy for Reject445After {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a Event,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move {
+            if event.kind != Kind::Custom(445) {
+                return PolicyResult::Accept;
+            }
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.1 {
+                PolicyResult::Accept
+            } else {
+                PolicyResult::Reject("test policy: no 445 for you".to_string())
+            }
+        })
+    }
+}
+
+async fn relay_rejecting_445_after(accept_first: usize) -> (LocalRelay, String) {
+    let relay = LocalRelay::new(RelayBuilder::default().write_policy(Reject445After::new(accept_first)));
+    relay.run().await.expect("policy relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+/// REGRESSION (cluster C) — a Seal that NO relay accepts must fail the
+/// founding, not hang it.
+///
+/// `spawn_publish_frame_with`'s failure sink had zero `Some(...)` callers, so
+/// the one path that reports a refused publish was dead code. The founder sat
+/// on "charter proposed" forever, every member waited for a frame that was
+/// never accepted, and `NetRitualFailed` — which exists for exactly this —
+/// was never reached. A seam that exists but is not wired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
+    // accept the founder's Welcome/1059 traffic, refuse every 445 — the Seal
+    // is the first 445 of the founding
+    let (_relay, url) = relay_rejecting_445_after(0).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Doomed".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
+
+    a.execute(Command::CreatePropose {
+        name: "Doomed".to_string(),
+        agenda: "this seal will never land".to_string(),
+    })
+    .await
+    .expect("proposed");
+
+    // the Seal publish is refused by the only relay: the founding must FAIL,
+    // visibly, instead of sitting on "charter proposed" forever
+    let s = wait_for(&a, "the founding to fail on the refused seal", |s| {
+        s.create.run.outcome == 2
+    })
+    .await;
+    assert!(
+        s.create.run.log.iter().any(|l| l.contains("seal") && l.contains("publish")),
+        "the log names the leg that could not be published: {:?}",
+        s.create.run.log
+    );
+    assert!(s.workspaces.is_empty(), "nothing was founded");
+}
