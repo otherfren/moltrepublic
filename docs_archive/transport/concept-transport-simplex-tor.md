@@ -15,7 +15,7 @@ fanned out; a clean close persists the advancing ratchet + the SMP queue
 credentials so a reopen **resumes** the mesh (concept §6, clean-close variant;
 per-drain write-ahead is the remaining crash-safety hardening). Fan-out privacy
 jitter is on.
-**T4 (Tor) is IMPLEMENTED** (`docs/transport/tor_transport_implementation.md`): a
+**T4 (Tor) is IMPLEMENTED** (`docs_archive/transport/tor_transport_implementation.md`): a
 fail-closed dialer (`Dialer::resolve` — no direct dial ever under
 `network=tor`) with four modes — off (clearnet, the shipped default), system
 Tor (SOCKS5h `127.0.0.1:9050`), whonix (gateway SOCKS), and embedded (in-process

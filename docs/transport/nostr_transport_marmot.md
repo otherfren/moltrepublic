@@ -4,7 +4,7 @@ Status: **DRAFT 2026-07-29, DISCUSSION DOCUMENT — not an execution plan.**
 Written after the delivery-guarantee live validation (2026-07-27..29) and
 hardened by two adversarial review passes (§13, two ledgers). Read first:
 `docs/transport/delivery_guarantee.md` (the layer this offloads),
-`docs/transport/mesh/mesh_selfheal.md` + `mesh_reliability.md` (the machinery this
+`docs_archive/transport/mesh/mesh_selfheal.md` + `mesh_reliability.md` (the machinery this
 removes — and the earlier measurement that partly contradicts §0),
 `docs/ritual/recovery_ritual.md`, `docs/storage/backup_restore_design.md`,
 `docs/ritual/founding_ritual.md` (invariants this must not weaken), and the
@@ -853,7 +853,7 @@ once. So:
   workspace, not per peer. Long-horizon retention measurement is
   observational and rides N2's real-relay soaks.
 - **N0.5 — Engine-side inventory & seams — ✅ DONE (2026-07-29),**
-  `docs/transport/nostr_n05_engine_inventory.md`. Verdict: a real engine
+  `docs_archive/transport/nostr_n05_engine_inventory.md`. Verdict: a real engine
   refactor, not a bolt-on — `RitualTransport` enum + queue-vs-relay dispatch at
   every reopen/recovery/close-persist site fork large; the `MemberId`-keyed
   health model + `deaf_legs` fork; a NEW `ChainOracle` seam (trait signature

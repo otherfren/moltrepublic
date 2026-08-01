@@ -10,7 +10,9 @@
 > (`smp://` addressing, `SmpServer`/`SmpTransport` wiring, the SMP no-leak
 > harness) are historical.
 
-Status: **plan, not started.** Executes T4 of
+Status: **BUILT** (T4 complete 2026-07-11; the dialer lives in
+`crates/molt-net/src/dial.rs`). ARCHIVED — the plan was executed. Was: plan,
+not started. Executes T4 of
 `concept-transport-simplex-tor.md` (§3.1 addressing, §4 modes, §5 circuit
 prebuild, §6 fail-closed). Written to be handed to several coding agents in
 parallel worktrees: it pins the design calls the code inventory forced, cuts

@@ -66,6 +66,25 @@ user could mistake for real.
   coding the wrong thing. A plan that begins with "I'll build X" without a
   paragraph on what already exists is not finished.
 
+## Where documents live
+
+- **`docs/`** — open work, plus the current specification of shipping
+  behaviour. If it is here, it is either something still to build or the
+  authority for how something works today.
+- **`docs_archive/`** — the record of what was decided and why: superseded
+  designs (everything SMP/mesh), executed plans, and analysis a decision
+  consumed. **Never implement from a document in `docs_archive/`.**
+
+Status lines are load-bearing — a doc claiming "not yet built" for shipped
+work costs a planning session. Correct the status in the same change that
+lands the work.
+
+After moving or renaming any document run **`python3
+scripts/check-doc-refs.py`** (exit 0 = clean). Code comments cite doc paths
+heavily, so a move silently rots them; the checker resolves every path and
+every bare `*.md` mention, and its exception list names why each non-reference
+is exempt.
+
 ## Architecture (read the workspace `Cargo.toml` header first)
 
 Strict crate layering: a lower crate never depends on a higher one, and there is
@@ -270,7 +289,7 @@ asymmetry, `reopen_transport`, SKEY sender seeds, the Stage-B N-queue
 redundancy, self-heal/rotate/keepalive/probe) were removed in etappe N-demo
 (2026-07-30) of the Nostr replacement
 (`docs/transport/nostr_transport_marmot.md`); the design docs under
-`docs/transport/mesh/` are historical records. What remains: the queue-shaped
+`docs_archive/transport/mesh/` are historical records. What remains: the queue-shaped
 `Transport` trait, the loopback hub — now THE test transport and the only
 transport until the Nostr runtime lands (production founding/join/recover fail
 honestly until N4) — the supervisor's delivery-guarantee core with a

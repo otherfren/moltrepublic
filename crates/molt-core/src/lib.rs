@@ -2078,7 +2078,7 @@ pub enum WorkspaceEvent {
         commit: String,
     },
     /// A member **(re)announced its per-pair mesh queues** — the relay leg of
-    /// dynamic mesh membership (`docs/transport/dynamic_mesh.md`): the coordinator
+    /// dynamic mesh membership (`docs_archive/transport/dynamic_mesh.md`): the coordinator
     /// that received a rejoiner's announce over the recovery channel
     /// re-broadcasts the MLS ciphertext **verbatim**, so every survivor
     /// authenticates the announcer by decryption and extends its own mesh

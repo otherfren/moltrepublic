@@ -1,6 +1,8 @@
 # Concept: creating and persisting workspaces — files and data structures
 
-Status: **implemented through S3** (S0 event-applier refactor, S1
+Status: **implemented through S6** (S4 export/import, S5 S3 uploader and S6
+at-rest sealing landed with the `docs/ui/mock_todo.md` stories; the text below
+still describes S0–S3 as the milestone split). Originally: implemented through S3 (S0 event-applier refactor, S1
 `molt-storage`, S2 create/open/close/delete wiring + id addressing + real
 seeds, S3 snapshots). S4–S6 (manual `.molt.enc` export/import, S3 uploader,
 passphrase sealing) remain open, as do the fsck tool, golden fixtures, the

@@ -31,8 +31,8 @@ alle verschickt werden — Chatnachrichten sollen gequeued werden und dann an de
 jeweiligen Client geschickt, sobald er wieder erreichbar ist. Das gilt für alle
 Arten von Nachrichten, auch Vote-Proposals, Votes etc. — generell immer für
 alle Nachrichten."* Ausführungsreif, test-first. Vorher lesen:
-`docs/transport/mesh/stage_b.md`, `docs/transport/mesh/mesh_selfheal.md`,
-`docs/transport/mesh/mesh_rotation_trackc.md`, `docs/chain/log_compaction.md` und den
+`docs_archive/transport/mesh/stage_b.md`, `docs_archive/transport/mesh/mesh_selfheal.md`,
+`docs_archive/transport/mesh/mesh_rotation_trackc.md`, `docs/chain/log_compaction.md` und den
 Transport-Abschnitt in `CLAUDE.md` — dieses Konzept baut direkt auf deren
 Maschinerie und ändert **nichts** an Ritual, Chain oder Roster.
 

@@ -1,6 +1,7 @@
 # Plan: per-message read receipts ("Lesebestätigung")
 
-Status: **PLANNED 2026-07-19** — design agreed, not yet built. Execution-ready,
+Status: **BUILT** (2026-07-19, `c618a8c`; dots restricted to own sent messages
+in `35260b5`). ARCHIVED — the plan was executed. Was: PLANNED, execution-ready,
 test-first. Read `docs/chat/chat_bus.md` first (this rides the chat/reaction
 machinery); read `docs/chain/persistent_chain.md` to confirm the ephemerality
 boundary this respects.

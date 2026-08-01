@@ -426,5 +426,5 @@ fast test; the product never uses it.
   joiner confirms). The over-a-real-SMP-server twin was retired with the SMP
   transport (etappe N-demo); N4's keystone is its Nostr twin.
 
-The transport concept this realizes is `docs/transport/concept-transport-simplex-tor.md`
+The transport concept this realizes is `docs_archive/transport/concept-transport-simplex-tor.md`
 (§3.3).

@@ -6,9 +6,10 @@
 > rotate machinery with it. Kept as the design record of the deleted
 > machinery and of why SMP was left.
 
-Status: **PLANNED 2026-07-19** — design agreed in discussion; not yet built.
-Execution-ready, test-first. Read `docs/transport/dynamic_mesh.md`,
-`docs/ritual/recovery_ritual.md`, `docs/transport/mesh/stage_b.md`, and the CLAUDE.md
+Status: **BUILT** (2026-07-20..23), then made HISTORICAL by the removal of the
+SMP transport in etappe N-demo. ARCHIVED. Was: PLANNED, not yet built.
+Execution-ready, test-first. Read `docs_archive/transport/dynamic_mesh.md`,
+`docs/ritual/recovery_ritual.md`, `docs_archive/transport/mesh/stage_b.md`, and the CLAUDE.md
 transport section first — this builds directly on their machinery.
 
 ## 0. The problem this fixes (grounded in a live incident)

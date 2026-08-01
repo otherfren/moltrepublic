@@ -1,6 +1,7 @@
 # Buzz follow-ups — the four work packages
 
-Decided 2026-08-01 in the planning session over `buzz_comparison.md`. That
+Decided 2026-08-01 in the planning session over
+`docs_archive/reviews/buzz_comparison.md`. That
 document holds the analysis and the reasoning per candidate; this one holds only
 what gets built, in the order it gets built.
 

@@ -1608,7 +1608,7 @@ impl State {
     }
 
     /// A rejoiner's **mesh announce** arrived on the recovery queue (dynamic
-    /// mesh membership, `docs/transport/dynamic_mesh.md` ❷): authenticate the
+    /// mesh membership, `docs_archive/transport/dynamic_mesh.md` ❷): authenticate the
     /// announcer by MLS decryption and check it is the member whose re-key
     /// just completed, then relay the ciphertext **verbatim** over the runtime
     /// mesh (every survivor authenticates + extends itself) and extend this

@@ -1326,7 +1326,7 @@ impl State {
                 }
                 // 4) dynamic mesh membership: the rejoiner's mesh announce
                 // follows on this same recovery queue — accept it for exactly
-                // this member (docs/transport/dynamic_mesh.md §3)
+                // this member (docs_archive/transport/dynamic_mesh.md §3)
                 self.recovery_mesh_window.insert(member.to_string());
                 tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }

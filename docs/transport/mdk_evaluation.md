@@ -129,7 +129,7 @@ seeded-random delivery is a property test we can write against
 `two_instances.rs` directly.
 
 Also worth reading before N2/N3:
-`docs/marmot-architecture/distributed-convergence.md` — its problem statement
+`docs/marmot-architecture/distributed-convergence.md` (in the MDK repo, not ours) — its problem statement
 (a returning client fetching a bag of messages from several relays, some from
 abandoned branches) is our problem verbatim.
 

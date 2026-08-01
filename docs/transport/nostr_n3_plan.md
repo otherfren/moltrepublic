@@ -1,6 +1,7 @@
 # N3 execution plan — NIP-EE mapping + commit lifecycle
 
-Status: **IN BUILD (started 2026-07-31).** Executes the N3 etappe of
+Status: **COMPLETE (2026-07-31 — all 7 steps plus two review rounds on
+master).** Known limits carried forward live in §5.5. Executes the N3 etappe of
 `nostr_transport_marmot.md` §11 on top of the N2 relay runtime
 (`nostr_n2_plan.md`). Every design input is ratified; this is the execution
 map, not a discussion.

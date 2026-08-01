@@ -117,7 +117,7 @@ molt-ui + ein Callback.
 - `crates/molt-ui-window/ui/app.slint:1570–1624` (Dropdown tor/none, Tor-Modus, Port; `:1624` übergibt nur den String `"tor"`/`"none"`)
 - `crates/molt-engine/src/lifecycles.rs:179,198` (`cmd_create_start` speichert `net` nur als Label), `:645`, `:906` (Join hartkodiert `"tor"`)
 - `crates/molt-engine/src/founding.rs:365–374`: der Ritual-Transport kommt aus `resolve_dialer()` = **globale** Settings (`crates/molt-engine/src/session.rs:256–280`)
-- Dokumentierte Entscheidung: `docs/transport/tor_transport_implementation.md` §P8 („`CreateStart.net` stays cosmetic“)
+- Dokumentierte Entscheidung: `docs_archive/transport/tor_transport_implementation.md` §P8 („`CreateStart.net` stays cosmetic“)
 
 **Was heute passiert:** Die Netzwerk-Wahl beim Gründen (inkl. Tor-Modus und
 Port) beeinflusst den Transport nicht; maßgeblich sind immer die globalen
