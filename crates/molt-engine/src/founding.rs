@@ -475,7 +475,7 @@ impl State {
                 // never truncate silently: the operator must be able to tell
                 // "using my whole pool" from "using the first eight of it"
                 notes.push(format!(
-                    "→ this node has {} dialable relays; the invite and the Welcome carry the                      first {} (the pool order is the priority — reorder in Settings to change                      which)",
+                    "→ this node has {} dialable relays; the invite and the Welcome carry the first {} (the pool order is the priority — reorder in Settings to change which)",
                     relays.len() + over,
                     molt_net::welcome::MAX_PAYLOAD_RELAYS
                 ));
@@ -2040,7 +2040,7 @@ mod ritual_ops {
                 if claimed.is_none() || claimed.as_deref() != Some(sender_npub.as_str()) {
                     tracing::warn!(seat, %member, "founding join rejected: anchor is not the wrap's proven sealer");
                     self.session.create.run.log.push(format!(
-                        "✗ invite {}: the request claims a transport key it did not                          sign with — refused (possible impersonation)",
+                        "✗ invite {}: the request claims a transport key it did not sign with — refused (possible impersonation)",
                         idx + 1
                     ));
                     self.emit_session(molt_core::SessionScope::Create);
@@ -2050,7 +2050,7 @@ mod ritual_ops {
             if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &nostr_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
                 self.session.create.run.log.push(format!(
-                    "✗ invite {}: the ticket code does not match — refused (wrong or                      edited link, or a link from a different founding)",
+                    "✗ invite {}: the ticket code does not match — refused (wrong or edited link, or a link from a different founding)",
                     idx + 1
                 ));
                 self.emit_session(molt_core::SessionScope::Create);
