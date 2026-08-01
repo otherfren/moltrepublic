@@ -135,18 +135,34 @@ surfaced-to-the-user retry, decided deliberately rather than by omission.
 Keystone: a founding whose Seal publish fails must reach `NetRitualFailed`,
 not hang.
 
-## D. Join-task lifecycle — HIGH + MEDIUM ×2
+## D. Join-task lifecycle — ✅ DONE
 
-`cmd_create_start` (and `cmd_recover_start`) do not invalidate an in-flight
-Nostr member-join task: `join_generation` is untouched and the task is not
-aborted, so a late `NetJoinSealed` from the abandoned join can land while the
-user is founding — hijacking the session into a workspace they did not create.
-`cmd_join_start` and `cmd_join_cancel` already do this correctly; the founding
-and recovery entry points were missed.
+A late `NetJoinSealed` from an abandoned join hijacked the session: the ONLY
+gate on `cmd_net_join_sealed` is the join generation, and neither
+`cmd_create_start` nor `cmd_recover_start` moved it or aborted the task — so
+the report materialized a republic the user never created, re-pointed
+`active_workspace` at it and flipped the screen out from under the founding
+wizard. Reproduced end-to-end before the fix.
 
-Fix: bump `join_generation` and abort `join_task` in both, exactly as
-`cmd_join_cancel` does. Keystone: start a join, start a founding, feed the
-join's late sealed report → it must be dropped.
+Fixed with one shared `invalidate_join()` (generation bump + close the
+ratification gate + abort the task + clear the wizard + fresh transport slot);
+`cmd_join_cancel` now delegates to it, so there is ONE definition of
+"abandon a join".
+
+**Two further holes of the same root cause, found by the investigation and
+closed here:**
+- `cmd_open_workspace` invalidated no join either — entering a workspace is a
+  context switch like any other, and a late seal would materialize a SECOND
+  republic beside the one just opened. (This also fires on restore-finish,
+  which is intended.)
+- The SYMMETRIC hole: `cmd_recover_start` never called `teardown_ritual`, so
+  an in-flight FOUNDING could still seal into the recovery session via
+  `maybe_finalize`. A recovery now abandons both.
+
+Keystones `founding_invalidates_an_in_flight_join` /
+`recovery_invalidates_an_in_flight_join` drive a REAL live join (two engines
+over an in-process relay) and then feed the abandoned task's own
+`NetJoinSealed`; both verified red-without / green-with.
 
 ## E. `GroupSub::recv` failure handling — MEDIUM ×3
 

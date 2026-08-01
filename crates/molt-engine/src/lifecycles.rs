@@ -691,9 +691,12 @@ impl State {
         let seed =
             molt_storage::generate_seed_phrase().map_err(|e| MoltError::Create(e.to_string()))?;
 
-        // any prior ritual/mesh belongs to a different context
+        // any prior ritual/mesh belongs to a different context — and so does
+        // any in-flight JOIN: without this its late seal materializes a
+        // foreign republic mid-founding (see invalidate_join)
         self.teardown_ritual();
         self.ritual_attestations.clear();
+        self.invalidate_join();
         let crate::founding::RitualStart { links, notes } = self
             .start_ritual(&name, &member, threshold, members, &seed)
             .map_err(MoltError::Create)?;
@@ -1375,6 +1378,14 @@ impl State {
                 "the recovery phrase must not be empty".to_string(),
             ));
         }
+        // …and so does any in-flight join or founding: a recovery is a context
+        // switch like any other. Without the join invalidation a late
+        // NetJoinSealed materializes a foreign republic mid-recovery; without
+        // the ritual teardown an in-flight FOUNDING can still seal into the
+        // recovery session via maybe_finalize (the symmetric hole).
+        self.invalidate_join();
+        self.teardown_ritual();
+        self.ritual_attestations.clear();
         // a restarted recovery supersedes the one in flight — bump the
         // incarnation so the stale task's late result is dropped
         self.recover_generation += 1;
@@ -1600,17 +1611,35 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
-        // invalidate any in-flight join task so its late result is dropped;
-        // dropping join_confirm closes the gate → a paused ritual declines.
-        // The Nostr member task is aborted outright — the user cancelled, so
-        // an in-flight frame of ITS OWN join is fine to lose.
+    /// Abandon any in-flight join: bump the generation so late results are
+    /// dropped, close the ratification gate (a paused ritual then declines),
+    /// abort the member task, and clear the wizard.
+    ///
+    /// **Every entry point that switches the session out of a join must call
+    /// this.** The ONLY gate on `cmd_net_join_sealed` is the join generation,
+    /// so a `NetJoinSealed` from a join the user walked away from otherwise
+    /// materializes a republic they never created, re-points
+    /// `active_workspace` at it and flips the screen — a session hijack, not
+    /// merely a stale-state bug. `cmd_join_start`/`cmd_join_cancel` did this
+    /// correctly; founding, recovery and open-workspace did not.
+    ///
+    /// Aborting the task is deliberate and matches cancel: this join's own
+    /// last outbound frame may be lost. That is the OTHER republic's founder's
+    /// problem to surface (cluster F), never a reason to keep the task alive.
+    pub(crate) fn invalidate_join(&mut self) {
         self.join_generation += 1;
         self.join_confirm = None;
         if let Some(task) = self.join_task.take() {
             task.abort();
         }
         self.session.join = JoinState::default();
+        // a fresh transport slot: the abandoned incarnation's must not be
+        // inherited by whatever runs next
+        self.join_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
+    }
+
+    pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
+        self.invalidate_join();
         self.session.screen = Screen::Choice;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

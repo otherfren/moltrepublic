@@ -735,3 +735,205 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     })
     .await;
 }
+
+/// A sealed roster the joiner's own engine would accept, plus the matching
+/// nostr secret — byte-identical in shape to what an abandoned member task
+/// really emits (`spawn_member_join`'s `NetJoinSealed`).
+fn injected_seal(member: &str) -> (String, String) {
+    use molt_core::{MemberIdentity, RosterAttestation};
+    let (sk_f, pk_f) = molt_storage::derive_identity_key(&[7u8; 32], "founder");
+    let (sk_m, pk_m) = molt_storage::derive_identity_key(&[9u8; 32], member);
+    let (nostr_sk, nostr_pk) = molt_net::nostr_identity(b"petra-entropy", "ticket-petra");
+    let identities = vec![
+        MemberIdentity {
+            member: "founder".to_string(),
+            identity_pk: pk_f,
+            nostr_pk: molt_net::nostr_identity(b"founder-entropy", "ticket-f").1,
+        },
+        MemberIdentity {
+            member: member.to_string(),
+            identity_pk: pk_m,
+            nostr_pk,
+        },
+    ];
+    let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
+    let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
+    let sealed = molt_core::SealedRoster {
+        name: "R".to_string(),
+        republic_id,
+        rule_m: 2,
+        rule_n: 2,
+        roster: vec!["founder".to_string(), member.to_string()],
+        identities,
+        attestations: vec![
+            RosterAttestation {
+                member: "founder".to_string(),
+                sig: molt_storage::identity_sign(&sk_f, &table),
+            },
+            RosterAttestation {
+                member: member.to_string(),
+                sig: molt_storage::identity_sign(&sk_m, &table),
+            },
+        ],
+        agenda: String::new(),
+    };
+    (
+        serde_json::to_string(&sealed).expect("sealed json"),
+        hex::encode(nostr_sk),
+    )
+}
+
+/// SECURITY (cluster D) — starting a FOUNDING must invalidate an in-flight
+/// join, or the abandoned join's late seal hijacks the session.
+///
+/// `cmd_join_start` and `cmd_join_cancel` bump `join_generation` and abort the
+/// task; the founding and recovery entry points were missed. The only gate on
+/// `cmd_net_join_sealed` is that generation — so a `NetJoinSealed` arriving
+/// from a join the user walked away from still materialized a workspace, set
+/// `active_workspace` and flipped the screen to Main, out from under the
+/// founding wizard. The user ends up inside a republic they never created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn founding_invalidates_an_in_flight_join() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // a real founding on A, so B has a genuine live join to abandon
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Other".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    // the join must be genuinely LIVE, or a later green proves nothing
+    let s = read_session(&b).await;
+    assert_eq!(s.join.run.outcome, 0, "the join is in flight");
+
+    // …the user changes their mind and founds their own republic instead
+    b.execute(Command::CreateStart {
+        name: "Mine".to_string(),
+        member: "petra".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("b starts its own founding");
+
+    // the abandoned join's task now reports in, exactly as it really would
+    let (sealed, nostr_sk) = injected_seal("petra");
+    b.execute(Command::NetJoinSealed {
+        sealed,
+        mls: String::new(),
+        mesh: Vec::new(),
+        nostr_sk,
+        relays: Vec::new(),
+        rotation_seed: String::new(),
+        generation: Some(1),
+    })
+    .await
+    .expect("the late report is accepted and dropped");
+
+    let s = read_session(&b).await;
+    assert!(
+        !s.workspaces.iter().any(|w| w.name == "R"),
+        "the abandoned join must not materialize a republic: {:?}",
+        s.workspaces.iter().map(|w| &w.name).collect::<Vec<_>>()
+    );
+    assert_eq!(s.screen, molt_core::Screen::Create, "the founding wizard keeps the screen");
+    assert_eq!(s.create.run.outcome, 0, "…and its own run is untouched");
+}
+
+/// …and the same for RECOVERY — the second entry point that switched the
+/// session out of a join without invalidating it. A recovery additionally
+/// abandons any in-flight FOUNDING (the symmetric hole: `maybe_finalize`
+/// would otherwise seal a founding into the recovery session).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_invalidates_an_in_flight_join() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Other".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    assert_eq!(read_session(&b).await.join.run.outcome, 0, "the join is in flight");
+
+    // the user abandons it for a recovery instead. It fails honestly (N4b is
+    // not built) — but the CONTEXT is armed, which is all the hijack needed.
+    let _ = b
+        .execute(Command::RecoverStart {
+            link: molt_engine::RecoveryInvite {
+                republic: "Guild".to_string(),
+                member: "petra".to_string(),
+                ticket: "ab".repeat(8),
+                server: "smp://f4nx4eK5dHAw8sO9_wl-UOfLQOGzxl8mVOA3Nj3wrQ0=@no-such-host.invalid"
+                    .to_string(),
+                queue_id: "cd".repeat(12),
+                wrap: "ef".repeat(32),
+                republic_id: "f00d".to_string(),
+            }
+            .render(),
+            phrase: "abandon abandon abandon".to_string(),
+        })
+        .await;
+
+    let (sealed, nostr_sk) = injected_seal("petra");
+    b.execute(Command::NetJoinSealed {
+        sealed,
+        mls: String::new(),
+        mesh: Vec::new(),
+        nostr_sk,
+        relays: Vec::new(),
+        rotation_seed: String::new(),
+        generation: Some(1),
+    })
+    .await
+    .expect("the late report is accepted and dropped");
+
+    let s = read_session(&b).await;
+    assert!(
+        !s.workspaces.iter().any(|w| w.name == "R"),
+        "the abandoned join must not materialize a republic during a recovery: {:?}",
+        s.workspaces.iter().map(|w| &w.name).collect::<Vec<_>>()
+    );
+    assert_ne!(s.screen, molt_core::Screen::Main, "the recovery keeps the screen");
+}
