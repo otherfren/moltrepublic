@@ -115,8 +115,10 @@ can start; but a wrong guess is expensive in exactly these five places.
   rather than trusting a separate field. Options (b) drop-the-field and (c)
   bind-into-the-bytes remain open but cost far more for the same guarantee.
 
-  **This is a finding, not coverage debt — it should be fixed on its own,
-  ahead of the rest of H.**
+  **✅ FIXED `1defd69`** — option (a) as recommended:
+  `check_roster_matches_identities` (`founding.rs:970`) is called from
+  `verify_sealed_roster` (`:1007`) and `verify_seal_proposal` (`:1131`). No
+  byte-layout bump.
 
 
 ## Status
@@ -130,8 +132,14 @@ can start; but a wrong guess is expensive in exactly these five places.
 | E | `GroupSub::recv` failure handling | ✅ (this session) |
 | F | Honesty gaps | ✅ (elapsed-wait deferred) |
 | G | NIP-42 inert on ritual subscriptions | ✅ (this session) |
-| H | Unpinned security checks | ✅ H2 (was semi-inert) + H4; H1/H3 need a hostile-peer harness |
+| H | Unpinned security checks | ✅ H2 (was semi-inert) + H4 + the unsigned-`roster` finding (`1defd69`); H1/H3 need a hostile-peer harness |
 | I | Invite relay cap | ✅ `28456f7` |
+
+**All nine clusters are closed** (2026-08-01), plus the adversarial swoop
+over the whole change-set and its survivors. Remaining coverage debt: H1/H3
+need a hostile-peer harness; F's elapsed-wait line is deferred. Both named in
+`nostr_n4a_review_followups.md`.
+
 
 ## Cluster C — The inert publish-failure seam
 

@@ -440,22 +440,88 @@ Each step is one commit, red test first, green on master before the next.
    (`{v:2, ticket, npub, relays, republic_id}`). **Red:** round-trip, v1
    rejection with the honest "older build" message, the same relay caps.
 5. **Coordinator mint over relays**: `cmd_recover_invite_start`
-   (`net.rs:1497-1562`) currently REQUIRES `runtime_transport()` to mint a
-   queue — on Nostr it needs only the dialer + the workspace relay list, so
-   the mesh precondition becomes a kind check. `spawn_recovery_provisioning`
-   (`recovery.rs:179-257`) reduces to inbox-subscribe → `NetRecoverLinkReady`
-   (its `NetRecoverLinkFailed` ticket-unregistration path stays).
+   (`net.rs:1526`, precondition at `:1561-1567`) currently REQUIRES
+   `runtime_transport()` to mint a queue — on Nostr it needs only the dialer
+   + the workspace relay list, so the mesh precondition becomes a kind check.
+   `spawn_recovery_provisioning` (`recovery.rs:205-285`, link render `:248`,
+   `NetRecoverLinkReady` `:260`) reduces to inbox-subscribe →
+   `NetRecoverLinkReady` (its `NetRecoverLinkFailed` ticket-unregistration
+   path stays).
+
+   **5a — PREREQUISITE, verified 2026-08-01: the survivor has no Nostr
+   material to mint with.** `open_stored_workspace` (`session.rs:1017`) reads
+   the whole `TransportState` but adopts only `identity_sk` (`:1043`);
+   `kind` becomes a local `nostr_kind` bool (`:877`) and is dropped. `State`
+   holds no `nostr_sk`, no group `relays`, no transport kind — so a reopened
+   coordinator cannot build a `RitualNet` at all. Step 5 therefore starts by
+   adopting them into `State`, in `open_stored_workspace` AND in
+   `materialize_workspace` (`lifecycles.rs`), next to `identity_sk`. Without
+   this the rest of step 5 cannot be written, let alone tested.
+
+   **5b — the inbox task.** `spawn_recovery_inbox`, modelled on
+   `spawn_founder_inbox` (`nostr_ritual.rs:74`): `RitualNet::inbox()` →
+   `live_state(LIVE_WAIT).any()` readable-gate (subscribe-before-advertise —
+   a link advertised over an inbox nothing answers on is the N4a defect
+   `a275f6e` fixed for founding) → THEN render the v2 link → loop feeding
+   `RitualMsg::Recover` into `Command::NetRecoverRequested`. The production
+   mint still renders `handover: None` (`recovery.rs:256`); this is where
+   `RecoveryHandoverV2` (step 4) gets its first production caller.
+
+   **5c — PoP for the rejoin key.** `NetRecoverRequested` (`core:3389`) has
+   no `sender_npub`, while its founding twin `NetJoinRequested` (`core:3353`)
+   carries one, set from the peeled wrap's proven sender
+   (`nostr_ritual.rs:173`) and checked before the ticket is spent
+   (`founding.rs:2378-2394`). §8.2 requires the wrap-author PoP to apply to
+   the rejoin key, so the field is added here — the inbox task is what knows
+   the sealer — and gated in `cmd_net_recover_requested` BEFORE the ticket is
+   spent. An empty `sender_npub` keeps the loopback path unchanged.
+
+   **Red (the bar this step must clear, stated because §8.8 originally gave
+   step 5 none):** on a founded-over-relays republic, `RecoverInviteStart`
+   on a survivor currently reports `recovery-link-failed:mesh-not-running`.
+   The red test asserts that literal outcome first, then flips to asserting a
+   parseable `molt://recover/…` link whose handover decodes as v2 and names
+   the coordinator's anchor + the group relays. Second red: a `Recover`
+   request whose `new_nostr_pk` is not the wrap's proven sealer is refused
+   with the ticket UNSPENT.
+
+   **Copy that step 5 makes false** (all keyed to the `mesh-not-running`
+   reason at `net.rs:1564`): the `recover_invite_start` MCP tool description
+   (`molt-mcp/src/lib.rs:1154` — also prose, against the compact-text rule),
+   the GUI branch at `app.slint:7374` / `molt-ui/src/lib.rs:2032`, and the
+   test pinning it (`two_instances.rs:4620`). Keep `mesh-not-running` for the
+   legacy kind; give the Nostr path its own short reasons from the existing
+   relay vocabulary (`relay_msg::pool_gap_reason`).
 6. **Rejoiner task**: the `RecoverStart` twin of N4a's `spawn_member_join` —
    derive the ephemeral key from the RECOVERY ticket, subscribe the 1059
    inbox, gift-wrap the `RecoverRequest` (with `new_nostr_pk` + seat proof
    v2), wait the 15-min `RECOVERY_WELCOME_TIMEOUT` (`recovery.rs:25`,
    absolute deadline — keep it), peel the 444, `join_from_welcome`, verify
    the served chain, report `NetRecoverSealed`. Deletes the last
-   `NO_TRANSPORT_YET` raise (`lifecycles.rs:1365`).
-7. **Ingest + block**: `cmd_net_recover_requested` (`net.rs:1442-1485`) runs
-   `canonical_nostr_pk` on the wire `new_nostr_pk` at that choke point (the
-   doc comment at `net.rs:1432-1440` already demands it), enforces cross-seat
-   uniqueness, and — ticket spent only on a VERIFIED request — passes it into
+   `NO_TRANSPORT_YET` raise (`lifecycles.rs:1441`, the const at `lib.rs:88`).
+
+   **ORDERING PROBLEM, found 2026-08-01 — decide before step 6 starts.** Step
+   6 says "peel the 444 … verify the served chain", but `WelcomePayload`
+   (`molt-net/src/welcome.rs:82`, `WELCOME_PAYLOAD_VERSION = 2`) carries only
+   `welcome`, `rotation_seed`, `relays` — **no chain slot**. Loopback gets
+   away with it by bundling the chain beside the Welcome on the reply queue
+   (`recovery.rs:294`, fed from `chain.rs:1365`); over Nostr there is no
+   second channel. So step 6 cannot be written without the payload decision
+   §8.8 defers to **step 10** (carry the chain vs. carry the HEAD and fetch
+   over 445 — the 65408-cap measurement). Either pull step 10's measurement
+   into step 6, or reorder 10 before 6. Also additive here:
+   `NetRecoverSealed` (`core:3722`) has no `nostr_sk`/`relays`/
+   `rotation_seed`, so `cmd_net_recover_sealed` still materializes the legacy
+   shape (`lifecycles.rs:1534`) — mirror `NetJoinSealed`.
+7. **Ingest + block** — **mostly landed already** by steps 1–3:
+   `cmd_net_recover_requested` (`net.rs:1443-1513`) already runs
+   `canonical_nostr_pk` on the wire `new_nostr_pk` (`:1470-1481`), already
+   enforces cross-seat uniqueness (`:1483-1494`), and already spends the
+   ticket only after verification (`:1505`). What REMAINS for step 7 is the
+   PoP gate (moved into 5c) and the doc comment at `net.rs:1432-1440`, which
+   still claims the opposite of the code ("recovery ingests NO wire-supplied
+   `nostr_pk`") and must be corrected in whichever commit touches the file
+   first. Originally it was to run — ticket spent only on a VERIFIED request — passes it into
    `verify_and_propose_restore` (`chain.rs:910-941`) so the proposed
    `Restored` block carries it.
 8. **Carrier stamp, both ends**: `restore_member_on_group`
