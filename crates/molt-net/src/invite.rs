@@ -348,6 +348,19 @@ pub enum RitualMsg {
         /// Which invite this answers (0-based seat index).
         seat: u32,
     },
+    /// founder → member: this founding is OVER — the founder cancelled, or it
+    /// failed on the founder's side. Sent so a member stops waiting instead
+    /// of sitting in an unbounded wait forever: before the group is born it
+    /// travels as a gift-wrap to each anchored seat, after birth as a 445
+    /// group frame.
+    ///
+    /// **Never authoritative for anything persisted** — it only ends a run.
+    /// Additive: an older peer fails to parse it and keeps its old silent
+    /// wait, exactly like `LinkSpent`.
+    Aborted {
+        /// Why, in the founder's words — shown to the member.
+        reason: String,
+    },
     /// member → founder: the signature over the table.
     Signed(SealSigned),
     /// member → founder: the member explicitly **declined** the proposed

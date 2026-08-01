@@ -324,6 +324,15 @@ impl RitualRuntime {
         self.generation
     }
 
+    /// The nostr anchors of every seat that has activated its link — the
+    /// members an abort must reach before the group is born.
+    pub(crate) fn anchored_nostr_pks(&self) -> Vec<String> {
+        self.seats
+            .iter()
+            .filter_map(|s| s.identity.as_ref().map(|i| i.nostr_pk.clone()))
+            .collect()
+    }
+
     /// Each joined seat's reply queue `(seat index, send address, wrap key)` —
     /// where the founder sends its own + relayed mesh announcements. A seat with
     /// no reply queue (never joined) is skipped.
@@ -584,6 +593,54 @@ impl State {
     /// bootstrap — dropping its `ct_tx` closes the task's inbound channel, which
     /// cascades the whole bootstrap to shut down and release the founding star
     /// (an abandoned founding must not leave a task blocked forever).
+    /// End the ritual AND tell the members, then tear down.
+    ///
+    /// `teardown_ritual` alone is silent: it drops the founder's state and
+    /// leaves every member sitting in an unbounded wait forever, unable to
+    /// tell a dead founding from a slow one. The abort travels on BOTH paths
+    /// because a member listens on exactly one of them depending on how far
+    /// the ritual got:
+    /// - before group birth the member is on its 1059 gift-wrap inbox, so the
+    ///   abort goes per anchored seat as a wrap;
+    /// - after birth it is on the 445 group channel, so it goes as a group
+    ///   frame.
+    ///
+    /// Fire-and-forget: the outbound tasks own their clones, and
+    /// `NostrRitual`'s Drop aborts only INBOUND tasks, so the sends survive
+    /// the teardown. A no-op on loopback and on a ritual that never started.
+    pub(crate) fn abandon_ritual(&mut self, reason: &str) {
+        if let Some(ritual) = &self.net_ritual {
+            if let Some(nostr) = &ritual.nostr {
+                let msg = invite::RitualMsg::Aborted { reason: reason.to_string() };
+                // pre-birth: every seat that anchored an identity is waiting
+                // on its own gift-wrap inbox
+                for seat in ritual.anchored_nostr_pks() {
+                    let net = nostr.net.clone();
+                    let msg = msg.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = net.send_ritual(&seat, &msg).await {
+                            tracing::warn!(error = %e, "abort wrap did not publish");
+                        }
+                    });
+                }
+                // post-birth: they moved to the group channel
+                if let (Some(group), Some(chan), Some(tx)) =
+                    (nostr.group.clone(), nostr.chan.clone(), self.cmd_tx.upgrade())
+                {
+                    crate::nostr_ritual::spawn_publish_frame(
+                        chan,
+                        crate::nostr_ritual::FramePayload::Encrypt(group, msg),
+                        "abort",
+                        crate::nostr_ritual::RetryPolicy::PRE_SEAL,
+                        tx.downgrade(),
+                        None,
+                    );
+                }
+            }
+        }
+        self.teardown_ritual();
+    }
+
     pub(crate) fn teardown_ritual(&mut self) {
         self.net_ritual = None;
         self.founder_mesh_in = None;
@@ -685,6 +742,7 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::Seal { .. }
                 | invite::RitualMsg::Genesis { .. }
                 | invite::RitualMsg::LinkSpent { .. }
+                | invite::RitualMsg::Aborted { .. }
                 | invite::RitualMsg::Recover(_)
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
@@ -1782,7 +1840,8 @@ mod ritual_ops {
                 .run
                 .log
                 .push(format!("✗ founding failed: {error}"));
-            self.teardown_ritual();
+            // the founding died on our side — say so, do not just vanish
+            self.abandon_ritual(&error);
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }
@@ -2069,14 +2128,80 @@ mod ritual_ops {
                 .as_ref()
                 .and_then(|r| r.seats.get(idx))
                 .and_then(|s| {
-                    s.identity
-                        .as_ref()
-                        .map(|a| (a.member.clone(), a.identity_pk.clone(), s.ticket.clone()))
+                    s.identity.as_ref().map(|a| {
+                        (
+                            a.member.clone(),
+                            a.identity_pk.clone(),
+                            a.nostr_pk.clone(),
+                            s.ticket.clone(),
+                            s.sealed,
+                        )
+                    })
                 });
-            if let Some((anchored_member, anchored_pk, ticket)) = spent {
+            let mut re_anchoring = false;
+            if let Some((anchored_member, anchored_pk, anchored_npk, ticket, seat_sealed)) = spent {
                 let same = anchored_member == member && anchored_pk == identity_pk;
-                if !same && invite::verify_join_mac(&ticket, &member, &identity_pk, &nostr_pk, &proof)
-                {
+                let mac_ok =
+                    invite::verify_join_mac(&ticket, &member, &identity_pk, &nostr_pk, &proof);
+                // The group is born the instant every seat has anchored, and
+                // the Welcome is bound to the joiner's FIRST KeyPackage —
+                // whose HPKE private half died with the abandoned task. So a
+                // retry is resumable only BEFORE birth.
+                let group_born = self
+                    .net_ritual
+                    .as_ref()
+                    .and_then(|r| r.nostr.as_ref())
+                    .is_some_and(|n| n.group.is_some());
+                // RE-ACTIVATION, not a second person: `cmd_join_start` mints a
+                // FRESH seed phrase on every start, so a retry after a
+                // transport hiccup always derives a DIFFERENT identity_pk.
+                // (The backlog claimed the retry re-derives the same identity
+                // and that the comparison was the bug — it is not; the bug was
+                // that there was no re-activation path at all, so any hiccup
+                // burned the seat to a dead identity and wedged the founding.)
+                if !same && mac_ok && anchored_member == member && !seat_sealed && !group_born {
+                    if let Some(seat_mut) =
+                        self.net_ritual.as_mut().and_then(|r| r.seats.get_mut(idx))
+                    {
+                        seat_mut.identity = None;
+                        seat_mut.key_package = None;
+                        seat_mut.reply_snd = None;
+                        seat_mut.reply_wrap = None;
+                    }
+                    // the DISPLACED anchor is told, not the new one
+                    if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
+                        if let Ok(target) = molt_net::canonical_nostr_pk(&anchored_npk) {
+                            let net = nostr.net.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = net
+                                    .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
+                                    .await
+                                {
+                                    tracing::warn!(error = %e, "displaced-anchor notice did not publish");
+                                }
+                            });
+                        }
+                    }
+                    self.session.create.run.log.push(format!(
+                        "· invite {} re-activated by {member} — the earlier attempt is replaced",
+                        idx + 1
+                    ));
+                    // fall THROUGH into the full ingest ladder below (PoP →
+                    // MAC → canonical anchor → uniqueness → KeyPackage
+                    // binding): a shortcut that wrote the new anchor here
+                    // would be an unauthenticated seat write
+                    re_anchoring = true;
+                } else if !same && !mac_ok {
+                    // previously silent: an unverifiable re-activation looked
+                    // exactly like "the invitee never tried"
+                    self.session.create.run.log.push(format!(
+                        "✗ invite {}: a second activation by {member} did not verify — ignored",
+                        idx + 1
+                    ));
+                    self.emit_session(molt_core::SessionScope::Create);
+                    return Ok(molt_core::Reply::Ack);
+                }
+                if !re_anchoring && !same && mac_ok {
                     // tell the second activator its link is spent — over its
                     // OWN claimed transport address: the gift-wrap anchor on
                     // Nostr (canonicalized; an invalid one gets no reply),
@@ -2109,14 +2234,29 @@ mod ritual_ops {
                             });
                         }
                     }
-                    self.session.create.run.log.push(format!(
-                        "✗ invite {} was activated a second time (by {member}) — that \
-                         link is spent; they need their own, unused link",
-                        idx + 1
-                    ));
+                    // split the wording: a DIFFERENT person needs their own
+                    // link; the same person after group birth is a different
+                    // situation entirely and "ask for your own link" would be
+                    // wrong advice
+                    let line = if anchored_member == member {
+                        format!(
+                            "✗ invite {}: this founding has already formed its group around the \
+                             first activation — cancel and re-mint to let {member} back in",
+                            idx + 1
+                        )
+                    } else {
+                        format!(
+                            "✗ invite {} was activated a second time (by {member}) — that \
+                             link is spent; they need their own, unused link",
+                            idx + 1
+                        )
+                    };
+                    self.session.create.run.log.push(line);
                     self.emit_session(molt_core::SessionScope::Create);
                 }
-                return Ok(molt_core::Reply::Ack);
+                if !re_anchoring {
+                    return Ok(molt_core::Reply::Ack);
+                }
             }
             let Some(ritual) = &self.net_ritual else {
                 return Ok(molt_core::Reply::Ack);

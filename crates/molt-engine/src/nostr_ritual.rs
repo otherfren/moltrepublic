@@ -384,13 +384,24 @@ pub(crate) enum Provenance {
 /// passed to `MlsMember::new`, which the founder set to its own member name.
 /// Everything else is cross-checked against what the LINK promised, because
 /// the link is the joiner's root of trust for "whose founding is this".
+/// Is this 445 frame from the FOUNDER?
+///
+/// `from` is the MLS-authenticated credential of the frame's author, so this
+/// is the whole gate. Extracted because BOTH group-channel arms need it: the
+/// Seal (which it always had) and the abort (where an ungated arm would let
+/// any welcomed seat kill every other seat's join with one frame — exactly
+/// the impersonation class fixed as CRITICAL in 63555dc).
+pub(crate) fn frame_is_from_founder(from: &str, info: &molt_core::InviteInfo) -> bool {
+    from == info.inviter
+}
+
 pub(crate) fn check_proposal_provenance(
     from: &str,
     proposal: &molt_core::SealedRoster,
     founder_npub: &str,
     info: &molt_core::InviteInfo,
 ) -> Provenance {
-    if from != info.inviter {
+    if !frame_is_from_founder(from, info) {
         return Provenance::NotTheFounder;
     }
     if proposal.rule_m != info.threshold || proposal.rule_n != info.members {
@@ -580,6 +591,13 @@ async fn member_join(
                         .to_string(),
                 );
             }
+            // the founder gave up: stop waiting instead of sitting here until
+            // the accept deadline with no idea why
+            Some(RitualDelivery::Msg(RitualMsg::Aborted { reason }, sender))
+                if sender == h.npub =>
+            {
+                return Err(format!("the founder ended this founding: {reason}"));
+            }
             Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => {
                 let _ = send_cmd(tx, Command::NetJoinAccepted { generation }).await;
                 welcome = Some(p);
@@ -599,6 +617,12 @@ async fn member_join(
                     if sender == h.npub =>
                 {
                     return Err("the founder voided this seat — the link was re-used".to_string());
+                }
+                // …the same, in the wait that really is unbounded
+                Some(RitualDelivery::Msg(RitualMsg::Aborted { reason }, sender))
+                    if sender == h.npub =>
+                {
+                    return Err(format!("the founder ended this founding: {reason}"));
                 }
                 _ => continue,
             }
@@ -635,6 +659,17 @@ async fn member_join(
         let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;
         };
+        // the founder gave up after the group was born: end the wait rather
+        // than loop forever. Gated on the authenticated author for the same
+        // reason the Seal is — an ungated abort is a one-frame kill switch
+        // any welcomed seat could pull on every other seat.
+        if let RitualMsg::Aborted { reason } = &msg {
+            if frame_is_from_founder(&from, &ctx.invite.info) {
+                return Err(format!("the founder ended this founding: {reason}"));
+            }
+            tracing::warn!(%from, "abort frame from a co-member — ignored");
+            continue;
+        }
         if let RitualMsg::Seal { proposal } = msg {
             // a frame from a co-member is IGNORED, never fatal: parsing or
             // verifying it before the author check would let any invitee
@@ -692,6 +727,14 @@ async fn member_join(
         let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;
         };
+        // …and in the genesis wait too, on the same gate
+        if let RitualMsg::Aborted { reason } = &msg {
+            if frame_is_from_founder(&from, &ctx.invite.info) {
+                return Err(format!("the founder ended this founding: {reason}"));
+            }
+            tracing::warn!(%from, "abort frame from a co-member — ignored");
+            continue;
+        }
         if let RitualMsg::Genesis { sealed, .. } = msg {
             // same rule as the Seal: a co-member's frame is ignored, not
             // fatal — otherwise one forged Genesis published first kills
@@ -789,6 +832,33 @@ mod tests {
     }
 
     const FOUNDER_NPK: &str = "dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11dd11";
+
+    /// SECURITY (cluster F2) — the abort arm is a KILL SWITCH, so it is gated
+    /// on the MLS-authenticated author exactly like the Seal.
+    ///
+    /// The 445 channel is shared: every welcomed seat can publish a frame the
+    /// others decrypt. An ungated abort would therefore let any invitee end
+    /// every other invitee's join with one frame — the same impersonation
+    /// class fixed as CRITICAL in 63555dc, re-entering through a new door.
+    ///
+    /// This pin only secures anything while BOTH group-channel arms call the
+    /// helper; if a later refactor inlines the check back, it dies silently.
+    #[test]
+    fn only_the_founder_can_abort_a_founding() {
+        let inv = molt_core::InviteInfo {
+            republic: "R".to_string(),
+            threshold: 2,
+            members: 2,
+            inviter: "walter".to_string(),
+            ticket: "ab".repeat(5),
+        };
+        assert!(frame_is_from_founder("walter", &inv), "the founder may end it");
+        assert!(
+            !frame_is_from_founder("petra", &inv),
+            "a welcomed co-member must NOT be able to kill another seat's join"
+        );
+        assert!(!frame_is_from_founder("", &inv), "an unauthenticated frame may not");
+    }
 
     /// KEYSTONE (review 2026-08-01, CRITICAL) — on the loopback path the
     /// `Seal` arrived on the member's OWN reply queue, which only the founder

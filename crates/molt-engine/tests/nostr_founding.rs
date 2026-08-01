@@ -157,6 +157,19 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     .await;
     let ws_id_b = s.active_workspace.clone();
 
+    // F1 — the FIRST session must be as honest as a reopen. `net_health` is
+    // written on the open path only, so a freshly founded/joined Nostr
+    // workspace reported the serde default (Ok) and showed a green pill for
+    // its entire first session, promising a runtime that does not exist yet.
+    for (who, s) in [("founder", read_session(&a).await), ("joiner", read_session(&b).await)] {
+        assert!(
+            matches!(&s.net_health, molt_core::NetHealth::Down { reason } if reason.contains("N5")),
+            "{who}: the first session must name the missing runtime, got {:?}",
+            s.net_health
+        );
+        assert_ne!(s.notice, "detached", "{who}: pending a runtime is not 'detached'");
+    }
+
     // --- disk truth, both ends (close to release the LOCKs)
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
@@ -1046,4 +1059,143 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
         s.create.run.log
     );
     assert!(s.workspaces.is_empty(), "nothing was founded");
+}
+
+/// REGRESSION (cluster F2) — a founder's cancel must REACH the members.
+///
+/// `cmd_create_cancel` only tore the ritual down locally. Every member sat in
+/// an unbounded wait (`loop { recv(RECV_SLICE) }` with no deadline and no
+/// progress surface), so a dead founding was indistinguishable from a slow
+/// one — forever. The abort travels as a 445 group frame once the group is
+/// born, and as a gift-wrap per anchored seat before that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_founder_cancel_reaches_the_members_inside_the_born_group() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Abandoned".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    // all-joined ⇒ the group is BORN, so petra is now waiting on the 445
+    // channel rather than her gift-wrap inbox
+    wait_for(&a, "the group to be born", |s| s.create.can_propose).await;
+
+    a.execute(Command::CreateCancel).await.expect("the founder gives up");
+
+    let s = wait_for(&b, "petra to learn the founding is over", |s| {
+        s.join.run.outcome == 2
+    })
+    .await;
+    assert!(
+        s.join.run.log.iter().any(|l| l.contains("founder ended this founding")),
+        "she is told WHY, not just that it stopped: {:?}",
+        s.join.run.log
+    );
+    assert!(s.workspaces.is_empty(), "nothing materialized on her side");
+}
+
+/// REGRESSION (cluster F3) — a legitimate RETRY of the same link by the same
+/// person must keep the seat, not burn it.
+///
+/// `cmd_join_start` mints a fresh seed phrase on every start, so a retry after
+/// a transport hiccup always derives a DIFFERENT identity — which the founder
+/// read as "a second person activated this link" and refused with LinkSpent,
+/// leaving the seat anchored to the joiner's dead first identity and the
+/// founding wedged. (The backlog blamed the comparison; the comparison is
+/// correct. The bug was that no re-activation path existed at all.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // 3 seats so the group is NOT born when petra retries (birth needs every
+    // seat anchored) — that is the window a retry is resumable in
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Retry".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 3,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "two joinable links", |s| {
+        s.create.seats.len() == 2
+            && s.create
+                .seats
+                .iter()
+                .all(|x| molt_engine::FoundingInvite::parse(&x.link).is_ok())
+    })
+    .await;
+    let link0 = s.create.seats[0].link.clone();
+    let link1 = s.create.seats[1].link.clone();
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart { invite: link0.clone(), member: "petra".to_string() })
+        .await
+        .expect("first attempt");
+    wait_for(&a, "petra's seat to anchor", |s| s.create.seats[0].member == "petra").await;
+
+    // …the transport hiccups: petra abandons the stuck attempt and retries
+    // with the same link. JoinCancel + JoinStart is the real user flow (the
+    // engine refuses a second JoinStart while one is running), and the retry
+    // mints a FRESH phrase, so the founder sees a different identity_pk.
+    b.execute(Command::JoinCancel).await.expect("she gives up on the stuck attempt");
+    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string() })
+        .await
+        .expect("the retry arms");
+    let s = wait_for(&a, "the founder to accept the re-activation", |s| {
+        s.create.run.log.iter().any(|l| l.contains("re-activated"))
+    })
+    .await;
+    assert_eq!(s.create.seats[0].member, "petra", "the seat is still hers");
+    assert!(
+        !s.create.run.log.iter().any(|l| l.contains("activated a second time")),
+        "her own retry is not treated as a stranger: {:?}",
+        s.create.run.log
+    );
+
+    // and the founding still completes with her SECOND identity
+    let c = engine(&tmp.path().join("third"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::JoinStart { invite: link1, member: "carol".to_string() })
+        .await
+        .expect("carol joins");
+    wait_for(&a, "all seats", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Retry".to_string(),
+        agenda: "a hiccup must not cost the seat".to_string(),
+    })
+    .await
+    .expect("proposed");
+    wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("petra ratifies");
+    wait_for(&c, "carol to see the charter", |s| s.join.awaiting_ratify).await;
+    c.execute(Command::JoinConfirmCharter).await.expect("carol ratifies");
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
 }

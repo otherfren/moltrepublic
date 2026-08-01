@@ -202,23 +202,59 @@ Fix: distinguish "idle" from "resubscribe failed"; retry with backoff, and
 report loudly (G4) rather than returning a lie. Keystone with injected time
 across a boundary plus a refusing relay.
 
-## F. Honesty gaps — MEDIUM ×3
+## F. Honesty gaps — ✅ DONE (one sub-item deferred, named below)
 
-1. A freshly founded/joined Nostr workspace still reports `NetHealth::Ok` —
-   the honest "no runtime until N5" state is only applied on REOPEN
-   (`session.rs`), not at founding/join time (`lifecycles.rs:1334`). The
-   green pill is a lie for the whole first session.
-2. A founder-side abort (`CreateCancel`) is never told to the group, so
-   members already inside the born MLS group wait forever. This is the same
-   root as my own `F-SELF-1` note (the unbounded post-accept waits): the
-   member has no way to learn a ritual died. Fix both together — publish an
-   abort frame AND make the member's wait legible (elapsed time surfaced, so
-   "still waiting" is distinguishable from "stuck").
-3. A legitimate retry of the same invite link is misdiagnosed as a second
-   activation and permanently refused (`founding.rs:1926`) — the same-member
-   idempotency arm compares `(member, identity_pk)` but a retry after a
-   transport hiccup re-derives the same identity, so this should be the
-   idempotent path, not the `LinkSpent` path. Re-check the comparison.
+**F1 — the green pill that lied for a whole session.** `net_health` was
+written on the OPEN path only, so a freshly founded/joined Nostr workspace
+kept the serde default `Ok` and promised a runtime that does not exist until
+N5; only a REOPEN was honest. Now set in the shared `materialize_workspace`,
+from ONE shared literal (`session::NOSTR_RUNTIME_PENDING`) so the
+first-session and reopen answers cannot drift into two different promises.
+Pinned inside the main keystone, for both engines.
+
+**F2 — a founding could die in silence.** `cmd_create_cancel` only tore the
+ritual down locally; every member sat in an unbounded `loop { recv() }` with
+no deadline, unable to tell a dead founding from a slow one, forever. New
+additive wire variant `RitualMsg::Aborted { reason }`, and `abandon_ritual`
+tells the members on BOTH paths — a gift-wrap per anchored seat before group
+birth, a 445 group frame after — because a member listens on exactly one of
+them depending on how far the ritual got. Routed in at all abandon sites
+(cancel, ritual-failed, a new founding, a join).
+
+SECURITY: the 445 abort arm is gated on the MLS-authenticated author
+(`frame_is_from_founder`, shared with the Seal arm). Ungated it would be a
+one-frame kill switch any welcomed seat could pull on every other seat — the
+impersonation class fixed as CRITICAL in `63555dc`, re-entering by a new door.
+
+**F3 — the backlog's diagnosis was WRONG, and the real defect was worse.** It
+claimed a retry "re-derives the same identity" and that the `(member,
+identity_pk)` comparison was the bug. It is not: `cmd_join_start` mints a
+FRESH seed phrase on every start, so a retry genuinely presents a different
+identity and the comparison is correct. The actual defect was that no
+re-activation path existed at all — so any transport hiccup burned the seat to
+a dead identity and wedged the founding permanently.
+
+Now a same-handle retry BEFORE group birth re-anchors: the seat is cleared and
+the request falls THROUGH the full ingest ladder (PoP → MAC → canonical anchor
+→ cross-seat uniqueness → KeyPackage binding), never fast-pathed, and the
+DISPLACED anchor gets the `LinkSpent`. After birth it is refused with the true
+reason (the group formed around the first activation — cancel and re-mint),
+not the misleading "ask for your own link". An unverifiable re-activation is
+now logged instead of silently ignored.
+
+Keystones, all verified red-without: the first-session health assert;
+`a_founder_cancel_reaches_the_members_inside_the_born_group`;
+`a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat`; and the unit pin
+`only_the_founder_can_abort_a_founding`. The pre-existing carol test (a
+DIFFERENT handle stays refused) is the guard on F3's blast radius and stays
+green.
+
+**Deferred, deliberately:** the elapsed-wait surfacing (`waiting_since` on
+`JoinState` + a rewritten "still waiting — N min" line on the presence tick).
+The abort frame closes the case that mattered — a member could not tell a DEAD
+founding from a slow one. What remains is only making a genuinely slow one
+legible, and it needs the `clock_override` seam and an in-crate harness. Worth
+doing; not worth holding this change-set for.
 
 ## G. NIP-42 is inert on ritual subscriptions — MEDIUM ×2
 

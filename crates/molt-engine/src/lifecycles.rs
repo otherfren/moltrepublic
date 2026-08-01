@@ -105,6 +105,8 @@ impl State {
         checkpoint_blob: Option<molt_core::CheckpointState>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
+        // captured before `shape` is consumed into the TransportState below
+        let nostr_shape = shape.kind == Some(molt_core::TransportKind::Nostr);
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
         let rule_n = u8::try_from(roster.len()).unwrap_or(u8::MAX);
         // one place builds the `Founded` body (SealedRoster::into_genesis) so a
@@ -195,6 +197,16 @@ impl State {
             prefs,
             handle: molt_storage::start_writer(opened),
         });
+        // The FIRST session must be as honest as a reopen. `net_health` was
+        // written on the open path only, so a freshly founded or joined Nostr
+        // workspace kept the serde default (`Ok`) and showed a green pill for
+        // its whole first session — promising a runtime that does not exist
+        // until N5. Both callers emit_session(Full) after this returns.
+        if nostr_shape {
+            self.session.net_health = molt_core::NetHealth::Down {
+                reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
+            };
+        }
         Ok(id)
     }
 
@@ -693,8 +705,9 @@ impl State {
 
         // any prior ritual/mesh belongs to a different context — and so does
         // any in-flight JOIN: without this its late seal materializes a
-        // foreign republic mid-founding (see invalidate_join)
-        self.teardown_ritual();
+        // foreign republic mid-founding (see invalidate_join). Anyone waiting
+        // on the abandoned ritual is told rather than left hanging.
+        self.abandon_ritual("the founder started a new founding");
         self.ritual_attestations.clear();
         self.invalidate_join();
         let crate::founding::RitualStart { links, notes } = self
@@ -756,8 +769,9 @@ impl State {
     pub(crate) fn cmd_create_cancel(&mut self) -> Result<Reply, MoltError> {
         // abandoning voids the distributed links; the disk stays untouched
         // unless the ritual already sealed a workspace into being (then it
-        // simply stays listed, just not entered)
-        self.teardown_ritual();
+        // simply stays listed, just not entered). The members are TOLD —
+        // otherwise they sit in an unbounded wait forever.
+        self.abandon_ritual("the founder cancelled it");
         self.ritual_attestations.clear();
         self.session.create = CreateState::default();
         self.session.screen = Screen::Choice;
@@ -1045,8 +1059,9 @@ impl State {
         // and the parse error says which it was
         let inv = crate::founding::FoundingInvite::parse(&invite).map_err(MoltError::Join)?;
         // starting a join abandons any founding the user had open — its
-        // recv loops must not seal and hijack the session behind our back
-        self.teardown_ritual();
+        // recv loops must not seal and hijack the session behind our back,
+        // and whoever was waiting on it is told
+        self.abandon_ritual("the founder started a join instead");
         // the joiner's own recovery phrase (shown once during the join); its
         // identity and its own workspace derive from it
         let seed =

@@ -30,6 +30,14 @@ pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
     u32::try_from(molt_storage::workspace_size_kib(dir)).unwrap_or(u32::MAX)
 }
 
+/// The honest health reason for a Nostr workspace before the N5 relay
+/// runtime exists. ONE literal: it is set both when a workspace is
+/// materialized (first session) and when one is reopened, and the two must
+/// not drift into two different promises.
+pub(crate) const NOSTR_RUNTIME_PENDING: &str =
+    "the Nostr relay runtime is not built yet — it lands with N5; local reads/writes work \
+     and queued traffic delivers once it does";
+
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
         // leaving an in-flight founding abandons it (the session is in-memory):
@@ -876,9 +884,7 @@ impl State {
             // here. Local reads/writes work; the outbox log holds traffic
             // until the runtime exists.
             self.session.net_health = molt_core::NetHealth::Down {
-                reason: "the Nostr relay runtime is not built yet — it lands with N5; \
-                         local reads/writes work and queued traffic delivers once it does"
-                    .to_string(),
+                reason: NOSTR_RUNTIME_PENDING.to_string(),
             };
             None
         } else if transport_state.mls.is_some()

@@ -128,7 +128,7 @@ can start; but a wrong guess is expensive in exactly these five places.
 | C | The inert publish-failure seam | ✅ (this session) |
 | D | Join-task lifecycle | ✅ `9809f6f` |
 | E | `GroupSub::recv` failure handling | open |
-| F | Honesty gaps | open |
+| F | Honesty gaps | ✅ (elapsed-wait deferred) |
 | G | NIP-42 inert on ritual subscriptions | open |
 | H | Unpinned security checks | roster finding ✅ `1defd69`; coverage open |
 | I | Invite relay cap | ✅ `28456f7` |
