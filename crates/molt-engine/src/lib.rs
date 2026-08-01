@@ -1269,6 +1269,10 @@ impl State {
                 generation,
             } => self.cmd_net_join_charter_proposed(name, agenda, generation),
             Command::JoinCancel => self.cmd_join_cancel(),
+            Command::NetRitualNote { note, generation } => {
+                self.cmd_net_ritual_note(note, generation)
+            }
+            Command::NetJoinNote { note, generation } => self.cmd_net_join_note(note, generation),
             Command::NetRitualPublished {
                 what,
                 accepted,

@@ -1665,6 +1665,25 @@ impl State {
         self.join_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
     }
 
+    /// The join task reports a NON-FATAL transport condition (the joiner's
+    /// twin of `cmd_net_ritual_note`). Never fails the run; deduped against
+    /// the last line so a repeating deaf note cannot stack.
+    pub(crate) fn cmd_net_join_note(
+        &mut self,
+        note: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
+            return Ok(Reply::Ack);
+        }
+        if self.session.join.run.log.last() == Some(&note) {
+            return Ok(Reply::Ack);
+        }
+        self.session.join.run.log.push(note);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
         self.invalidate_join();
         self.session.screen = Screen::Choice;

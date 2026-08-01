@@ -241,6 +241,56 @@ impl RitualNet {
     }
 }
 
+/// First delay before a failed window-roll re-placement is retried.
+const RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// Ceiling for that backoff — loud forever, but never a spin.
+const RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// TEST SEAM — a process-global shift on the window clock, in seconds.
+///
+/// Zero in every shipping run. Deliberately NOT feature-gated: molt-net's own
+/// integration tests cannot enable a feature on their own crate, and a
+/// midnight window roll is otherwise untestable without waiting for midnight.
+/// It is process-global, so any test using it needs its OWN test binary.
+static WINDOW_CLOCK_SHIFT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Move the window clock for tests. See [`WINDOW_CLOCK_SHIFT`].
+#[doc(hidden)]
+pub fn shift_window_clock_for_tests(secs: i64) {
+    WINDOW_CLOCK_SHIFT.store(secs, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Wall-clock seconds as the h-window logic sees them.
+fn now_secs() -> u64 {
+    Timestamp::now()
+        .as_secs()
+        .saturating_add_signed(WINDOW_CLOCK_SHIFT.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// What [`GroupSub::recv`] observed.
+///
+/// `Idle` and `Deaf` used to be the same `None`, which every caller read as
+/// "nothing arrived" — so a node whose window-roll resubscribe failed went
+/// PERMANENTLY DEAF at a UTC boundary while looking perfectly healthy, and
+/// spun without backoff doing it. Advisory, never terminal: a `Deaf` and a
+/// delivered `Frame` can interleave while the stale subscription still
+/// carries legitimate traffic inside the skew margin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupRecv {
+    /// A valid 445 frame under one of our current tags.
+    Frame {
+        /// The sealed outer content.
+        content: String,
+        /// The carrier stamp both ends must agree on.
+        created_at: u64,
+    },
+    /// Nothing arrived within the budget — the honest quiet.
+    Idle,
+    /// The subscription could not be re-placed for the new window; the
+    /// channel is not being heard. Retried on a backoff.
+    Deaf(String),
+}
+
 /// The live 1059 inbox of one [`RitualNet`] endpoint: peels arriving wraps
 /// and yields typed deliveries with their proven senders.
 pub struct RitualInbox {
@@ -365,7 +415,7 @@ impl GroupChannel {
             .map_err(|e| NetError::Crypto(format!("sealing the 445 frame: {e}")))?;
         // one `now` for tag and stamp: deriving them separately could
         // straddle a window boundary and publish a stamp its tag disowns
-        let now = Timestamp::now();
+        let now = Timestamp::from_secs(now_secs());
         let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
         let h = Tag::parse(["h", tag.as_str()])
             .map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
@@ -385,9 +435,16 @@ impl GroupChannel {
     /// the current window's, plus the adjacent one's inside the §4.4 skew
     /// margin (ONE filter, both `#h` values).
     pub async fn subscribe(&self) -> Result<GroupSub, NetError> {
-        let tags = window_tags(&self.rotation_seed, Timestamp::now().as_secs());
+        let tags = window_tags(&self.rotation_seed, now_secs());
         let sub = self.subscribe_tags(&tags).await?;
-        Ok(GroupSub { sub, tags, channel: self.clone() })
+        Ok(GroupSub {
+            sub,
+            tags,
+            channel: self.clone(),
+            deaf: None,
+            retry_at: tokio::time::Instant::now(),
+            retry_backoff: RETRY_INITIAL,
+        })
     }
 
     /// Place one pooled 445 subscription over exactly `tags`.
@@ -420,6 +477,13 @@ pub struct GroupSub {
     /// compares [`window_tags`] at now against exactly this.
     tags: Vec<String>,
     channel: GroupChannel,
+    /// Why the last re-placement failed, while it is still failing. `None`
+    /// once a retry succeeds.
+    deaf: Option<String>,
+    /// Earliest next re-placement attempt — without it a failing roll retries
+    /// on every caller iteration, which is a busy-spin, not a retry.
+    retry_at: tokio::time::Instant,
+    retry_backoff: Duration,
 }
 
 // manual: the channel inside holds the secret-class rotation seed
@@ -452,28 +516,42 @@ impl GroupSub {
     /// skipped at debug, never fatal. The UTC window roll is checked
     /// between waits ([`ROLL_POLL`] slices) and triggers a resubscribe
     /// under the fresh tags before the wait continues.
-    pub async fn recv(&mut self, timeout: Duration) -> Option<(String, u64)> {
+    pub async fn recv(&mut self, timeout: Duration) -> GroupRecv {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let current =
-                window_tags(&self.channel.rotation_seed, Timestamp::now().as_secs());
-            if current != self.tags {
+            let current = window_tags(&self.channel.rotation_seed, now_secs());
+            if current != self.tags && tokio::time::Instant::now() >= self.retry_at {
                 match self.channel.subscribe_tags(&current).await {
                     Ok(sub) => {
                         // the old subscription drops here — its supervisors
                         // abort (pure inbound, the sanctioned abort)
                         self.sub = sub;
                         self.tags = current;
+                        self.deaf = None;
+                        self.retry_backoff = RETRY_INITIAL;
                     }
                     Err(e) => {
-                        tracing::debug!(error = %e, "445 window-roll resubscribe failed");
-                        return None;
+                        // Returning `None` here was the bug: every caller
+                        // reads it as "idle", so a node went permanently deaf
+                        // at a UTC boundary while looking healthy — and,
+                        // because the caller loops immediately, span the CPU
+                        // doing it. Say Deaf, and gate the next attempt.
+                        let why = e.to_string();
+                        tracing::warn!(error = %why, "445 window-roll resubscribe failed");
+                        self.deaf = Some(why.clone());
+                        self.retry_at = tokio::time::Instant::now() + self.retry_backoff;
+                        self.retry_backoff = (self.retry_backoff * 2).min(RETRY_CAP);
+                        return GroupRecv::Deaf(why);
                     }
                 }
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return None;
+                // while deaf, the budget elapsing is NOT the honest quiet
+                return match &self.deaf {
+                    Some(why) => GroupRecv::Deaf(why.clone()),
+                    None => GroupRecv::Idle,
+                };
             }
             let slice = deadline.saturating_duration_since(now).min(ROLL_POLL);
             let Some(event) = self.sub.recv(slice).await else {
@@ -483,7 +561,10 @@ impl GroupSub {
                 event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
             match envelope::parse_445_tags(&tags) {
                 Ok((h, _expiration)) if self.tags.contains(&h) => {
-                    return Some((event.content, event.created_at.as_secs()));
+                    return GroupRecv::Frame {
+                        content: event.content,
+                        created_at: event.created_at.as_secs(),
+                    };
                 }
                 Ok((h, _)) => {
                     tracing::debug!(h = %h, "skipping a 445 under a foreign h tag");

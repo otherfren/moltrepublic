@@ -1764,6 +1764,30 @@ mod ritual_ops {
         /// N4's Nostr provisioning re-emits it): fail the create run and tear
         /// the ritual down, so the wizard shows the error instead of waiting
         /// for links that will never come.
+        /// The ritual task reports a NON-FATAL transport condition.
+        ///
+        /// Never sets `outcome = 2`: a one-shot `CreatePropose` must not be
+        /// destroyed by a relay blip (it would lose every collected signature
+        /// and force a re-mint). Deduped against the last line, because a
+        /// deaf channel repeats its note on every poll.
+        pub(crate) fn cmd_net_ritual_note(
+            &mut self,
+            note: String,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if !self.ritual_generation_current(generation)
+                || self.session.create.run.outcome != 0
+            {
+                return Ok(molt_core::Reply::Ack);
+            }
+            if self.session.create.run.log.last() == Some(&note) {
+                return Ok(molt_core::Reply::Ack);
+            }
+            self.session.create.run.log.push(note);
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
         /// A publish task reported its REAL per-relay outcome.
         ///
         /// Four outcomes, three of which used to be invisible:

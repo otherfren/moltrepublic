@@ -11,7 +11,7 @@ use molt_net::dial::Dialer;
 use molt_net::envelope::{h_tag, open_outer, H_WINDOW};
 use molt_net::invite::RitualMsg;
 use molt_net::nostr_identity;
-use molt_net::ritual_net::{window_tags, GroupChannel, RitualDelivery, RitualNet};
+use molt_net::ritual_net::{window_tags, GroupChannel, GroupRecv, RitualDelivery, RitualNet};
 use molt_net::welcome::WelcomePayload;
 use nostr_relay_builder::MockRelay;
 
@@ -172,7 +172,9 @@ async fn a_445_frame_round_trips_through_the_group_channel() {
         .expect("publish the frame");
     assert_eq!(report.accepted.len(), 1, "the one relay took it: {report:?}");
 
-    let (content, created_at) = sub.recv(RECV_TIMEOUT).await.expect("the frame");
+    let GroupRecv::Frame { content, created_at } = sub.recv(RECV_TIMEOUT).await else {
+        panic!("expected the frame");
+    };
     assert_eq!(created_at, stamp, "one carrier stamp on both ends");
     assert_eq!(
         open_outer(&[[9u8; 32]], &content).expect("the exporter opens it"),
@@ -198,7 +200,7 @@ async fn a_frame_under_a_foreign_seed_is_not_delivered() {
         .await
         .expect("their publish succeeds");
     assert!(
-        sub.recv(Duration::from_secs(2)).await.is_none(),
+        matches!(sub.recv(Duration::from_secs(2)).await, GroupRecv::Idle),
         "a foreign-seed frame must not be delivered"
     );
 }
@@ -317,7 +319,10 @@ async fn ritual_endpoints_sync_and_deliver_on_an_auth_required_relay() {
         "the group channel must replay on an auth-required relay"
     );
     chan.publish_frame(&[7u8; 32], b"authed frame").await.expect("frame publishes");
-    assert!(sub.recv(RECV_TIMEOUT).await.is_some(), "the frame is delivered");
+    assert!(
+        matches!(sub.recv(RECV_TIMEOUT).await, GroupRecv::Frame { .. }),
+        "the frame is delivered"
+    );
 }
 
 /// Cluster G, the OTHER direction — the publish path must stay

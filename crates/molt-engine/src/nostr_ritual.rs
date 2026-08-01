@@ -495,9 +495,39 @@ pub(crate) fn spawn_founder_group_recv(
             .await;
             return;
         }
+        let mut was_deaf = false;
         loop {
-            let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
-                continue;
+            let (content, created_at) = match sub.recv(RECV_SLICE).await {
+                molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+                    if was_deaf {
+                        was_deaf = false;
+                        let _ = send_cmd(
+                            &tx,
+                            Command::NetRitualNote {
+                                note: "✓ the group channel is back".to_string(),
+                                generation: Some(generation),
+                            },
+                        )
+                        .await;
+                    }
+                    (content, created_at)
+                }
+                molt_net::ritual_net::GroupRecv::Idle => continue,
+                // loud, never fatal: a one-shot founding must survive a blip
+                molt_net::ritual_net::GroupRecv::Deaf(why) => {
+                    was_deaf = true;
+                    let _ = send_cmd(
+                        &tx,
+                        Command::NetRitualNote {
+                            note: format!(
+                                "⚠ cannot hear the group channel — {why} · still retrying"
+                            ),
+                            generation: Some(generation),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
             };
             let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
                 continue;
@@ -710,12 +740,40 @@ async fn member_join(
         );
     }
 
+    let mut was_deaf = false;
     // Seal wait: the founder's charter proposal as a 445 in the born group.
     // verify_seal_proposal is THE ladder (content-derived id, our 3-anchor
     // seat, every seat's anchor) — sign-what-you-see, unchanged.
     let (proposal, table) = loop {
-        let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
-            continue;
+        let (content, created_at) = match sub.recv(RECV_SLICE).await {
+            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+                if was_deaf {
+                    was_deaf = false;
+                    let _ = send_cmd(
+                        tx,
+                        Command::NetJoinNote {
+                            note: "✓ the group channel is back".to_string(),
+                            generation,
+                        },
+                    )
+                    .await;
+                }
+                (content, created_at)
+            }
+            molt_net::ritual_net::GroupRecv::Idle => continue,
+            // loud, never fatal — the join keeps waiting, visibly
+            molt_net::ritual_net::GroupRecv::Deaf(why) => {
+                was_deaf = true;
+                let _ = send_cmd(
+                    tx,
+                    Command::NetJoinNote {
+                        note: format!("⚠ cannot hear the group channel — {why} · still retrying"),
+                        generation,
+                    },
+                )
+                .await;
+                continue;
+            }
         };
         let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;
@@ -779,11 +837,39 @@ async fn member_join(
         .await
         .map_err(|e| format!("seal signature did not publish: {e}"))?;
 
+    let mut was_deaf = false;
     // Genesis wait: the sealed roster as a 445. Sign-what-you-see closes
     // HERE — the distributed table must byte-equal the ratified one.
     let sealed_final = loop {
-        let Some((content, created_at)) = sub.recv(RECV_SLICE).await else {
-            continue;
+        let (content, created_at) = match sub.recv(RECV_SLICE).await {
+            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+                if was_deaf {
+                    was_deaf = false;
+                    let _ = send_cmd(
+                        tx,
+                        Command::NetJoinNote {
+                            note: "✓ the group channel is back".to_string(),
+                            generation,
+                        },
+                    )
+                    .await;
+                }
+                (content, created_at)
+            }
+            molt_net::ritual_net::GroupRecv::Idle => continue,
+            // loud, never fatal — the join keeps waiting, visibly
+            molt_net::ritual_net::GroupRecv::Deaf(why) => {
+                was_deaf = true;
+                let _ = send_cmd(
+                    tx,
+                    Command::NetJoinNote {
+                        note: format!("⚠ cannot hear the group channel — {why} · still retrying"),
+                        generation,
+                    },
+                )
+                .await;
+                continue;
+            }
         };
         let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
             continue;

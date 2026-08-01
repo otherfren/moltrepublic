@@ -3601,6 +3601,28 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The founder's own ritual task reporting a NON-FATAL transport
+    /// condition (engine-internal) — e.g. the group channel cannot be heard
+    /// after a window roll. Appends to the founding log and never fails the
+    /// run: a one-shot `CreatePropose` must not die on a relay blip. Never a
+    /// tool — an MCP agent must not be able to write lines into a founding
+    /// log.
+    NetRitualNote {
+        /// The line to append, already worded by the task.
+        note: String,
+        /// Ritual incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The joiner's twin of [`Command::NetRitualNote`], scoped to the join
+    /// wizard's run log. Never a tool, same reason.
+    NetJoinNote {
+        /// The line to append.
+        note: String,
+        /// Join incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// A ritual publish task reporting its REAL per-relay outcome
     /// (engine-internal). Sent for every outcome — clean, partial and total
     /// failure — so "landed on 1 of 5 relays" and "landed nowhere" stop being

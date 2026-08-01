@@ -191,16 +191,42 @@ Keystones `founding_invalidates_an_in_flight_join` /
 over an in-process relay) and then feed the abandoned task's own
 `NetJoinSealed`; both verified red-without / green-with.
 
-## E. `GroupSub::recv` failure handling — MEDIUM ×3
+## E. `GroupSub::recv` failure handling — ✅ DONE
 
-On a failed window-roll resubscribe the receiver returns `None` — which every
-caller reads as "idle tick" — so a node goes **permanently deaf** at a UTC
-midnight boundary while looking healthy, and the caller loops without backoff
-(busy-spin).
+On a failed window-roll resubscribe `recv` returned `None` — which every
+caller reads as "idle tick". A node therefore went **permanently deaf at a UTC
+midnight boundary while looking perfectly healthy**, and because the caller
+loops straight back it burned CPU doing it.
 
-Fix: distinguish "idle" from "resubscribe failed"; retry with backoff, and
-report loudly (G4) rather than returning a lie. Keystone with injected time
-across a boundary plus a refusing relay.
+`GroupRecv { Frame, Idle, Deaf(reason) }` separates the honest quiet from the
+lie. The re-placement is now backoff-gated (1 s, ×2, cap 30 s) instead of
+retried on every caller iteration, and while deaf the stale subscription keeps
+being read — inside the ±1 h skew margin the previous window's tag is still
+legitimate traffic, so `Deaf` and a delivered `Frame` can interleave. Deaf is
+advisory, never terminal.
+
+**Decided: loud forever, never fatal.** `CreatePropose` is one-shot, so a
+founding aborted on a transient relay blip would lose every collected
+signature and force a re-mint. (This is the same question cluster G answers
+the other way at PLACEMENT time, where nothing has started yet and refusing is
+cheap — the two rules are deliberate, not inconsistent.)
+
+Two engine-internal commands carry it to the surfaces, `NetRitualNote` and
+`NetJoinNote`, both deduped against the last line so a note repeating every
+poll cannot stack, and neither ever sets `outcome = 2`. A `✓ the group channel
+is back` line closes the spell.
+
+**The anti-inertness guard is the point.** The compiler forces every caller to
+handle the new variant, but it cannot stop `Deaf(_) => continue` — which would
+restore the exact silence. Verified: making that edit compiles cleanly and the
+engine keystone fails on it.
+
+Keystones: `nostr_window_roll.rs` in BOTH crates (own test binaries — the
+window-clock seam is process-global). The molt-net one pins all three
+properties against a cuttable proxy (deaf not idle · ≤12 connection attempts
+in 6 s · heals); the molt-engine one drives a real founding+join and pins that
+both wizards SEE it, that neither run dies, and that the founding still
+completes afterwards.
 
 ## F. Honesty gaps — ✅ DONE (one sub-item deferred, named below)
 

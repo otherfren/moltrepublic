@@ -127,7 +127,7 @@ can start; but a wrong guess is expensive in exactly these five places.
 | B | Joiner's relay gate + diagnosis | ✅ `88dd854` |
 | C | The inert publish-failure seam | ✅ (this session) |
 | D | Join-task lifecycle | ✅ `9809f6f` |
-| E | `GroupSub::recv` failure handling | open |
+| E | `GroupSub::recv` failure handling | ✅ (this session) |
 | F | Honesty gaps | ✅ (elapsed-wait deferred) |
 | G | NIP-42 inert on ritual subscriptions | ✅ (this session) |
 | H | Unpinned security checks | roster finding ✅ `1defd69`; coverage open |
