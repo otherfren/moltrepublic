@@ -610,6 +610,7 @@ impl State {
     /// the teardown. A no-op on loopback and on a ritual that never started.
     pub(crate) fn abandon_ritual(&mut self, reason: &str) {
         if let Some(ritual) = &self.net_ritual {
+            let gen = ritual.generation();
             if let Some(nostr) = &ritual.nostr {
                 let msg = invite::RitualMsg::Aborted { reason: reason.to_string() };
                 // pre-birth: every seat that anchored an identity is waiting
@@ -633,7 +634,11 @@ impl State {
                         "abort",
                         crate::nostr_ritual::RetryPolicy::PRE_SEAL,
                         tx.downgrade(),
-                        None,
+                        // its OWN generation, never None: `None` means
+                        // "current in every incarnation", so a failed
+                        // farewell would fail whatever founding is running
+                        // ~30 s later
+                        Some(gen),
                     );
                 }
             }
@@ -912,6 +917,22 @@ impl FoundingInvite {
 /// `sealed_roster_from_blob` documents it must not be routed here).
 fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
+    // HANDLES must be unique too, not just transport anchors. The chain layer
+    // ALREADY assumes it — `valid_signers` resolves a signature by
+    // `identities.find(|i| i.member == att.member)` and counts a
+    // `BTreeSet<String>` of NAMES — so a republic with two seats called
+    // `walter` can never count both as distinct signers and is permanently
+    // ungovernable once m exceeds the number of distinct handles. It is also
+    // what every "is this the founder?" comparison rests on.
+    let mut names = std::collections::BTreeSet::new();
+    for id in identities {
+        if !names.insert(id.member.as_str()) {
+            return Err(format!(
+                "two seats share the handle {} — every seat must be distinguishable",
+                id.member
+            ));
+        }
+    }
     for id in identities {
         let canonical = molt_net::canonical_nostr_pk(&id.nostr_pk)
             .map_err(|e| format!("seat {} carries an invalid nostr anchor: {e}", id.member))?;
@@ -1824,12 +1845,19 @@ mod ritual_ops {
                     self.emit_session(molt_core::SessionScope::Full);
                     return Ok(molt_core::Reply::Ack);
                 }
-                if !self.ritual_generation_current(generation) {
+                // `None` means "belongs to no ritual" — it must never be
+                // read as "belongs to the current one" and fail a run that
+                // has nothing to do with it (that is what the abort leg did).
+                let Some(g) = generation else {
+                    tracing::error!(what, %detail, "an ungenerationed ritual leg reached no relay");
+                    return Ok(molt_core::Reply::Ack);
+                };
+                if !self.ritual_generation_current(Some(g)) {
                     return Ok(molt_core::Reply::Ack);
                 }
                 return self.cmd_net_ritual_failed(
                     format!("{what} did not publish: {detail}"),
-                    generation,
+                    Some(g),
                 );
             }
             if !failed.is_empty() {
@@ -2163,6 +2191,9 @@ mod ritual_ops {
                     })
                 });
             let mut re_anchoring = false;
+            // the anchor being replaced — told only once the replacement has
+            // actually passed every check
+            let mut displaced: Option<String> = None;
             if let Some((anchored_member, anchored_pk, anchored_npk, ticket, seat_sealed)) = spent {
                 let same = anchored_member == member && anchored_pk == identity_pk;
                 let mac_ok =
@@ -2184,36 +2215,18 @@ mod ritual_ops {
                 // that there was no re-activation path at all, so any hiccup
                 // burned the seat to a dead identity and wedged the founding.)
                 if !same && mac_ok && anchored_member == member && !seat_sealed && !group_born {
-                    if let Some(seat_mut) =
-                        self.net_ritual.as_mut().and_then(|r| r.seats.get_mut(idx))
-                    {
-                        seat_mut.identity = None;
-                        seat_mut.key_package = None;
-                        seat_mut.reply_snd = None;
-                        seat_mut.reply_wrap = None;
-                    }
-                    // the DISPLACED anchor is told, not the new one
-                    if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
-                        if let Ok(target) = molt_net::canonical_nostr_pk(&anchored_npk) {
-                            let net = nostr.net.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = net
-                                    .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
-                                    .await
-                                {
-                                    tracing::warn!(error = %e, "displaced-anchor notice did not publish");
-                                }
-                            });
-                        }
-                    }
-                    self.session.create.run.log.push(format!(
-                        "· invite {} re-activated by {member} — the earlier attempt is replaced",
-                        idx + 1
-                    ));
-                    // fall THROUGH into the full ingest ladder below (PoP →
-                    // MAC → canonical anchor → uniqueness → KeyPackage
-                    // binding): a shortcut that wrote the new anchor here
-                    // would be an unauthenticated seat write
+                    // STAGE, do not destroy. The first version cleared the
+                    // seat HERE and only then ran the ladder — so a request
+                    // that failed PoP (any ticket holder can mint a valid MAC
+                    // over a nostr_pk they do not hold) evicted the honest
+                    // member and left the seat empty, after which `all_joined`
+                    // could never become true again.
+                    //
+                    // Nothing needs clearing: the write at the end of the
+                    // ladder overwrites identity, key_package and the reply
+                    // handover wholesale. The early clear's only effect was
+                    // to make FAILURE destructive.
+                    displaced = Some(anchored_npk);
                     re_anchoring = true;
                 } else if !same && !mac_ok {
                     // previously silent: an unverifiable re-activation looked
@@ -2347,11 +2360,40 @@ mod ritual_ops {
             // either a broken client or a correlation attack (and would make
             // the future npk→member mapping non-injective) — reject it. The
             // founder's own anchor counts too.
-            let duplicate = ritual.founder.nostr_pk == nostr_pk
+            // …and the HANDLE, for the same reason plus a sharper one: every
+            // "is this the founder?" check on the 445 channel
+            // (`frame_is_from_founder`, `check_proposal_provenance`) is a
+            // string compare against a handle printed in the invite link. A
+            // joiner who simply TYPES the founder's handle would otherwise be
+            // welcomed into the group with a leaf credential that satisfies
+            // every one of those gates — able to abort every other seat's
+            // join, or propose a charter as the founder. OpenMLS does not
+            // help: it enforces uniqueness of signature/encryption/init keys,
+            // never of credential identities.
+            let handle_taken = ritual.founder.member == member
                 || ritual
                     .seats
                     .iter()
-                    .any(|other| other.identity.as_ref().is_some_and(|i| i.nostr_pk == nostr_pk));
+                    .enumerate()
+                    .any(|(i, other)| {
+                        i != idx && other.identity.as_ref().is_some_and(|x| x.member == member)
+                    });
+            if handle_taken {
+                tracing::warn!(seat, %member, "founding join rejected: handle already taken");
+                self.session.create.run.log.push(format!(
+                    "✗ invite {}: the name {member} is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)",
+                    idx + 1
+                ));
+                self.emit_session(molt_core::SessionScope::Create);
+                return Ok(molt_core::Reply::Ack);
+            }
+            let duplicate = ritual.founder.nostr_pk == nostr_pk
+                || ritual.seats.iter().enumerate().any(|(i, other)| {
+                    // a re-activation must not collide with the very anchor
+                    // it is replacing
+                    !(re_anchoring && i == idx)
+                        && other.identity.as_ref().is_some_and(|x| x.nostr_pk == nostr_pk)
+                });
             if duplicate {
                 tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
                 self.session.create.run.log.push(format!(
@@ -2430,6 +2472,27 @@ mod ritual_ops {
             if let Some(view) = self.session.create.seats.get_mut(idx) {
                 view.member = member.clone();
                 view.state = 1;
+            }
+            // the replacement is COMMITTED — only now is the displaced anchor
+            // told, and only now is the re-activation announced
+            if let Some(old_npk) = displaced {
+                if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
+                    if let Ok(target) = molt_net::canonical_nostr_pk(&old_npk) {
+                        let net = nostr.net.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = net
+                                .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat })
+                                .await
+                            {
+                                tracing::warn!(error = %e, "displaced-anchor notice did not publish");
+                            }
+                        });
+                    }
+                }
+                self.session.create.run.log.push(format!(
+                    "· invite {} re-activated by {member} — the earlier attempt is replaced",
+                    idx + 1
+                ));
             }
             self.session
                 .create

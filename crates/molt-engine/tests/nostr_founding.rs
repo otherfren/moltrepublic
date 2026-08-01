@@ -1260,3 +1260,160 @@ async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
         "no joinable link may be published over an inbox nothing replayed"
     );
 }
+
+/// SECURITY (adversarial swoop, 2026-08-01) — a joiner may NOT take the
+/// founder's handle.
+///
+/// Every "is this the founder?" gate on the 445 channel is a string compare
+/// against `info.inviter` — a handle printed in every invite link. The MLS
+/// leaf credential is whatever the joiner typed, `key_package_binding` only
+/// requires it to equal the CLAIMED member (satisfied by construction), and
+/// OpenMLS enforces uniqueness of signature/encryption/init keys but never of
+/// credential identities. So a legitimate invitee who simply types the
+/// founder's name was welcomed into the group with a credential that
+/// satisfies `frame_is_from_founder` — able to end every other seat's join
+/// with one `Aborted` frame, or propose a charter as the founder.
+///
+/// The chain layer independently ASSUMES handle uniqueness (`valid_signers`
+/// counts a set of NAMES), so duplicates also make a republic ungovernable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joiner_may_not_claim_the_founders_handle() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Impersonation".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    // the invitee types the founder's handle, which the link tells them
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "walter".to_string(),
+    })
+    .await
+    .expect("the wizard arms");
+
+    let s = wait_for(&a, "the founder to refuse the taken handle", |s| {
+        s.create.run.log.iter().any(|l| l.contains("already taken"))
+    })
+    .await;
+    assert!(
+        s.create.seats[0].member.is_empty(),
+        "the seat must NOT anchor an impersonator: {:?}",
+        s.create.seats[0].member
+    );
+    assert!(!s.create.can_propose, "…and the founding must not proceed on it");
+}
+
+/// SECURITY (adversarial swoop, 2026-08-01) — a re-activation that FAILS must
+/// not destroy the seat it tried to replace.
+///
+/// The first version of the F3 re-anchor cleared the seat's identity, key
+/// package and reply handover BEFORE running the ingest ladder. Since
+/// `verify_join_mac` is a pure HMAC over the ticket, any holder of a leaked
+/// link can mint a request that passes the MAC while failing
+/// proof-of-possession — and that failure left the seat EMPTY, evicting the
+/// honest member and making `all_joined` unreachable forever.
+///
+/// Stage-then-commit: nothing is touched until every check has passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Eviction".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 3,
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "two joinable links", |s| {
+        s.create.seats.len() == 2
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link0 = s.create.seats[0].link.clone();
+    let inv = molt_engine::FoundingInvite::parse(&link0).expect("parse");
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string() })
+        .await
+        .expect("petra joins");
+    let s = wait_for(&a, "petra's seat to anchor", |s| s.create.seats[0].member == "petra").await;
+    let honest_anchor = s.create.seats[0].member.clone();
+
+    // an attacker with the leaked link mints a MAC-valid request under
+    // petra's handle but claims a transport key it does not hold — the
+    // gift-wrap's proven sealer will not match, so PoP must refuse it
+    let (_evil_sk, evil_npk) = molt_net::nostr_identity(b"evil-entropy", "evil");
+    let (attacker_sk, _) = molt_net::nostr_identity(b"attacker-entropy", "atk");
+    let attacker = molt_net::ritual_net::RitualNet::new(
+        molt_net::dial::Dialer::resolve("none", "local", 0).expect("dialer"),
+        vec![url.clone()],
+        &attacker_sk,
+    )
+    .expect("attacker endpoint");
+    let (_, evil_idpk) = molt_storage::derive_identity_key(&[42u8; 32], "petra");
+    let mac = molt_net::invite::join_mac(&inv.handover.ticket, "petra", &evil_idpk, &evil_npk);
+    attacker
+        .send_ritual(
+            &inv.handover.npub,
+            &molt_net::invite::RitualMsg::Join(molt_net::invite::JoinRequest {
+                seat: 0,
+                name: "petra".to_string(),
+                identity_pk: evil_idpk,
+                nostr_pk: evil_npk,
+                mac,
+                reply: None,
+                key_package: String::new(),
+            }),
+        )
+        .await
+        .expect("the hostile request publishes");
+
+    // give the founder time to process and refuse it
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // The session VIEW keeps the old name even when the ritual seat is
+    // cleared, so asserting on it proves nothing. The observable damage is
+    // that an emptied seat can never complete the founding: `all_joined`
+    // counts ANCHORED seats, so `can_propose` never flips once one is lost.
+    let c = engine(&tmp.path().join("third"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::JoinStart {
+        invite: s.create.seats[1].link.clone(),
+        member: "carol".to_string(),
+    })
+    .await
+    .expect("carol joins");
+    let s = wait_for(&a, "all seats anchored despite the hostile attempt", |s| {
+        s.create.can_propose
+    })
+    .await;
+    assert_eq!(
+        s.create.seats[0].member, honest_anchor,
+        "…and the seat is still the honest member's: {:?}",
+        s.create.run.log
+    );
+}

@@ -2660,9 +2660,9 @@ fn log_tones(log: &[String]) -> ModelRc<i32> {
 /// knowing which half failed.
 fn genesis_undelivered_copy(lang: i32) -> &'static str {
     if lang == 1 {
-        "Die Republik wurde hier gegründet, aber der Genesis-Block erreichte kein Relay —          die anderen Mitglieder wissen nichts davon."
+        "Die Republik wurde hier gegründet, aber der Genesis-Block erreichte kein Relay — die anderen Mitglieder wissen nichts davon."
     } else {
-        "The republic was founded here, but the genesis reached no relay — the other          members have not been told."
+        "The republic was founded here, but the genesis reached no relay — the other members have not been told."
     }
 }
 

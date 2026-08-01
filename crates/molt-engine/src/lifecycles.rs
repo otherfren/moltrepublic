@@ -1411,7 +1411,7 @@ impl State {
         // the ritual teardown an in-flight FOUNDING can still seal into the
         // recovery session via maybe_finalize (the symmetric hole).
         self.invalidate_join();
-        self.teardown_ritual();
+        self.abandon_ritual("the founder started a recovery instead");
         self.ritual_attestations.clear();
         // a restarted recovery supersedes the one in flight — bump the
         // incarnation so the stale task's late result is dropped

@@ -49,7 +49,7 @@ impl State {
         if screen != Screen::Create
             && (self.net_ritual.is_some() || self.founder_mesh_in.is_some())
         {
-            self.teardown_ritual();
+            self.abandon_ritual("the founder navigated away");
             self.ritual_attestations.clear();
             self.session.create = molt_core::CreateState::default();
         }
