@@ -6,6 +6,12 @@ per-finding refutation; round 2: inert-keystone hunt, loopback differential,
 malicious-relay model, regression sweep + a 3-lens judge panel). 25 + 16 raw
 findings, **21 + 14 survived** refutation, with heavy overlap.
 
+**Companion:** `nostr_n4a_followup_plans.md` carries the per-cluster
+EXECUTION plans — verified anchors, the red test to write first, ordered
+steps, risks — plus the file-conflict matrix, the two-session ownership split,
+and the five open decisions that must be made before the affected cluster
+starts. This document says what is broken; that one says how to fix it.
+
 This document is the execution plan for the survivors, clustered by root
 cause — several findings are the same defect seen from different angles, and
 fixing the cause once closes all of them. Work top-down: the order is by
