@@ -610,9 +610,14 @@ impl State {
             slot.take(); // drop removes the staging dir
         }
         tracing::warn!(error = %error, "restore failed");
+        let headline = crate::relay_msg::restore_headline_for(&error);
         let r = &mut self.session.restore.run;
         r.outcome = 2;
         r.log.push(format!("✗ restore failed: {error}"));
+        // the few words the operator READS; the sentence above keeps the
+        // detail. Unrecognised failures leave it empty on purpose — the
+        // surface then shows its generic failed-title rather than a guess.
+        r.headline = headline;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -815,6 +820,7 @@ impl State {
             }
             Err(e) => {
                 self.session.create.run.outcome = 2;
+                self.session.create.run.headline = crate::relay_msg::headline_for(&e.to_string());
                 self.session
                     .create
                     .run
@@ -1638,6 +1644,9 @@ impl State {
         self.session.join.awaiting_ratify = false;
         self.join_confirm = None;
         self.session.join.run.log.push(format!("✗ join failed: {error}"));
+        // the headline is what the operator READS: a few words, large, in the
+        // signal colour. The sentence above stays in the log for the detail.
+        self.session.join.run.headline = crate::relay_msg::headline_for(&error);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

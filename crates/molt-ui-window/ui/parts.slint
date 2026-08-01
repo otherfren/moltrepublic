@@ -1498,6 +1498,10 @@ export component RunView inherits VerticalLayout {
     in property <string> ph2;
     in property <string> ph3;
     in property <string> failed-label;
+    // the ONE thing that went wrong, in a few words — rendered large and in
+    // the signal colour. The log below keeps the detail; a failure an
+    // operator must act on cannot live at the end of a small technical line.
+    in property <string> headline;
     in property <[string]> log;
     // per-line tone (0 neutral, 1 good, 2 bad), computed Rust-side from the
     // ✓/✗ prefix; an empty model keeps every line neutral
@@ -1535,10 +1539,22 @@ export component RunView inherits VerticalLayout {
                     background: root.outcome == 2 ? Theme.bad : Theme.accent;
                 }
             }
+            if root.outcome == 2 && root.headline != "": Text {
+                text: root.headline;
+                color: Theme.bad;
+                font-size: Theme.fs-h1;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
             HorizontalLayout {
                 spacing: 8px;
                 Text {
-                    text: root.outcome == 2 ? root.failed-label
+                    // the headline already named the cause — repeating a
+                    // generic "failed" under it is the second statement the
+                    // eye has to reconcile, and for a relay-gate refusal the
+                    // old label ("invite rejected") contradicted it outright
+                    text: root.outcome == 2
+                        ? (root.headline == "" ? root.failed-label : "")
                         : (root.progress < 0.3 ? root.ph1 : (root.progress < 0.75 ? root.ph2 : root.ph3));
                     color: root.outcome == 2 ? Theme.bad : Theme.dim;
                     font-size: Theme.fs-cap;

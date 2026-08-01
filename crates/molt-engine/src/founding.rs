@@ -1875,7 +1875,7 @@ mod ritual_ops {
                     if let Err(e) = self.post_message_with_kind(
                         String::new(),
                         format!(
-                            "⚠ the founding genesis reached no relay ({detail}). The other                              members were never told this republic exists; they cannot join                              until it is published."
+                            "⚠ genesis reached no relay ({detail}) — nobody can join until it is published"
                         ),
                         None,
                         molt_core::ChannelRef::Group,
@@ -1928,6 +1928,7 @@ mod ritual_ops {
                 return Ok(molt_core::Reply::Ack);
             }
             self.session.create.run.outcome = 2;
+            self.session.create.run.headline = crate::relay_msg::headline_for(&error);
             self.session
                 .create
                 .run

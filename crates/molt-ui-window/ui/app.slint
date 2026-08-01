@@ -874,6 +874,10 @@ export component AppWindow inherits Window {
     // per-line ✓/✗ tones for the three run logs (see cw-log-tone)
     in property <[int]> rw-log-tone;
     in property <[int]> jw-log-tone;
+    // the ONE thing that went wrong, a few words, rendered large + signal
+    in property <string> rw-headline;
+    in property <string> jw-headline;
+    in property <string> cw-headline;
     callback copy-log(string);
     // (theme changes are routed via the Theme.picked global callback, bound in Rust)
 
@@ -2269,12 +2273,17 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
                             spacing: 6px;
+                            // The ONE thing that went wrong, large and in the
+                            // signal colour. The generic "founding failed"
+                            // title says nothing an operator can act on, so
+                            // the headline REPLACES it when there is one.
                             Text {
                                 text: root.cw-declined
-                                    ? "⚠ \{Strings.cw-declined-title}"
-                                    : "⚠ \{Strings.cw-failed-title}";
+                                    ? Strings.cw-declined-title
+                                    : (root.cw-headline != "" ? root.cw-headline
+                                        : Strings.cw-failed-title);
                                 color: Theme.bad;
-                                font-size: Theme.fs-body;
+                                font-size: Theme.fs-h1;
                                 font-weight: 700;
                                 wrap: word-wrap;
                             }
@@ -3405,6 +3414,7 @@ export component AppWindow inherits Window {
                         ph3: Strings.jw-ph3;
                         failed-label: Strings.jw-failed;
                         log: root.jw-log;
+                        headline: root.jw-headline;
                         tones: root.jw-log-tone;
                         back-shown: false;
                         // the engine enters the republic on its own once the
@@ -3731,6 +3741,7 @@ export component AppWindow inherits Window {
                     ph3: Strings.rw-ph3;
                     failed-label: Strings.rw-failed;
                     log: root.rw-log;
+                    headline: root.rw-headline;
                     tones: root.rw-log-tone;
                     back-enabled: root.rw-outcome == 2;
                     finish-enabled: root.rw-outcome == 1;

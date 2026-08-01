@@ -2566,6 +2566,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
     sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
     ui.set_rw_log_tone(log_tones(&sv.restore.run.log));
+    ui.set_rw_headline(sv.restore.run.headline.clone().into());
 
     // founding ritual; the run header is composed here so an MCP-started
     // founding shows real values even with an empty local form
@@ -2582,6 +2583,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
     ui.set_cw_log_tone(log_tones(&sv.create.run.log));
+    ui.set_cw_headline(sv.create.run.headline.clone().into());
     // a declined seat switches the failure banner to "the founding is over"
     ui.set_cw_declined(sv.create.seats.iter().any(|s| s.state == 3));
     // the ritual member list: founder (always sealed) plus one row per seat
@@ -2637,6 +2639,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
     ui.set_jw_log_tone(log_tones(&sv.join.run.log));
+    ui.set_jw_headline(sv.join.run.headline.clone().into());
 }
 
 /// Per-line tone of a run log (0 neutral, 1 good, 2 bad) from the ✓/✗
@@ -5282,7 +5285,7 @@ lexicon! {
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";
     cw_provisioning: "Preparing the invite link…", "Invite-Link wird vorbereitet…";
     cw_failed_title: "The founding cannot continue", "Die Gründung kann nicht fortgesetzt werden";
-    cw_failed_hint: "The founding cannot continue. The reason is shown below — close this ritual and begin it again once it is resolved.", "Die Gründung kann nicht fortgesetzt werden. Der Grund steht unten — schließe dieses Ritual und beginne es neu, sobald er behoben ist.";
+    cw_failed_hint: "Close and found anew once it is resolved.", "Schließen und neu gründen, sobald es behoben ist.";
     // the button jumps to the anonymity tab (set-tab = 3) — it must not
     // promise the relay settings that now live one tab further
     cw_open_net_settings: "Open anonymity settings", "Anonymitäts-Einstellungen öffnen";
@@ -5298,7 +5301,7 @@ lexicon! {
     cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
     cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
-    cw_declined_hint: "A member declined the charter. This ritual cannot continue — close it and found the republic anew.", "Ein Mitglied hat die Satzung abgelehnt. Dieses Ritual kann nicht fortgesetzt werden — schließe es und gründe die Republik neu.";
+    cw_declined_hint: "A member declined the charter — close and found anew.", "Ein Mitglied hat die Satzung abgelehnt — schließen und neu gründen.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
@@ -5426,7 +5429,10 @@ lexicon! {
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
     jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
-    jw_failed: "Failed — invite rejected", "Fehlgeschlagen — Einladung abgelehnt";
+    // no cause here: the headline above carries it, and "invite rejected" was
+    // wrong for the commonest refusal of all — the relay gate, which turns the
+    // join away before anything is sent
+    jw_failed: "Failed", "Fehlgeschlagen";
     om_recover_link: "Recovery link", "Recovery-Link";
     rlk_title: "Recovery link", "Recovery-Link";
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";

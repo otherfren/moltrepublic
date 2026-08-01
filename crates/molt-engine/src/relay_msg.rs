@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Operator-facing sentences for the relay gate.
+//! Operator-facing sentences for the relay gate, and the short run-failure
+//! headlines rendered above them.
+//!
+//! The headlines ([`headline_for`], [`restore_headline_for`]) live here rather
+//! than in their own module because their arms are pinned, in this module's
+//! tests, against the very functions below that PRODUCE the sentences they
+//! classify — the two must be read and changed together. A reworded
+//! `pool_gap_reason` that silently kills a headline arm is the exact defect
+//! that separation invited once already.
 //!
 //! `molt_core::relay` decides WHETHER a relay can be dialed and WHY NOT; this
 //! module is the only place that turns those verdicts into words. The split
@@ -98,6 +106,142 @@ pub(crate) fn join_relay_refusal(
     JoinRelayRefusal { detail, headline }
 }
 
+/// The failure in a FEW WORDS — what gets rendered large and in the signal
+/// colour above the run log.
+///
+/// The full sentence stays in the log. This is deliberately not a summary of
+/// it: a headline that tries to carry the detail is just the wall of text
+/// again, one line higher up. Name the missing thing, stop.
+///
+/// Two rules make this safe to derive from a rendered sentence:
+///
+/// 1. **An unrecognised failure gets NO headline** (empty), never a guessed
+///    cause. The surface then shows its generic failed-title, which is
+///    merely uninformative — whereas a guessed cause is WRONG, and sends the
+///    operator to fix something that was never broken.
+/// 2. **Every arm matches a phrase this codebase actually emits**, anchored
+///    and distinctive — never a short fragment. `contains("tor")` matched
+///    "res**tor**e", "s**tor**age" and "his**tor**y", so every restore
+///    failure would have been reported, large and red, as a Tor problem.
+///    The URL-host-parser lesson in `CLAUDE.md` is the same shape: a
+///    substring test that disagrees with the real vocabulary IS the defect.
+///
+/// The companion test drives the arms from the producing functions
+/// (`pool_gap_reason`, `join_relay_refusal`) rather than from re-typed
+/// sentences, so a reworded message breaks the test instead of silently
+/// killing an arm.
+pub(crate) fn headline_for(error: &str) -> String {
+    let e = error.to_ascii_lowercase();
+    // the leg's OWN anchored phrases decide first; the network vocabulary is
+    // the fallback. That order is load-bearing, not cosmetic — see
+    // [`network_headline`].
+    ritual_headline(&e)
+        .or_else(|| network_headline(&e))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The same, for the RESTORE leg (`fail_restore` / `restore_task`).
+///
+/// A separate vocabulary, not a few more arms on [`headline_for`]: the two
+/// legs share sentences that do NOT mean the same thing. `"crypto: …"` is a
+/// wrong passphrase when a backup is being decrypted and a storage fault when
+/// a founding is being written — one classifier serving both would announce
+/// "Cannot decrypt the backup" over a failed founding. Scoping the arms to the
+/// leg that emits them makes that class of mistake unrepresentable instead of
+/// merely untested.
+pub(crate) fn restore_headline_for(error: &str) -> String {
+    let e = error.to_ascii_lowercase();
+    restore_only_headline(&e)
+        .or_else(|| network_headline(&e))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Faults that mean the same thing on every leg: the dialer and the relay
+/// gate. Ordered most-specific first — several contain "relay", and the
+/// clearnet switch is the one cause an operator cannot deduce from their own
+/// settings, so it outranks the generic "no dialable relay" it travels inside.
+///
+/// **This runs LAST, after the leg's own arms.** Some of the sentences fed to
+/// the classifier carry text this node did not write: the founder's `reason`
+/// on `LinkSpent`/`Aborted` (`nostr_ritual.rs:674-693`) comes off the wire,
+/// and a restore's file path and bucket name come from the operator's own
+/// input. A remote party that could reach the network arms would choose what
+/// this node shouts in 26px — "Tor cannot reach the relay" over a founding
+/// the founder simply cancelled. Letting the leg's anchored phrases decide
+/// first means our own words, which always precede the borrowed text, win.
+fn network_headline(e: &str) -> Option<&'static str> {
+    Some(if e.contains("no relay in common") {
+        "No shared relay"
+    } else if e.contains("clearnet/local dialing off") {
+        "Clearnet dialing is off"
+    } else if e.contains("no dialable relay") {
+        "No dialable relay"
+    } else if e.contains("not readable on any relay") {
+        "Relay not answering"
+    } else if e.contains("no relay configured") {
+        "No relay configured"
+    } else if e.contains("no relay confirmed") {
+        "No relay confirmed"
+    // the anchored Tor phrases — `molt_net::dial` emits these verbatim. A
+    // bare `contains("tor")` matches "res-tor-e", "s-tor-age", "his-tor-y".
+    } else if e.contains("tor circuit") || e.contains("onion-only") || e.contains("tor is off") {
+        "Tor cannot reach the relay"
+    } else if e.contains("timed out") || e.contains("timeout") {
+        "No answer in time"
+    } else {
+        return None;
+    })
+}
+
+/// The founding/join leg: the ritual's own faults.
+fn ritual_headline(e: &str) -> Option<&'static str> {
+    Some(if e.contains("did not publish") || e.contains("relay refused") {
+        "No relay took it"
+    } else if e.contains("already used") {
+        "Invite already used"
+    } else if e.contains("ended this founding") {
+        "The founder ended it"
+    } else if e.contains("the founder refused this activation") {
+        "The founder refused it"
+    } else if e.contains("already exists") {
+        // the founding's own materialization step, not a backup
+        "Workspace already exists"
+    } else {
+        return None;
+    })
+}
+
+/// The restore leg: reading, decrypting and verifying a backup blob.
+fn restore_only_headline(e: &str) -> Option<&'static str> {
+    Some(if e.contains("crypto:") {
+        // covers a wrong passphrase AND a tampered frame — the headline must
+        // not pick one of them and assert it
+        "Cannot decrypt the backup"
+    } else if e.contains("chain verification failed") {
+        "Chain does not verify"
+    } else if e.contains("no verifiable chain") {
+        "Backup carries no chain"
+    } else if e.contains("holds no seat") {
+        "No seat in this roster"
+    } else if e.contains("is currently open") {
+        "Workspace is open"
+    } else if e.contains("already exists") {
+        "Workspace already exists"
+    } else if e.starts_with("reading ") {
+        "Cannot read the file"
+    } else if e.contains("beyond the") && e.contains("cap") {
+        "Backup file too big"
+    } else if e.contains("no backup for workspace") {
+        "No backup in the bucket"
+    } else if e.contains("download failed") {
+        "Download failed"
+    } else {
+        return None;
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +288,184 @@ mod tests {
         let r = join_relay_refusal(&v, &mine, true);
         assert_eq!(r.headline, "no relay in common with this invite");
         assert!(r.detail.iter().any(|l| l.contains("dialable here: wss://mine.example")), "{:?}", r.detail);
+    }
+
+    /// Every headline is a few words — never a sentence, never the detail.
+    /// A headline that carries the explanation is the wall of text again,
+    /// one line higher up.
+    ///
+    /// The inputs come from the functions that PRODUCE them wherever one
+    /// exists. A case list of re-typed sentences pins nothing: the first
+    /// version of this matched `"no relay is configured"` while
+    /// `pool_gap_reason` emits `"no relay configured"`, so the arm was dead
+    /// against every real founding — and the test passed, because it fed the
+    /// arm the invented string it wanted.
+    #[test]
+    fn a_failure_headline_is_a_few_words_not_a_sentence() {
+        // a pool that shares nothing with the invite — the producer's own
+        // "no relay in common", not a re-typed copy of it
+        let mine = vec![entry("wss://mine.example", true)];
+        let disjoint = diagnose_invite_relays(&["wss://theirs.example".to_string()], &mine, true);
+        let refusal = join_relay_refusal(&disjoint, &mine, true);
+        let cases = [
+            // …produced by this module, read back from the producer
+            refusal.headline.clone(),
+            format!("cannot found: {}", pool_gap_reason(PoolGap::Empty)),
+            format!("cannot found: {}", pool_gap_reason(PoolGap::Unconfirmed)),
+            format!("cannot found: {}", pool_gap_reason(PoolGap::NonOnionOff)),
+            // …emitted verbatim by nostr_ritual.rs / dial.rs / lifecycles.rs
+            "the founding inbox is not readable on any relay — no relay replayed \
+             the subscription (auth required, rate limited, or refused). No invite \
+             was published."
+                .to_string(),
+            "seal did not publish: relay refused: blocked: nope".to_string(),
+            "this invite link was already used by someone else".to_string(),
+            "the founder ended this founding".to_string(),
+            "tor circuit to relay.example via 127.0.0.1:9050 timed out".to_string(),
+        ];
+        for c in &cases {
+            let h = headline_for(c);
+            assert!(!h.is_empty(), "a known failure gets a headline: {c}");
+            assert!(
+                h.split_whitespace().count() <= 5,
+                "at most five words, got {h:?} for {c}"
+            );
+            assert!(!h.ends_with('.'), "a headline is not a sentence: {h}");
+            assert!(h.chars().count() <= 32, "short enough to render large: {h:?}");
+        }
+        // the specific cases are distinguished, not collapsed into one default
+        assert_eq!(headline_for(&refusal.headline), "No shared relay");
+        assert_ne!(
+            headline_for(&format!("cannot found: {}", pool_gap_reason(PoolGap::Empty))),
+            headline_for(&format!("cannot found: {}", pool_gap_reason(PoolGap::Unconfirmed))),
+            "two different missing things get two different headlines"
+        );
+        // the switch outranks the generic refusal it travels inside: it is the
+        // one cause the operator cannot deduce from their own settings
+        let dark = vec![entry("wss://dark.example", true)];
+        let blocked = diagnose_invite_relays(&["wss://dark.example".to_string()], &dark, false);
+        let switched = join_relay_refusal(&blocked, &dark, false);
+        assert_eq!(headline_for(&switched.headline), "Clearnet dialing is off");
+    }
+
+    /// An unrecognised failure gets NO headline — never a guessed cause.
+    ///
+    /// The first version answered "Connection failed" for everything it did
+    /// not match, so a local storage fault, a bad key package or an MLS error
+    /// would have been announced, large and red, as a network problem — and
+    /// the operator would go check their relays. An empty headline is merely
+    /// uninformative; a wrong one costs an evening.
+    #[test]
+    fn an_unknown_failure_gets_no_headline_rather_than_a_guessed_cause() {
+        for unknown in [
+            "something nobody anticipated",
+            "mls identity: key store rejected the credential",
+            "key package: unsupported ciphersuite",
+            "staging task failed: panic in blocking pool",
+        ] {
+            assert_eq!(
+                headline_for(unknown),
+                "",
+                "no cause may be invented for: {unknown}"
+            );
+        }
+    }
+
+    /// "res**tor**e", "s**tor**age" and "his**tor**y" all contain "tor".
+    ///
+    /// The arm that matched the bare fragment would have reported EVERY
+    /// restore failure as a Tor problem, in the largest type on the surface.
+    /// These are the real sentences `fail_restore` and `restore_task` emit.
+    #[test]
+    fn a_restore_failure_is_never_reported_as_a_tor_problem() {
+        let restore_failures = [
+            "the restore task lost its staged blob",
+            "the backup carries no verifiable chain — refusing to materialize \
+             unverified history",
+            "workspace ws-1 is currently open — close it before restoring over it \
+             (a replace cannot move a live directory)",
+            "this node has no workspace storage to restore into",
+            "crypto: aead open failed",
+            "reading /home/u/restore.molt.enc: no such file or directory",
+        ];
+        for f in restore_failures {
+            let h = restore_headline_for(f);
+            assert!(
+                !h.contains("Tor"),
+                "a restore failure is not a Tor failure: {f} → {h:?}"
+            );
+            assert!(h.chars().count() <= 32, "renderable large: {h:?}");
+        }
+        // …and the ones an operator can act on DO get named
+        assert_eq!(
+            restore_headline_for("crypto: aead open failed"),
+            "Cannot decrypt the backup"
+        );
+        assert_eq!(
+            restore_headline_for("workspace ws-1 is currently open — close it first"),
+            "Workspace is open"
+        );
+    }
+
+    /// The far end does not get to choose what this node shouts.
+    ///
+    /// `LinkSpent`/`Aborted` carry a `reason` the FOUNDER writes
+    /// (`nostr_ritual.rs:674-693`), and it is embedded in the sentence the
+    /// classifier then reads. A founder who writes "tor circuit timed out"
+    /// must not make the joiner's screen blame its own Tor setup for a
+    /// founding that was simply cancelled. Our anchored phrase always
+    /// precedes the borrowed text, so ordering the leg's own arms first is
+    /// what enforces this.
+    #[test]
+    fn the_far_end_cannot_choose_this_node_s_headline() {
+        // exactly the strings nostr_ritual.rs builds, with a hostile reason
+        let hostile = "tor circuit to relay.example timed out";
+        assert_eq!(
+            headline_for(&format!("the founder ended this founding: {hostile}")),
+            "The founder ended it"
+        );
+        assert_eq!(
+            headline_for(&format!("the founder refused this activation: {hostile}")),
+            "The founder refused it"
+        );
+        // and the operator's own file path cannot do it either
+        assert_eq!(
+            restore_headline_for("reading /home/u/tor circuit/backup.molt.enc: no such file"),
+            "Cannot read the file"
+        );
+    }
+
+    /// The two legs keep separate vocabularies, because they share sentences
+    /// that do not share meanings.
+    ///
+    /// `"crypto: …"` is a wrong passphrase while a backup is decrypted and a
+    /// storage fault while a founding is written. A single classifier over
+    /// both would announce "Cannot decrypt the backup" across a failed
+    /// founding — a confident, wrong cause in the largest type on the screen.
+    #[test]
+    fn the_restore_vocabulary_never_leaks_into_the_founding_leg() {
+        // the restore-only phrases stay silent on the ritual leg…
+        for restore_only in [
+            "crypto: aead open failed",
+            "chain verification failed: height 3 is below threshold",
+            "the backup carries no verifiable chain",
+            "download failed: 503",
+        ] {
+            assert_eq!(
+                headline_for(restore_only),
+                "",
+                "a founding must not borrow a restore headline: {restore_only}"
+            );
+        }
+        // …while the network faults, which DO mean the same thing on both
+        // legs, are answered identically by each
+        for shared in [
+            "tor circuit to relay.example via 127.0.0.1:9050 timed out",
+            "cannot found: clearnet/local dialing off ([transport.nostr] clearnet_enabled)",
+        ] {
+            assert_eq!(headline_for(shared), restore_headline_for(shared));
+            assert!(!headline_for(shared).is_empty(), "{shared}");
+        }
     }
 
     /// The founding prerequisite names the fault in three words — and the

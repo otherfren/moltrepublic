@@ -1482,3 +1482,42 @@ async fn changing_the_pool_during_a_founding_says_the_invites_are_stale() {
         s.create.run.log
     );
 }
+
+/// The failure an operator must act on gets a SHORT headline, not just a
+/// sentence buried at the end of the log.
+///
+/// User instruction (2026-08-01): error messages must be short, to the point,
+/// large and in the signal colour. The GUI renders `run.headline` at h1/h2 in
+/// `Theme.bad`; the log keeps the detail. A headline that carries the
+/// explanation is the wall of text again, one line higher up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_join_gets_a_short_headline_not_only_a_log_line() {
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // the joiner's only relay is one the invite does not name. No MockRelay:
+    // the gate refuses before anything is dialed, and a relay standing by
+    // that nothing ever connects to would suggest otherwise.
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, "wss://mine.example").await;
+    b.execute(Command::JoinStart {
+        invite: link_naming(&["wss://never-added.example".to_string()]),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the wizard arms");
+
+    let s = wait_for(&b, "the join to refuse", |s| s.join.run.outcome == 2).await;
+    let h = s.join.run.headline.clone();
+    assert!(!h.is_empty(), "a failed run carries a headline: {:?}", s.join.run.log);
+    assert!(
+        h.split_whitespace().count() <= 5 && h.len() <= 32,
+        "…and it is a few words, renderable large: {h:?}"
+    );
+    assert_eq!(h, "No shared relay", "…naming the missing thing, nothing else");
+    // the detail is still there, just not the headline's job
+    assert!(
+        s.join.run.log.iter().any(|l| l.contains("no relay in common")),
+        "the log keeps the detail: {:?}",
+        s.join.run.log
+    );
+}

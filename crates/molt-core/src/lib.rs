@@ -2385,6 +2385,15 @@ pub struct RunCore {
     pub outcome: u8,
     /// The live detail log, newest line last.
     pub log: Vec<String>,
+    /// The ONE thing that went wrong, in a few words — rendered large and in
+    /// the signal colour, above the log.
+    ///
+    /// A failure the operator must act on cannot live at the end of a long,
+    /// small, technical line: people stop reading walls of text within
+    /// seconds and then read nothing at all. The log keeps the detail; this
+    /// carries the headline. Empty while the run is fine.
+    #[serde(default)]
+    pub headline: String,
 }
 
 impl RunCore {
