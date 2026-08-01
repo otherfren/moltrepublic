@@ -4339,6 +4339,7 @@ mod tests {
             queue_id: "cd".repeat(12),
             wrap: "ef".repeat(32),
             republic_id: republic_id.to_string(),
+            handover: None,
         }
         .render()
     }

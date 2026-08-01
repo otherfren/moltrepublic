@@ -932,6 +932,7 @@ async fn recovery_invalidates_an_in_flight_join() {
                 queue_id: "cd".repeat(12),
                 wrap: "ef".repeat(32),
                 republic_id: "f00d".to_string(),
+                handover: None,
             }
             .render(),
             phrase: "abandon abandon abandon".to_string(),

@@ -127,6 +127,114 @@ pub struct InviteHandoverV2 {
 
 const INVITE_HANDOVER_VERSION: u8 = 2;
 
+/// The transport handover a **recovery** link carries (N4b).
+///
+/// The founding twin plus the republic id, minus the seat: a rejoiner is
+/// returning to a seat it already holds, so there is no seat index to pick,
+/// but it CANNOT derive the republic id (it has no roster yet) while the seat
+/// proof must bind exactly that id — so the coordinator carries it.
+///
+/// Both sides then check it against their own: the coordinator verifies the
+/// proof against ITS id, so a doctored link's id simply fails to verify, and
+/// the rejoiner re-derives the real id from the genesis once it catches up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryHandoverV2 {
+    /// The FULL single-use recovery ticket (64 lowercase hex).
+    pub ticket: String,
+    /// The COORDINATOR's transport anchor — the gift-wrap recipient for the
+    /// RecoverRequest.
+    pub npub: String,
+    /// The relays the coordinator listens on.
+    pub relays: Vec<String>,
+    /// The republic's content-derived id, which the seat proof binds.
+    pub republic_id: String,
+}
+
+const RECOVERY_HANDOVER_VERSION: u8 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct RecoveryWire {
+    v: u8,
+    ticket: String,
+    npub: String,
+    relays: Vec<String>,
+    republic_id: String,
+}
+
+impl RecoveryHandoverV2 {
+    /// Render the handover as one URL-safe hex segment.
+    pub fn encode(&self) -> Result<String, NetError> {
+        use nostr::nips::nip19::ToBech32;
+        if self.ticket.len() != 64 || !is_lower_hex(&self.ticket) {
+            return Err(NetError::Framing("recovery ticket is malformed".into()));
+        }
+        if self.republic_id.is_empty() || !is_lower_hex(&self.republic_id) {
+            return Err(NetError::Framing("recovery republic id is malformed".into()));
+        }
+        let relays = InviteHandoverV2::check_relays(&self.relays)?;
+        let canonical = crate::nostr::canonical_nostr_pk(&self.npub)?;
+        let npub = nostr::PublicKey::from_hex(&canonical)
+            .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?
+            .to_bech32()
+            .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?;
+        let wire = RecoveryWire {
+            v: RECOVERY_HANDOVER_VERSION,
+            ticket: self.ticket.clone(),
+            npub,
+            relays,
+            republic_id: self.republic_id.clone(),
+        };
+        Ok(hex::encode(
+            serde_json::to_string(&wire).map_err(|e| NetError::Framing(e.to_string()))?,
+        ))
+    }
+
+    /// Parse and validate — strict, fail-closed, and honest about a
+    /// pre-N4b (queue-shaped) recovery link.
+    pub fn decode(blob: &str) -> Result<Self, NetError> {
+        let bytes = hex::decode(blob.trim())
+            .map_err(|_| NetError::Framing("not a recovery handover segment".into()))?;
+        let wire = String::from_utf8(bytes)
+            .map_err(|_| NetError::Framing("not a recovery handover segment".into()))?;
+        let parsed: RecoveryWire = serde_json::from_str(&wire).map_err(|_| {
+            if wire.contains('\n') {
+                NetError::Framing(
+                    "this is a queue-shaped recovery link from an older build — \
+                     ask for a fresh recovery link on this build"
+                        .into(),
+                )
+            } else {
+                NetError::Framing("not a recovery handover".into())
+            }
+        })?;
+        if parsed.v != RECOVERY_HANDOVER_VERSION {
+            return Err(NetError::Framing(format!(
+                "unsupported recovery handover version {} — this build reads \
+                 v{RECOVERY_HANDOVER_VERSION}",
+                parsed.v
+            )));
+        }
+        if parsed.ticket.len() != 64 || !is_lower_hex(&parsed.ticket) {
+            return Err(NetError::Framing("recovery ticket is malformed".into()));
+        }
+        if parsed.republic_id.is_empty() || !is_lower_hex(&parsed.republic_id) {
+            return Err(NetError::Framing("recovery republic id is malformed".into()));
+        }
+        use nostr::nips::nip19::FromBech32;
+        let pk = nostr::PublicKey::from_bech32(&parsed.npub)
+            .map_err(|e| NetError::Framing(format!("recovery npub: {e}")))?;
+        // bech32 decoding does no curve validation — the ONE anchor gate does
+        let npub = crate::nostr::canonical_nostr_pk(&pk.to_hex())?;
+        let relays = InviteHandoverV2::check_relays(&parsed.relays)?;
+        Ok(RecoveryHandoverV2 {
+            ticket: parsed.ticket,
+            npub,
+            relays,
+            republic_id: parsed.republic_id,
+        })
+    }
+}
+
 /// The wire form: versioned JSON, npub as bech32.
 #[derive(Serialize, Deserialize)]
 struct HandoverWire {

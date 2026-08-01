@@ -358,3 +358,53 @@ async fn the_publish_path_refuses_to_authenticate() {
         "…and must say why, loudly: {msg}"
     );
 }
+
+/// N4b step 4 — the recovery handover round-trips, and refuses everything it
+/// should.
+///
+/// It is the founding handover's twin plus the republic id: a total-loss
+/// rejoiner has no roster, so it cannot derive the id the seat proof must
+/// bind — the coordinator carries it, and both sides check it against their
+/// own (a doctored id simply fails the proof).
+#[test]
+fn a_recovery_handover_round_trips_and_fails_closed() {
+    use molt_net::invite::RecoveryHandoverV2;
+
+    let (_, npub) = nostr_identity(b"coordinator-entropy", "rec");
+    let h = RecoveryHandoverV2 {
+        ticket: "ab".repeat(32),
+        npub: npub.clone(),
+        relays: vec!["wss://relay.example.org".to_string()],
+        republic_id: "f00dcafe".to_string(),
+    };
+    let blob = h.encode().expect("encodes");
+    let back = RecoveryHandoverV2::decode(&blob).expect("round-trips");
+    assert_eq!(back, h, "every field survives the round trip");
+
+    // a queue-shaped (pre-N4b) link is named as such, not as generic junk —
+    // the operator needs to know a FRESH link is the remedy
+    let legacy = hex::encode("smp://server\naabb\nccdd\nf00d");
+    let err = RecoveryHandoverV2::decode(&legacy).expect_err("v1 is refused").to_string();
+    assert!(err.contains("older build"), "the refusal names the cause: {err}");
+
+    // a wrong version is refused rather than best-effort parsed
+    let wrong_v = hex::encode(
+        r#"{"v":9,"ticket":"aa","npub":"x","relays":[],"republic_id":"f0"}"#,
+    );
+    assert!(RecoveryHandoverV2::decode(&wrong_v).is_err());
+
+    // malformed ticket / republic id / npub all fail closed
+    let mut bad = h.clone();
+    bad.ticket = "short".to_string();
+    assert!(bad.encode().is_err(), "a malformed ticket never renders");
+    let mut bad = h.clone();
+    bad.republic_id = String::new();
+    assert!(bad.encode().is_err(), "an empty republic id never renders");
+    let mut bad = h.clone();
+    bad.npub = "zz".repeat(32);
+    assert!(bad.encode().is_err(), "a non-curve anchor never renders");
+    // …and the relay cap is the same untrusted-input gate the invite uses
+    let mut many = h.clone();
+    many.relays = (0..9).map(|i| format!("wss://r{i}.example")).collect();
+    assert!(many.encode().is_err(), "more relays than a link may carry");
+}

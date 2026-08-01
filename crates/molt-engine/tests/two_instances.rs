@@ -3345,6 +3345,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
         queue_id: hex::encode(&recover_q.snd.id.0),
         wrap: hex::encode(recover_wrap.to_bytes()),
         republic_id: republic_id.to_string(),
+        handover: None,
     };
     // exercise the link render→parse roundtrip on the way in
     let link = inv.render();
@@ -3476,6 +3477,7 @@ fn recovery_invite(
         queue_id,
         wrap,
         republic_id: republic_id.to_string(),
+        handover: None,
     }
 }
 

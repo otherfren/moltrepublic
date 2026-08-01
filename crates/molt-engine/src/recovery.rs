@@ -52,21 +52,32 @@ pub struct RecoveryInvite {
     /// from the genesis once it catches up, and the coordinator checks the proof
     /// against its OWN id, so a doctored link's id simply fails to verify.
     pub republic_id: String,
+    /// The N4b transport handover: ticket, the coordinator's anchor, relays,
+    /// and the republic id. `None` on the legacy queue-shaped path (and on a
+    /// preview-only link), which is why it is additive rather than replacing
+    /// the fields above.
+    pub handover: Option<molt_net::invite::RecoveryHandoverV2>,
 }
 
 impl RecoveryInvite {
     /// Render the link (preview + hex transport handover).
+    ///
+    /// A v2 handover renders the Nostr shape; without one it falls back to
+    /// the queue shape, so a loopback/test link still round-trips.
     pub fn render(&self) -> String {
-        let handover = format!(
-            "{}\n{}\n{}\n{}",
-            self.server, self.queue_id, self.wrap, self.republic_id
-        );
+        let handover = match self.handover.as_ref().map(|h| h.encode()) {
+            Some(Ok(blob)) => blob,
+            _ => hex::encode(format!(
+                "{}\n{}\n{}\n{}",
+                self.server, self.queue_id, self.wrap, self.republic_id
+            )),
+        };
         format!(
             "molt://recover/{}/{}/{}/{}",
             self.republic.replace(' ', "-"),
             self.member,
             self.ticket,
-            hex::encode(handover),
+            handover,
         )
     }
 
@@ -84,6 +95,20 @@ impl RecoveryInvite {
         }
         if republic.trim().is_empty() || member.is_empty() || ticket.len() < 4 {
             return None;
+        }
+        // v2 first: the Nostr shape is JSON, the legacy one is newline-joined,
+        // so they cannot be confused for one another
+        if let Ok(h) = molt_net::invite::RecoveryHandoverV2::decode(handover_hex) {
+            return Some(RecoveryInvite {
+                republic,
+                member,
+                ticket,
+                server: String::new(),
+                queue_id: String::new(),
+                wrap: String::new(),
+                republic_id: h.republic_id.clone(),
+                handover: Some(h),
+            });
         }
         let text = String::from_utf8(hex::decode(handover_hex).ok()?).ok()?;
         let mut fields = text.split('\n');
@@ -107,6 +132,7 @@ impl RecoveryInvite {
             queue_id,
             wrap,
             republic_id,
+            handover: None,
         })
     }
 }
@@ -227,6 +253,7 @@ pub(crate) fn spawn_recovery_provisioning(
             queue_id: hex::encode(&q.snd.id.0),
             wrap: hex::encode(wrap.to_bytes()),
             republic_id: republic_id.clone(),
+            handover: None,
         }
         .render();
         // report the shareable link to the operator (GUI/MCP read it back)
@@ -773,6 +800,55 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
 
 #[cfg(test)]
 mod tests {
+
+    /// N4b step 4 — a recovery LINK carries the v2 Nostr handover, and the
+    /// legacy queue shape still parses beside it.
+    ///
+    /// The two encodings cannot be confused: v2 is JSON, the legacy one is
+    /// newline-joined, so `decode` distinguishes them structurally rather
+    /// than by guessing.
+    #[test]
+    fn a_recovery_link_round_trips_its_v2_handover() {
+        let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
+        let inv = super::RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "dora".to_string(),
+            ticket: "ab".repeat(32),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            republic_id: "f00dcafe".to_string(),
+            handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                ticket: "ab".repeat(32),
+                npub: npub.clone(),
+                relays: vec!["wss://relay.example.org".to_string()],
+                republic_id: "f00dcafe".to_string(),
+            }),
+        };
+        let link = inv.render();
+        let back = super::RecoveryInvite::parse(&link).expect("v2 link parses");
+        let h = back.handover.expect("the v2 handover survives");
+        assert_eq!(h.npub, npub, "the coordinator anchor round-trips");
+        assert_eq!(h.relays, vec!["wss://relay.example.org".to_string()]);
+        assert_eq!(back.republic_id, "f00dcafe", "…and the id the proof binds");
+        assert_eq!(back.member, "dora");
+        assert_eq!(back.republic, "Chess Club", "dashes decode back to spaces");
+
+        // the legacy queue-shaped link still parses, with no v2 handover
+        let legacy = super::RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "dora".to_string(),
+            ticket: "cd".repeat(8),
+            server: "smp://f@h".to_string(),
+            queue_id: "aabb".to_string(),
+            wrap: "ef".repeat(32),
+            republic_id: "f00d".to_string(),
+            handover: None,
+        };
+        let back = super::RecoveryInvite::parse(&legacy.render()).expect("legacy parses");
+        assert!(back.handover.is_none(), "the legacy shape carries no v2 handover");
+        assert_eq!(back.server, "smp://f@h");
+    }
     use super::*;
     use molt_core::{
         ChainBlock, ChainChange, MemberIdentity, RosterAttestation, GENESIS_PREV,
@@ -787,6 +863,7 @@ mod tests {
             queue_id: "deadbeef".to_string(),
             wrap: "00112233".to_string(),
             republic_id: "f00dbabe".to_string(),
+            handover: None,
         }
     }
 
@@ -871,6 +948,7 @@ mod tests {
             wrap: hex::encode(wrap.to_bytes()),
             // any hex string — the ritual times out before the id matters
             republic_id: "f00dbabe".to_string(),
+            handover: None,
         };
         let phrase = molt_storage::generate_seed_phrase().expect("phrase");
 
@@ -1009,6 +1087,7 @@ mod tests {
             queue_id: "aa".to_string(),
             wrap: "bb".to_string(),
             republic_id: republic_id.to_string(),
+            handover: None,
         }
     }
 
