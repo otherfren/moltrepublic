@@ -77,6 +77,33 @@ with no window-roll (trap 2) and no cursors (trap 3).
   must NOT see it and `subscribe_since` MUST — over a `MockRelay`. That pair is
   the whole point: it fails today for the reason trap 1 names.
 
+### N5.0 — a frame discriminator on the 445 plaintext *(do before N5.2)*
+
+**Verified 2026-08-02.** Two producers already put different things inside a
+445's MLS plaintext, and neither tags what it is:
+
+- the ritual sends `serde_json::to_vec(RitualMsg)` — bare JSON
+  (`nostr_ritual.rs:303`);
+- the supervisor sends `serde_json::to_vec(EventEnvelope)` — also bare JSON —
+  or a `MESH_ACK_TAG`-prefixed control frame (`supervisor.rs:155`).
+
+Today they never meet: the ritual owns the channel before the runtime exists.
+N5.2 is exactly the change that makes them meet, and then a receiver must tell
+a `RitualMsg` from an `EventEnvelope` by *trying to parse one and seeing if it
+works*. That is the accidental-parse ambiguity the ack tag already avoids —
+`MESH_ACK_TAG` is the precedent, and it exists because someone thought about
+this once already.
+
+**Build:** one byte-prefix tag per plaintext kind, in the same shape as
+`MESH_ACK_TAG` (`molt-net/src/lib.rs:95`), with the untagged form kept meaning
+exactly what it means today so nothing on the wire changes for the ritual until
+we choose to move it.
+
+- **Red:** an `EventEnvelope` whose JSON happens to satisfy `RitualMsg`'s shape
+  must not be delivered as a ritual message, and vice versa. Construct the
+  colliding pair rather than asserting on the tag constant — a test that only
+  checks "the tag is what I wrote" pins nothing.
+
 ### N5.2 — the group runtime skeleton
 `spawn_group(...)` beside `supervisor::spawn` — a NEW function, not a
 parameterization: `spawn` is bound to `T: Transport` and `Vec<PeerLink>`
