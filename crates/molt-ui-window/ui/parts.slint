@@ -1019,6 +1019,12 @@ export component ProposalCard inherits Rectangle {
     // buttons, a "declined by … ·  when" line instead. The discussion
     // link stays (the channel is re-openable, read-only).
     in property <bool> read-only: false;
+    // COMPACT: the same card sitting above a decision's own chat, as the
+    // orientation header for it. Drops the two things that make no sense
+    // there — the 240px inline image viewer (this is a header, not a
+    // gallery) and the "discuss" button (we ARE in the discussion).
+    // Everything that identifies the decision stays.
+    in property <bool> compact: false;
     callback approve();
     callback decline();
     // jump into the proposal's discussion — its patch channel on the chat
@@ -1239,7 +1245,7 @@ export component ProposalCard inherits Rectangle {
             }
             // the inline viewer: the decoded picture inside the panel —
             // no modal; clicking it (or the share card again) closes it
-            if root.inline-open: Rectangle {
+            if root.inline-open && !root.compact: Rectangle {
                 height: 240px;
                 border-radius: Theme.win95 ? 0px : 6px;
                 border-width: Theme.border-w;
@@ -1351,7 +1357,7 @@ export component ProposalCard inherits Rectangle {
                     root.decline();
                 }
             }
-            AppButton {
+            if !root.compact: AppButton {
                 emoji: "💬";
                 label: Strings.pc-discuss;
                 clicked => {

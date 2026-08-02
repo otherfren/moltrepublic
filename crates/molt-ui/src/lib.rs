@@ -1132,11 +1132,19 @@ pub fn run_app(
                 // …and the read-only flag from the proposal cache, so the
                 // compose row collapses on the click, not a push later (the
                 // push then re-decides from the engine's annotation)
-                let closed = chat_ui
+                let (closed, org) = chat_ui
                     .lock()
-                    .map(|st| selected_channel_closed(&ch, &[], &st.proposals))
-                    .unwrap_or(false);
+                    .map(|st| {
+                        (
+                            selected_channel_closed(&ch, &[], &st.proposals),
+                            selected_channel_org(&ch, &st.proposals),
+                        )
+                    })
+                    .unwrap_or((false, false));
                 ui.set_selected_channel_closed(closed);
+                // instant, like `closed`: the nav must not collapse the
+                // section the click came from while the push is in flight
+                ui.set_selected_channel_org(org);
             }
             if let Ok(mut st) = chat_ui.lock() {
                 // bumps the push generation: every in-flight push read
@@ -2803,6 +2811,12 @@ struct SurfacesBundle {
     /// The selected channel is a decided vote's read-only discussion
     /// (collapses the compose row, shows the banner's 🔒 note).
     selected_closed: bool,
+    /// The selected channel is an ORGANIZATION decision's discussion — the
+    /// compact detail panel above the log, and the nav section that stays
+    /// expanded behind it ([`selected_channel_org`]).
+    selected_org: bool,
+    /// That decision's row, for the panel. Default when none is selected.
+    selected_decision: ProposalRowData,
     /// Organization → Members table rows (engine `ReadMembers`), already
     /// ordered by the active sort.
     members: Vec<MemberRowData>,
@@ -3196,6 +3210,10 @@ struct ReceiptData {
     /// Whether they have confirmed reading (green) or not yet (yellow).
     read: bool,
 }
+/// `Default` = "no decision selected": the compact panel above a chat needs
+/// an empty row when the selected channel is not a decision at all, and the
+/// panel itself is gated on `selected_org` so the empty one never renders.
+#[derive(Default)]
 struct ProposalRowData {
     id: i32,
     text: String,
@@ -3527,6 +3545,18 @@ async fn push_surfaces(
         i32::try_from(unread.get("group").copied().unwrap_or(0)).unwrap_or(i32::MAX);
     let selected_label = channel_display_label(&selected, &titles);
     let selected_closed = selected_channel_closed(&selected, &infos, &known);
+    let selected_org = selected_channel_org(&selected, &known);
+    // the panel renders from the SAME projection the Organization pane uses,
+    // so the two can never drift apart
+    let selected_decision = match &selected {
+        ChannelRef::Patch { id } => all_pending
+            .iter()
+            .chain(all_declined.iter())
+            .find(|p| p.id == *id)
+            .map(|p| proposal_row(lang, p))
+            .unwrap_or_default(),
+        _ => ProposalRowData::default(),
+    };
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
@@ -3553,6 +3583,8 @@ async fn push_surfaces(
         selected_key,
         selected_label,
         selected_closed,
+        selected_org,
+        selected_decision,
         members,
         uploads,
         members_sort,
@@ -3670,28 +3702,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                     }
                 })
                 .collect();
-            let to_row = |p: &ProposalRowData| ProposalRow {
-                id: p.id,
-                text: p.text.clone().into(),
-                approvals: p.approvals,
-                threshold: p.threshold,
-                current: p.current.clone().into(),
-                proposed: p.proposed.clone().into(),
-                image_op: p.image_op,
-                img_b64: p.img_b64.as_str().into(),
-                charter_op: p.charter_op,
-                votes: ModelRc::new(VecModel::from(
-                    p.votes
-                        .iter()
-                        .map(|(member, vote)| MemberVoteMark {
-                            member: member.as_str().into(),
-                            vote: *vote,
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-                declined_by: p.declined_by.clone().into(),
-                declined_when: p.declined_when.clone().into(),
-            };
+            let to_row = to_proposal_row;
             // pending stays complete — an open vote must never hide behind
             // a page; the declined (outcome) list pages like the applied log
             let pending: Vec<ProposalRow> = s.pending.iter().map(to_row).collect();
@@ -3758,6 +3769,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
     ui.set_selected_channel_closed(b.selected_closed);
+    ui.set_selected_channel_org(b.selected_org);
+    ui.set_selected_decision(to_proposal_row(&b.selected_decision));
 
     // the Organization tables (Members / Uploads)
     let members: Vec<MemberRow> = b
@@ -4067,6 +4080,36 @@ fn strings_pick(de: bool, en: &str, de_s: &str) -> String {
 
 /// Project one proposal view into the card row the GUI renders — shared by
 /// the pending and the declined list.
+/// The Slint projection of one [`ProposalRowData`].
+///
+/// A free function rather than a per-surface closure: the compact decision
+/// panel above a chat renders the SAME row the Organization pane does, and
+/// two conversions would be two things to keep in step.
+fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
+    ProposalRow {
+        id: p.id,
+        text: p.text.clone().into(),
+        approvals: p.approvals,
+        threshold: p.threshold,
+        current: p.current.clone().into(),
+        proposed: p.proposed.clone().into(),
+        image_op: p.image_op,
+        img_b64: p.img_b64.as_str().into(),
+        charter_op: p.charter_op,
+        votes: ModelRc::new(VecModel::from(
+            p.votes
+                .iter()
+                .map(|(member, vote)| MemberVoteMark {
+                    member: member.as_str().into(),
+                    vote: *vote,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        declined_by: p.declined_by.clone().into(),
+        declined_when: p.declined_when.clone().into(),
+    }
+}
+
 fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
     let op = p
         .payload
@@ -4544,6 +4587,25 @@ fn selected_channel_closed(
         return state != molt_core::ProposalState::Proposed;
     }
     known.get(&id.0).is_some_and(|k| k.fate != KnownFate::Pending)
+}
+
+/// Whether the selected channel is an **Organization** decision's discussion.
+///
+/// One flag, two jobs, and they belong together: it puts the compact detail
+/// panel above that chat (so opening a decision's discussion always says
+/// which decision, without scrolling), and it keeps the nav's Organization
+/// section expanded while the chat pane is showing — otherwise the row the
+/// user just clicked collapses out of sight the moment it works.
+///
+/// Deliberately Organization only: the ask says other surfaces' decisions
+/// are handled differently, so they get neither.
+fn selected_channel_org(selected: &ChannelRef, known: &HashMap<u64, KnownProposal>) -> bool {
+    let ChannelRef::Patch { id } = selected else {
+        return false;
+    };
+    known
+        .get(&id.0)
+        .is_some_and(|k| k.surface == Surface::Organization)
 }
 
 /// What the UI remembers about a proposal beyond the read contract's
@@ -6536,6 +6598,43 @@ mod tests {
             derive_channels(0, &infos, &known, &HashMap::new()).is_empty(),
             "a declined vote's discussion is not a sidebar row"
         );
+    }
+
+    /// The decision-panel flag: only an ORGANIZATION decision's discussion.
+    ///
+    /// The ask is explicit that other surfaces' decisions are handled
+    /// differently, so the panel must not appear for them. And it must not
+    /// appear for the group chat or a free topic either — there is no
+    /// decision to head those with.
+    #[test]
+    fn selected_channel_org_flags_only_organization_decisions() {
+        let known_of = |surface: Surface| KnownProposal {
+            payload: serde_json::json!({"op": "set_name", "value": "x"}),
+            surface,
+            approvals: 1,
+            threshold: 2,
+            fate: KnownFate::Pending,
+        };
+        let known = HashMap::from([
+            (1u64, known_of(Surface::Organization)),
+            (2u64, known_of(Surface::Memory)),
+        ]);
+        let patch = |id: u64| ChannelRef::Patch { id: ProposalId(id) };
+
+        assert!(selected_channel_org(&patch(1), &known), "an Organization decision");
+        assert!(
+            !selected_channel_org(&patch(2), &known),
+            "another surface's decision is handled differently - no panel"
+        );
+        assert!(
+            !selected_channel_org(&patch(9), &known),
+            "an unknown referent heads nothing"
+        );
+        assert!(!selected_channel_org(&ChannelRef::Group, &known));
+        assert!(!selected_channel_org(
+            &ChannelRef::Topic { name: "budget".into() },
+            &known
+        ));
     }
 
     /// The compose-collapse flag: only a DECIDED vote's patch channel is

@@ -1054,6 +1054,12 @@ export component AppWindow inherits Window {
     // the compose row collapses and the banner says so (computed in Rust
     // from the engine's channel annotation, instant on selection)
     in property <bool> selected-channel-closed: false;
+    // the selected channel is an ORGANIZATION decision's discussion: the
+    // compact detail panel sits above the log, so opening a decision's chat
+    // always says WHICH decision without scrolling anywhere. Other surfaces'
+    // decisions are handled differently and get no panel.
+    in property <bool> selected-channel-org: false;
+    in property <ProposalRow> selected-decision;
     callback select-channel(string);
     // new-topic affordance: a MODAL that asks for the name and nothing else.
     // It used to be a reveal row beside the compose field, which put two
@@ -4117,6 +4123,27 @@ export component AppWindow inherits Window {
                                             root.select-view("organization", "members");
                                         }
                                     }
+                                }
+                            }
+
+                            // A DECISION's discussion is headed by the decision
+                            // itself: the same card the Organization pane
+                            // shows, compact. Opening a decision's chat then
+                            // always says which decision, and what it is
+                            // waiting for, without scrolling anywhere.
+                            if root.selected-channel-org: ProposalCard {
+                                p: root.selected-decision;
+                                compact: true;
+                                org-img: root.org-img;
+                                org-img-set: root.org-img-set;
+                                // a decided vote's card loses its buttons for
+                                // the same reason its compose row collapses
+                                read-only: root.selected-channel-closed;
+                                approve => {
+                                    root.approve(root.selected-decision.id);
+                                }
+                                decline => {
+                                    root.decline(root.selected-decision.id);
                                 }
                             }
 
