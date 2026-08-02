@@ -141,6 +141,39 @@ rejoiner that trusted a prefix could fork the republic's state. The checks:
   `recovery_ritual.md` §6) — so a newcomer's signatures count on the blocks
   that follow and a restored member's keep counting unchanged.
 
+### 6.1 Extending a prefix we already verified
+
+Hard-reject is about **trust**, not about redoing arithmetic. Re-walking the
+chain from its anchor for every arriving block made a catch-up of *N* blocks
+cost `m·N(N+1)` signature verifications (twice that before the duplicate probe
+went), all inside one uninterruptible actor turn — so a node catching up was
+indistinguishable from a dead one, which is what the delivery guarantee
+escalates on.
+
+The walk is therefore a value (`ChainWalk`) that a holder keeps. It carries
+everything the verification accumulates: the head, the applied-id guard, and
+the checkpoint projection. `verify_chain`, `verify_suffix_chain` and the
+holder's extension all drive the **same** `step` — extending by one block is
+not a second implementation that could drift from verifying from the anchor,
+it is the same code with the intermediate state kept instead of discarded.
+
+The trust boundary does not move. A **full** walk stays mandatory wherever a
+chain arrives from outside the holder's own verified prefix: adoption, the
+restore import, a checkpoint re-anchor, and load from disk. The incremental
+path only ever appends to a prefix this node walked itself.
+
+Two properties the cache depends on, both pinned by tests:
+
+- **A refused block leaves the walk byte-identical.** The double-apply guard
+  is consulted *before* the signatures, so a step that recorded ids as it went
+  would let one unsigned block burn a proposal id forever — and this holder
+  would then refuse a block every other node accepts. `verify_next` therefore
+  only reads the guard, returning the id for the caller to record after every
+  check has passed.
+- **The guard survives a prune.** After compaction the blocks carrying the
+  pre-cut ids are gone, so it must be seeded from the checkpoint blob's
+  `consumed_ids` — never re-derived from the surviving suffix.
+
 ## 7. Ordering — single branch, re-base = new sequence number + re-sign
 
 There is exactly one branch. A patch that gathers its *m* approvals is
