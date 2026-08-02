@@ -183,7 +183,7 @@ the group channel, and the Nostr group runtime was built without one.
 `restore_member_on_group` → `NetRuntime::real_crypto`. A Nostr workspace has
 no `NetRuntime`; its group MLS is `GroupNet.mls`. Needs a `GroupNet` arm.
 
-**(ii) The carrier stamp is not optional here — it is a divergence.**
+**(ii) ✅ DONE — the carrier stamp is not optional here, it is a divergence.**
 `molt-net/CLAUDE.md`: `CommitKey(created_at, sha256(commit))`, lowest wins,
 and *"the stamp must come from the SAME source on both sides."* On 445 the
 receive side already uses the real `created_at`
@@ -201,14 +201,21 @@ deriving them separately can straddle a window boundary and publish a stamp
 its own tag disowns. So this is N4b step 8, and it lands with 6c rather than
 after it.
 
-**(iii) The group runtime has no epoch buffer.** `ingest_one`
+**(iii) ✅ DONE (`9900f36`) — the group runtime had no epoch handling.** `ingest_one`
 (`group_runtime.rs:600`) matches `Deliver`/`Ack`/`GroupAck` and sends
 everything else to `_ => Ingest::Nothing` — including `EpochAdvanced`
 ("ack it and retry the epoch buffer") and `FutureEpoch` ("hold it and retry
 after the next commit merges"). The mesh supervisor implements both; the
 group runtime implements neither, so a frame that arrives ahead of its commit
-is **dropped rather than held**. Latent today because nothing commits on 445
-yet — and recovery is precisely what starts.
+is **dropped rather than held**. Latent because nothing commits on 445 yet —
+and recovery is precisely what starts.
+
+Building it found two more, both real and both now fixed: a commit was
+sealed under the exporter of the epoch the sender had just moved TO (opaque
+to exactly its recipients, since a receiver's ring reaches backward only),
+and on 445 a future-epoch frame fails at the OUTER layer as `Opaque`, so a
+hold keyed on `MlsDecode::FutureEpoch` alone would never have fired. See
+`nostr_n5_plan.md` N5.3c.
 
 Then: re-key on `GroupNet.mls`, publish the commit at the pinned stamp,
 gift-wrap the 444 to the rejoiner's **NEW** anchor (`working_nostr_pk`
