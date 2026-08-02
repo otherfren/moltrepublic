@@ -152,7 +152,7 @@ pub(crate) fn sealed_roster_from_genesis(
         rule_n,
         identities,
         agenda,
-        relays: _,
+        relays,
     } = &block.change
     else {
         return None;
@@ -166,7 +166,11 @@ pub(crate) fn sealed_roster_from_genesis(
         identities: identities.clone(),
         attestations: block.sigs.clone(),
         agenda: agenda.clone(),
-        relays: Vec::new(),
+        // the RATIFIED pool (roster-v4): it sits inside the very bytes these
+        // attestations were made over, so a reconstruction that dropped it
+        // would hand a recovered node an empty pool — and no way to reach the
+        // republic it just proved it belongs to
+        relays: relays.clone(),
     })
 }
 
@@ -651,9 +655,15 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
         rule_n: blob.rule_n,
         roster: blob.roster.iter().map(|i| i.member.clone()).collect(),
         identities: blob.roster.clone(),
+        // a pruned holder no longer has the founding block, so it has no
+        // founding attestations to hand on — the blob's own m-of-n anchor
+        // signatures are what a suffix verifier trusts instead
         attestations: Vec::new(),
         agenda: blob.agenda.clone(),
-        relays: Vec::new(),
+        // …but the ratified pool DOES survive the cut: checkpoint-v3 binds it
+        // into the signed summary exactly so a rejoiner arriving after a
+        // compaction still learns which relays the republic agreed on
+        relays: blob.relays.clone(),
     }
 }
 
@@ -1005,7 +1015,7 @@ mod tests {
                 rule_n: 2,
                 identities: ids.clone(),
                 agenda: "play chess".to_string(),
-                relays: Vec::new(),
+                relays: vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()],
             },
             sigs: vec![
                 RosterAttestation {
@@ -1026,6 +1036,14 @@ mod tests {
         assert_eq!(sealed.identities, ids);
         assert_eq!(sealed.attestations.len(), 2, "the block's sigs ARE the attestations");
         assert_eq!(sealed.agenda, "play chess");
+        // R3 made the relay pool constitutional — it is inside the very bytes
+        // these attestations were made over, so a reconstruction that drops it
+        // hands a recovered node an empty pool and no way to reach anyone
+        assert_eq!(
+            sealed.relays,
+            vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()],
+            "the ratified pool must survive the reconstruction"
+        );
 
         // a non-genesis block has no roster to reconstruct
         let applied = ChainBlock {
@@ -1039,6 +1057,46 @@ mod tests {
             sigs: Vec::new(),
         };
         assert!(sealed_roster_from_genesis(&applied).is_none());
+    }
+
+    /// A rejoiner arriving after a compaction gets the pool from the BLOB.
+    ///
+    /// The genesis is gone by then — `AUTO_CHECKPOINT_MIN_LEN` is 32, so this
+    /// is the steady state, not an edge case — and the blob is the only
+    /// threshold-signed record of what the founders agreed. Checkpoint-v3
+    /// binds the pool into it for exactly this moment; dropping it here would
+    /// have made the binding decorative.
+    #[test]
+    fn a_pruned_republic_hands_on_its_ratified_pool() {
+        let ids = vec![MemberIdentity {
+            member: "petra".to_string(),
+            identity_pk: "aa".to_string(),
+            nostr_pk: "cc".to_string(),
+        }];
+        let blob = molt_core::CheckpointState {
+            founding_name: "Chess Club".to_string(),
+            rule_m: 1,
+            rule_n: 1,
+            founding_identities: ids.clone(),
+            agenda: "play chess".to_string(),
+            relays: vec!["wss://relay.one".to_string()],
+            republic_id: "f00".to_string(),
+            roster: ids,
+            applied: Vec::new(),
+            consumed_ids: Vec::new(),
+            upto: 7,
+        };
+        let sealed = sealed_roster_from_blob(&blob);
+        assert_eq!(
+            sealed.relays,
+            vec!["wss://relay.one".to_string()],
+            "the pool survives the cut, because checkpoint-v3 binds it"
+        );
+        assert!(
+            sealed.attestations.is_empty(),
+            "a pruned holder has no founding block, so no founding attestations \
+             — the blob's own m-of-n anchor is what a suffix verifier trusts"
+        );
     }
 
     /// A real, n-of-n-signed single-block genesis chain for `members`
