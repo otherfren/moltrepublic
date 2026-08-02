@@ -1367,7 +1367,9 @@ impl State {
                 true
             }
             Err(e) => {
-                tracing::error!(error = %e, "refused a block that fails chain verification");
+                // routine, not an internal fault: a stale re-serve during
+                // catch-up and a hostile peer both land here
+                tracing::warn!(height = block.height, error = %e, "refused a chain block");
                 false
             }
         }
@@ -3167,6 +3169,47 @@ mod tests {
             writes, 1,
             "the drained batch is written ONCE — the write blocks on the \
              storage writer's ack, so {N} of them would sit inside one turn"
+        );
+    }
+
+    /// Batching the write must not turn "once per block" into "never".
+    ///
+    /// Every path that accepts a block ends in exactly one
+    /// `persist_chain_now`; this is the guard for a future third caller that
+    /// forgets, which would leave accepted blocks unwritten and silently
+    /// re-fetched on every restart.
+    #[test]
+    fn an_accepted_block_is_written_once_and_a_refused_one_not_at_all() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut peer = chain_peer("walter", &b, genesis);
+
+        CHAIN_PERSISTS.with(|c| c.set(0));
+        peer.receive_block(b.blocks[1].clone());
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+        assert_eq!(
+            CHAIN_PERSISTS.with(std::cell::Cell::get),
+            1,
+            "an accepted block is written"
+        );
+
+        let refused = b.seal(
+            2,
+            ChainChange::Applied {
+                proposal_id: 2,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 2 }),
+            },
+            &["petra"],
+        );
+        CHAIN_PERSISTS.with(|c| c.set(0));
+        peer.receive_block(refused);
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+        assert_eq!(
+            CHAIN_PERSISTS.with(std::cell::Cell::get),
+            0,
+            "a refused block writes nothing"
         );
     }
 
