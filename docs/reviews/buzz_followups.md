@@ -118,12 +118,41 @@ resolving them ourselves would be the leak we are avoiding. Buzz needs SSRF
 guards because their workflow engine fetches arbitrary URLs; we have no
 webhooks.
 
+**Re-verified against HEAD, 2026-08-02 — two of the four bounds already exist.**
+
+- The frame cap is there: `MAX_WS_MESSAGE = 1 MiB` on both `max_message_size`
+  and `max_frame_size` (`relay_ws.rs:29,175`), enforced by tungstenite.
+- The dribbler is covered: every read is
+  `ws.recv(KEEPALIVE.min(SUB_IDLE_TIMEOUT))` with a keepalive ping
+  (`relay_runtime.rs:726`), so a connection that goes quiet dies on the idle
+  bound instead of pinning us.
+- Events are signature-verified before anything trusts them
+  (`relay_runtime.rs:729`), so a relay cannot forge ids to suppress an honest
+  copy through the dedup ring.
+
+**What is genuinely missing is the per-REQ event bound** — and it needs more
+care than buzz's number suggests:
+
+> **It interacts with the catch-up subscription (N5.1).** A naive "500
+> historical events per filter" would silently TRUNCATE a legitimate
+> `subscribe_since` over several windows, which is worse than the flood it
+> prevents: the flood is noisy and self-announcing, a truncated catch-up is a
+> member quietly missing history it believes it has.
+
+So the bound must be (a) on the HISTORICAL phase only — counted until EOSE,
+with live traffic left unbounded, which is what buzz's own number means; (b)
+generous enough that a real multi-window catch-up never reaches it, an order of
+magnitude above buzz's chat-shaped 500; and (c) LOUD when hit, because at that
+size it is evidence, not tuning.
+
 **Steps.**
 
-1. Red: a relay double sends a frame past the cap; assert we reject it and stay
-   connected rather than dying or accepting.
+1. ~~Red: a relay double sends a frame past the cap~~ — already bounded; write
+   the test to PIN it rather than to add it.
 2. Red: a relay double answers one REQ with an unbounded event stream; assert we
-   stop at the bound and report it.
+   stop at the bound, report it structurally, and that the bound is counted
+   pre-EOSE so a catch-up is untouched. **Needs a hostile relay double** —
+   `nostr_relay_runtime.rs`'s `mod proxy` is the closest existing lever.
 3. Red: a relay double accepts the connection then dribbles; assert we time out
    instead of pinning the connection.
 4. Implement the bounds in `relay_ws.rs` as named constants with a comment on
