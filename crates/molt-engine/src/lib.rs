@@ -421,6 +421,17 @@ pub(crate) struct NostrTransport {
     /// actually dial is its own confirmed pool intersected with these — the
     /// two are deliberately different (`relay_pool.md` §3).
     pub(crate) relays: Vec<String>,
+    /// The group's stable h-tag seed, from the Welcome. Without it this node
+    /// cannot compute a single `h` tag, so it can neither publish a 445 nor
+    /// subscribe to one — it was persisted at founding/join and then, like
+    /// the secret above, left on disk.
+    ///
+    /// Adopted ahead of its consumer: the group runtime (N5.2) is the first
+    /// thing that reads it, and adopting it in the same place as the secret
+    /// keeps the "a Nostr workspace has all three or none" rule in ONE
+    /// match arm rather than two.
+    #[allow(dead_code)] // read by the N5.2 group runtime
+    pub(crate) rotation_seed: [u8; 32],
 }
 
 pub(crate) struct State {

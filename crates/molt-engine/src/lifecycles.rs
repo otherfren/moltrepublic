@@ -148,6 +148,7 @@ impl State {
         // must be able to speak as itself immediately (N4b §8.8 step 5a)
         let adopt_kind = shape.kind;
         let adopt_relays = shape.relays.clone();
+        let adopt_seed = shape.rotation_seed.clone();
         let adopt_nostr_sk: Option<zeroize::Zeroizing<Vec<u8>>> = if chain.is_empty() {
             None
         } else {
@@ -204,6 +205,7 @@ impl State {
             adopt_kind,
             adopt_nostr_sk.as_ref().map(|sk| sk.as_slice()),
             &adopt_relays,
+            adopt_seed.as_deref(),
         );
         let prefs = opened.prefs.clone();
         self.active = Some(ActiveStorage {

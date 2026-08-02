@@ -798,15 +798,21 @@ impl State {
         kind: Option<molt_core::TransportKind>,
         nostr_sk: Option<&[u8]>,
         relays: &[String],
+        rotation_seed: Option<&[u8]>,
     ) {
         self.transport_kind = kind;
         // a 32-byte scalar is the shape check; whether it IS the anchored key
         // is decided fail-closed by `RitualNet::new`, which owns that rule
-        self.nostr = match (kind, nostr_sk) {
-            (Some(molt_core::TransportKind::Nostr), Some(sk)) if sk.len() == 32 => {
+        // the seed is as load-bearing as the secret: without it no h tag can
+        // be computed, so a workspace with one and not the other is not
+        // usable and must not pretend to be
+        let seed = rotation_seed.and_then(|b| <[u8; 32]>::try_from(b).ok());
+        self.nostr = match (kind, nostr_sk, seed) {
+            (Some(molt_core::TransportKind::Nostr), Some(sk), Some(seed)) if sk.len() == 32 => {
                 Some(crate::NostrTransport {
                     sk: zeroize::Zeroizing::new(sk.to_vec()),
                     relays: relays.to_vec(),
+                    rotation_seed: seed,
                 })
             }
             _ => None,
@@ -1084,6 +1090,7 @@ impl State {
             transport_state.kind,
             transport_state.nostr_sk.as_deref(),
             &transport_state.relays,
+            transport_state.rotation_seed.as_deref(),
         );
         // a crash may have separated an Approved frame from its Applied frame;
         // re-decide thresholds that were already met (legacy path only)
