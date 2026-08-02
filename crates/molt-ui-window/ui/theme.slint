@@ -203,6 +203,9 @@ export struct InvitePreview {
     republic: string,
     rule: string, // "m-of-n"
     inviter: string,
+    // the republic's relays, as the invite names them, and how many of them
+    // this node is still missing — the join gate refuses on exactly that
+    missing-relays: int,
 }
 
 // One sub-view of a surface (nav entry), from molt-core's shared view list.
@@ -610,6 +613,8 @@ export global Strings {
     in property <string> jw-preview-hint;
     in property <string> jw-invited-by;
     in property <string> jw-join;
+    in property <string> jw-adopt-relays;
+    in property <string> jw-adopt-done;
     in property <string> jw-busy-title;
     in property <string> jw-busy-cancel;
     in property <string> jw-ph1;

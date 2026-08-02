@@ -885,6 +885,7 @@ export component AppWindow inherits Window {
     // join verbs (engine-backed; the real join runs off the actor and
     // enters the republic on its own once the founder seals)
     callback join-start(string, string);
+    callback adopt-invite-relays(string);
     callback join-cancel();
     // the joiner ratifies the founder's proposed charter (releases its seal
     // signature; the workspace opens only after this)
@@ -3416,6 +3417,18 @@ export component AppWindow inherits Window {
                                         if (root.jw-invite != "" && root.jw-member != "") {
                                             root.join-start(root.jw-invite, root.jw-member);
                                         }
+                                    }
+                                }
+                                // the invite already NAMES the republic's
+                                // relays, so a joiner refused for not having
+                                // them should not have to copy them out of a
+                                // chat message by hand
+                                if root.jw-preview.missing-relays > 0: AppButton {
+                                    height: 38px;
+                                    label: "\{Strings.jw-adopt-relays} (\{root.jw-preview.missing-relays})";
+                                    clicked => {
+                                        root.adopt-invite-relays(root.jw-invite);
+                                        root.show-toast(Strings.jw-adopt-done);
                                     }
                                 }
                                 AppButton {

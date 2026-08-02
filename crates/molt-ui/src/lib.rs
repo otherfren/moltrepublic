@@ -179,15 +179,28 @@ pub fn run_app(
         .into()
     });
 
-    ui.on_parse_invite(|s| match molt_core::InviteInfo::parse(&s) {
-        Some(i) => InvitePreview {
-            valid: true,
-            republic: i.republic.as_str().into(),
-            rule: format!("{}-of-{}", i.threshold, i.members).into(),
-            inviter: i.inviter.as_str().into(),
-        },
-        None => InvitePreview::default(),
-    });
+    {
+        let weak = ui.as_weak();
+        ui.on_parse_invite(move |s| match molt_core::InviteInfo::parse(&s) {
+            Some(i) => {
+                // how many of the republic's relays this node does not have.
+                // The invite carries them, so a refused joiner never has to
+                // copy them out of a chat message by hand.
+                let missing = weak
+                    .upgrade()
+                    .map(|ui| invite_relays_missing(&ui, &s))
+                    .unwrap_or(0);
+                InvitePreview {
+                    valid: true,
+                    republic: i.republic.as_str().into(),
+                    rule: format!("{}-of-{}", i.threshold, i.members).into(),
+                    inviter: i.inviter.as_str().into(),
+                    missing_relays: missing,
+                }
+            }
+            None => InvitePreview::default(),
+        });
+    }
 
     // NOTE: the old duplicate-name check is gone by design — display names
     // may repeat, the workspace id disambiguates (the same DAO opened twice
@@ -850,6 +863,31 @@ pub fn run_app(
         let weak = ui.as_weak();
         ui.on_restore_finish(move || {
             issue(&rt, &w, &weak, Command::RestoreFinish);
+        });
+    }
+    {
+        let rt_adopt = rt.clone();
+        let w_adopt = wallet.clone();
+        let weak_adopt = ui.as_weak();
+        ui.on_adopt_invite_relays(move |link| {
+            let Ok(inv) = molt_engine::FoundingInvite::parse(&link) else {
+                return;
+            };
+            for url in inv.handover.relays {
+                issue(&rt_adopt, &w_adopt, &weak_adopt, Command::RelayAdd { url: url.clone() });
+                // an ONION relay needs no exposure decision — confirm it
+                // outright. A clearnet one keeps its acknowledgement: making
+                // the convenient path the less private one is exactly what
+                // this button must not do.
+                if molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion {
+                    issue(
+                        &rt_adopt,
+                        &w_adopt,
+                        &weak_adopt,
+                        Command::RelayConfirm { url, accept_clearnet: false },
+                    );
+                }
+            }
         });
     }
     {
@@ -2693,6 +2731,22 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
     ui.set_jw_log_tone(log_tones(&sv.join.run.log));
     ui.set_jw_headline(sv.join.run.headline.clone().into());
+}
+
+/// The invite's relays this node does not hold yet.
+fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
+    let Ok(inv) = molt_engine::FoundingInvite::parse(link) else {
+        return 0;
+    };
+    let have: Vec<String> = ui.get_relay_rows().iter().map(|r| r.url.to_string()).collect();
+    i32::try_from(
+        inv.handover
+            .relays
+            .iter()
+            .filter(|u| !have.contains(u))
+            .count(),
+    )
+    .unwrap_or(0)
 }
 
 /// Per-line tone of a run log (0 neutral, 1 good, 2 bad) from the ✓/✗
@@ -5544,6 +5598,10 @@ lexicon! {
     jw_grp_preview: "You are joining …", "Du trittst bei …";
     jw_preview_hint: "Details are exchanged during the handshake.", "Details werden beim Handshake ausgetauscht.";
     jw_invited_by: "invited by", "eingeladen von";
+    jw_adopt_relays: "Add the republic's relays", "Relays der Republik hinzufügen";
+    // onion relays need no exposure decision, so they are confirmed outright;
+    // a clearnet one still waits for the acknowledgement in Settings
+    jw_adopt_done: "Added. Clearnet relays still need confirming in Settings.", "Hinzugefügt. Clearnet-Relays müssen noch in den Einstellungen bestätigt werden.";
     jw_join: "Join republic", "Republik beitreten";
     jw_busy_title: "Joining the republic", "Beitritt zur Republik";
     jw_busy_cancel: "Cancel", "Abbrechen";
