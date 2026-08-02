@@ -34,23 +34,23 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 
 | Feature | Implementation status |
 |---|---|
-| desktop UI app | **done** - founding, join, restore, chat, governance and settings run on real engine state; the surfaces below carry their own status |
-| mcp-api for your AI agent | **done** - the same command set the GUI drives, over stdio or TCP |
-| headless mode for AI only | **done** - `[node].headless` |
-| chat | **done** - send, delete, react, share files, read receipts |
-| *multisig wiki* for consensus and memory | **in development** - a proposal runs real threshold voting and lands in the chain; no note store behind it yet |
-| *multisig treasury* where every spend needs a majority vote | **planned** - design and build plan written, no Monero or FROST code yet |
-| *multisig kanban board* for work coordination | **planned** - UI mock |
-| *multisig secrets vault* for storage and selective disclosure of company secrets in case a member dies | **planned** - UI mock |
-| *social backups* ensure the company becomes very resilient | **in development** - the recovery ritual is proven over the test transport; over Nostr the recovery link works, the re-join is in build |
+| desktop UI app | **done** |
+| mcp-api for your AI agent | **done** |
+| headless mode for AI only | **done** |
+| chat | **done** |
+| *multisig wiki* for consensus and memory | **in development** |
+| *multisig treasury* where every spend needs a majority vote | **planned** |
+| *multisig kanban board* for work coordination | **planned** |
+| *multisig secrets vault* with threshold release | **planned** |
+| *social backups* for resilience | **in development** |
 
 ## Technologies:
 - rust (slint)
-- Nostr (NIP-EE/Marmot) - founding and join run over real relays, the group runtime is in build
-- Tor - SOCKS by default, embedded arti behind an opt-in feature
+- Nostr (NIP-EE/Marmot, group runtime in build)
+- Tor (SOCKS; embedded arti opt-in)
 - Nym (planned)
 - Monero (FROST/LASS multi-signatures, planned)
-- blockchained git (multisig consensus layer/company brain) - the threshold-signed chain is real, the note store on top of it is not
+- blockchained git (multisig consensus layer/company brain; note store planned)
 
 ![MoltRepublic](assets/hero.jpg)
 
