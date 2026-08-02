@@ -1775,6 +1775,11 @@ pub struct SealedRoster {
     pub identities: Vec<MemberIdentity>,
     /// Every member's signature over the canonical table.
     pub attestations: Vec<RosterAttestation>,
+    /// The group's relay pool, bound into the signed bytes since v4. A
+    /// verifier recomputes over exactly this list, so a founder cannot seal a
+    /// pool different from the one everybody ratified.
+    #[serde(default)]
+    pub relays: Vec<String>,
     /// The deliberated free-text charter every member ratified (concept §3.3).
     #[serde(default)]
     pub agenda: String,
@@ -1801,6 +1806,7 @@ impl SealedRoster {
                 attestations: self.attestations.clone(),
                 republic_id: self.republic_id.clone(),
                 agenda: self.agenda.clone(),
+                relays: self.relays.clone(),
             },
         }
     }
@@ -1809,22 +1815,50 @@ impl SealedRoster {
 /// The one canonical serialization of a roster table — what every member
 /// signs during the founding ritual's seal round and what every verifier
 /// reconstructs. Length-prefixed fields, entries in the given order (the
-/// ritual fixes the order: founder first, then invite order). v3 binds the
-/// per-member `nostr_pk` (the third anchor) into the signed bytes — a
-/// founder cannot swap a member's transport key without breaking every
-/// attestation.
+/// ritual fixes the order: founder first, then invite order). v3 bound the
+/// per-member `nostr_pk` (the third anchor).
+///
+/// **v4 binds the RELAY POOL** (`relay_topology_plan.md` R3, user-ratified
+/// 2026-08-02). The pool decides who can reach whom — relays do not federate —
+/// so it is as constitutional as the roster itself, and every member ratifies
+/// it by signing these bytes.
+///
+/// Order is preserved, not sorted — but NOT because of dial priority: the
+/// relay runtime connects to every relay concurrently, and the priority order
+/// in `relay_pool.md` belongs to the node's LOCAL pool, which is a different
+/// list. The order is signed because members ratify the list as they were
+/// shown it, because the invite↔Welcome equality check compares the lists
+/// element-wise, and because the recovery mint subsets them with `take`.
+///
+/// v4 also COUNTS the member run and length-prefixes `ws_id`, which v3 wrote
+/// raw ahead of two single bytes. That boundary was not self-delimiting, so `("ab", 1, …)` and
+/// `("a", 0x62, …)` produce overlapping prefixes. It is not exploitable
+/// today — `republic_id` is always 64 hex chars — but the sibling layout
+/// `molt-republic-id-v2` was length-prefixed for exactly this class after a
+/// forged larger founding table collided, and an unframed field in a hash
+/// preimage should not survive a version bump that is already rewriting it.
 pub fn roster_canonical_bytes(
     ws_id: &str,
     rule_m: u8,
     rule_n: u8,
     members: &[MemberIdentity],
     agenda: &str,
+    relays: &[String],
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-roster-v3\0");
-    out.extend_from_slice(ws_id.as_bytes());
+    out.extend_from_slice(b"molt-roster-v4\0");
+    let id = ws_id.as_bytes();
+    out.extend_from_slice(&u32::try_from(id.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(id);
     out.push(rule_m);
     out.push(rule_n);
+    // COUNT the member run. v3 got away without one because the agenda was
+    // the last field and had to exhaust the buffer; appending the relay run
+    // after it removed that implicit delimiter, and an uncounted run then
+    // collides — a one-member table byte-matches a zero-member table whose
+    // agenda and relay absorb the same bytes. Same class as the separator-only
+    // `republic_id` that let a forged larger founding table collide.
+    out.extend_from_slice(&u32::try_from(members.len()).unwrap_or(0).to_le_bytes());
     for m in members {
         let name = m.member.as_bytes();
         out.extend_from_slice(&u32::try_from(name.len()).unwrap_or(0).to_le_bytes());
@@ -1845,6 +1879,15 @@ pub fn roster_canonical_bytes(
     let ag = agenda.as_bytes();
     out.extend_from_slice(&u32::try_from(ag.len()).unwrap_or(0).to_le_bytes());
     out.extend_from_slice(ag);
+    // the group's relay pool: entry-COUNTED then each entry length-prefixed,
+    // so the preimage stays injective for any pool content and the field
+    // cannot be extended by a longer neighbour
+    out.extend_from_slice(&u32::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+    for r in relays {
+        let b = r.as_bytes();
+        out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(b);
+    }
     out
 }
 
@@ -1910,6 +1953,11 @@ pub enum WorkspaceEvent {
         /// like the roster. Empty on a genesis founded without deliberation.
         #[serde(default)]
         agenda: String,
+        /// The ratified relay pool (v4). Stored here for the same reason as
+        /// `republic_id`: a reader holding only the log must be able to
+        /// recompute the exact bytes the attestations above were signed over.
+        #[serde(default)]
+        relays: Vec<String>,
     },
     /// A seat filled via invite.
     MemberJoined {
@@ -4996,7 +5044,8 @@ mod tests {
         }
     }
 
-    /// N1 BYTE-IDENTITY PIN — `molt-roster-v3` binds the third anchor.
+    /// BYTE-IDENTITY PIN — `molt-roster-v4`: the third anchor (N1), the
+    /// relay pool and a length-prefixed `ws_id` (R3).
     /// Layout: tag ‖ ws_id ‖ m ‖ n ‖ per member (le32-len name ‖ le32-len
     /// identity_pk ‖ le32-len nostr_pk) ‖ le32-len agenda. The digest was
     /// computed INDEPENDENTLY of this codebase (python hashlib over the
@@ -5004,7 +5053,7 @@ mod tests {
     /// the implementation is wrong, not the fixture. Changing the layout
     /// means a NEW version tag and a new independently-computed fixture.
     #[test]
-    fn roster_canonical_bytes_v3_binds_the_third_anchor_byte_exactly() {
+    fn roster_canonical_bytes_v4_binds_anchor_pool_and_id_byte_exactly() {
         use sha2::Digest;
         let table = vec![
             MemberIdentity {
@@ -5018,25 +5067,81 @@ mod tests {
                 nostr_pk: "dd".repeat(32),
             },
         ];
-        let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter");
-        assert!(bytes.starts_with(b"molt-roster-v3\0"), "version tag bumped");
-        assert_eq!(bytes.len(), 317, "fixture length");
+        let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]);
+        assert!(bytes.starts_with(b"molt-roster-v4\0"), "version tag bumped");
+        assert_eq!(bytes.len(), 329, "fixture length");
         assert_eq!(
             hex::encode(sha2::Sha256::digest(&bytes)),
-            "294586c7d20ded0358f3d62ca1cb2623867e93325eea67fbcc3c8705b66aff12",
+            "471faf57994f951dbbb7c57811122b296cdff8885ad41d0323997c5ea795116e",
             "independently computed byte-identity fixture"
+        );
+        // v4: the RELAY POOL is inside the signed bytes. A founder cannot seal
+        // a pool different from the one everybody ratified.
+        let pooled = roster_canonical_bytes(
+            "f00",
+            2,
+            3,
+            &table,
+            "charter",
+            &["wss://a.example".to_string(), "wss://b.example".to_string()],
+        );
+        assert_ne!(pooled, bytes, "the pool changes what every member signs");
+        assert_eq!(pooled.len(), 367, "fixture length with two relays");
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&pooled)),
+            "035242b703cbeaaf5907f5bf7788fc919887b8cb43d9478ab3e9394a5847a625",
+            "independently computed byte-identity fixture (pool)"
+        );
+        // …and the pool ORDER is part of the agreement: the order IS the dial
+        // priority, so two orderings are two different pools, not one sorted
+        assert_ne!(
+            pooled,
+            roster_canonical_bytes(
+                "f00",
+                2,
+                3,
+                &table,
+                "charter",
+                &["wss://b.example".to_string(), "wss://a.example".to_string()],
+            ),
+            "relay order is signed, not normalized away"
+        );
+        // INJECTIVITY: an uncounted member run collides once a field follows
+        // the agenda. These two tables differ in every meaningful way and must
+        // never share a byte form — they DID before the member count.
+        assert_ne!(
+            roster_canonical_bytes(
+                "f00",
+                2,
+                3,
+                &[MemberIdentity {
+                    member: "ada".to_string(),
+                    identity_pk: "\u{9}".to_string(),
+                    nostr_pk: String::new(),
+                }],
+                "",
+                &[],
+            ),
+            roster_canonical_bytes("f00", 2, 3, &[], "ada", &["\0\0\0\0\0\0\0\0\0".to_string()]),
+        );
+        // v4 also length-prefixes ws_id, so the id/rule boundary is
+        // self-delimiting: these two differ, and under v3 their prefixes
+        // overlapped
+        assert_ne!(
+            roster_canonical_bytes("ab", 1, 2, &table, "charter", &[]),
+            roster_canonical_bytes("a", b'b', 1, &table, "charter", &[]),
         );
         // the third anchor is inside the signed bytes: changing ONLY a
         // nostr_pk changes what every member signs
         let mut changed = table.clone();
         changed[0].nostr_pk = "dd".repeat(32);
-        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter"));
+        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter", &[]));
         // a legacy (empty) nostr_pk still length-prefixes as 0 — no special
         // casing that could collide two different rosters onto one byte form
         let mut legacy = table.clone();
         legacy[0].nostr_pk = String::new();
-        let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter");
-        assert_eq!(legacy_bytes.len(), 317 - 64);
+        let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[]);
+        assert_eq!(legacy_bytes.len(), 329 - 64);
         assert_ne!(legacy_bytes, bytes);
     }
 
@@ -5054,15 +5159,15 @@ mod tests {
                 nostr_pk: "dd".repeat(32),
             },
         ];
-        let a = roster_canonical_bytes("f00", 2, 3, &table, "charter");
-        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter"));
+        let a = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]);
+        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]));
         // any changed field changes the bytes
-        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter"));
-        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter"));
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter"));
+        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter", &[]));
+        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter", &[]));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter", &[]));
         // the ratified agenda is bound: a changed charter changes the bytes
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other"));
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, ""));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other", &[]));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "", &[]));
         // length prefixes prevent name/pk boundary games
         let shifted = vec![MemberIdentity {
             member: "petraa".to_string(),
@@ -5075,8 +5180,8 @@ mod tests {
             nostr_pk: String::new(),
         }];
         assert_ne!(
-            roster_canonical_bytes("f00", 1, 1, &shifted, ""),
-            roster_canonical_bytes("f00", 1, 1, &plain, "")
+            roster_canonical_bytes("f00", 1, 1, &shifted, "", &[]),
+            roster_canonical_bytes("f00", 1, 1, &plain, "", &[])
         );
     }
 

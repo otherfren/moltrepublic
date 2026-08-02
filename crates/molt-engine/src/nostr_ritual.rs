@@ -1119,6 +1119,7 @@ mod tests {
             ],
             attestations: Vec::new(),
             agenda: String::new(),
+            relays: Vec::new(),
         }
     }
 

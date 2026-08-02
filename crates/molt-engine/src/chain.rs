@@ -211,6 +211,7 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
         rule_n,
         identities,
         agenda: _,
+        relays: _,
     } = &block.change
     else {
         return Err("block 0 is not a genesis".to_string());
@@ -331,6 +332,7 @@ pub(crate) fn checkpoint_state(
                 rule_n,
                 identities,
                 agenda,
+                relays: _,
             },
         ..
     }) = blocks.first()
@@ -486,6 +488,7 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
         rule_n,
         identities,
         agenda,
+        relays: _,
     } = &genesis.change
     else {
         unreachable!("verify_genesis accepted a non-genesis block 0");
@@ -705,6 +708,10 @@ impl State {
                 rule_n: sealed.rule_n,
                 identities: sealed.identities.clone(),
                 agenda: sealed.agenda.clone(),
+                // the pool the founders SIGNED — genesis approval_bytes is
+                // roster_canonical_bytes, so this must be exactly what the
+                // attestations below were made over
+                relays: sealed.relays.clone(),
             },
             sigs: sealed.attestations.clone(),
         }]
@@ -2126,6 +2133,7 @@ mod tests {
                 rule_n,
                 identities: identities.clone(),
                 agenda: "play chess".to_string(),
+                relays: Vec::new(),
             };
             let mut b = Builder {
                 republic_id: republic_id.clone(),

@@ -268,6 +268,7 @@ mod tests {
                 attestations: Vec::new(),
                 republic_id: String::new(),
                 agenda: String::new(),
+                relays: Vec::new(),
             },
         };
         let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");

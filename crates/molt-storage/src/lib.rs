@@ -577,6 +577,7 @@ fn genesis_from_snapshot(
                 attestations: Vec::new(),
                 republic_id: st.republic_id,
                 agenda: st.agenda,
+                relays: Vec::new(),
             },
         });
     }
@@ -2870,6 +2871,7 @@ mod tests {
                 attestations: Vec::new(),
                 republic_id: String::new(),
                 agenda: String::new(),
+                relays: Vec::new(),
             },
         }
     }

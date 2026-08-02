@@ -192,6 +192,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
         attestations,
         republic_id,
         agenda,
+        relays,
         ..
     } = &log[0].body
     else {
@@ -201,8 +202,11 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     assert_eq!(agenda, "play chess, decide together");
     assert_eq!(identities.len(), 2);
     assert_eq!(attestations.len(), 2);
+    // the ratified pool travels in the genesis frame, so a reader holding only
+    // the log can recompute exactly what the attestations were signed over
+    assert_eq!(relays, &vec![url.clone()]);
     let table =
-        molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda);
+        molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda, relays);
     for att in attestations {
         let identity = identities
             .iter()
@@ -789,8 +793,9 @@ fn injected_seal(member: &str) -> (String, String) {
         },
     ];
     let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-    let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
+    let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[]);
     let sealed = molt_core::SealedRoster {
+        relays: Vec::new(),
         name: "R".to_string(),
         republic_id,
         rule_m: 2,
@@ -1599,5 +1604,98 @@ async fn the_founder_picks_the_republics_relays_and_the_invite_carries_the_pick(
     assert!(
         format!("{err}").contains("never-added.example"),
         "…naming the offending relay: {err}"
+    );
+}
+
+/// **R3** — the relay pool is signed by everyone, not merely configured.
+///
+/// The pool decides who can reach whom (relays do not federate), so it is as
+/// constitutional as the roster. Since `molt-roster-v4` it rides inside the
+/// bytes every member signs at the seal, which means a founder cannot seal a
+/// pool different from the one that was ratified — the same sign-what-you-see
+/// property the charter already had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_pool_is_bound_into_what_every_member_signs() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+
+    let a = engine(&root_a);
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+        relays: vec![url.clone()],
+    })
+    .await
+    .expect("founding starts");
+
+    let s = wait_for(&a, "the seat link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    wait_for(&a, "the join", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Chess Club".to_string(),
+        agenda: "play chess".to_string(),
+    })
+    .await
+    .expect("charter");
+    wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    let s = wait_for(&a, "the seal", |s| {
+        s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
+    })
+    .await;
+    let ws_id = s.active_workspace.clone();
+    wait_for(&b, "the join seal", |s| {
+        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+    })
+    .await;
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+
+    // …the genesis on disk carries the pool, and the chain still verifies —
+    // which is the whole claim: the attestations were made over bytes that
+    // INCLUDE these relays.
+    let dir = molt_storage::find_workspace_dir(&root_a, &ws_id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    let (_blob, chain) = ws.read_chain();
+    let genesis = chain.first().expect("a genesis block");
+    let molt_core::chain::ChainChange::Genesis { relays, .. } = &genesis.change else {
+        panic!("block 0 is not a genesis");
+    };
+    assert_eq!(
+        relays,
+        &vec![url.clone()],
+        "the ratified pool must be in the genesis"
+    );
+    molt_engine::verify_chain(&chain).expect("the signed chain still verifies over v4 bytes");
+
+    // …and a doctored pool breaks every attestation, which is what "signed"
+    // has to mean. Without this the field could ride along unbound.
+    let mut forged = chain.clone();
+    let molt_core::chain::ChainChange::Genesis { relays, .. } = &mut forged[0].change else {
+        unreachable!()
+    };
+    relays.push("wss://the-founder-added-this-later.example".to_string());
+    assert!(
+        molt_engine::verify_chain(&forged).is_err(),
+        "a pool nobody ratified must not verify"
     );
 }

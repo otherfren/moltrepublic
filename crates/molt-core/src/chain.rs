@@ -83,6 +83,12 @@ pub enum ChainChange {
         identities: Vec<MemberIdentity>,
         /// The ratified free-text charter.
         agenda: String,
+        /// The group's relay pool, ratified with the rest of the founding
+        /// table (v4). Carried HERE because the genesis's `approval_bytes`
+        /// IS `roster_canonical_bytes` — a verifier that cannot see the pool
+        /// cannot recompute what the founders signed.
+        #[serde(default)]
+        relays: Vec<String>,
     },
     /// A gated surface transition that reached threshold and is applied.
     Applied {
@@ -168,7 +174,8 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             rule_n,
             identities,
             agenda,
-        } => roster_canonical_bytes(rid, *rule_m, *rule_n, identities, agenda),
+            relays,
+        } => roster_canonical_bytes(rid, *rule_m, *rule_n, identities, agenda, relays),
         ChainChange::Applied {
             proposal_id,
             surface,
@@ -388,10 +395,11 @@ mod tests {
             rule_n: 2,
             identities: identities.clone(),
             agenda: "play".to_string(),
+            relays: Vec::new(),
         };
         assert_eq!(
             approval_bytes("f00", 0, &change),
-            roster_canonical_bytes("f00", 2, 2, &identities, "play"),
+            roster_canonical_bytes("f00", 2, 2, &identities, "play", &[]),
         );
     }
 

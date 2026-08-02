@@ -154,7 +154,7 @@ genesis would. Either the pick is capped at `MAX_PAYLOAD_RELAYS` in the UI (so
 the two can never disagree), or R3 must carry the full list some other way.
 Cap in the UI — the simpler invariant.
 
-### R3 — The initial pool is signed by everyone
+### R3 — The initial pool is signed by everyone ✅ DONE 2026-08-02
 The `molt-roster-v4` bump of §4.1, with the pool travelling from the founder's
 create-wizard choice into the founding table every member ratifies.
 - **Red:** a v3 table must not verify against a v4 seat; a sealed roster whose

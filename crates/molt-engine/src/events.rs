@@ -150,6 +150,9 @@ impl State {
                 // the ratified charter lives in the genesis frame (immutable);
                 // the ratified charter, surfaced by the Constitution surface
                 agenda,
+                // read by verifiers recomputing the signed bytes from the log,
+                // not by the applier — the live pool comes from transport.state
+                relays: _,
             } => {
                 self.replica = Some(ReplicaState {
                     name: name.clone(),
@@ -704,6 +707,7 @@ mod tests {
                     attestations: Vec::new(),
                     republic_id: String::new(),
                     agenda: String::new(),
+                    relays: Vec::new(),
                 },
             ),
             e(2, "petra", WorkspaceEvent::Chat(msg("petra", "gm", 102))),
@@ -809,6 +813,7 @@ mod tests {
                 attestations: Vec::new(),
                 republic_id: String::new(),
                 agenda: String::new(),
+                relays: Vec::new(),
             },
         ));
         st.apply(&e(

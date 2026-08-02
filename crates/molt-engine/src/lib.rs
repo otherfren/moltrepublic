@@ -4116,7 +4116,7 @@ mod tests {
             },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "");
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[]);
         let attestations = vec![
             RosterAttestation { member: "founder".to_string(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "petra".to_string(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -4130,6 +4130,7 @@ mod tests {
             identities,
             attestations,
             agenda: String::new(),
+            relays: Vec::new(),
         }
     }
 
@@ -4378,6 +4379,7 @@ mod tests {
             rule_n: 2,
             identities,
             agenda: "survive total loss".to_string(),
+            relays: Vec::new(),
         };
         let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
         let genesis = ChainBlock {

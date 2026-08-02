@@ -309,6 +309,7 @@ mod tests {
                 attestations: Vec::new(),
                 republic_id: String::new(),
                 agenda: "keep secrets".to_string(),
+                relays: Vec::new(),
             },
         }
     }

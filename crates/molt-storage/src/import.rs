@@ -554,6 +554,7 @@ mod tests {
                 attestations: Vec::new(),
                 republic_id: String::new(),
                 agenda: String::new(),
+                relays: Vec::new(),
             },
         }
     }

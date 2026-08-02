@@ -152,6 +152,7 @@ pub(crate) fn sealed_roster_from_genesis(
         rule_n,
         identities,
         agenda,
+        relays: _,
     } = &block.change
     else {
         return None;
@@ -165,6 +166,7 @@ pub(crate) fn sealed_roster_from_genesis(
         identities: identities.clone(),
         attestations: block.sigs.clone(),
         agenda: agenda.clone(),
+        relays: Vec::new(),
     })
 }
 
@@ -651,6 +653,7 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
         identities: blob.roster.clone(),
         attestations: Vec::new(),
         agenda: blob.agenda.clone(),
+        relays: Vec::new(),
     }
 }
 
@@ -1002,6 +1005,7 @@ mod tests {
                 rule_n: 2,
                 identities: ids.clone(),
                 agenda: "play chess".to_string(),
+                relays: Vec::new(),
             },
             sigs: vec![
                 RosterAttestation {
@@ -1060,6 +1064,7 @@ mod tests {
             rule_n,
             identities,
             agenda: "found it".to_string(),
+            relays: Vec::new(),
         };
         let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
         let sigs = members

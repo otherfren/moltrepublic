@@ -211,7 +211,14 @@ impl RitualRuntime {
     /// constitution.
     fn canonical(&self, identities: &[MemberIdentity]) -> Vec<u8> {
         let rid = self.republic_id(identities);
-        molt_core::roster_canonical_bytes(&rid, self.rule_m, self.rule_n, identities, &self.agenda)
+        molt_core::roster_canonical_bytes(
+            &rid,
+            self.rule_m,
+            self.rule_n,
+            identities,
+            &self.agenda,
+            &self.group_relays(),
+        )
     }
 
     fn next_msg_id(&self, tag: &str) -> molt_net::MsgId {
@@ -282,6 +289,13 @@ impl RitualRuntime {
 
     /// The founder's Nostr transport secret (the third anchor's private
     /// half) — persisted beside `identity_sk` when the founding seals.
+    /// The group's relay pool for this founding — the founder's pick, which
+    /// every member ratifies by signing it into the roster bytes (R3). Empty
+    /// on the loopback path, which has no relays.
+    pub(crate) fn group_relays(&self) -> Vec<String> {
+        self.nostr.as_ref().map(|n| n.relays.clone()).unwrap_or_default()
+    }
+
     pub(crate) fn founder_nostr_sk(&self) -> &[u8] {
         &self.founder_nostr_sk
     }
@@ -1037,7 +1051,14 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     // name/agenda in the genesis than the members ratified, their signatures
     // (made over the Seal's table) fail here — the charter is tamper-evident
     let table =
-        molt_core::roster_canonical_bytes(&s.republic_id, s.rule_m, s.rule_n, &s.identities, &s.agenda);
+        molt_core::roster_canonical_bytes(
+            &s.republic_id,
+            s.rule_m,
+            s.rule_n,
+            &s.identities,
+            &s.agenda,
+            &s.relays,
+        );
     for att in &s.attestations {
         let id = s
             .identities
@@ -1173,6 +1194,7 @@ pub(crate) fn verify_seal_proposal(
         proposal.rule_n,
         &proposal.identities,
         &proposal.agenda,
+        &proposal.relays,
     ))
 }
 
@@ -2809,6 +2831,10 @@ mod ritual_ops {
             // recompute the canonical table itself and check its own membership,
             // so it ratifies exactly what it verifies (not an opaque blob)
             let proposal = molt_core::SealedRoster {
+                // the pool is part of what the members RATIFY, not something
+                // the founder adds afterwards — the genesis byte comparison
+                // closes on exactly these bytes
+                relays: ritual.group_relays(),
                 name: ritual.name.clone(),
                 republic_id: ritual.republic_id(&identities),
                 rule_m: ritual.rule_m,
@@ -3075,7 +3101,7 @@ mod tests {
             },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter");
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter", &[]);
         let attestations = vec![
             RosterAttestation { member: "founder".into(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "member".into(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -3089,6 +3115,7 @@ mod tests {
             identities,
             attestations,
             agenda: "charter".into(),
+            relays: Vec::new(),
         }
     }
 
@@ -3284,7 +3311,7 @@ mod tests {
         // the returned bytes are exactly the canonical table over the charter,
         // so a signature over them ratifies precisely this name + agenda + roster
         let expect =
-            molt_core::roster_canonical_bytes(&p.republic_id, p.rule_m, p.rule_n, &p.identities, &p.agenda);
+            molt_core::roster_canonical_bytes(&p.republic_id, p.rule_m, p.rule_n, &p.identities, &p.agenda, &[]);
         assert_eq!(table, expect);
     }
 
@@ -3626,6 +3653,7 @@ mod tests {
                 identities: identities.clone(),
                 attestations: Vec::new(),
                 agenda: "the ratified charter".to_string(),
+                relays: Vec::new(),
             };
             send(invite::RitualMsg::JoinAccepted { seat: 0 }, 1).await;
             send(
@@ -3671,8 +3699,10 @@ mod tests {
                 2,
                 &evil_identities,
                 "a charter nobody ratified",
+                &[],
             );
             let sealed = SealedRoster {
+                relays: Vec::new(),
                 name: "R".to_string(),
                 republic_id: evil_rid,
                 rule_m: 2,

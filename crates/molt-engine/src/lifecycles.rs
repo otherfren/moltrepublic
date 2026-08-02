@@ -121,6 +121,11 @@ impl State {
             identities,
             attestations,
             agenda,
+            // the RATIFIED pool. `shape.relays` is the same list the founder
+            // picked, the members signed and the genesis must carry — a
+            // placeholder here writes a genesis whose own attestations do not
+            // verify against it.
+            relays: shape.relays.clone(),
         };
         let genesis = sealed.into_genesis(member, now_secs());
         // Block 0 of the persistent chain IS the founding: the sealed roster as a
@@ -889,12 +894,20 @@ impl State {
         // the canonical bytes bind the ratified charter (agenda); the founder's
         // name/agenda are already the final, proposed ones (cmd_create_propose
         // set c.name/c.agenda and the ritual together)
+        // the group's relay pool goes into the signed bytes (R3): the founder
+        // PICKED it (R2c) and every member ratifies it here, so from the
+        // genesis on it is group state nobody can change alone
+        // from the RITUAL PARAMETER, not `self.net_ritual`: `maybe_finalize`
+        // took it before calling here, so reading the field would silently
+        // seal an empty pool — which the R3 keystone caught.
+        let pool: Vec<String> = ritual.group_relays();
         let table = molt_core::roster_canonical_bytes(
             &republic_id,
             c.threshold,
             c.members,
             &identities,
             &c.agenda,
+            &pool,
         );
         let founder_sig = molt_storage::identity_sign(ritual.founder_sk(), &table);
         let mut attestations = vec![molt_core::RosterAttestation {
@@ -905,6 +918,7 @@ impl State {
 
         // the complete sealed roster every member (founder included) writes
         let sealed = molt_core::SealedRoster {
+            relays: pool.clone(),
             name: c.name.clone(),
             republic_id: republic_id.clone(),
             rule_m: c.threshold,

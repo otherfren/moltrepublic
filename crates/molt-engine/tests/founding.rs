@@ -122,7 +122,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
 
     // THE guarantee: every attestation verifies against the anchored key
     // over the one canonical table
-    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda);
+    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda, &[]);
     for att in attestations {
         let identity = identities
             .iter()
@@ -136,7 +136,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     }
 
     // a tampered table breaks every signature (sanity: the check has teeth)
-    let bad = molt_core::roster_canonical_bytes(republic_id, 3, *rule_n, identities, agenda);
+    let bad = molt_core::roster_canonical_bytes(republic_id, 3, *rule_n, identities, agenda, &[]);
     assert!(!molt_storage::identity_verify(
         &identities[0].identity_pk,
         &bad,
