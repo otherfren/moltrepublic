@@ -250,6 +250,11 @@ thread_local! {
     /// rather than a timing: a holder that re-walks its chain per block shows
     /// up here as `N²`, not `N`.
     pub(crate) static VERIFY_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Test-only count of whole-chain writes. Same reason as `VERIFY_STEPS`:
+    /// the write is a BLOCKING round-trip to the storage writer, so "once per
+    /// batch" is a claim worth asserting rather than describing.
+    pub(crate) static CHAIN_PERSISTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Verify one post-genesis block against the current head. Returns the
@@ -896,6 +901,48 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// Fold ONE freshly-appended block into the projection.
+    ///
+    /// [`State::apply_chain_to_state`] rebuilds from the whole chain, which is
+    /// right when entries must DISAPPEAR (a re-base, a prune) and wrong for an
+    /// append: it re-clones every payload in the chain for every block, so a
+    /// catch-up draining N blocks cloned the applied log N²/2 times.
+    ///
+    /// An append can only add, so this runs the same three folds for the one
+    /// block — the projection it produces is the one the full rebuild would.
+    fn project_one(&mut self, block: &ChainBlock) {
+        match &block.change {
+            ChainChange::Applied {
+                proposal_id,
+                surface,
+                payload,
+            } => {
+                self.chain_applied
+                    .entry(*surface)
+                    .or_default()
+                    .push((Some(*proposal_id), payload.clone()));
+            }
+            // the LAST Restored block for a seat wins, and an append is the
+            // last; an empty anchor leaves the previous one standing, exactly
+            // as the full rebuild's insert-only fold does
+            ChainChange::Membership {
+                member,
+                nostr_pk: Some(pk),
+                ..
+            } if !pk.is_empty() => {
+                self.chain_anchors.insert(member.clone(), pk.clone());
+            }
+            _ => {}
+        }
+        // the verified head carries the roster after every membership block
+        if let Some(head) = &self.chain_head {
+            if let Some(r) = &mut self.replica {
+                r.identities = head.identities.clone();
+                r.roster = head.identities.iter().map(|i| i.member.clone()).collect();
+            }
+        }
+    }
+
     pub(crate) fn apply_chain_to_state(&mut self) {
         let mut projected: std::collections::HashMap<
             Surface,
@@ -1263,6 +1310,7 @@ impl State {
         if !self.append_committed_block(block.clone()) {
             return;
         }
+        self.persist_chain_now();
         self.after_block_applied(&block);
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
@@ -1285,22 +1333,37 @@ impl State {
         self.maybe_auto_checkpoint();
     }
 
-    /// Verify a block as the extension of our chain, append + persist it, and
-    /// re-project state. Returns whether it was accepted.
+    /// Write the chain as it stands.
+    ///
+    /// **Once per accepted batch, never per block.** The round-trip is
+    /// synchronous — `persist_chain_blocking` waits on the writer's ack — so
+    /// a catch-up draining N blocks used to sit through N blocking
+    /// whole-chain writes inside one uninterruptible actor turn. Losing a
+    /// batch to a crash costs a re-fetch and nothing else: any survivor
+    /// re-serves the blocks on the next catch-up.
+    fn persist_chain_now(&self) {
+        #[cfg(test)]
+        CHAIN_PERSISTS.with(|c| c.set(c.get() + 1));
+        let Some(active) = &self.active else {
+            return;
+        };
+        active
+            .handle
+            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone());
+    }
+
+    /// Verify a block as the extension of our chain, append it, and re-project
+    /// state. Returns whether it was accepted. **Does not persist** — the
+    /// caller does, once per batch ([`State::persist_chain_now`]).
     fn append_committed_block(&mut self, block: ChainBlock) -> bool {
         // verify BEFORE appending — the block only ever touches `self.chain`
         // once it has passed, so there is nothing to roll back
         match self.extend_own(&block) {
             Ok(head) => {
-                self.chain.push(block);
                 self.chain_head = Some(head);
-                self.apply_chain_to_state();
-                let chain = self.chain.clone();
-                if let Some(active) = &self.active {
-                    active
-                        .handle
-                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
-                }
+                // an append only ADDS to the projection — no whole-chain refold
+                self.project_one(&block);
+                self.chain.push(block);
                 true
             }
             Err(e) => {
@@ -1376,12 +1439,7 @@ impl State {
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
-                        let chain = self.chain.clone();
-                        if let Some(active) = &self.active {
-                            active
-                                .handle
-                                .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
-                        }
+                        self.persist_chain_now();
                         self.emit(Event::CheckpointSealed {
                             height: anchor_height,
                             upto,
@@ -1885,6 +1943,7 @@ impl State {
                 self.adopt_chain(vec![block]);
                 if self.chain_head.is_some() {
                     self.drain_buffered_blocks();
+                    self.persist_chain_now();
                 }
             } else {
                 self.pending_blocks.insert(block.height, block);
@@ -1896,7 +1955,10 @@ impl State {
         };
         if block.height == head.height + 1 {
             if self.apply_next_block(block) {
+                // the buffered suffix drains behind it — ONE write for the
+                // whole batch, at the end
                 self.drain_buffered_blocks();
+                self.persist_chain_now();
             }
         } else if block.height <= head.height {
             self.tie_break(block);
@@ -2124,12 +2186,7 @@ impl State {
                     self.after_org_applied();
                 }
                 self.rebase_pending_approvals();
-                let chain = self.chain.clone();
-                if let Some(active) = &self.active {
-                    active
-                        .handle
-                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
-                }
+                self.persist_chain_now();
                 if self.catchup_from.is_some_and(|f| f <= new_height) {
                     self.catchup_from = None;
                 }
@@ -2219,12 +2276,7 @@ impl State {
             if let Ok(head) = self.verify_own(&self.chain) {
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
-                let chain = self.chain.clone();
-                if let Some(active) = &self.active {
-                    active
-                        .handle
-                        .persist_chain_blocking(self.checkpoint_blob.clone(), chain);
-                }
+                self.persist_chain_now();
                 // the displaced proposal returns to pending and re-bases
                 if let Some(ChainChange::Applied { proposal_id, .. }) =
                     displaced.as_ref().map(|b| &b.change)
@@ -2339,6 +2391,20 @@ mod tests {
                 proposal_id,
                 surface: Surface::Memory,
                 payload: json!({ "op": "add_note", "id": proposal_id }),
+            };
+            let block = self.seal(height, change, signers);
+            self.push(block);
+        }
+
+        /// Commit a `Restored` membership block — the seat keeps its anchored
+        /// identity key and re-anchors its transport key.
+        fn commit_restored(&mut self, member: &str, nostr_pk: &str, signers: &[&str]) {
+            let height = u64::try_from(self.blocks.len()).expect("small chain");
+            let change = ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: member.to_string(),
+                identity_pk: self.pk(member),
+                nostr_pk: Some(nostr_pk.to_string()),
             };
             let block = self.seal(height, change, signers);
             self.push(block);
@@ -3079,10 +3145,12 @@ mod tests {
         // reverse order, so every block buffers and the whole suffix drains
         // in ONE turn — the shape a real catch-up has
         VERIFY_STEPS.with(|c| c.set(0));
+        CHAIN_PERSISTS.with(|c| c.set(0));
         for block in b.blocks[1..].iter().rev() {
             peer.receive_block(block.clone());
         }
         let steps = VERIFY_STEPS.with(std::cell::Cell::get);
+        let writes = CHAIN_PERSISTS.with(std::cell::Cell::get);
 
         assert_eq!(
             peer.chain_head.as_ref().expect("head").height,
@@ -3094,6 +3162,11 @@ mod tests {
             "each block is verified exactly once — a re-walk per block would \
              cost {} here, and 7M at N=1000",
             N * (N + 1)
+        );
+        assert_eq!(
+            writes, 1,
+            "the drained batch is written ONCE — the write blocks on the \
+             storage writer's ack, so {N} of them would sit inside one turn"
         );
     }
 
@@ -3133,6 +3206,35 @@ mod tests {
             peer.chain_head.as_ref().expect("head").height,
             1,
             "a refused block must not burn its proposal id"
+        );
+    }
+
+    /// The incrementally-folded projection must equal the whole-chain
+    /// rebuild — including across a Membership block, where the anchors map
+    /// and the roster move too.
+    ///
+    /// This is the property `project_one` trades a refold for; a full rebuild
+    /// re-clones every payload in the chain per block, which made a drain of
+    /// N blocks clone the applied log N²/2 times.
+    #[test]
+    fn the_appended_projection_equals_the_whole_chain_rebuild() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let fresh = molt_net::nostr_identity(b"walter-recovered", "new-ticket").1;
+        b.commit_restored("walter", &fresh, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let mut peer = chain_peer("walter", &b, b.blocks[..1].to_vec());
+        for block in b.blocks[1..].iter().rev() {
+            peer.receive_block(block.clone());
+        }
+        assert_eq!(peer.chain.len(), 4, "the whole suffix drained");
+
+        let incremental = (peer.chain_applied.clone(), peer.chain_anchors.clone());
+        peer.apply_chain_to_state();
+        assert_eq!(
+            incremental,
+            (peer.chain_applied.clone(), peer.chain_anchors.clone()),
+            "the appended projection must equal the whole-chain rebuild"
         );
     }
 
