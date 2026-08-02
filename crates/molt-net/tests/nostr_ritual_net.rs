@@ -182,6 +182,76 @@ async fn a_445_frame_round_trips_through_the_group_channel() {
     );
 }
 
+/// **The stamp can be PINNED, and it drives the h tag with it.**
+///
+/// A recovery re-key has to key its own commit at the same `created_at`
+/// every receiver will read off the wire — `CommitKey(created_at, digest)`,
+/// lowest wins, "the stamp must come from the SAME source on both sides"
+/// (`molt-net/CLAUDE.md`). The sender therefore has to choose the value
+/// BEFORE it commits, which `publish_frame` cannot do: it generates `now`
+/// internally and only reports it afterwards.
+///
+/// The subscriber must still see it, which is the second half of the claim:
+/// the pinned value has to derive the **h tag** as well. Deriving tag and
+/// stamp from different clocks can straddle a UTC window boundary and
+/// publish a frame under a tag that disowns its own timestamp — the reason
+/// `publish_frame` takes one `now` for both.
+#[tokio::test]
+async fn a_pinned_stamp_is_the_one_on_the_wire_and_names_its_own_window() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let channel = GroupChannel::new(dialer(), vec![url], [5u8; 32]);
+
+    let mut sub = channel.subscribe().await.expect("group subscription");
+    assert!(sub.live(RECV_TIMEOUT).await, "the group REQ replayed");
+
+    // a stamp inside the current window but NOT "now" — a plain `now_secs()`
+    // implementation would report a different number
+    let pinned = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs()
+        - 137;
+    let (stamp, report) = channel
+        .publish_frame_at(&[9u8; 32], b"the rekey commit", pinned)
+        .await
+        .expect("publish at a pinned stamp");
+    assert_eq!(stamp, pinned, "the stamp reported is the stamp asked for");
+    assert_eq!(report.accepted.len(), 1, "the one relay took it: {report:?}");
+
+    let GroupRecv::Frame { content, created_at } = sub.recv(RECV_TIMEOUT).await else {
+        panic!("the pinned frame must land under the window its own stamp names");
+    };
+    assert_eq!(created_at, pinned, "both ends read the SAME carrier stamp");
+    assert_eq!(
+        open_outer(&[[9u8; 32]], &content).expect("the exporter opens it"),
+        b"the rekey commit"
+    );
+
+    // …and the tag half, which the round-trip above CANNOT see: 137 seconds
+    // back is the same h window, so a tag derived from the wall clock would
+    // land in exactly the same place and the assertion would be inert.
+    //
+    // Three days back is a different window. A current-window subscriber must
+    // therefore NOT see it — if the tag came from `now` instead of from the
+    // pinned stamp, it would arrive, and this frame would be sitting under a
+    // tag that disowns its own timestamp.
+    let old = pinned - 3 * 86_400;
+    channel
+        .publish_frame_at(&[9u8; 32], b"stamped three days back", old)
+        .await
+        .expect("publish at an old stamp");
+    // anything but a Frame means it did not arrive — the tag followed the
+    // stamp into the old window, which is the whole claim
+    if let GroupRecv::Frame { created_at, .. } = sub.recv(RECV_TIMEOUT).await {
+        panic!(
+            "a frame stamped {old} reached a subscriber asking only for the \
+             current window (got created_at {created_at}) — its tag was \
+             derived from the clock, not from the stamp"
+        );
+    }
+}
+
 /// Keystone 5 — a frame published under a FOREIGN rotation seed never
 /// reaches a subscriber: the h tags disagree, so the filter (and the
 /// recv-side gate behind it) keeps the channels disjoint.

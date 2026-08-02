@@ -408,11 +408,33 @@ impl GroupChannel {
         exporter: &[u8; 32],
         mls_ciphertext: &[u8],
     ) -> Result<(u64, PublishReport), NetError> {
+        self.publish_frame_at(exporter, mls_ciphertext, now_secs()).await
+    }
+
+    /// [`Self::publish_frame`] at a **caller-chosen** `created_at`.
+    ///
+    /// A commit's sender has to key it at the value every receiver will read
+    /// off the wire — `CommitKey(created_at, digest)`, and the rule is that
+    /// the stamp comes from the same source on both sides
+    /// (`molt-net/CLAUDE.md`). Choosing it afterwards is too late: the MLS
+    /// commit is already made. So the coordinator picks the stamp, commits at
+    /// it, and publishes at exactly it.
+    ///
+    /// The supplied value drives the **h tag** as well, for the same reason
+    /// the generated one does: a tag and a stamp from different clocks can
+    /// straddle a UTC window boundary, and the frame then sits under a tag
+    /// that disowns its own timestamp — invisible to everyone asking for the
+    /// window it claims to be in.
+    pub async fn publish_frame_at(
+        &self,
+        exporter: &[u8; 32],
+        mls_ciphertext: &[u8],
+        created_at: u64,
+    ) -> Result<(u64, PublishReport), NetError> {
         let sealed = envelope::seal_outer(exporter, mls_ciphertext)
             .map_err(|e| NetError::Crypto(format!("sealing the 445 frame: {e}")))?;
-        // one `now` for tag and stamp: deriving them separately could
-        // straddle a window boundary and publish a stamp its tag disowns
-        let now = Timestamp::from_secs(now_secs());
+        // one value for tag and stamp — see the doc above
+        let now = Timestamp::from_secs(created_at);
         let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
         let h = Tag::parse(["h", tag.as_str()])
             .map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
