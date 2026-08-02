@@ -444,7 +444,6 @@ pub(crate) struct NostrTransport {
     /// thing that reads it, and adopting it in the same place as the secret
     /// keeps the "a Nostr workspace has all three or none" rule in ONE
     /// match arm rather than two.
-    #[allow(dead_code)] // read by the N5.2 group runtime
     pub(crate) rotation_seed: [u8; 32],
 }
 
