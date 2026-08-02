@@ -323,7 +323,7 @@ component ToolBtn inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
         changed has-hover => {
             if (self.has-hover) {
-                HintTip.label = root.enabled ? root.name : "\{root.name} — \{Strings.not-implemented-yet}";
+                HintTip.label = root.enabled ? root.name : "\{root.name} - \{Strings.not-implemented-yet}";
                 HintTip.ax = root.absolute-position.x;
                 HintTip.ay = root.absolute-position.y + root.height + 6px;
             } else if (HintTip.ax == root.absolute-position.x
@@ -729,27 +729,27 @@ export component MemoryPane inherits VerticalLayout {
     // the same document as markdown source for the ✏️ edit mode.
     property <[BrainDoc]> docs: [
         { path: "charter.md", author: "petra", ver: "v12", when: "3 d", links: ["decisions/2026-07-02-treasury.md", "glossary.md"],
-            raw: "# Charter\n\nWhat we agreed to at the founding — the purpose, the rule, and the habits that keep four people one republic.\n\n## Purpose\n\nPool funds, share knowledge and act as one signer where a single person would be a single point of failure.\n\n## Consensus\n\n- Every gated change needs 3 of 4 signatures — no exceptions, not even for the founder.\n- Proposals live in chat until sealed; only sealed changes are canon.\n\n## Habits\n\n- Quarterly recovery drill (see runbooks/node-recovery.md).\n- Decisions get a dated file under decisions/ — if it is not written down, it was not decided.",
+            raw: "# Charter\n\nWhat we agreed to at the founding - the purpose, the rule, and the habits that keep four people one republic.\n\n## Purpose\n\nPool funds, share knowledge and act as one signer where a single person would be a single point of failure.\n\n## Consensus\n\n- Every gated change needs 3 of 4 signatures - no exceptions, not even for the founder.\n- Proposals live in chat until sealed; only sealed changes are canon.\n\n## Habits\n\n- Quarterly recovery drill (see runbooks/node-recovery.md).\n- Decisions get a dated file under decisions/ - if it is not written down, it was not decided.",
             blocks: [
             { kind: 0, text: "Charter" },
-            { kind: 2, text: "What we agreed to at the founding — the purpose, the rule, and the habits that keep four people one republic." },
+            { kind: 2, text: "What we agreed to at the founding - the purpose, the rule, and the habits that keep four people one republic." },
             { kind: 1, text: "Purpose" },
             { kind: 2, text: "Pool funds, share knowledge and act as one signer where a single person would be a single point of failure." },
             { kind: 1, text: "Consensus" },
-            { kind: 3, text: "Every gated change needs 3 of 4 signatures — no exceptions, not even for the founder." },
+            { kind: 3, text: "Every gated change needs 3 of 4 signatures - no exceptions, not even for the founder." },
             { kind: 3, text: "Proposals live in chat until sealed; only sealed changes are canon." },
             { kind: 1, text: "Habits" },
             { kind: 3, text: "Quarterly recovery drill (see runbooks/node-recovery.md)." },
-            { kind: 3, text: "Decisions get a dated file under decisions/ — if it is not written down, it was not decided." }] },
+            { kind: 3, text: "Decisions get a dated file under decisions/ - if it is not written down, it was not decided." }] },
         { path: "decisions/2026-06-14-relay.md", author: "walter", ver: "v4", when: "1 m", links: ["runbooks/node-recovery.md"],
-            raw: "# Decision: paid SMP relay\n\nFree relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate.\n\n## Options weighed\n\n- Stay on public relays — free, but no uptime promise.\n- Self-host — full control, but one member becomes ops.\n- Rent + cert-pin — chosen: predictable, and no single admin.\n\n```\nrelay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault\n```\n\nRevisit when the second-relay quest lands.",
+            raw: "# Decision: paid SMP relay\n\nFree relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate.\n\n## Options weighed\n\n- Stay on public relays - free, but no uptime promise.\n- Self-host - full control, but one member becomes ops.\n- Rent + cert-pin - chosen: predictable, and no single admin.\n\n```\nrelay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault\n```\n\nRevisit when the second-relay quest lands.",
             blocks: [
             { kind: 0, text: "Decision: paid SMP relay" },
             { kind: 2, text: "Free relays kept dropping our queues under load. We now rent a dedicated relay and pin its certificate." },
             { kind: 1, text: "Options weighed" },
-            { kind: 3, text: "Stay on public relays — free, but no uptime promise." },
-            { kind: 3, text: "Self-host — full control, but one member becomes ops." },
-            { kind: 3, text: "Rent + cert-pin — chosen: predictable, and no single admin." },
+            { kind: 3, text: "Stay on public relays - free, but no uptime promise." },
+            { kind: 3, text: "Self-host - full control, but one member becomes ops." },
+            { kind: 3, text: "Rent + cert-pin - chosen: predictable, and no single admin." },
             { kind: 4, text: "relay = \"smp://u2Fq…@relay.example:5223\"  # pinned, see vault" },
             { kind: 2, text: "Revisit when the second-relay quest lands." }] },
         { path: "decisions/2026-07-02-treasury.md", author: "mara", ver: "v3", when: "2 w", links: ["charter.md"],
@@ -761,31 +761,31 @@ export component MemoryPane inherits VerticalLayout {
             { kind: 3, text: "Recurring costs (relay, domain) are pre-approved up to 3 XMR per quarter." },
             { kind: 3, text: "Quest rewards are paid out only after the claim is marked done." }] },
         { path: "quests/onboarding-guide.md", author: "petra", ver: "v9", when: "5 d", links: ["glossary.md", "runbooks/node-recovery.md"],
-            raw: "# Onboarding guide\n\nThe path from invite link to first signed proposal, for the next member.\n\n- Read charter.md first — it is short on purpose.\n- Work through the MLS & SMP reading list, messaging layer first.\n- Run the recovery drill once with a buddy before you hold real shares.",
+            raw: "# Onboarding guide\n\nThe path from invite link to first signed proposal, for the next member.\n\n- Read charter.md first - it is short on purpose.\n- Work through the MLS & SMP reading list, messaging layer first.\n- Run the recovery drill once with a buddy before you hold real shares.",
             blocks: [
             { kind: 0, text: "Onboarding guide" },
             { kind: 2, text: "The path from invite link to first signed proposal, for the next member." },
-            { kind: 3, text: "Read charter.md first — it is short on purpose." },
+            { kind: 3, text: "Read charter.md first - it is short on purpose." },
             { kind: 3, text: "Work through the MLS & SMP reading list, messaging layer first." },
             { kind: 3, text: "Run the recovery drill once with a buddy before you hold real shares." }] },
         { path: "runbooks/node-recovery.md", author: "walter", ver: "v6", when: "1 w", links: ["charter.md"],
-            raw: "# Node recovery\n\nTotal-loss restore, tested at every quarterly drill. Budget an hour.\n\n- Restore from your seed phrase — it derives every key you had.\n- Re-adopt the queue credentials from the last clean-close backup.\n- Verify the chain before your first send; a red check means stop.\n\n```\ndrill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)\n```",
+            raw: "# Node recovery\n\nTotal-loss restore, tested at every quarterly drill. Budget an hour.\n\n- Restore from your seed phrase - it derives every key you had.\n- Re-adopt the queue credentials from the last clean-close backup.\n- Verify the chain before your first send; a red check means stop.\n\n```\ndrill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)\n```",
             blocks: [
             { kind: 0, text: "Node recovery" },
             { kind: 2, text: "Total-loss restore, tested at every quarterly drill. Budget an hour." },
-            { kind: 3, text: "Restore from your seed phrase — it derives every key you had." },
+            { kind: 3, text: "Restore from your seed phrase - it derives every key you had." },
             { kind: 3, text: "Re-adopt the queue credentials from the last clean-close backup." },
             { kind: 3, text: "Verify the chain before your first send; a red check means stop." },
             { kind: 4, text: "drill log 2026-06: petra 41 min · jonas 58 min (stuck at re-adopt)" }] },
         { path: "glossary.md", author: "mara", ver: "v17", when: "1 d", links: ["charter.md"],
-            raw: "# Glossary\n\nThe words we keep using, pinned down once.\n\n- Ritual — the founding ceremony that seals the roster; nothing touches disk before the seal.\n- Seal — the moment a proposal reaches the threshold and becomes canon.\n- Threshold — our 3-of-4 rule: three signatures make a change real.\n- Patch — one gated change on the chain, like a commit.",
+            raw: "# Glossary\n\nThe words we keep using, pinned down once.\n\n- Ritual - the founding ceremony that seals the roster; nothing touches disk before the seal.\n- Seal - the moment a proposal reaches the threshold and becomes canon.\n- Threshold - our 3-of-4 rule: three signatures make a change real.\n- Patch - one gated change on the chain, like a commit.",
             blocks: [
             { kind: 0, text: "Glossary" },
             { kind: 2, text: "The words we keep using, pinned down once." },
-            { kind: 3, text: "Ritual — the founding ceremony that seals the roster; nothing touches disk before the seal." },
-            { kind: 3, text: "Seal — the moment a proposal reaches the threshold and becomes canon." },
-            { kind: 3, text: "Threshold — our 3-of-4 rule: three signatures make a change real." },
-            { kind: 3, text: "Patch — one gated change on the chain, like a commit." }] },
+            { kind: 3, text: "Ritual - the founding ceremony that seals the roster; nothing touches disk before the seal." },
+            { kind: 3, text: "Seal - the moment a proposal reaches the threshold and becomes canon." },
+            { kind: 3, text: "Threshold - our 3-of-4 rule: three signatures make a change real." },
+            { kind: 3, text: "Patch - one gated change on the chain, like a commit." }] },
         { path: "untitled-1.md", author: "petra", ver: "v1", when: "now", links: [],
             raw: "# Untitled 1\n\nA fresh page. Use Edit to replace this draft.",
             blocks: [
@@ -1781,7 +1781,7 @@ export component VaultPane inherits VerticalLayout {
     ];
     property <[MockExposed]> exposed: [
         { name: "Old relay admin password", content: "relay-2025 · root · \"circular-otter-42\"", by: "walter", when: "2 m" },
-        { name: "Budget sheet key (2025)", content: "age1q…8vte — decrypts budget-2025.age in the uploads", by: "petra", when: "5 m" },
+        { name: "Budget sheet key (2025)", content: "age1q…8vte - decrypts budget-2025.age in the uploads", by: "petra", when: "5 m" },
     ];
 
     if root.view == "secrets": VerticalLayout {
@@ -1992,15 +1992,15 @@ export component WalletPane inherits VerticalLayout {
     // sample data — design mock only, never engine state
     property <[MockTransfer]> transfers: [
         { incoming: true, amount: "0.5028", label: "Donation (anonymous)", when: "5 h", conf: 3, txid: "b41c…9e" },
-        { incoming: true, amount: "12.0000", label: "Member top-up — mara", when: "2 d", conf: 10, txid: "9f3c…a1" },
-        { incoming: false, amount: "4.0000", label: "Quest reward — multisig setup", when: "1 w", conf: 10, txid: "77ab…04" },
-        { incoming: true, amount: "25.0000", label: "Member top-up — petra", when: "2 w", conf: 10, txid: "c2d8…5f" },
+        { incoming: true, amount: "12.0000", label: "Member top-up - mara", when: "2 d", conf: 10, txid: "9f3c…a1" },
+        { incoming: false, amount: "4.0000", label: "Quest reward - multisig setup", when: "1 w", conf: 10, txid: "77ab…04" },
+        { incoming: true, amount: "25.0000", label: "Member top-up - petra", when: "2 w", conf: 10, txid: "c2d8…5f" },
         { incoming: false, amount: "2.4000", label: "Relay hosting Q2", when: "1 m", conf: 10, txid: "e901…bc" },
         { incoming: false, amount: "0.8000", label: "Domain renewal", when: "1 m", conf: 10, txid: "12fe…77" },
         { incoming: true, amount: "100.0000", label: "Founding treasury", when: "4 m", conf: 10, txid: "a0b1…c2" },
     ];
     property <[MockPendingTx]> pending-tx: [
-        { label: "Quest reward — recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: [
+        { label: "Quest reward - recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: [
             { name: "petra", signed: true }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
         { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: [
             { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
@@ -2380,7 +2380,7 @@ export component WalletPane inherits VerticalLayout {
             }
             SettingRow {
                 label: Strings.wl-signer-set;
-                value: "3 \{Strings.cw-rule-b} 4 — petra, walter, mara, jonas";
+                value: "3 \{Strings.cw-rule-b} 4 - petra, walter, mara, jonas";
             }
         }
     }

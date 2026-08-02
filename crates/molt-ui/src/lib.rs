@@ -2317,7 +2317,7 @@ fn apply_session(
                 format!("{} {} ({})", s.get_ow_export_note(), ex.dest, file_size_label(ex.bytes));
             if !ex.skipped.is_empty() {
                 note.push_str(&format!(
-                    " — {} {}",
+                    " - {} {}",
                     s.get_ow_export_skipped(),
                     ex.skipped.join(", ")
                 ));
@@ -2716,9 +2716,9 @@ fn log_tones(log: &[String]) -> ModelRc<i32> {
 /// knowing which half failed.
 fn genesis_undelivered_copy(lang: i32) -> &'static str {
     if lang == 1 {
-        "Die Republik wurde hier gegründet, aber der Genesis-Block erreichte kein Relay — die anderen Mitglieder wissen nichts davon."
+        "Die Republik wurde hier gegründet, aber der Genesis-Block erreichte kein Relay - die anderen Mitglieder wissen nichts davon."
     } else {
-        "The republic was founded here, but the genesis reached no relay — the other members have not been told."
+        "The republic was founded here, but the genesis reached no relay - the other members have not been told."
     }
 }
 
@@ -3987,7 +3987,7 @@ fn chain_row(lang: i32, r: &molt_core::ChainBlockView) -> ChainRow {
     };
     ChainRow {
         height: if r.height == 0 && r.kind == "applied" {
-            strings_pick(de, "— (before the cut)", "— (vor dem Schnitt)")
+            strings_pick(de, "- (before the cut)", "- (vor dem Schnitt)")
         } else {
             format!("#{}", r.height)
         }
@@ -4212,7 +4212,7 @@ fn charter_columns(text: &str, max: usize) -> Vec<String> {
 fn expires_label(lang: i32, now: u64, expires_ts: u64, available: bool) -> String {
     let de = lang == 1;
     if !available || expires_ts == 0 {
-        return "—".to_string();
+        return "-".to_string();
     }
     if expires_ts <= now {
         return strings_pick(de, "expired", "abgelaufen");
@@ -4663,7 +4663,7 @@ fn patch_system_lines(
 ) -> Vec<(u64, LogLineData)> {
     let text = match pending.iter().find(|p| p.id.0 == patch) {
         Some(p) => format!(
-            "⚖ #{patch} · {} — {}/{}",
+            "⚖ #{patch} · {} - {}/{}",
             display_title(lang, &p.payload),
             p.approvals,
             p.threshold
@@ -4675,7 +4675,7 @@ fn patch_system_lines(
                     KnownFate::Closed => "⊘".to_string(),
                     KnownFate::Pending => format!("{}/{}", k.approvals, k.threshold),
                 };
-                format!("⚖ #{patch} · {} — {progress}", display_title(lang, &k.payload))
+                format!("⚖ #{patch} · {} - {progress}", display_title(lang, &k.payload))
             }
             None => format!("⚖ #{patch}"),
         },
@@ -5341,7 +5341,7 @@ lexicon! {
     choice_join_sub: "Via an invite link", "Einem Workspace per Einladungslink beitreten";
     choice_restore_key: "R", "W";
     choice_restore_rest: "estore", "iederherstellen";
-    choice_restore_sub: "With your phrase — from a backup or after device loss", "Mit deiner Phrase — aus Backup oder nach Geräteverlust";
+    choice_restore_sub: "With your phrase - from a backup or after device loss", "Mit deiner Phrase - aus Backup oder nach Geräteverlust";
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
@@ -5378,22 +5378,22 @@ lexicon! {
     // moment the choice is cheap (§10.15, user-ratified 2026-08-02).
     cw_grp_relays: "Relays", "Relays";
     cw_relays_hint: "Every member must reach the same relay.", "Jedes Mitglied muss denselben Relay erreichen.";
-    cw_relays_none: "No relay this node can dial — add one in Settings.", "Kein erreichbarer Relay — in den Einstellungen einen hinzufügen.";
+    cw_relays_none: "No relay this node can dial - add one in Settings.", "Kein erreichbarer Relay - in den Einstellungen einen hinzufügen.";
     cw_relays_toggle: "Use for this republic", "Für diese Republik verwenden";
     cw_relays_rule: "A self-hosted relay must be in every member's pool before they join.", "Ein selbst betriebener Relay muss vor dem Beitritt im Pool jedes Mitglieds stehen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
-    cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";
+    cw_transport_hint: "How this node reaches the other members - one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht - eine globale Einstellung für jede Republik.";
     // this panel is about the ANONYMITY layer only (tor/none) — never the
     // relay pool, which is its own settings tab. Both the label and the
     // deep-link hint name that tab exactly, so "Netzwerk" can no longer be
     // read as "Nostr-Relays".
     cw_net_label: "Anonymity network", "Anonymitäts-Netzwerk";
     cw_net_ok_tor: "Anonymized via Tor circuits.", "Anonymisiert via Tor-Circuits.";
-    cw_net_warn: "Not anonymized — peers see your IP.", "Nicht anonymisiert — Peers sehen deine IP.";
-    cw_net_hint_settings: "Global setting — change it under Settings → Anonymity network.", "Globale Einstellung — ändern unter Einstellungen → Anonymitäts-Netzwerk.";
+    cw_net_warn: "Not anonymized - peers see your IP.", "Nicht anonymisiert - Peers sehen deine IP.";
+    cw_net_hint_settings: "Global setting - change it under Settings → Anonymity network.", "Globale Einstellung - ändern unter Einstellungen → Anonymitäts-Netzwerk.";
     cw_found: "Begin ritual", "Ritual beginnen";
     cw_invites: "Invites", "Einladungen";
-    cw_invites_hint: "One link per future member — share each once, over a private channel.", "Ein Link pro künftigem Mitglied — jeden nur einmal teilen, über einen privaten Kanal.";
+    cw_invites_hint: "One link per future member - share each once, over a private channel.", "Ein Link pro künftigem Mitglied - jeden nur einmal teilen, über einen privaten Kanal.";
     cw_members_title: "Members", "Mitglieder";
     cw_sealed_word: "sealed", "versiegelt";
     cw_sim_badge: "SIMULATION", "SIMULATION";
@@ -5404,19 +5404,19 @@ lexicon! {
     // the button jumps to the anonymity tab (set-tab = 3) — it must not
     // promise the relay settings that now live one tab further
     cw_open_net_settings: "Open anonymity settings", "Anonymitäts-Einstellungen öffnen";
-    cw_ritual_hint_sim: "No real network yet: this node simulates the other members — it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder — er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
+    cw_ritual_hint_sim: "No real network yet: this node simulates the other members - it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder - er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
-    cw_charter_step: "Next step: agree on the charter — your input is needed", "Nächster Schritt: Einigt euch auf die Satzung — deine Eingabe ist gefragt";
+    cw_charter_step: "Next step: agree on the charter - your input is needed", "Nächster Schritt: Einigt euch auf die Satzung - deine Eingabe ist gefragt";
     cw_charter_name_label: "Republic name", "Name der Republik";
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
-    cw_charter_agenda_ph: "Agenda / charter — what this republic is for", "Agenda / Satzung — wofür diese Republik steht";
+    cw_charter_agenda_ph: "Agenda / charter - what this republic is for", "Agenda / Satzung - wofür diese Republik steht";
     cw_charter_hint: "Every member has joined. Propose the charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage die Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
     cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
     cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
     cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
-    cw_declined_hint: "A member declined the charter — close and found anew.", "Ein Mitglied hat die Satzung abgelehnt — schließen und neu gründen.";
+    cw_declined_hint: "A member declined the charter - close and found anew.", "Ein Mitglied hat die Satzung abgelehnt - schließen und neu gründen.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
@@ -5437,15 +5437,15 @@ lexicon! {
     oa_list_pending: "List pending", "Offene zeigen";
     org_edit: "Edit", "Bearbeiten";
     ol_title: "Republic image", "Bild der Republik";
-    ol_body: "Pick a new image via the file dialog, or remove the current one. Either way the change is a gated proposal the members approve by threshold. The image itself (up to 256 KiB) travels inside the proposal, so every member sees exactly what they approve — once applied, it shows on every device.", "Wähle über den Datei-Dialog ein neues Bild oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. Das Bild selbst (bis 256 KiB) reist im Vorschlag mit — jedes Mitglied sieht genau, worüber es abstimmt; nach dem Anwenden erscheint es auf jedem Gerät.";
+    ol_body: "Pick a new image via the file dialog, or remove the current one. Either way the change is a gated proposal the members approve by threshold. The image itself (up to 256 KiB) travels inside the proposal, so every member sees exactly what they approve - once applied, it shows on every device.", "Wähle über den Datei-Dialog ein neues Bild oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. Das Bild selbst (bis 256 KiB) reist im Vorschlag mit - jedes Mitglied sieht genau, worüber es abstimmt; nach dem Anwenden erscheint es auf jedem Gerät.";
     ol_remove: "Remove image", "Bild entfernen";
     ol_current: "Current image", "Aktuelles Bild";
     ol_none: "No image set.", "Kein Bild gesetzt.";
     ol_pick: "Choose…", "Auswählen…";
     oc_title: "Edit charter", "Satzung bearbeiten";
-    oc_body: "The charter was ratified by everyone at the founding — an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new charter; the founding charter stays immutable in block 0.", "Die Satzung wurde bei der Gründung von allen ratifiziert — eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Satzung; die Gründungssatzung bleibt unveränderlich in Block 0.";
+    oc_body: "The charter was ratified by everyone at the founding - an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new charter; the founding charter stays immutable in block 0.", "Die Satzung wurde bei der Gründung von allen ratifiziert - eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Satzung; die Gründungssatzung bleibt unveränderlich in Block 0.";
     oc_propose: "Propose change", "Änderung vorschlagen";
-    toast_proposed: "Proposed — awaiting approvals", "Vorgeschlagen — wartet auf Zustimmungen";
+    toast_proposed: "Proposed - awaiting approvals", "Vorgeschlagen - wartet auf Zustimmungen";
     om_col_id: "ID", "ID";
     om_col_pk: "Public key", "Public Key";
     om_col_last: "Last seen", "Zuletzt gesehen";
@@ -5469,11 +5469,11 @@ lexicon! {
     pg_of: "of", "von";
     ou_no_match: "No uploads match the filter.", "Keine Uploads passen zum Filter.";
     orn_title: "Rename republic", "Republik umbenennen";
-    orn_body: "The name was ratified at the founding — renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert — eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
+    orn_body: "The name was ratified at the founding - renaming is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, the republic shows its new name everywhere; its identity (the republic id) never changes.", "Der Name wurde bei der Gründung ratifiziert - eine Umbenennung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden trägt die Republik überall den neuen Namen; ihre Identität (die Republik-ID) ändert sich nie.";
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
-    ch_readonly: "read-only — the vote is decided", "nur lesen — die Abstimmung ist entschieden";
+    ch_readonly: "read-only - the vote is decided", "nur lesen - die Abstimmung ist entschieden";
     pc_proposal: "Proposal:", "Vorschlag:";
     pc_img_hint: "Click to view the proposed image", "Klicken zum Anzeigen des vorgeschlagenen Bilds";
     pc_img_missing: "The proposed image could not be decoded.", "Das vorgeschlagene Bild konnte nicht dekodiert werden.";
@@ -5489,8 +5489,8 @@ lexicon! {
     ocs_relays_hint: "Every member must reach one of these.", "Jedes Mitglied muss einen davon erreichen.";
     ocs_days: "days", "Tage";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
-    ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change — the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung — der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
-    ou_note: "Only metadata is shared — the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten — die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
+    ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change - the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung - der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
+    ou_note: "Only metadata is shared - the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten - die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
     ow_change_folder: "Change folder", "Ordner wechseln";
@@ -5505,7 +5505,7 @@ lexicon! {
     dw_title: "Decrypt workspace", "Workspace entschlüsseln";
     dw_body: "Enter the recovery phrase to decrypt this workspace on disk: it is verified against the workspace, the keys are restored, and the workspace can be opened again. A wrong phrase changes nothing.", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu entschlüsseln: sie wird gegen den Workspace geprüft, die Schlüssel werden wiederhergestellt, und der Workspace lässt sich wieder öffnen. Eine falsche Phrase ändert nichts.";
     ew_title: "Encrypt workspace", "Workspace verschlüsseln";
-    ew_body: "Enter the recovery phrase to seal this workspace on disk: it is verified first, then the device-stored keys are removed — afterwards only the phrase opens this workspace again.", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu versiegeln: sie wird zuerst geprüft, dann werden die gerätegespeicherten Schlüssel entfernt — danach öffnet nur noch die Phrase diesen Workspace.";
+    ew_body: "Enter the recovery phrase to seal this workspace on disk: it is verified first, then the device-stored keys are removed - afterwards only the phrase opens this workspace again.", "Gib die Wiederherstellungs-Phrase ein, um diesen Workspace auf der Platte zu versiegeln: sie wird zuerst geprüft, dann werden die gerätegespeicherten Schlüssel entfernt - danach öffnet nur noch die Phrase diesen Workspace.";
     ow_open: "Open", "Öffnen";
     ow_delete: "Delete", "Löschen";
     ow_select_hint: "Select a republic to see its status.", "Wähle eine Republik, um ihren Status zu sehen.";
@@ -5513,7 +5513,7 @@ lexicon! {
     ow_s3_off: "No S3", "Kein S3";
     ow_grp_backup: "Backup", "Backup";
     ow_grp_seed: "Seed", "Seed";
-    ow_seed_missing: "No seed is stored on this device — only your written-down phrase can restore this workspace.", "Auf diesem Gerät ist kein Seed gespeichert — nur deine notierte Phrase kann diesen Workspace wiederherstellen.";
+    ow_seed_missing: "No seed is stored on this device - only your written-down phrase can restore this workspace.", "Auf diesem Gerät ist kein Seed gespeichert - nur deine notierte Phrase kann diesen Workspace wiederherstellen.";
     ow_members: "Members", "Mitglieder";
     ow_backup_cfg: "Settings", "Einstellungen";
     ow_export: "Manual backup", "Manuelles Backup";
@@ -5528,10 +5528,10 @@ lexicon! {
     ow_hold_tip: "Hold to reveal", "Halten zum Anzeigen";
     toast_copied: "Copied to clipboard", "In die Zwischenablage kopiert";
     del_ws_title: "Delete workspace?", "Workspace löschen?";
-    del_ws_body: "This moves the republic's folder into the trash on this device — recoverable for 30 days, then purged. Type its name to confirm.", "Dies verschiebt den Ordner der Republik in den Papierkorb dieses Geräts — 30 Tage wiederherstellbar, danach entfernt. Tippe zur Bestätigung ihren Namen aus.";
+    del_ws_body: "This moves the republic's folder into the trash on this device - recoverable for 30 days, then purged. Type its name to confirm.", "Dies verschiebt den Ordner der Republik in den Papierkorb dieses Geräts - 30 Tage wiederherstellbar, danach entfernt. Tippe zur Bestätigung ihren Namen aus.";
     del_ws_confirm: "Delete permanently", "Endgültig löschen";
     bk_title: "Manual backup", "Manuelles Backup";
-    bk_body: "The whole workspace is written to this location as one encrypted file — history, chain, and (when stored here) the recovery seed. Live group/transport state is never included: restoring reads everything, rejoining runs the recovery ritual. Caution: this backup + its passphrase can restore your seat like the recovery phrase — guard both.", "Der gesamte Workspace wird als eine verschlüsselte Datei an diesen Ort geschrieben — Historie, Chain und (wenn hier gespeichert) der Recovery-Seed. Live-Gruppen-/Transport-Zustand ist nie enthalten: Wiederherstellen macht alles lesbar, der Wiederbeitritt läuft über das Recovery-Ritual. Achtung: dieses Backup + seine Passphrase kann deinen Sitz wiederherstellen wie die Recovery-Phrase — beides gut verwahren.";
+    bk_body: "The whole workspace is written to this location as one encrypted file - history, chain, and (when stored here) the recovery seed. Live group/transport state is never included: restoring reads everything, rejoining runs the recovery ritual. Caution: this backup + its passphrase can restore your seat like the recovery phrase - guard both.", "Der gesamte Workspace wird als eine verschlüsselte Datei an diesen Ort geschrieben - Historie, Chain und (wenn hier gespeichert) der Recovery-Seed. Live-Gruppen-/Transport-Zustand ist nie enthalten: Wiederherstellen macht alles lesbar, der Wiederbeitritt läuft über das Recovery-Ritual. Achtung: dieses Backup + seine Passphrase kann deinen Sitz wiederherstellen wie die Recovery-Phrase - beides gut verwahren.";
     bk_path: "Target file", "Zieldatei";
     bk_pass: "Export passphrase (min. 10 characters)", "Export-Passphrase (mind. 10 Zeichen)";
     bk_confirm: "Save backup", "Backup speichern";
@@ -5559,25 +5559,25 @@ lexicon! {
     rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
     rlk_caution: "Caution: share this link only over a secret channel. It is single-use and becomes invalid again when this application restarts.", "Achtung, dieser Link sollte nur über einen geheimen Kanal geteilt werden. Er ist einmalig nutzbar und wird nach Neustart dieser Anwendung wieder ungültig.";
     rlk_pending: "Creating the link…", "Link wird erstellt…";
-    rlk_pending_hint: "The returning member does not need to be online — a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein — ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
+    rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
     rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
-    rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while — it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern — Timeout nach ~15 Minuten.";
-    rv_failed_hint: "Recovery links are single-use — ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig — bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
+    rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while - it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern - Timeout nach ~15 Minuten.";
+    rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "Restore", "Wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
     rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
     rw_continue: "Continue", "Weiter";
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
-    rw_peer_hint: "Rejoins via another member — paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei — füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
+    rw_peer_hint: "Rejoins via another member - paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei - füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
     rw_s3_ok: "reachable", "erreichbar";
     // honest endpoint status: "reachable" is only claimed after a REAL
     // probe (session.s3_test == "ok"); before that the state is untested
-    rw_s3_untested: "not tested — use Test in the backup settings", "ungetestet — Test in den Backup-Einstellungen";
+    rw_s3_untested: "not tested - use Test in the backup settings", "ungetestet - Test in den Backup-Einstellungen";
     rw_s3_target_ph: "workspace id from the backup table · or molt/<id>/<ts>.molt.enc", "Workspace-ID aus der Backup-Tabelle · oder molt/<id>/<ts>.molt.enc";
     rw_via_file: "Manual restore", "Manuelles Restore";
     rw_file_hint: "Restores from an encrypted .molt.enc file backup.", "Stellt aus einem verschlüsselten .molt.enc-Datei-Backup wieder her.";
@@ -5588,16 +5588,16 @@ lexicon! {
     rw_file_pick: "Select", "Auswählen";
     rw_log_title: "Live details", "Live-Details";
     rw_finish: "Finish", "Fertigstellen";
-    rw_failed: "Failed — see the live details", "Fehlgeschlagen — siehe Live-Details";
+    rw_failed: "Failed - see the live details", "Fehlgeschlagen - siehe Live-Details";
     // the honest §4.4 boundary: knowledge vs membership
     // origin-neutral on purpose: the engine derives "detached" from the
     // directory's state (no group key, no mesh), not from HOW it got there
-    toast_detached: "Workspace is detached — knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached — Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
+    toast_detached: "Workspace is detached - knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached - Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
     toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
     toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     // mesh self-heal Phase 4 — connection-health banner (net_health tone 1/2)
     banner_reconnecting: "Reconnecting…", "Verbinde erneut…";
-    banner_disconnected: "Disconnected — you're not sending or receiving.", "Getrennt — du sendest und empfängst nichts.";
+    banner_disconnected: "Disconnected - you're not sending or receiving.", "Getrennt - du sendest und empfängst nichts.";
     banner_repair: "Repair connection", "Verbindung reparieren";
     banner_repair_tip: "Rejoin via a recovery link from a member who's online.", "Wiederbeitritt über einen Recovery-Link eines Mitglieds, das online ist.";
     banner_gap_note: "Messages sent while you were disconnected won't appear.", "Während der Trennung gesendete Nachrichten erscheinen nicht.";
@@ -5622,10 +5622,10 @@ lexicon! {
     chain_kind_membership: "Membership", "Mitgliedschaft";
     chain_kind_checkpoint: "Checkpoint (compacted)", "Checkpoint (kompaktiert)";
     chain_pre_cut: "before the cut", "vor dem Schnitt";
-    chain_empty: "No chain — this workspace is not chain-governed.", "Keine Chain — dieser Workspace ist nicht chain-regiert.";
+    chain_empty: "No chain - this workspace is not chain-governed.", "Keine Chain - dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
-    set_ws_dir_body: "Path of the folder that holds your workspaces — browse via the file dialog or type it directly.", "Pfad des Ordners, der deine Workspaces enthält — per Datei-Dialog auswählen oder direkt eintippen.";
+    set_ws_dir_body: "Path of the folder that holds your workspaces - browse via the file dialog or type it directly.", "Pfad des Ordners, der deine Workspaces enthält - per Datei-Dialog auswählen oder direkt eintippen.";
     set_ws_dir_browse: "Browse…", "Durchsuchen…";
     set_ws_found_one: "workspace found in this folder", "Workspace in diesem Ordner gefunden";
     set_ws_found_many: "workspaces found in this folder", "Workspaces in diesem Ordner gefunden";
@@ -5640,30 +5640,30 @@ lexicon! {
     set_s3_unit_min: "min", "Minuten";
     set_s3_keep: "save up to", "behalte bis zu";
     set_s3_unit_copies: "copies", "Kopien";
-    s3_test_tip: "Sends a signed probe to the bucket over the configured transport — Tor when it is enabled.", "Sendet eine signierte Testanfrage an den Bucket über den konfigurierten Transport — via Tor, wenn aktiviert.";
-    s3_ok: "bucket reachable — credentials accepted ✓", "Bucket erreichbar — Zugangsdaten akzeptiert ✓";
+    s3_test_tip: "Sends a signed probe to the bucket over the configured transport - Tor when it is enabled.", "Sendet eine signierte Testanfrage an den Bucket über den konfigurierten Transport - via Tor, wenn aktiviert.";
+    s3_ok: "bucket reachable - credentials accepted ✓", "Bucket erreichbar - Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";
     bk_col_remote: "Backup in bucket", "Backup im Bucket";
     bk_col_auto: "Auto", "Auto";
     bk_col_size: "Size", "Größe";
     bk_col_last: "Last backup", "Letztes Backup";
     bk_refresh: "Refresh bucket", "Bucket aktualisieren";
-    bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport — Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport — via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
+    bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport - Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport - via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
     bk_listing: "listing the bucket…", "Bucket wird gelesen…";
     bk_list_ok: "bucket listed ✓", "Bucket gelesen ✓";
     set_save: "Save", "Speichern";
     set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";
     set_close: "Close", "Schließen";
     set_path_label: "Config is written to", "Config wird geschrieben nach";
-    set_reloaded_note: "config.toml changed on disk — settings reloaded.", "config.toml wurde auf der Platte geändert — Einstellungen neu geladen.";
-    set_conflict_note: "config.toml on disk is invalid — the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig — die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
+    set_reloaded_note: "config.toml changed on disk - settings reloaded.", "config.toml wurde auf der Platte geändert - Einstellungen neu geladen.";
+    set_conflict_note: "config.toml on disk is invalid - the running settings stay. Fix the file or run --repair-config.", "config.toml auf der Platte ist ungültig - die laufenden Einstellungen bleiben. Datei korrigieren oder --repair-config ausführen.";
     set_restart_note: "Takes effect after a restart:", "Wirkt erst nach einem Neustart:";
     set_panel_appearance: "Language & appearance", "Sprache & Erscheinungsbild";
     set_panel_sounds: "Sound alerts", "Benachrichtigungstöne";
     field_sound_message: "New message", "Neue Nachricht";
     field_sound_vote: "New vote", "Neue Abstimmung";
     sound_off: "off", "aus";
-    set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor — use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor — nutze stattdessen einen lokalen Tor-Daemon.";
+    set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor - use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor - nutze stattdessen einen lokalen Tor-Daemon.";
     // settings → Anonymity network: the Tor connectivity probe. The ladder's
     // rungs are worded so that NONE of them can be mistaken for a working Tor
     // except the last one — a listening SOCKS port proves a socket, not a
@@ -5674,14 +5674,14 @@ lexicon! {
     tor_test_tip: "Probes the draft above: the Tor SOCKS address, then a relay from your own pool through it.", "Prüft den Entwurf oben: die Tor-SOCKS-Adresse, dann ein Relay aus deinem eigenen Pool hindurch.";
     tor_v_idle: "Tor has not been tested yet.", "Tor wurde noch nicht getestet.";
     tor_v_testing: "testing Tor…", "teste Tor…";
-    tor_v_off: "Nothing was sent — the anonymity network is not set to Tor.", "Es wurde nichts gesendet — das Anonymitäts-Netzwerk steht nicht auf Tor.";
+    tor_v_off: "Nothing was sent - the anonymity network is not set to Tor.", "Es wurde nichts gesendet - das Anonymitäts-Netzwerk steht nicht auf Tor.";
     tor_v_misconfigured: "Nothing was probed: this Tor configuration was refused before a single packet. Fix it and test again.", "Es wurde nichts geprüft: Diese Tor-Konfiguration wurde abgelehnt, bevor ein einziges Paket lief. Korrigieren und erneut testen.";
     tor_v_no_proxy: "No Tor daemon: nothing is listening at this SOCKS address.", "Kein Tor-Daemon: An dieser SOCKS-Adresse lauscht nichts.";
-    tor_v_proxy_only: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Add and confirm a relay to test a real circuit.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Für einen echten Circuit-Test ein Relay hinzufügen und bestätigen.";
+    tor_v_proxy_only: "A Tor SOCKS port answers - but nothing was routed through it, so no circuit is proven. Add and confirm a relay to test a real circuit.", "Ein Tor-SOCKS-Port antwortet - aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Für einen echten Circuit-Test ein Relay hinzufügen und bestätigen.";
     tor_v_no_target: "Nothing could be established: this Tor mode has no SOCKS address to probe, and there was no relay to dial through it.", "Es konnte nichts festgestellt werden: Dieser Tor-Modus hat keine SOCKS-Adresse zum Prüfen, und es gab kein Relay, das hindurch gewählt werden konnte.";
-    tor_v_circuit_failed: "No connection to the relay through Tor. Either Tor is not working, or that relay is unreachable — the line below says which step failed.", "Keine Verbindung zum Relay durch Tor. Entweder funktioniert Tor nicht, oder das Relay ist nicht erreichbar — die Zeile darunter sagt, welcher Schritt scheiterte.";
-    tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes — try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern — nach dem Bootstrap erneut versuchen.";
-    tor_v_proxy_only_locked: "A Tor SOCKS port answers — but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: connections outside Tor are switched off.", "Ein Tor-SOCKS-Port antwortet — aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Verbindungen außerhalb Tor sind ausgeschaltet.";
+    tor_v_circuit_failed: "No connection to the relay through Tor. Either Tor is not working, or that relay is unreachable - the line below says which step failed.", "Keine Verbindung zum Relay durch Tor. Entweder funktioniert Tor nicht, oder das Relay ist nicht erreichbar - die Zeile darunter sagt, welcher Schritt scheiterte.";
+    tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes - try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern - nach dem Bootstrap erneut versuchen.";
+    tor_v_proxy_only_locked: "A Tor SOCKS port answers - but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: connections outside Tor are switched off.", "Ein Tor-SOCKS-Port antwortet - aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Verbindungen außerhalb Tor sind ausgeschaltet.";
     tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
     // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
@@ -5689,19 +5689,19 @@ lexicon! {
     // needs the warning AND the (persisted) non-onion dialing switch.
     rp_title: "Relay Pool", "Relay-Pool";
     rp_in_use: "Relays in use:", "Relays in Benutzung:";
-    rp_none_dialable: "No relay is in use — this node is not connected.", "Kein Relay ist in Benutzung — dieser Knoten ist nicht verbunden.";
+    rp_none_dialable: "No relay is in use - this node is not connected.", "Kein Relay ist in Benutzung - dieser Knoten ist nicht verbunden.";
     rp_empty_title: "No relay configured yet", "Noch kein Relay eingerichtet";
-    rp_empty_body: "This node is connected to nothing. Add a relay you trust and confirm it — .onion addresses are the private choice and connect on their own.", "Dieser Knoten ist mit nichts verbunden. Trag ein Relay ein, dem du vertraust, und bestätige es — .onion-Adressen sind die private Wahl und verbinden sich von selbst.";
+    rp_empty_body: "This node is connected to nothing. Add a relay you trust and confirm it - .onion addresses are the private choice and connect on their own.", "Dieser Knoten ist mit nichts verbunden. Trag ein Relay ein, dem du vertraust, und bestätige es - .onion-Adressen sind die private Wahl und verbinden sich von selbst.";
     rp_badge_onion: "ONION", "ONION";
     rp_badge_clearnet: "CLEARNET", "CLEARNET";
     rp_badge_local: "LOCAL", "LOKAL";
     rp_st_auto: "connects automatically", "verbindet automatisch";
-    rp_st_unconfirmed: "not in use — confirm to enable", "nicht in Benutzung — zum Aktivieren bestätigen";
-    rp_st_locked: "confirmed — but clearnet/local dialing is switched off", "bestätigt — aber Clearnet-/Lokal-Verbindungen sind ausgeschaltet";
+    rp_st_unconfirmed: "not in use - confirm to enable", "nicht in Benutzung - zum Aktivieren bestätigen";
+    rp_st_locked: "confirmed - but clearnet/local dialing is switched off", "bestätigt - aber Clearnet-/Lokal-Verbindungen sind ausgeschaltet";
     rp_st_active: "in use", "in Benutzung";
     rp_confirm: "Confirm", "Bestätigen";
     rp_revoke: "Withdraw", "Zurückziehen";
-    rp_revoke_tip: "Withdraw the confirmation — the relay stays in the list but is no longer used", "Bestätigung zurückziehen — das Relay bleibt in der Liste, wird aber nicht mehr benutzt";
+    rp_revoke_tip: "Withdraw the confirmation - the relay stays in the list but is no longer used", "Bestätigung zurückziehen - das Relay bleibt in der Liste, wird aber nicht mehr benutzt";
     rp_copy: "Copy the address", "Adresse kopieren";
     rp_up: "Higher priority", "Höhere Priorität";
     rp_down: "Lower priority", "Niedrigere Priorität";
@@ -5710,24 +5710,24 @@ lexicon! {
     rp_add_hint: "Adding never connects: a new relay starts unconfirmed.", "Hinzufügen verbindet nicht: Ein neues Relay ist zunächst unbestätigt.";
     rp_err_scheme: "A relay address starts with wss:// (or ws:// for .onion and local addresses).", "Eine Relay-Adresse beginnt mit wss:// (oder ws:// bei .onion- und lokalen Adressen).";
     rp_err_host: "This address has no usable host.", "Diese Adresse hat keinen nutzbaren Host.";
-    rp_err_plain: "ws:// is unencrypted — allowed for .onion and local addresses only, use wss:// here.", "ws:// ist unverschlüsselt — nur bei .onion- und lokalen Adressen erlaubt, hier brauchst du wss://.";
+    rp_err_plain: "ws:// is unencrypted - allowed for .onion and local addresses only, use wss:// here.", "ws:// ist unverschlüsselt - nur bei .onion- und lokalen Adressen erlaubt, hier brauchst du wss://.";
     rp_err_junk: "This address contains spaces or control characters.", "Diese Adresse enthält Leerzeichen oder Steuerzeichen.";
-    rp_err_onion: "This is not a valid .onion address — a v3 onion has 56 characters (a–z, 2–7) before .onion.", "Das ist keine gültige .onion-Adresse — eine v3-Onion hat 56 Zeichen (a–z, 2–7) vor .onion.";
+    rp_err_onion: "This is not a valid .onion address - a v3 onion has 56 characters (a–z, 2–7) before .onion.", "Das ist keine gültige .onion-Adresse - eine v3-Onion hat 56 Zeichen (a–z, 2–7) vor .onion.";
     rp_err_userinfo: "Credentials do not belong in a relay address.", "Zugangsdaten gehören nicht in eine Relay-Adresse.";
     rp_err_fragment: "A relay address cannot carry a #fragment.", "Eine Relay-Adresse kann kein #Fragment tragen.";
     rp_err_toolong: "This address is too long (max. 512 characters).", "Diese Adresse ist zu lang (max. 512 Zeichen).";
-    rp_err_noncanon: "Write the address plainly — host, IP and port in their canonical form.", "Schreib die Adresse schlicht — Host, IP und Port in ihrer kanonischen Form.";
+    rp_err_noncanon: "Write the address plainly - host, IP and port in their canonical form.", "Schreib die Adresse schlicht - Host, IP und Port in ihrer kanonischen Form.";
     rp_err_dup: "This relay is already in the list.", "Dieses Relay steht schon in der Liste.";
     rp_cn_title: "Use a clearnet relay?", "Ein Clearnet-Relay benutzen?";
     rp_cn_title_local: "Use a local relay?", "Ein lokales Relay benutzen?";
-    rp_cn_body_tor: "Not a .onion service: its operator sees what this node subscribes to and when it is online. Tor hides your IP address — the endpoint stays in someone else's hands.", "Kein .onion-Dienst: Sein Betreiber sieht, was dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse — der Endpunkt bleibt in fremder Hand.";
+    rp_cn_body_tor: "Not a .onion service: its operator sees what this node subscribes to and when it is online. Tor hides your IP address - the endpoint stays in someone else's hands.", "Kein .onion-Dienst: Sein Betreiber sieht, was dieser Knoten abonniert und wann er online ist. Tor verbirgt deine IP-Adresse - der Endpunkt bleibt in fremder Hand.";
     rp_cn_body_plain: "Not a .onion service: its operator sees your IP address, what this node subscribes to and when it is online. Tor is off, so nothing hides where you connect from.", "Kein .onion-Dienst: Sein Betreiber sieht deine IP-Adresse, was dieser Knoten abonniert und wann er online ist. Tor ist aus, nichts verbirgt, von wo du dich verbindest.";
-    rp_cn_body_local: "This relay is on your machine or local network — reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz — es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
+    rp_cn_body_local: "This relay is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz - es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
     rp_cn_note: "Confirming also switches connections outside Tor on and remembers that. You can switch them off again below at any time.", "Das Bestätigen schaltet Verbindungen außerhalb Tor zugleich ein und merkt sich das. Du kannst sie unten jederzeit wieder ausschalten.";
     rp_cn_session_title: "Relays outside Tor", "Relays außerhalb Tor";
-    rp_cn_session_off: "Switched off: confirmed clearnet and local relays are not dialed at all — founding and joining over one is refused. Switching it on is remembered.", "Ausgeschaltet: Bestätigte Clearnet- und lokale Relays werden gar nicht angewählt — Gründen und Beitreten über so eines wird abgelehnt. Das Einschalten wird gemerkt.";
+    rp_cn_session_off: "Switched off: confirmed clearnet and local relays are not dialed at all - founding and joining over one is refused. Switching it on is remembered.", "Ausgeschaltet: Bestätigte Clearnet- und lokale Relays werden gar nicht angewählt - Gründen und Beitreten über so eines wird abgelehnt. Das Einschalten wird gemerkt.";
     rp_cn_session_on: "On: confirmed clearnet and local relays are in use. This stays on until you switch it off.", "An: Bestätigte Clearnet- und lokale Relays werden benutzt. Das bleibt so, bis du es ausschaltest.";
     rp_cn_activate: "Switch on", "Einschalten";
     rp_cn_deactivate: "Switch off", "Ausschalten";
@@ -5742,7 +5742,7 @@ lexicon! {
     mv_decline: "Decline", "Ablehnen";
     mv_pending: "Pending decisions", "Offene Entscheidungen";
     mv_declined: "Declined proposals", "Abgelehnte Vorschläge";
-    mv_empty_declined: "No declined proposals right now — this view empties on the chat retention rhythm.", "Gerade keine abgelehnten Vorschläge — diese Ansicht leert sich im Chat-Aufbewahrungsrhythmus.";
+    mv_empty_declined: "No declined proposals right now - this view empties on the chat retention rhythm.", "Gerade keine abgelehnten Vorschläge - diese Ansicht leert sich im Chat-Aufbewahrungsrhythmus.";
     pc_declined_by: "Declined by", "Abgelehnt von";
     mv_applied: "Applied", "Angewandt";
     mv_accepted: "Accepted changes", "Angenommene Änderungen";
@@ -5750,7 +5750,7 @@ lexicon! {
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
     mv_empty_chat: "No messages yet.", "Noch keine Nachrichten.";
-    mv_later: "Nothing here yet — this view comes with a later build.", "Hier ist noch nichts — diese Ansicht kommt mit einem späteren Build.";
+    mv_later: "Nothing here yet - this view comes with a later build.", "Hier ist noch nichts - diese Ansicht kommt mit einem späteren Build.";
     mv_empty_pending: "Nothing awaiting approval.", "Nichts wartet auf Zustimmung.";
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
@@ -5760,12 +5760,12 @@ lexicon! {
     ch_topic_ph: "Topic name…", "Themenname…";
     ch_topic_open: "Open topic", "Thema öffnen";
     ch_to_vote: "To the vote", "Zur Abstimmung";
-    mv_file_gone: "File no longer available — its owner deleted it.", "Datei nicht mehr verfügbar — der Besitzer hat sie gelöscht.";
+    mv_file_gone: "File no longer available - its owner deleted it.", "Datei nicht mehr verfügbar - der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
-    toast_file_removed: "Local file deleted — the share is no longer available.", "Lokale Datei gelöscht — die Freigabe ist nicht mehr verfügbar.";
+    toast_file_removed: "Local file deleted - the share is no longer available.", "Lokale Datei gelöscht - die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";
-    dm_body: "The text disappears for everyone and only a deletion notice remains — a replicated tombstone addressed by message id, kept in the event log.", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt — ein replizierter Tombstone, per Nachrichten-ID adressiert und im Event-Log gehalten.";
+    dm_body: "The text disappears for everyone and only a deletion notice remains - a replicated tombstone addressed by message id, kept in the event log.", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt - ein replizierter Tombstone, per Nachrichten-ID adressiert und im Event-Log gehalten.";
     dm_confirm: "Delete", "Löschen";
     mv_close_ws: "Close workspace", "Workspace schließen";
     close_ws_title: "Close workspace?", "Workspace schließen?";
@@ -5781,7 +5781,7 @@ lexicon! {
     // surface design mocks (Memory / Quests / Vault / Wallet panes): badged
     // UX drafts — the sample data stays .slint-side, only chrome localizes
     mock_badge: "DESIGN MOCK", "DESIGN-MOCK";
-    mock_tip: "A design draft with sample data — nothing here is stored, sent, or real.", "Ein Design-Entwurf mit Beispieldaten — nichts hier wird gespeichert, gesendet oder ist echt.";
+    mock_tip: "A design draft with sample data - nothing here is stored, sent, or real.", "Ein Design-Entwurf mit Beispieldaten - nichts hier wird gespeichert, gesendet oder ist echt.";
     mem_title_brain: "Multisig-Wiki", "Multisig-Wiki";
     mem_tb_new_file: "New file", "Neue Datei";
     mem_tb_new_folder: "New folder", "Neuer Ordner";
@@ -5794,31 +5794,31 @@ lexicon! {
     mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
     mem_tb_prev: "Previous document", "Vorheriges Dokument";
     mem_tb_next: "Next document", "Nächstes Dokument";
-    mem_toast_link: "Link copied — paste it in chat or another note", "Link kopiert — in Chat oder eine andere Notiz einfügen";
+    mem_toast_link: "Link copied - paste it in chat or another note", "Link kopiert - in Chat oder eine andere Notiz einfügen";
     mem_empty_folder: "empty", "leer";
-    mem_empty: "Nothing here yet — create a new file.", "Noch nichts hier — lege eine neue Datei an.";
+    mem_empty: "Nothing here yet - create a new file.", "Noch nichts hier - lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
-    mem_hint_archive: "Retired from the wiki — still readable, no longer linked.", "Aus dem Wiki zurückgezogen — weiter lesbar, nicht mehr verknüpft.";
+    mem_hint_archive: "Retired from the wiki - still readable, no longer linked.", "Aus dem Wiki zurückgezogen - weiter lesbar, nicht mehr verknüpft.";
     qb_title_board: "Quest board", "Quest-Board";
-    qb_hint_board: "Tasks put forward, claimed and completed. Putting one forward and reporting it done are gated proposals.", "Aufgaben — ausgeschrieben, übernommen, erledigt. Ausschreiben und Erledigt-Melden sind geschützte Vorschläge.";
+    qb_hint_board: "Tasks put forward, claimed and completed. Putting one forward and reporting it done are gated proposals.", "Aufgaben - ausgeschrieben, übernommen, erledigt. Ausschreiben und Erledigt-Melden sind geschützte Vorschläge.";
     qb_col_open: "Open", "Offen";
     qb_col_claimed: "Claimed", "Übernommen";
     qb_col_done: "Done", "Erledigt";
     qb_title_create: "Put forward a quest", "Quest ausschreiben";
     qb_hint_create: "Describe the task and pin a reward from the treasury. Putting it forward starts a gated proposal.", "Beschreibe die Aufgabe und setze eine Belohnung aus der Kasse aus. Das Ausschreiben startet einen geschützten Vorschlag.";
     qb_ph_title: "Quest title", "Titel der Quest";
-    qb_ph_desc: "What needs doing — and how completion will be judged", "Was zu tun ist — und woran Erledigung gemessen wird";
+    qb_ph_desc: "What needs doing - and how completion will be judged", "Was zu tun ist - und woran Erledigung gemessen wird";
     qb_reward: "Reward (XMR)", "Belohnung (XMR)";
     qb_deadline: "Deadline", "Frist";
     qb_propose: "Put forward", "Ausschreiben";
     qb_title_mine: "My quests", "Meine Quests";
-    qb_hint_mine: "Quests you claimed. Reporting one done asks the members to confirm completion — the reward transfers once the threshold agrees.", "Von dir übernommene Quests. Erledigt melden bittet die Mitglieder um Bestätigung — die Belohnung fließt, sobald die Schwelle zustimmt.";
+    qb_hint_mine: "Quests you claimed. Reporting one done asks the members to confirm completion - the reward transfers once the threshold agrees.", "Von dir übernommene Quests. Erledigt melden bittet die Mitglieder um Bestätigung - die Belohnung fließt, sobald die Schwelle zustimmt.";
     qb_mark_done: "Report done", "Erledigt melden";
     qb_title_archive: "Closed quests", "Abgeschlossene Quests";
     qb_hint_archive: "Completed and expired quests, kept for the record.", "Erledigte und ausgelaufene Quests, festgehalten fürs Protokoll.";
     vt_title_secrets: "Sealed secrets", "Versiegelte Geheimnisse";
-    vt_hint_secrets: "Encrypted entries no single member can open — release needs the threshold.", "Verschlüsselte Einträge, die kein einzelnes Mitglied öffnen kann — die Freigabe braucht die Schwelle.";
+    vt_hint_secrets: "Encrypted entries no single member can open - release needs the threshold.", "Verschlüsselte Einträge, die kein einzelnes Mitglied öffnen kann - die Freigabe braucht die Schwelle.";
     vt_seal_new: "Seal a secret", "Geheimnis versiegeln";
     vt_sealed_by: "sealed by", "versiegelt von";
     vt_opens_at: "opens at", "öffnet bei";
@@ -5828,10 +5828,10 @@ lexicon! {
     vt_requested_by: "requested by", "angefragt von";
     vt_signed_word: "signed", "signiert";
     vt_title_exposed: "Released secrets", "Offengelegte Geheimnisse";
-    vt_hint_exposed: "Opened by threshold decision — readable by every member, irreversibly.", "Per Schwellen-Entscheid geöffnet — für jedes Mitglied lesbar, unumkehrbar.";
+    vt_hint_exposed: "Opened by threshold decision - readable by every member, irreversibly.", "Per Schwellen-Entscheid geöffnet - für jedes Mitglied lesbar, unumkehrbar.";
     vt_released_word: "released", "freigegeben";
     wl_title_balance: "Treasury balance", "Kassenstand";
-    wl_hint_balance: "The shared Monero multisig wallet — no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet — kein einzelnes Mitglied kann daraus ausgeben.";
+    wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";
     wl_locked: "locked", "in Bestätigung";
     wl_multisig_word: "multisig", "Multisig";
@@ -5839,7 +5839,7 @@ lexicon! {
     wl_title_history: "Transfers", "Transfers";
     wl_hint_history: "Every movement of the treasury, confirmations included.", "Jede Bewegung der Kasse, samt Bestätigungen.";
     wl_title_send: "Send from the treasury", "Aus der Kasse senden";
-    wl_hint_send: "A transfer is a gated proposal — the wallet signs only once the threshold approves.", "Ein Transfer ist ein geschützter Vorschlag — die Wallet signiert erst, wenn die Schwelle zustimmt.";
+    wl_hint_send: "A transfer is a gated proposal - the wallet signs only once the threshold approves.", "Ein Transfer ist ein geschützter Vorschlag - die Wallet signiert erst, wenn die Schwelle zustimmt.";
     wl_to_address: "Recipient address", "Empfängeradresse";
     wl_amount: "Amount (XMR)", "Betrag (XMR)";
     wl_priority: "Priority", "Priorität";
@@ -5849,10 +5849,10 @@ lexicon! {
     wl_fee: "network fee", "Netzwerkgebühr";
     wl_propose_transfer: "Propose transfer", "Transfer vorschlagen";
     wl_title_receive: "Receive into the treasury", "In die Kasse empfangen";
-    wl_hint_receive: "Deposits to the shared subaddress land in the treasury after confirmation — visible to every member.", "Einzahlungen an die gemeinsame Subadresse landen nach Bestätigung in der Kasse — sichtbar für jedes Mitglied.";
+    wl_hint_receive: "Deposits to the shared subaddress land in the treasury after confirmation - visible to every member.", "Einzahlungen an die gemeinsame Subadresse landen nach Bestätigung in der Kasse - sichtbar für jedes Mitglied.";
     wl_subaddress: "Shared subaddress", "Gemeinsame Subadresse";
     wl_title_settings: "Wallet settings", "Wallet-Einstellungen";
-    wl_hint_settings: "How this node talks to Monero — the signer set is fixed by the founding.", "Wie dieser Node mit Monero spricht — der Signer-Kreis ist seit der Gründung fest.";
+    wl_hint_settings: "How this node talks to Monero - the signer set is fixed by the founding.", "Wie dieser Node mit Monero spricht - der Signer-Kreis ist seit der Gründung fest.";
     wl_node: "Monero node", "Monero-Node";
     wl_sync: "Sync height", "Sync-Höhe";
     wl_signer_set: "Signer set", "Signer-Kreis";
@@ -6658,7 +6658,7 @@ mod tests {
             cols.join(" ")
                 .split_whitespace()
                 .eq(mid.split_whitespace()),
-            "columns are a display split — every word survives"
+            "columns are a display split - every word survives"
         );
         // a long charter caps at the column maximum
         let long = "wort ".repeat(300);
@@ -6678,12 +6678,12 @@ mod tests {
         assert_eq!(expires_label(0, 500, 100, true), "expired");
         assert_eq!(
             expires_label(0, 100, 0, true),
-            "—",
+            "-",
             "0 = unknown share age, no deadline (the engine keeps it forever)"
         );
         assert_eq!(
             expires_label(0, 100, 100 + 86_400, false),
-            "—",
+            "-",
             "an unavailable share has nothing left to expire"
         );
         // the cell renders in the active language, like the tables around it
@@ -7254,7 +7254,7 @@ mod tests {
         assert_eq!(rows[1].blocked, 1, "unconfirmed");
         assert!(!rows[1].first && !rows[1].last, "the middle row moves both ways");
         assert_eq!(rows[2].pos, 3);
-        assert_eq!(rows[2].kind, 2, "local badge — never presented as clearnet");
+        assert_eq!(rows[2].kind, 2, "local badge - never presented as clearnet");
         assert_eq!(rows[2].blocked, 2, "outside Tor, not activated this session");
         assert!(rows[2].confirmed, "…yet confirmed: the two are independent");
         assert!(rows[2].last, "the bottom row cannot move down");
@@ -7280,7 +7280,7 @@ mod tests {
                     &pool
                 ),
                 None,
-                "plaintext to an onion service is fine — Tor encrypts it"
+                "plaintext to an onion service is fine - Tor encrypts it"
             );
             // …and every refusal names its reason
             for bad in [

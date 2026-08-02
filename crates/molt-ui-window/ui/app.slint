@@ -717,7 +717,7 @@ component SortHeader inherits Rectangle {
 
 
 export component AppWindow inherits Window {
-    title: "MoltRepublic — node";
+    title: "MoltRepublic - node";
     preferred-width: 940px;
     preferred-height: 720px;
     // Raised 760 → 900 for the one-row settings tab bar. Measured (DejaVu Sans
@@ -2282,7 +2282,7 @@ export component AppWindow inherits Window {
                                     background: root.cw-net == "tor" ? Theme.good : Theme.warn;
                                 }
                                 Text {
-                                    text: "\{Strings.cw-net-label}: \{root.cw-net} — \{root.cw-net == "tor" ? Strings.cw-net-ok-tor : Strings.cw-net-warn}";
+                                    text: "\{Strings.cw-net-label}: \{root.cw-net} - \{root.cw-net == "tor" ? Strings.cw-net-ok-tor : Strings.cw-net-warn}";
                                     color: root.cw-net == "tor" ? Theme.good : Theme.warn;
                                     font-size: Theme.fs-cap;
                                     vertical-alignment: center;
@@ -5052,7 +5052,7 @@ export component AppWindow inherits Window {
                                                     max-width: 130px;
                                                     spacing: 4px;
                                                     Text {
-                                                        text: m.id == "" ? "—" : m.id;
+                                                        text: m.id == "" ? "-" : m.id;
                                                         color: Theme.dim;
                                                         font-size: Theme.fs-cap;
                                                         vertical-alignment: center;
@@ -5079,7 +5079,7 @@ export component AppWindow inherits Window {
                                                     max-width: 130px;
                                                     spacing: 4px;
                                                     Text {
-                                                        text: m.pk == "" ? "—" : m.pk;
+                                                        text: m.pk == "" ? "-" : m.pk;
                                                         color: Theme.faint;
                                                         font-size: Theme.fs-cap;
                                                         vertical-alignment: center;
@@ -6083,7 +6083,7 @@ export component AppWindow inherits Window {
                                             x: 12px;
                                             y: 10px;
                                             width: parent.width - 24px;
-                                            text: root.cfg-workspace-dir == "" ? "—" : root.cfg-workspace-dir;
+                                            text: root.cfg-workspace-dir == "" ? "-" : root.cfg-workspace-dir;
                                             color: Theme.text;
                                             font-size: Theme.fs-cap;
                                             wrap: char-wrap;
@@ -6396,7 +6396,7 @@ export component AppWindow inherits Window {
                                                 spacing: 10px;
                                                 Text {
                                                     width: bk-tab.name-w;
-                                                    text: r.local == "" ? "—" : r.local;
+                                                    text: r.local == "" ? "-" : r.local;
                                                     color: r.local == "" ? Theme.faint : Theme.text;
                                                     font-size: Theme.fs-body;
                                                     vertical-alignment: center;
@@ -6405,7 +6405,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 Text {
                                                     width: bk-tab.name-w;
-                                                    text: r.remote == "" ? "—" : r.remote;
+                                                    text: r.remote == "" ? "-" : r.remote;
                                                     color: r.remote == "" ? Theme.faint : Theme.text;
                                                     font-size: Theme.fs-body;
                                                     vertical-alignment: center;
@@ -6443,7 +6443,7 @@ export component AppWindow inherits Window {
                                                     if !r.has-local: Text {
                                                         width: 100%;
                                                         height: 100%;
-                                                        text: "—";
+                                                        text: "-";
                                                         color: Theme.faint;
                                                         font-size: Theme.fs-body;
                                                         vertical-alignment: center;
@@ -6635,7 +6635,7 @@ export component AppWindow inherits Window {
                                             x: 12px;
                                             y: 10px;
                                             width: parent.width - 24px;
-                                            text: root.cfg-mcp-token == "" ? "—"
+                                            text: root.cfg-mcp-token == "" ? "-"
                                                 : (tok-row.token-shown ? root.cfg-mcp-token : "****************");
                                             color: Theme.text;
                                             font-size: Theme.fs-cap;
@@ -7219,8 +7219,8 @@ export component AppWindow inherits Window {
     if root.decrypt-modal-open: dec-dlg := ConfirmModal {
         dialog-width: 480px;
         title: root.decrypt-seal
-            ? "\{Strings.ew-title} — \{root.decrypt-name}"
-            : "\{Strings.dw-title} — \{root.decrypt-name}";
+            ? "\{Strings.ew-title} - \{root.decrypt-name}"
+            : "\{Strings.dw-title} - \{root.decrypt-name}";
         body: root.decrypt-seal ? Strings.ew-body : Strings.dw-body;
         confirm-label: root.decrypt-seal ? Strings.ow-encrypt : Strings.ow-decrypt;
         confirm-enabled: root.decrypt-phrase != "";

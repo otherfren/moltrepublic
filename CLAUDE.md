@@ -126,6 +126,10 @@ Concretely:
 This is a REVIEW CRITERION: prose creeping back into a user-facing string is a
 finding, the same as a bug.
 
+**No em dash in UI or HTML.** In every string a human sees (Slint labels,
+`molt-ui` strings, `landing_page/`) write a plain `-`, never `—` and never
+`&mdash;`. Documents under `docs/` are unaffected.
+
 ## Conventions that will trip you up
 
 - **clippy is kept at 0, including tests.** `unwrap_used = "warn"` applies to all

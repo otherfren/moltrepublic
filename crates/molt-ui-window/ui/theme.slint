@@ -58,7 +58,7 @@ export struct LogLine {
 // One row of the Chain-History settings panel: a committed block of the
 // open republic (WP4b read_chain — the MCP tool serves the same view).
 export struct ChainRow {
-    height: string, // block number ("—" for pre-cut entries a pruned holder rebuilds from its blob)
+    height: string, // block number ("-" for pre-cut entries a pruned holder rebuilds from its blob)
     kind: string, // localized kind label (founding/membership/checkpoint) or "" for applied
     surface: string, // localized surface name for applied blocks ("" otherwise)
     title: string, // display title (op-placeholder translated, or the membership/checkpoint text)
@@ -150,7 +150,7 @@ export struct UploadRow {
     available: bool,
     online: bool, // sharer reachable (user-to-user transfer needs them)
     checksum: string, // shortened real sha256 (full value via MCP)
-    expires: string, // "in 13 days" · "expired" · "—" (unavailable)
+    expires: string, // "in 13 days" · "expired" · "-" (unavailable)
     status: string, // live download status ("" idle · "42 %" · check/warn)
     status-kind: int, // 0 idle · 1 running · 2 done · 3 failed
 }
