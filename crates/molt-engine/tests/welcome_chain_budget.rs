@@ -99,3 +99,56 @@ fn one_set_image_block_can_exceed_the_gift_wrap_cap_on_its_own() {
          cannot carry the chain"
     );
 }
+
+/// **The second cliff: a PRUNED republic's anchor is not small either.**
+///
+/// The plan's answer to the measurement above is "hand the rejoiner the chain
+/// ANCHOR and let the rest arrive over catch-up". For a full holder that
+/// anchor is the genesis — a founding table and n signatures, kilobytes.
+///
+/// A pruned holder has no genesis. Its trust root is the WP4b checkpoint
+/// blob, and the blob carries `applied`: **every applied payload below the
+/// cut**, images included, because that is precisely what keeps the pre-cut
+/// entries readable after the history is dropped. And after a checkpoint
+/// every node prunes, so no survivor is left holding a genesis to serve
+/// instead — the blob is the only root that exists.
+///
+/// So the anchor plan meets the same `set_image` at the same cap, and step 6
+/// cannot treat "carry the anchor" as unconditionally possible.
+#[test]
+fn a_pruned_republics_anchor_carries_every_applied_payload() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(vec![0x89u8; 25 * 1024]);
+
+    let ids = vec![molt_core::MemberIdentity {
+        member: "walter".to_string(),
+        identity_pk: "ab".repeat(32),
+        nostr_pk: "cd".repeat(32),
+    }];
+    let blob = molt_core::CheckpointState {
+        founding_name: "Chess Club".to_string(),
+        rule_m: 2,
+        rule_n: 3,
+        founding_identities: ids.clone(),
+        agenda: "play chess".to_string(),
+        relays: vec!["wss://relay.example".to_string()],
+        republic_id: "ef".repeat(32),
+        roster: ids,
+        applied: vec![(
+            molt_core::Surface::Organization,
+            vec![(1, serde_json::json!({"op": "set_image", "bytes_b64": b64}))],
+        )],
+        consumed_ids: vec![1],
+        upto: 1,
+    };
+
+    let cost = serde_json::to_string(&blob).expect("blob serializes").len() * 2;
+    eprintln!("MEASURED pruned anchor with one logo: {cost} B, cap {GIFT_PLAINTEXT_MAX} B");
+    assert!(
+        cost > GIFT_PLAINTEXT_MAX,
+        "a checkpoint blob holding one 25 KB logo costs {cost} B — expected it \
+         to exceed the {GIFT_PLAINTEXT_MAX} B cap, because the blob carries the \
+         whole applied projection and that is what a pruned republic hands a \
+         rejoiner as its trust root"
+    );
+}
