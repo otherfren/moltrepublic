@@ -149,10 +149,15 @@ size it is evidence, not tuning.
 
 1. ~~Red: a relay double sends a frame past the cap~~ — already bounded; write
    the test to PIN it rather than to add it.
-2. Red: a relay double answers one REQ with an unbounded event stream; assert we
-   stop at the bound, report it structurally, and that the bound is counted
-   pre-EOSE so a catch-up is untouched. **Needs a hostile relay double** —
-   `nostr_relay_runtime.rs`'s `mod proxy` is the closest existing lever.
+2. ✅ **DONE 2026-08-02.** `MAX_STORED_EVENTS_PER_REQ = 5_000`, counted
+   pre-EOSE only, with `RelayRuntime::with_history_bound` so a test does not
+   have to publish five thousand events to reach it. Keystone:
+   `molt-net/tests/relay_flood_bound.rs` — the flood goes in through the real
+   `publish_frame` path (a flood of WELL-FORMED events is the case that
+   matters; a malformed one is already dropped by the tag gate), and the whole
+   molt-net suite including the N5.1 catch-up stays green, which is the
+   interaction this bound was specified around. No hostile relay double was
+   needed after all: a real relay holding hostile events IS the double.
 3. Red: a relay double accepts the connection then dribbles; assert we time out
    instead of pinning the connection.
 4. Implement the bounds in `relay_ws.rs` as named constants with a comment on

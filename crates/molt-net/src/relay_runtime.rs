@@ -102,6 +102,8 @@ pub struct RelayRuntime {
     size_budget: Option<u64>,
     /// Per-relay connection state, written by the subscription supervisors.
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    /// Stored-event bound per REQ (see [`MAX_STORED_EVENTS_PER_REQ`]).
+    history_bound: usize,
     /// Reconnect backoff (initial, cap) — overridable for tests.
     backoff: (Duration, Duration),
     /// NIP-42 identity for the SUBSCRIBE connections (the per-republic
@@ -135,6 +137,19 @@ pub enum RelayHealth {
     Down,
 }
 
+/// How many STORED events one relay may replay for a single REQ before we
+/// stop reading from it.
+///
+/// Counted pre-EOSE only; live traffic is unbounded, which is what buzz's
+/// "500 historical events per filter" actually means. Ours is an order of
+/// magnitude higher because one of our REQs legitimately spans several past
+/// h-windows (`GroupChannel::subscribe_since`) — a bound tight enough to catch
+/// a chat flood would silently truncate a real catch-up, and a member quietly
+/// missing history it believes it has is worse than a flood that announces
+/// itself. At this size it is evidence of a hostile or broken relay, never a
+/// tuning knob.
+pub const MAX_STORED_EVENTS_PER_REQ: usize = 5_000;
+
 impl RelayRuntime {
     /// A runtime over the CURRENTLY dialable relays. An empty list is legal
     /// (a fresh install) — every operation then fails typed, and connects to
@@ -157,6 +172,7 @@ impl RelayRuntime {
             health: Arc::new(Mutex::new(std::collections::HashMap::new())),
             backoff: (Duration::from_secs(1), Duration::from_secs(60)),
             auth_keys: None,
+            history_bound: MAX_STORED_EVENTS_PER_REQ,
         }
     }
 
@@ -172,6 +188,14 @@ impl RelayRuntime {
     #[must_use]
     pub fn with_backoff(self, initial: Duration, cap: Duration) -> Self {
         Self { backoff: (initial, cap), ..self }
+    }
+
+    /// Override [`MAX_STORED_EVENTS_PER_REQ`] (tests use a small number — a
+    /// test that had to publish five thousand events to reach the real bound
+    /// would be measuring the relay, not the bound).
+    #[must_use]
+    pub fn with_history_bound(self, bound: usize) -> Self {
+        Self { history_bound: bound, ..self }
     }
 
     /// The supervisors' per-relay connection state — the honest input for
@@ -420,6 +444,7 @@ struct SubShared {
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     backoff: (Duration, Duration),
     auth_keys: Option<nostr::Keys>,
+    history_bound: usize,
 }
 
 impl RelayRuntime {
@@ -449,6 +474,7 @@ impl RelayRuntime {
             health: self.health.clone(),
             backoff: self.backoff,
             auth_keys: self.auth_keys.clone(),
+            history_bound: self.history_bound,
         });
         // the FIRST connects run CONCURRENTLY and bounded: sequentially, one
         // relay that accepts TCP but never answers the WS upgrade would wedge
@@ -714,6 +740,11 @@ async fn read_session(
 ) -> std::ops::ControlFlow<()> {
     let mut last_ping = tokio::time::Instant::now();
     let mut pending_auth: Option<nostr::EventId> = None;
+    // stored events this relay has replayed for this REQ. Counted only while
+    // the replay is running: after EOSE the stream is live group traffic,
+    // which is bounded by the group itself, and counting it would eventually
+    // cut off a perfectly healthy relay.
+    let mut stored_seen: usize = 0;
     loop {
         // keepalive: a flow silently dropped by a NAT/middlebox otherwise
         // reads as a healthy-but-quiet connection until the idle bound
@@ -725,6 +756,22 @@ async fn read_session(
         }
         match ws.recv(KEEPALIVE.min(SUB_IDLE_TIMEOUT)).await {
             Ok(RelayMessage::Event { event, .. }) => {
+                // a relay that keeps replaying past the bound is hostile or
+                // broken; either way we stop reading from it rather than
+                // spending a signature verification and a dedup slot per
+                // event forever (buzz B3)
+                if !*eose_counted {
+                    stored_seen += 1;
+                    if stored_seen > shared.history_bound {
+                        tracing::warn!(
+                            relay = %url,
+                            bound = shared.history_bound,
+                            got = stored_seen,
+                            "relay replayed more stored events than the bound — dropped"
+                        );
+                        return std::ops::ControlFlow::Break(());
+                    }
+                }
                 // VERIFY BEFORE TRUSTING (review 2026-07-31, HIGH): the id
                 // and signature arrive verbatim from an untrusted relay
                 // (`RelayMessage::from_json` verifies NOTHING). Without this
