@@ -174,14 +174,51 @@ Found while tracing this design; fixed first because step 6 stands on it.
   whole chain would otherwise pass while reintroducing the size cliff.
 
 ### 6c — the coordinator can re-key on Nostr
-Give `coordinator_rekey` a `GroupNet` arm: re-key the group MLS held there,
-publish the commit as a 445 `MlsCommit`, gift-wrap the 444 Welcome to the
-rejoiner's **NEW** anchor (`working_nostr_pk` already returns it — the
-`Restored` block folded before `after_block_applied` runs), then
-`serve_chain_anchor()`.
+
+**Three prerequisites, all verified 2026-08-02, none of them in §8.8.** A
+recovery is the first thing in this product that produces an MLS *commit* on
+the group channel, and the Nostr group runtime was built without one.
+
+**(i) There is no Nostr re-key.** `coordinator_rekey` reaches the group via
+`restore_member_on_group` → `NetRuntime::real_crypto`. A Nostr workspace has
+no `NetRuntime`; its group MLS is `GroupNet.mls`. Needs a `GroupNet` arm.
+
+**(ii) The carrier stamp is not optional here — it is a divergence.**
+`molt-net/CLAUDE.md`: `CommitKey(created_at, sha256(commit))`, lowest wins,
+and *"the stamp must come from the SAME source on both sides."* On 445 the
+receive side already uses the real `created_at`
+(`group_runtime.rs:605`, deliberately). So a sender passing
+`NO_CARRIER_STAMP` would key its own commit at 0 while every receiver keys it
+at the wire time — the two ends pick different winners of a same-epoch race
+and **diverge permanently under one epoch number, silently**. That is the
+exact failure the rule exists to prevent, mirrored.
+
+The sender must therefore pin the stamp BEFORE committing, and
+`publish_frame` (`ritual_net.rs:406`) generates `now` internally and only
+returns it afterwards. It needs a caller-supplied variant — and the supplied
+value must drive the **h tag too**, for the reason already in that function:
+deriving them separately can straddle a window boundary and publish a stamp
+its own tag disowns. So this is N4b step 8, and it lands with 6c rather than
+after it.
+
+**(iii) The group runtime has no epoch buffer.** `ingest_one`
+(`group_runtime.rs:600`) matches `Deliver`/`Ack`/`GroupAck` and sends
+everything else to `_ => Ingest::Nothing` — including `EpochAdvanced`
+("ack it and retry the epoch buffer") and `FutureEpoch` ("hold it and retry
+after the next commit merges"). The mesh supervisor implements both; the
+group runtime implements neither, so a frame that arrives ahead of its commit
+is **dropped rather than held**. Latent today because nothing commits on 445
+yet — and recovery is precisely what starts.
+
+Then: re-key on `GroupNet.mls`, publish the commit at the pinned stamp,
+gift-wrap the 444 to the rejoiner's **NEW** anchor (`working_nostr_pk`
+already returns it — `project_one` folds the `Restored` block before
+`after_block_applied` runs), then `serve_chain_anchor()`.
 - **Red:** on a Nostr republic a committed `Restored` block produces a
-  Welcome and a chain-anchor offer; today it produces the "state-only" log
-  line and nothing else.
+  Welcome and a chain-anchor offer; today it produces a log line and nothing
+  else. Plus: both ends compute the same `CommitKey` over the production
+  entry points (the N3 lesson — a keystone driving an API the product does
+  not call pins nothing).
 
 ### 6d — `NetRecoverSealed` carries the Nostr shape
 Mirror `NetJoinSealed`: `nostr_sk`, `relays`, `rotation_seed`, `kind`.

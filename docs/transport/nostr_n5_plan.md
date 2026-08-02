@@ -144,6 +144,20 @@ the most concentrated fork point) with ONE 445 carrying the group ack state.
   stores ~75k events and every reopened subscription is a full history query,
   so the keystone would pass with the entire guarantee absent.
 
+### N5.3c — the group runtime has no epoch handling *(found 2026-08-02)*
+`ingest_one` (`group_runtime.rs:600`) matches `Deliver`/`Ack`/`GroupAck` and
+routes everything else to `_ => Ingest::Nothing` — including the two arms
+whose own doc comments say what to do:
+
+- `EpochAdvanced` — "ack it and retry the epoch buffer";
+- `FutureEpoch` — "hold it (acks unfired) and retry after the next commit
+  merges". The group runtime holds nothing, so such a frame is **dropped**.
+
+The mesh supervisor implements both (`epoch_watch`, the held-message retry).
+Latent today only because nothing produces a commit on 445 yet — and N4b's
+recovery re-key is exactly what starts. **Prerequisite for N4b step 6c**
+(`nostr_n4b_step6_design.md`), not for N5's own keystones.
+
 ### N5.4 — epoch-ring honesty (G4)
 A frame older than the exporter ring is undecryptable **by construction**.
 Report it loudly rather than dropping it quietly.

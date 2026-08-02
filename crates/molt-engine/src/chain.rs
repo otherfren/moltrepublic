@@ -1595,7 +1595,17 @@ impl State {
                 tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }
             Some(Err(e)) => tracing::warn!(%member, error = %e, "MLS re-key failed"),
-            None => tracing::warn!(%member, "no runtime MLS group to re-key (state-only)"),
+            // this arm is reached in TWO different situations and must not
+            // describe them as one: a demo/state-only node has no group at
+            // all, while a Nostr workspace HAS one — on `GroupNet`, which
+            // `restore_member_on_group` cannot see (it reads
+            // `NetRuntime::real_crypto`). Saying "state-only" there sends a
+            // debugger looking for a missing group instead of a missing arm.
+            None => tracing::warn!(
+                %member,
+                group = if self.group_net.is_some() { "nostr" } else { "none" },
+                "no re-key path for this workspace — the returning seat gets no welcome"
+            ),
         }
     }
 
