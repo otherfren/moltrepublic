@@ -41,6 +41,7 @@ pub mod block;
 pub mod chunk;
 pub mod dial;
 pub mod envelope;
+pub mod group_runtime;
 pub mod invite;
 pub mod kinds;
 pub mod loopback;

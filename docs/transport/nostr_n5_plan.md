@@ -112,7 +112,7 @@ both shapes having become undecodable.
 leads with NUL, which no JSON document may, so it is disjoint by construction
 rather than by accident. Pinned in the same test.
 
-### N5.2 — the group runtime skeleton
+### N5.2 — the group runtime ✅ DONE 2026-08-02
 `spawn_group(...)` beside `supervisor::spawn` — a NEW function, not a
 parameterization: `spawn` is bound to `T: Transport` and `Vec<PeerLink>`
 (`supervisor.rs:510`), and marmot §4.1 already says the runtime is not behind

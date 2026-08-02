@@ -85,9 +85,56 @@ impl MlsChannel {
         }
     }
 
+    /// The MLS ciphertext for `env` AND the exporter secret of the epoch it
+    /// was made at, under ONE lock.
+    ///
+    /// Split into two calls, a commit merging in between seals a NEW-epoch
+    /// outer over an OLD-epoch inner: the receiver strips the outer with its
+    /// current secret and can then never decrypt the inner (`max_past_epochs`
+    /// is 0). Taken together, that state is unrepresentable.
+    ///
+    /// Deliberately bypasses the fan-out `cache`: a broadcast publishes once
+    /// per seq, so there is no second consumer — and without the cache every
+    /// rewind-resend is a fresh encryption at the current epoch BY
+    /// CONSTRUCTION, which is what the guarantee requires anyway.
+    pub(crate) fn group_frame(&self, env: &EventEnvelope) -> Option<GroupFrame> {
+        let mut m = self.member.lock().ok()?;
+        // a re-key commit is an MLS handshake message: it ships RAW, never
+        // wrapped in an application ciphertext (one encrypted at the old epoch
+        // could never be processed — the recipient needs it to REACH the new
+        // epoch). Same branch `ciphertext_for` keeps for the queue path.
+        let ciphertext = if let WorkspaceEvent::MlsCommit { commit } = &env.body {
+            hex::decode(commit).ok()?
+        } else {
+            let plaintext = serde_json::to_vec(env).ok()?;
+            m.encrypt(&plaintext).ok()?
+        };
+        let exporter = m.exporter_secret().ok()?;
+        Some(GroupFrame { ciphertext, exporter })
+    }
+
+    /// The outer-opening ladder: the CURRENT epoch's exporter secret first,
+    /// then the retained ring, in one lock scope.
+    ///
+    /// One definition of a ladder that otherwise gets rebuilt inline at every
+    /// call site — and the ring is why a laggard past `EXPORTER_RING_K` epoch
+    /// changes cannot strip the outer layer at all, however faithfully the
+    /// relay stored the frame.
+    pub(crate) fn exporter_secrets(&self) -> Vec<[u8; 32]> {
+        let Ok(m) = self.member.lock() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Ok(cur) = m.exporter_secret() {
+            out.push(cur);
+        }
+        out.extend_from_slice(m.exporter_ring());
+        out
+    }
+
     /// Subscribe to node-wide epoch advances (one bump per merged commit,
     /// whichever link it arrived on).
-    fn epoch_watch(&self) -> watch::Receiver<u64> {
+    pub(crate) fn epoch_watch(&self) -> watch::Receiver<u64> {
         self.epoch_bump.subscribe()
     }
 
@@ -141,10 +188,21 @@ impl MlsChannel {
     /// discipline. MLS itself rejects replays, so there is no separate dedup
     /// window here.
     fn decode(&self, wire: &[u8]) -> MlsDecode {
+        self.decode_at(wire, crate::mls::NO_CARRIER_STAMP)
+    }
+
+    /// [`Self::decode`] with the carrier event's `created_at`.
+    ///
+    /// kind-445 is the FIRST transport that carries one, and it is half of the
+    /// `CommitKey` that breaks a concurrent same-epoch commit race. The queue
+    /// path has no per-event stamp, so it keeps passing `NO_CARRIER_STAMP` —
+    /// symmetric zero on both sides, which degrades the order to the digest
+    /// rather than making our own commit always lose.
+    pub(crate) fn decode_at(&self, wire: &[u8], created_at: u64) -> MlsDecode {
         let Ok(mut m) = self.member.lock() else {
             return MlsDecode::Discard;
         };
-        match m.decrypt(wire) {
+        match m.decrypt_at(wire, created_at) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
                 // a delivery ACK (delivery guarantee §4.3): the peer reports
                 // what it has engine-accepted of OUR events. Authenticated by
@@ -202,9 +260,17 @@ impl MlsChannel {
     }
 }
 
+/// One outbound group frame: the MLS ciphertext and the exporter secret of
+/// the epoch it was produced at. Always made together — see
+/// [`MlsChannel::group_frame`].
+pub(crate) struct GroupFrame {
+    pub(crate) ciphertext: Vec<u8>,
+    pub(crate) exporter: [u8; 32],
+}
+
 /// What the recv loop should do with one inbound MLS message.
 #[derive(Debug)]
-enum MlsDecode {
+pub(crate) enum MlsDecode {
     /// An authenticated application envelope — deliver and ack.
     Deliver(MemberId, Box<EventEnvelope>),
     /// A delivery ACK (delivery guarantee §4.3): the authenticated sender
@@ -958,7 +1024,7 @@ pub(crate) fn rewind_unacked(state: &mut TransportState) {
 /// Whether `env` is something the peer's engine can ever acknowledge: an
 /// OWN envelope that is not an `MlsCommit` (commits are supervisor-consumed
 /// raw — §4.5 — and foreign envelopes are never fanned out at all).
-fn own_ackable(me: &MemberId, env: &EventEnvelope) -> bool {
+pub(crate) fn own_ackable(me: &MemberId, env: &EventEnvelope) -> bool {
     env.by == *me && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
 }
 
@@ -972,7 +1038,7 @@ fn own_ackable(me: &MemberId, env: &EventEnvelope) -> bool {
 /// read as a permanently unacked tail on every quiet listener — a perpetual
 /// rewind loop with a false Degraded, and a compaction gate pinned weeks
 /// behind on lurkers.
-fn advance_acked_floor(
+pub(crate) fn advance_acked_floor(
     me: &MemberId,
     envs: &[EventEnvelope],
     win: &molt_core::AcceptedWindow,

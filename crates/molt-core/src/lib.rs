@@ -1664,6 +1664,32 @@ pub struct TransportState {
     /// optimization — correctness rests on the ACK/rewind layer (§4.3).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_cursors: BTreeMap<String, u64>,
+    /// The BROADCAST send cursor: ONE publish position for the whole republic,
+    /// because one kind-445 event reaches every member (§4.1). The per-member
+    /// ACK half — `acked_floor`/`ack_seen` — stays in [`Self::outbound`]; only
+    /// the SEND position collapses.
+    ///
+    /// Additive at v4 with no version bump on purpose: `read_transport_state_at`
+    /// answers `default()` for any file whose version exceeds the binary's, and
+    /// that would throw away `nostr_sk`, which nothing can re-derive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupCursor>,
+}
+
+/// The broadcast transport's send position and its resend budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupCursor {
+    /// Last local log seq whose kind-445 publish at least one relay accepted.
+    #[serde(default)]
+    pub log_seq: u64,
+    /// Resend rounds published inside the hour beginning at
+    /// `resend_window_start`. PERSISTED, unlike the per-peer backoff: a crash
+    /// loop must not re-publish the unacked tail to every relay on every start.
+    #[serde(default)]
+    pub resend_rounds: u32,
+    /// Unix second the current resend hour began.
+    #[serde(default)]
+    pub resend_window_start: u64,
 }
 
 /// One event in a workspace's append-only history: the envelope every log

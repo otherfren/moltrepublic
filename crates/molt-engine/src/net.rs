@@ -595,6 +595,19 @@ impl State {
                 self.accepted_dirty = false;
             }
         }
+        // the group runtime's ratchet, on the same terms: stop it, then merge
+        // durably. Without this the reopen restores the founding blob and the
+        // next publish reuses sender generations — replay-rejected and
+        // silently lost at every peer.
+        if let Some(group) = self.group_net.take() {
+            let snap = group.mls.lock().ok().and_then(|g| g.snapshot().ok());
+            // signals stop and aborts the inbox; the outbox finishes its
+            // in-flight publish and exits on its own
+            drop(group);
+            if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
+                active.handle.persist_crypto_blocking(Some(snap), None);
+            }
+        }
         let Some(net) = self.net.take() else {
             return;
         };
@@ -756,6 +769,69 @@ impl State {
         self.build_real_net_shared(transport, mesh, Arc::new(Mutex::new(mls)))
     }
 
+    /// Bring up the kind-445 GROUP runtime of a Nostr workspace (N5.2).
+    ///
+    /// The Nostr twin of [`Self::build_real_net`], and it reuses that one's
+    /// engine seam verbatim — the same `StorageLog` / `FileStateStore` /
+    /// `CmdSink` triple. What differs is everything below the seam: one
+    /// broadcast channel instead of n queues, and no `NetRuntime` at all.
+    ///
+    /// `None` when anything the runtime needs is absent — a Nostr workspace
+    /// that cannot dial one of its own relays, or whose MLS group did not
+    /// restore, must stay honestly silent rather than half-run.
+    pub(crate) fn build_group_net(&mut self, mls_blob: &[u8]) -> Option<crate::GroupNet> {
+        let active = self.active.as_ref()?;
+        let nostr = self.nostr.as_ref()?;
+        let dialer = self.dialer_for().ok()?;
+        // what the GROUP uses intersected with what THIS node may dial: the
+        // two are different questions, and publishing to a relay nobody else
+        // reads is the partition §10.15 is about
+        let verdicts = molt_core::relay::diagnose_invite_relays(
+            &nostr.relays,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        let relays: Vec<String> = verdicts
+            .iter()
+            .filter(|v| v.blocked.is_none())
+            .map(|v| v.url.clone())
+            .collect();
+        if relays.is_empty() {
+            tracing::warn!("no dialable relay for this republic — the group runtime stays down");
+            return None;
+        }
+        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
+        let mls_arc = std::sync::Arc::new(std::sync::Mutex::new(mls));
+        let channel = molt_net::ritual_net::GroupChannel::new(
+            dialer,
+            relays,
+            nostr.rotation_seed,
+        );
+        let owner = self.member();
+        let others: Vec<MemberId> = self
+            .roster()
+            .into_iter()
+            .filter(|m| *m != owner)
+            .collect();
+        let feed = StorageLog::new(active.handle.clone());
+        let store = FileStateStore::new(active.handle.clone());
+        let (wakeup, wakeup_rx) = watch::channel(0u64);
+        let (health_tx, health) = watch::channel(molt_net::group_runtime::GroupHealth::default());
+        let handle = molt_net::group_runtime::spawn_group(
+            channel,
+            molt_net::supervisor::MlsChannel::from_shared(mls_arc.clone()),
+            molt_net::group_runtime::GroupNetConfig::new(owner, others),
+            feed,
+            store,
+            // `generation: None`: the generation gate requires `self.net` to be
+            // Some, and a Nostr workspace builds no NetRuntime at all
+            CmdSink { tx: self.cmd_tx.clone(), generation: None },
+            wakeup_rx,
+            health_tx,
+        );
+        Some(crate::GroupNet { handle, mls: mls_arc, wakeup, health })
+    }
+
     /// [`Self::build_real_net`] over an **already-live** shared group — the
     /// mesh-extension rebuild hands the running `Arc` straight through instead
     /// of a snapshot→restore round-trip: a late encrypt by the dying outbox
@@ -897,6 +973,20 @@ impl State {
     /// consumed instead of replaying a whole session into replay rejection.
     pub(crate) fn persist_mls_if_due(&mut self, now: u64) {
         if now.saturating_sub(self.mls_persisted_at) < MLS_PERSIST_SECS {
+            return;
+        }
+        // A Nostr workspace has no `NetRuntime`, but it very much has a live
+        // ratchet: the group runtime advances it on every publish. Without
+        // this the reopen restores the founding blob and the next publish
+        // REUSES sender generations — which every peer replay-rejects and
+        // silently drops.
+        if let Some(group) = self.group_net.as_ref() {
+            let snap = group.mls.lock().ok().and_then(|g| g.snapshot().ok());
+            if let (Some(snap), Some(active)) = (snap, self.active.as_ref()) {
+                if active.handle.merge_mls_async(snap) {
+                    self.mls_persisted_at = now;
+                }
+            }
             return;
         }
         let Some(net) = self.net.as_ref() else { return };

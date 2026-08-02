@@ -405,6 +405,20 @@ pub(crate) struct ActiveStorage {
 }
 
 /// All authoritative state, owned exclusively by the actor task.
+/// The running group runtime of an open Nostr workspace: the handle to shut
+/// it down and the wakeup its outbox waits on.
+pub(crate) struct GroupNet {
+    pub(crate) handle: molt_net::group_runtime::GroupHandle,
+    /// The SAME group the runtime advances — the engine snapshots this ratchet
+    /// on a clean close, and a snapshot→restore round trip here would reuse
+    /// sender generations (which are replay-rejected and silently lost).
+    pub(crate) mls: std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
+    pub(crate) wakeup: tokio::sync::watch::Sender<u64>,
+    /// What the runtime reports about the channel.
+    #[allow(dead_code)] // read by N5.5, where net_health becomes relay status
+    pub(crate) health: tokio::sync::watch::Receiver<molt_net::group_runtime::GroupHealth>,
+}
+
 /// This seat's live Nostr transport material for the open workspace.
 ///
 /// It exists because the sealed `transport.state` was being read at open and
@@ -512,6 +526,10 @@ pub(crate) struct State {
     /// "this IS one but its transport secret did not load" are different
     /// faults and must not share a refusal.
     pub(crate) nostr: Option<NostrTransport>,
+    /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
+    /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
+    /// Nostr one whose MLS group or relay set did not come up.
+    pub(crate) group_net: Option<GroupNet>,
     /// Live recovery-inbox tasks (N4b step 5), one per minted link.
     ///
     /// They MUST be aborted when the workspace closes. The loopback twin gets
@@ -856,6 +874,7 @@ impl State {
             identity_sk: None,
             transport_kind: None,
             nostr: None,
+            group_net: None,
             recovery_inboxes: Vec::new(),
             chain: Vec::new(),
             chain_head: None,

@@ -116,6 +116,11 @@ impl State {
         if let (Some(net), Some(env)) = (&self.net, &wake_env) {
             net.wake_appended(env);
         }
+        // …and the group runtime's outbox, which reads the same storage log
+        // (the watch coalesces, so this never blocks the append path)
+        if let Some(group) = &self.group_net {
+            let _ = group.wakeup.send(seq);
+        }
         if active.handle.failed() {
             self.session.notice = "storage-failed".to_string();
         } else if seq % SNAPSHOT_EVERY == 0 {
@@ -611,6 +616,13 @@ impl State {
         // which is the one case the delivery guarantee forbids aborting
         for task in self.recovery_inboxes.drain(..) {
             task.abort();
+        }
+        // the group runtime's OUTBOX is DRAINED, not aborted: a frame between
+        // seal and relay-OK would otherwise vanish silently. The drain awaits,
+        // and the actor never awaits — so it rides a spawned task, the same
+        // pattern every other off-actor teardown uses.
+        if let Some(group) = self.group_net.take() {
+            tokio::spawn(async move { group.handle.shutdown().await });
         }
         self.chain.clear();
         self.chain_head = None;

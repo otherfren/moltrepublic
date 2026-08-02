@@ -2593,6 +2593,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             let mut ts = ws.read_transport_state();
                             ts.outbound = state.outbound;
                             ts.inbound = state.inbound;
+                            // …and the broadcast cursor. Without this line it
+                            // works in-process and silently resets on every
+                            // open, which reads as "the runtime republishes
+                            // the whole log after a restart".
+                            ts.group = state.group;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }

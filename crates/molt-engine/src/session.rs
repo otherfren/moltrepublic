@@ -912,6 +912,14 @@ impl State {
         // never pushed through the queue-shaped resume (its state carries no
         // queue creds or mesh links by design, not by damage).
         let nostr_kind = transport_state.kind == Some(molt_core::TransportKind::Nostr);
+        // N5.2: a Nostr workspace brings up its GROUP runtime here instead —
+        // one broadcast channel, no queues, no NetRuntime. Everything it needs
+        // came off the sealed transport state via `adopt_nostr_transport`.
+        if nostr_kind {
+            if let Some(blob) = transport_state.mls.as_deref() {
+                self.group_net = self.build_group_net(blob);
+            }
+        }
         let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
             _ if nostr_kind => None,
             (Some(mls), Some(creds), Some(_dialer)) if !transport_state.mesh.is_empty() => {
