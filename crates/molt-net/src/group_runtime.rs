@@ -583,11 +583,26 @@ enum Ingest {
     Opaque,
     /// A peer's claim sheet — its floor over OUR events, already applied.
     Acked,
-    /// Decoded but carried nothing to deliver (a commit, a replay).
+    /// Decoded but carried nothing to deliver (a replay, a proposal).
     Nothing,
+    /// Encrypted at an epoch this node has not reached — its commit is still
+    /// in flight. **Held, never dropped**: on a broadcast channel the commit
+    /// and the frames encrypted after it race, and the loser is ordinary.
+    FutureEpoch,
+    /// A commit merged and the epoch advanced — whatever is being held may
+    /// decode now.
+    EpochAdvanced,
     /// The engine is gone.
     EngineGone,
 }
+
+/// Frames held awaiting the commit that unlocks them.
+///
+/// Bounded for the same reason the mesh's reorder buffer is: a peer that
+/// never sends the commit would otherwise pin memory for the session. Excess
+/// is dropped back onto the delivery guarantee's re-offer, which is where an
+/// unbounded hold's contents would have to come from anyway.
+const EPOCH_HOLD_MAX: usize = 512;
 
 async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     mls: &MlsChannel,
@@ -634,7 +649,53 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             apply_group_ack(log, store, me, &from, &ack).await;
             Ingest::Acked
         }
-        _ => Ingest::Nothing,
+        // the two arms the mesh supervisor implements and this loop did not:
+        // both used to fall into a catch-all `Nothing`, which held nothing and
+        // retried nothing, so a frame arriving ahead of its commit was DROPPED
+        MlsDecode::FutureEpoch => Ingest::FutureEpoch,
+        MlsDecode::EpochAdvanced => Ingest::EpochAdvanced,
+        MlsDecode::Discard => Ingest::Nothing,
+    }
+}
+
+/// Re-offer every held frame after an epoch advance, **in hold order**, and
+/// repeatedly while progress is made — a held commit can unlock further held
+/// frames, so one pass is not enough. Returns how many stayed permanently
+/// unreadable, for the operator counter.
+///
+/// Each frame is retried at its ORIGINAL `created_at`: that stamp is half of
+/// the `CommitKey` both ends must agree on, and re-stamping it here with the
+/// retry time would make this node compute a different key from everyone
+/// else's for the same commit.
+///
+/// **A frame still opaque after an advance is opaque for good.** That is the
+/// eviction rule, and it is what keeps the hold from growing without bound:
+/// if the frame had been from an epoch AHEAD of us, the advance we just made
+/// is exactly what would have opened it.
+async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
+    mls: &MlsChannel,
+    log: &L,
+    store: &S,
+    sink: &K,
+    me: &MemberId,
+    hold: &mut Vec<(String, u64)>,
+) -> Result<u64, ()> {
+    let mut lost = 0u64;
+    loop {
+        let mut progress = false;
+        let mut still = Vec::new();
+        for (content, at) in std::mem::take(hold) {
+            match ingest_one(mls, log, store, sink, me, &content, at).await {
+                Ingest::EngineGone => return Err(()),
+                Ingest::FutureEpoch => still.push((content, at)),
+                Ingest::Opaque => lost += 1,
+                _ => progress = true,
+            }
+        }
+        *hold = still;
+        if !progress || hold.is_empty() {
+            return Ok(lost);
+        }
     }
 }
 
@@ -666,6 +727,8 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
         opaque_frames: 0,
     };
     let _ = health.send(state.clone());
+    // frames whose commit has not arrived yet — see `retry_epoch_hold`
+    let mut hold: Vec<(String, u64)> = Vec::new();
     loop {
         let recv = tokio::select! {
             r = sub.recv(RECV_SLICE) => r,
@@ -678,9 +741,36 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 }
                 match ingest_one(&mls, &log, &store, &sink, &me, &content, created_at).await {
                     Ingest::EngineGone => return,
-                    Ingest::Opaque => {
-                        state.opaque_frames += 1;
-                        let _ = health.send(state.clone());
+                    // NOT counted yet, and not dropped. On 445 the epoch shows
+                    // up at the OUTER layer, not at the MLS decode: a frame
+                    // sealed under an exporter we have not derived yet is
+                    // simply unopenable, so "newer than us" and "older than
+                    // the ring" arrive as the SAME answer. Holding it costs
+                    // one retry after the next commit merges, and that retry
+                    // is what tells the two apart.
+                    Ingest::Opaque | Ingest::FutureEpoch => {
+                        if hold.len() < EPOCH_HOLD_MAX {
+                            hold.push((content, created_at));
+                        } else {
+                            // loud: the guarantee's re-offer is the repair
+                            // path, and silence here would read as delivery
+                            state.opaque_frames += 1;
+                            let _ = health.send(state.clone());
+                            tracing::warn!(
+                                held = hold.len(),
+                                "epoch hold is full — dropping an unopenable frame"
+                            );
+                        }
+                    }
+                    Ingest::EpochAdvanced => {
+                        match retry_epoch_hold(&mls, &log, &store, &sink, &me, &mut hold).await {
+                            Err(()) => return,
+                            Ok(0) => {}
+                            Ok(lost) => {
+                                state.opaque_frames += lost;
+                                let _ = health.send(state.clone());
+                            }
+                        }
                     }
                     Ingest::Delivered | Ingest::Acked | Ingest::Nothing => {}
                 }
@@ -703,6 +793,150 @@ mod tests {
 
     fn cfg() -> GroupNetConfig {
         GroupNetConfig::fast("walter".into(), vec!["petra".into(), "zoe".into()])
+    }
+
+    /// **A frame that arrives ahead of its commit is held, not dropped.**
+    ///
+    /// A recovery re-key is the first thing in this product that puts an MLS
+    /// commit on the group channel, and on a broadcast channel the commit and
+    /// the frames encrypted after it race. `ingest_one` used to route both
+    /// `FutureEpoch` and `EpochAdvanced` into a catch-all `Nothing`: nothing
+    /// was held, nothing retried, so the loser of that race was lost.
+    ///
+    /// The order here is the whole test — the application frame is published
+    /// BEFORE the commit that makes it decodable. Publish them the other way
+    /// round and it passes with the hold absent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_frame_ahead_of_its_commit_is_held_until_the_commit_lands() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                self.0.lock().expect("sink").push(env);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("a welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
+
+        // alice re-keys cara's seat: this is the RECOVERY shape, and it is the
+        // only API that hands the commit out for someone else to merge
+        let (commit, _w) = alice
+            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .expect("re-key");
+        drop(cara);
+
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let alice_chan = crate::ritual_net::GroupChannel::new(
+            crate::dial::Dialer::Direct,
+            vec![url.clone()],
+            seed,
+        );
+        let alice_mls = MlsChannel::new(alice);
+
+        let env = |seq: u64, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts: 1_751_000_000,
+            by: "alice".to_string(),
+            body,
+        };
+        let msg = env(
+            1,
+            molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage {
+                id: molt_core::MessageId([9u8; 16]),
+                from: "alice".to_string(),
+                body: "spoken past the commit".to_string(),
+                ts: 1_751_000_000,
+                quote: None,
+                quote_id: None,
+                channel: molt_core::ChannelRef::Group,
+                kind: molt_core::ChatKind::User,
+                reactions: std::collections::BTreeMap::new(),
+                deleted_by: None,
+                file: None,
+                read_by: std::collections::BTreeSet::new(),
+            }),
+        );
+        // encrypted at the NEW epoch — alice merged her own commit already
+        let after = alice_mls.group_frame(&msg).expect("frame after the commit");
+        let commit_frame = alice_mls
+            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) }))
+            .expect("commit frame");
+
+        let sink = Sink::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let bob_chan =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let handle = spawn_group(
+            bob_chan,
+            MlsChannel::new(bob),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // THE ORDER IS THE TEST: the message first, its commit second
+        alice_chan
+            .publish_frame(&after.exporter, &after.ciphertext)
+            .await
+            .expect("publish the future-epoch message");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(
+            sink.0.lock().expect("sink").is_empty(),
+            "it must NOT be deliverable before its commit — otherwise this \
+             test proves nothing about holding it"
+        );
+
+        alice_chan
+            .publish_frame(&commit_frame.exporter, &commit_frame.ciphertext)
+            .await
+            .expect("publish the commit");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if !sink.0.lock().expect("sink").is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the held frame was never re-offered after the commit merged"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        handle.shutdown().await;
     }
 
     /// With nobody acking, the floor is unknown and the cursor does not move.

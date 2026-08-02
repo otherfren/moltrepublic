@@ -144,7 +144,7 @@ the most concentrated fork point) with ONE 445 carrying the group ack state.
   stores ~75k events and every reopened subscription is a full history query,
   so the keystone would pass with the entire guarantee absent.
 
-### N5.3c — the group runtime has no epoch handling *(found 2026-08-02)*
+### N5.3c — epoch handling on the group channel ✅ DONE 2026-08-02
 `ingest_one` (`group_runtime.rs:600`) matches `Deliver`/`Ack`/`GroupAck` and
 routes everything else to `_ => Ingest::Nothing` — including the two arms
 whose own doc comments say what to do:
@@ -154,9 +154,31 @@ whose own doc comments say what to do:
   merges". The group runtime holds nothing, so such a frame is **dropped**.
 
 The mesh supervisor implements both (`epoch_watch`, the held-message retry).
-Latent today only because nothing produces a commit on 445 yet — and N4b's
-recovery re-key is exactly what starts. **Prerequisite for N4b step 6c**
-(`nostr_n4b_step6_design.md`), not for N5's own keystones.
+Latent only because nothing produces a commit on 445 yet — and N4b's recovery
+re-key is exactly what starts.
+
+**Building the keystone found two more, both real:**
+
+1. **A commit was sealed under the wrong exporter.** `group_frame` took
+   `exporter_secret()` — the epoch the sender had just moved TO. A receiver's
+   `exporter_secrets` is its current epoch plus the ring of PAST ones; it
+   reaches backward only. So the outer layer of a re-key commit was opaque to
+   exactly the members it exists to move forward, and the whole re-key was
+   undeliverable. It now seals under `exporter_ring().first()` — the epoch the
+   sender just left, which is where its recipients still are. The queue path
+   has no outer layer, which is why this only bites on 445.
+2. **`FutureEpoch` barely happens here.** On 445 the epoch shows up at the
+   OUTER layer: a frame sealed under an exporter this node has not derived is
+   simply unopenable, so "newer than us" and "older than the ring" arrive as
+   the SAME answer — `Opaque`. Holding only `MlsDecode::FutureEpoch` would
+   have been a hold that never fires. Both are held now, and the retry after
+   an epoch advance is what tells them apart: still opaque after an advance
+   means opaque for good, which is also the eviction rule that bounds the
+   hold.
+
+The keystone (`a_frame_ahead_of_its_commit_is_held_until_the_commit_lands`)
+publishes the message BEFORE its commit — the other order passes with the
+whole mechanism absent — and each half was verified to fail on its own.
 
 ### N5.4 — epoch-ring honesty (G4)
 A frame older than the exporter ring is undecryptable **by construction**.

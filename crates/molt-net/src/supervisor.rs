@@ -103,13 +103,22 @@ impl MlsChannel {
         // wrapped in an application ciphertext (one encrypted at the old epoch
         // could never be processed — the recipient needs it to REACH the new
         // epoch). Same branch `ciphertext_for` keeps for the queue path.
-        let ciphertext = if let WorkspaceEvent::MlsCommit { commit } = &env.body {
-            hex::decode(commit).ok()?
+        let (ciphertext, exporter) = if let WorkspaceEvent::MlsCommit { commit } = &env.body {
+            // …and on 445 its OUTER layer must be sealed under the epoch its
+            // RECIPIENTS are still at — the one this node just left. A
+            // receiver's `exporter_secrets` is its current epoch plus the ring
+            // of past ones; it reaches BACKWARD only. So a commit sealed at
+            // the new epoch is opaque to exactly the members it exists to move
+            // forward, and the whole re-key is undeliverable. (The queue path
+            // has no outer layer, which is why this only bites here.)
+            let prev = m.exporter_ring().first().copied()?;
+            (hex::decode(commit).ok()?, prev)
         } else {
             let plaintext = serde_json::to_vec(env).ok()?;
-            m.encrypt(&plaintext).ok()?
+            let ct = m.encrypt(&plaintext).ok()?;
+            let exporter = m.exporter_secret().ok()?;
+            (ct, exporter)
         };
-        let exporter = m.exporter_secret().ok()?;
         Some(GroupFrame { ciphertext, exporter })
     }
 
