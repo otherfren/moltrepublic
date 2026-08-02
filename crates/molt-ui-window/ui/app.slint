@@ -718,7 +718,19 @@ component SortHeader inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "MoltRepublic - node";
-    preferred-width: 940px;
+    // Raised 940 → 1060 so the Open screen's table fits WITHOUT a manual
+    // resize. Measured against that table's own columns (app.slint, the
+    // header and the rows carry the same widths):
+    //   18 padding + 9 dot + 140 name(min) + 110 sync + 120 backup
+    //   + 85 status + 330 buttons (86 Open + 134 Encrypt + 86 Delete, 2×12
+    //   spacing) + 5 × 12 column spacing + 18 padding = 890px of table.
+    // The Open screen runs with the nav rail COLLAPSED (`nav-collapsed` is
+    // `screen != main`), so it takes 64px, plus the screen's own 2 × 16px
+    // padding: the table wants 986px of window. At 940 it was 46px short —
+    // exactly the right edge of Delete, the last fixed column.
+    // 1060 leaves the stretching name column ~70px above its 140px floor, so
+    // the default actually shows names rather than eliding them at the floor.
+    preferred-width: 1060px;
     preferred-height: 720px;
     // Raised 760 → 900 for the one-row settings tab bar. Measured (DejaVu Sans
     // Bold 14px, the default sans here), German — the widest set:
@@ -732,7 +744,12 @@ export component AppWindow inherits Window {
     // bar → 897px of window, rounded to 900. Narrower still is safe (the bar's
     // absolute floor — every wrappable title on two lines — is 686px of bar,
     // i.e. 798px of window); it just wraps more titles.
-    min-width: 900px;
+    // …and raised 900 → 990 for the same table. Leaving the minimum at 900
+    // would keep the bug reachable by dragging the window narrow: the
+    // Flickable's viewport is `self.width`, so the table does not scroll
+    // horizontally, it CLIPS — and Delete is the last column, so it is always
+    // the one that disappears. 990 is the 986px floor above, rounded.
+    min-width: 990px;
     min-height: 600px;
     background: Theme.bg;
 
