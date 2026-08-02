@@ -4422,9 +4422,16 @@ fn parse_channel_key(key: &str) -> Option<ChannelRef> {
     if let Some(id) = key.strip_prefix("patch:") {
         return id.parse().ok().map(|id| ChannelRef::Patch { id: ProposalId(id) });
     }
-    key.strip_prefix("topic:").map(|name| ChannelRef::Topic {
-        name: name.to_string(),
-    })
+    // TRIMMED here, the same rule `ChannelRef::normalized` applies on send —
+    // otherwise the dialog could select "  " as a channel and the failure
+    // would only surface on the first message. No stored topic name can carry
+    // outer whitespace either, so trimming never misses an existing channel.
+    key.strip_prefix("topic:")
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| ChannelRef::Topic {
+            name: name.to_string(),
+        })
 }
 
 /// The sidebar's DISCUSSION rows from the engine enumeration: a discussion

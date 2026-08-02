@@ -994,6 +994,7 @@ export component AppWindow inherits Window {
         || root.decrypt-modal-open
         || root.charter-view-open
         || root.relay-clearnet-modal-open
+        || root.nt-open
         || root.recover-link-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
@@ -1054,11 +1055,19 @@ export component AppWindow inherits Window {
     // from the engine's channel annotation, instant on selection)
     in property <bool> selected-channel-closed: false;
     callback select-channel(string);
-    // new-topic affordance: a compose-side reveal row (send-to-new-topic).
-    // Deliberately NOT a "create channel" ritual — a channel exists because
-    // a message exists (concept Q2).
+    // new-topic affordance: a MODAL that asks for the name and nothing else.
+    // It used to be a reveal row beside the compose field, which put two
+    // inputs and two buttons on screen at once and left the user guessing
+    // which belonged to which.
+    //
+    // Still deliberately NOT a "create channel" ritual — a channel exists
+    // because a message exists (concept Q2). The dialog only selects it.
     property <bool> nt-open: false;
     property <string> nt-draft: "";
+    // mirrors `molt_core::TOPIC_NAME_MAX_CHARS`; the engine normalizes and
+    // would refuse a longer name on the first send, which is far too late to
+    // tell the user about it
+    property <int> nt-max: 64;
     property <string> mv-draft;
     // compose quote state: the id of the message the next send replies to
     // ("" = none); the scroll target stays a row index (chat-scroll-to).
@@ -1526,6 +1535,13 @@ export component AppWindow inherits Window {
             root.confirm-delete-open = false;
         } else if (root.confirm-delmsg-open) {
             root.confirm-delmsg-open = false;
+        } else if (root.nt-open) {
+            // ConfirmModal's own FocusScope takes Escape only while IT holds
+            // focus; once the name field is clicked, Escape bubbles here — so
+            // without this branch the dialog became uncancellable by keyboard
+            // the moment the user started typing. The draft goes with it.
+            root.nt-open = false;
+            root.nt-draft = "";
         } else if (root.backup-modal-open) {
             root.backup-modal-open = false;
             // every way out of the modal drops the typed export passphrase
@@ -4104,6 +4120,44 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // A free topic names itself HERE, under the member
+                            // pills — the user must see which channel they are
+                            // in BEFORE reading a message, not after. This
+                            // replaces the "# name" line that used to sit down
+                            // by the compose row, below the whole log.
+                            //
+                            // Topics only: a decision's discussion gets its
+                            // detail panel in this slot instead, and the group
+                            // chat needs no heading at all.
+                            if root.selected-channel != "group" && !root.selected-channel-votable: Rectangle {
+                                height: 36px;
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 7px;
+                                    Text {
+                                        text: "#";
+                                        color: Theme.accent;
+                                        font-size: Theme.fs-h2;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.selected-channel-label;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-h2;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+
                             // the message list sits on a real panel — writing
                             // straight onto the desktop background read badly,
                             // especially in the brutalism theme
@@ -4221,11 +4275,13 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // composing into a non-group channel? a quiet
-                            // banner names it (for a fresh topic this is the
-                            // only signal until its first message exists);
-                            // back to the group goes via the sidebar row
-                            if root.selected-channel != "group": Rectangle {
+                            // A DECISION's discussion keeps its compose-side
+                            // banner, because it carries the jump back to the
+                            // ballot and the read-only note. A free topic does
+                            // not: its name is a heading at the top of the pane
+                            // now, and repeating it here was the second label
+                            // for the same fact.
+                            if root.selected-channel-votable: Rectangle {
                                 height: 26px;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
@@ -4282,61 +4338,6 @@ export component AppWindow inherits Window {
                                                 root.jump-to-vote();
                                             }
                                         }
-                                    }
-                                }
-                            }
-
-                            // new-topic reveal row (send-to-new-topic): name
-                            // a topic and the NEXT message opens the channel —
-                            // only in the general chat: a specific discussion
-                            // already HAS its topic
-                            if root.nt-open && root.selected-channel == "group": HorizontalLayout {
-                                spacing: 8px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 34px;
-                                    background: Theme.panel;
-                                    border-radius: Theme.radius;
-                                    border-width: Theme.border-w;
-                                    border-color: nt-in.has-focus ? Theme.accent : Theme.line;
-                                    clip: true;
-                                    if root.nt-draft == "": Text {
-                                        x: 10px;
-                                        y: 8px;
-                                        text: Strings.ch-topic-ph;
-                                        color: Theme.faint;
-                                        font-size: Theme.fs-body;
-                                    }
-                                    nt-in := TextInput {
-                                        x: 10px;
-                                        y: 8px;
-                                        width: parent.width - 20px;
-                                        text <=> root.nt-draft;
-                                        color: Theme.text;
-                                        font-size: Theme.fs-body;
-                                        single-line: true;
-                                        init => {
-                                            self.focus();
-                                        }
-                                        accepted => {
-                                            if (root.nt-draft != "") {
-                                                root.select-channel("topic:" + root.nt-draft);
-                                                root.nt-open = false;
-                                                root.nt-draft = "";
-                                                chat-in.focus();
-                                            }
-                                        }
-                                    }
-                                }
-                                AppButton {
-                                    height: 34px;
-                                    label: Strings.ch-topic-open;
-                                    enabled: root.nt-draft != "";
-                                    clicked => {
-                                        root.select-channel("topic:" + root.nt-draft);
-                                        root.nt-open = false;
-                                        root.nt-draft = "";
-                                        chat-in.focus();
                                     }
                                 }
                             }
@@ -4462,10 +4463,11 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                // send-to-new-topic: reveals the topic-name
-                                // row above (a channel exists because a
-                                // message exists — no create ritual); only
-                                // in the general chat, like the reveal row
+                                // send-to-new-topic: opens the name dialog (a
+                                // channel exists because a message exists — no
+                                // create ritual); only in the general chat,
+                                // since a specific discussion already has its
+                                // topic
                                 if root.selected-channel == "group": VerticalLayout {
                                     alignment: end;
                                     Rectangle {
@@ -7047,6 +7049,42 @@ export component AppWindow inherits Window {
                     del-dlg.confirmed();
                 }
             }
+        }
+    }
+
+    // Modal: name a new chat topic. One input, two buttons, nothing else on
+    // screen competing for them.
+    if root.nt-open: nt-dlg := ConfirmModal {
+        dialog-width: 420px;
+        title: Strings.ch-new-topic;
+        confirm-label: Strings.ch-topic-open;
+        // the engine trims and caps the name (`ChannelRef::normalized`), so
+        // the button is gated on the same rule rather than letting the send
+        // fail later
+        confirm-enabled: root.nt-draft != "" && root.nt-draft.character-count <= root.nt-max;
+        dismissed => {
+            root.nt-open = false;
+            root.nt-draft = "";
+        }
+        confirmed => {
+            root.select-channel("topic:" + root.nt-draft);
+            root.nt-open = false;
+            root.nt-draft = "";
+        }
+        AppField {
+            text <=> root.nt-draft;
+            placeholder: Strings.ch-topic-ph;
+            invalid: root.nt-draft.character-count > root.nt-max;
+            accepted => {
+                if (nt-dlg.confirm-enabled) {
+                    nt-dlg.confirmed();
+                }
+            }
+        }
+        if root.nt-draft.character-count > root.nt-max: Text {
+            text: "\{root.nt-draft.character-count} / \{root.nt-max}";
+            color: Theme.bad;
+            font-size: Theme.fs-cap;
         }
     }
 
