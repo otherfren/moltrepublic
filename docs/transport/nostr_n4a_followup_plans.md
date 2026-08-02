@@ -130,15 +130,16 @@ can start; but a wrong guess is expensive in exactly these five places.
 | C | The inert publish-failure seam | ✅ (this session) |
 | D | Join-task lifecycle | ✅ `9809f6f` |
 | E | `GroupSub::recv` failure handling | ✅ (this session) |
-| F | Honesty gaps | ✅ (elapsed-wait deferred) |
+| F | Honesty gaps | ✅ — the deferred elapsed-wait line landed 2026-08-02 |
 | G | NIP-42 inert on ritual subscriptions | ✅ (this session) |
 | H | Unpinned security checks | ✅ H2 (was semi-inert) + H4 + the unsigned-`roster` finding (`1defd69`); H1/H3 need a hostile-peer harness |
 | I | Invite relay cap | ✅ `28456f7` |
 
 **All nine clusters are closed** (2026-08-01), plus the adversarial swoop
-over the whole change-set and its survivors. Remaining coverage debt: H1/H3
-need a hostile-peer harness; F's elapsed-wait line is deferred. Both named in
-`nostr_n4a_review_followups.md`.
+over the whole change-set and its survivors. Remaining coverage debt: H1/H3 need a
+hostile-peer harness. F's elapsed-wait line is **done** (2026-08-02): the
+member's genesis wait now reports how long it has been waiting, on a widening
+ladder, so silence and progress stop looking identical.
 
 
 ## Cluster C — The inert publish-failure seam

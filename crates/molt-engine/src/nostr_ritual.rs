@@ -960,6 +960,14 @@ async fn member_join(
         .map_err(|e| format!("seal signature did not publish: {e}"))?;
 
     let mut was_deaf = false;
+    // The wait below is deliberately UNBOUNDED: the genesis lands only after
+    // every seat ratified, and a founder finishing a human deliberation is not
+    // a failure. But silence and progress looked identical here — a member
+    // whose founder died sat on this loop forever with nothing on screen. So
+    // the wait says how long it has been waiting (cluster F's deferred
+    // elapsed line).
+    let waiting_since = tokio::time::Instant::now();
+    let mut noted_secs: u64 = 0;
     // Genesis wait: the sealed roster as a 445. Sign-what-you-see closes
     // HERE — the distributed table must byte-equal the ratified one.
     let sealed_final = loop {
@@ -978,7 +986,21 @@ async fn member_join(
                 }
                 (content, created_at)
             }
-            molt_net::ritual_net::GroupRecv::Idle => continue,
+            molt_net::ritual_net::GroupRecv::Idle => {
+                let waited = waiting_since.elapsed().as_secs();
+                if let Some(next) = genesis_wait_note(waited, noted_secs) {
+                    noted_secs = next;
+                    let _ = send_cmd(
+                        tx,
+                        Command::NetJoinNote {
+                            note: format!("⧗ waiting for the genesis · {}", elapsed_label(next)),
+                            generation,
+                        },
+                    )
+                    .await;
+                }
+                continue;
+            }
             // loud, never fatal — the join keeps waiting, visibly
             molt_net::ritual_net::GroupRecv::Deaf(why) => {
                 was_deaf = true;
@@ -1205,5 +1227,75 @@ mod tests {
             check_proposal_provenance("walter", &p, FOUNDER_NPK, &inv),
             Provenance::Refused(_)
         ));
+    }
+}
+
+/// Whether the genesis wait is due for an elapsed note, and the mark to
+/// record when it is.
+///
+/// The wait itself is unbounded on purpose — the genesis lands after a HUMAN
+/// deliberation, so a slow founder is not a failure. What was wrong is that
+/// waiting and being stranded looked identical. Notes go out on a widening
+/// ladder rather than a fixed tick: the first minutes are when an operator
+/// wonders whether anything is happening, and an hour in a line every 30 s
+/// would be noise burying the run log.
+fn genesis_wait_note(waited_secs: u64, last_noted: u64) -> Option<u64> {
+    const LADDER: [u64; 6] = [30, 120, 300, 900, 1_800, 3_600];
+    let due = LADDER
+        .iter()
+        .rev()
+        .find(|mark| waited_secs >= **mark && **mark > last_noted)?;
+    Some(*due)
+}
+
+/// A wait as few words: `45s`, `2m`, `1h30m`. Never a sentence — this rides
+/// inside a run-log line that already says what is being waited for.
+fn elapsed_label(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let (h, m) = (mins / 60, mins % 60);
+    if m == 0 {
+        format!("{h}h")
+    } else {
+        format!("{h}h{m}m")
+    }
+}
+
+#[cfg(test)]
+mod wait_note_tests {
+    use super::*;
+
+    /// A note fires once per ladder rung, never twice, and never before its
+    /// rung is reached.
+    #[test]
+    fn the_elapsed_note_fires_once_per_rung() {
+        assert_eq!(genesis_wait_note(0, 0), None, "no note before the first rung");
+        assert_eq!(genesis_wait_note(29, 0), None);
+        assert_eq!(genesis_wait_note(30, 0), Some(30), "the first rung");
+        assert_eq!(genesis_wait_note(31, 30), None, "…and not again on the same rung");
+        assert_eq!(genesis_wait_note(120, 30), Some(120), "the next rung");
+        // a long stall that skipped rungs reports the HIGHEST reached, not a
+        // burst of every rung it slept through
+        assert_eq!(genesis_wait_note(4_000, 30), Some(3_600));
+        // past the last rung nothing repeats — the log stops growing
+        assert_eq!(genesis_wait_note(100_000, 3_600), None);
+    }
+
+    /// The label is a few characters, never a sentence.
+    #[test]
+    fn the_elapsed_label_is_compact() {
+        assert_eq!(elapsed_label(45), "45s");
+        assert_eq!(elapsed_label(60), "1m");
+        assert_eq!(elapsed_label(150), "2m");
+        assert_eq!(elapsed_label(3_600), "1h");
+        assert_eq!(elapsed_label(5_400), "1h30m");
+        for s in [0, 59, 60, 3_599, 3_600, 86_400] {
+            assert!(elapsed_label(s).len() <= 6, "{}", elapsed_label(s));
+        }
     }
 }
