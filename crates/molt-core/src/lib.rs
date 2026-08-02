@@ -3296,6 +3296,20 @@ pub enum Command {
         threshold: u8,
         /// The member count (n), `2..=13`.
         members: u8,
+        /// The relays this republic will run on — the founder's deliberate
+        /// pick, which the invites and the Welcome carry verbatim.
+        ///
+        /// Empty = "whatever this node can dial", the pre-pick behaviour.
+        /// A relay named here that this node cannot dial is refused rather
+        /// than dropped: a republic founded on a relay its own founder
+        /// cannot reach is a republic nobody can join.
+        ///
+        /// This is a deliberate set, not an accident of the settings page,
+        /// because it becomes constitutional — every member signs it into
+        /// the genesis (`relay_topology_plan.md` R2c → R3), and a joiner's
+        /// refusal quotes it as a fact about the REPUBLIC.
+        #[serde(default)]
+        relays: Vec<String>,
     },
     /// Propose the deliberated charter — the final DAO name and a free-text
     /// agenda — once every seat has joined (`create.can_propose`). This seals

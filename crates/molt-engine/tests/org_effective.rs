@@ -56,6 +56,7 @@ async fn an_applied_set_name_renames_the_session_entry_and_the_manifest() {
         member: "petra".to_string(),
         threshold: 1,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");
@@ -157,6 +158,7 @@ async fn an_applied_set_image_materializes_the_logo_file() {
         member: "petra".to_string(),
         threshold: 1,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

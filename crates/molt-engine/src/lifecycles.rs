@@ -700,6 +700,10 @@ impl State {
         member: String,
         threshold: u8,
         members: u8,
+        // the founder's deliberate relay pick (empty = whatever this node can
+        // dial). It becomes the invites' list, the Welcome's, and — with R3 —
+        // the pool every member signs into the genesis.
+        relays: Vec<String>,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.create.run, MoltError::Create)?;
         let name = name.trim().to_string();
@@ -731,7 +735,7 @@ impl State {
         self.ritual_attestations.clear();
         self.invalidate_join();
         let crate::founding::RitualStart { links, notes } = self
-            .start_ritual(&name, &member, threshold, members, &seed)
+            .start_ritual(&name, &member, threshold, members, &seed, &relays)
             .map_err(MoltError::Create)?;
 
         // the founder shares the invite links off-band and waits for real

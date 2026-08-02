@@ -597,9 +597,39 @@ Each step is one commit, red test first, green on master before the next.
     inside N4b would duplicate `request_catchup`/the serve path and is
     explicitly the wrong move. **N5's runtime moves ahead of step 6.**
 
-    The one thing the rejoiner still needs from the Welcome is the chain HEAD
-    (to know what it is catching up TO); the blocks themselves arrive over the
-    ordinary runtime once it is up.
+    **CORRECTION 2026-08-02 — "the Welcome carries the HEAD" is wrong.** The
+    paragraph above concluded that the rejoiner only needs the head. It cannot
+    bootstrap from one, for four verified reasons:
+
+    - `request_catchup` returns immediately when `chain_head.is_none()`
+      (`chain.rs:1788`) — a headless rejoiner can never even ASK;
+    - `is_chain_governed()` **is** `chain_head.is_some()` (`chain.rs:841`), and
+      both `Committed` and `ChainRequest` ingest are gated on it
+      (`net.rs:1258`, `:1261`) — so a node without a head silently drops every
+      block served to it;
+    - a *verified* head cannot exist without the chain: `verify_chain` is
+      all-or-nothing from the genesis, so a head lifted out of a Welcome is an
+      unverified claim, not a head;
+    - `materialize_workspace` uses `chain.is_empty()` as the master switch that
+      also decides whether the identity signing key and the Nostr transport
+      secret are set and persisted at all — and the genesis's `SealedRoster` is
+      what materializes the workspace in the first place.
+
+    **So the Welcome must carry enough to BOOTSTRAP** — at minimum the genesis,
+    which is what makes a workspace exist and what `verify_chain` anchors on —
+    and the rest may arrive over catch-up. The measurement still stands: the
+    Welcome cannot carry an ARBITRARY chain, and `set_image` is why. The
+    open question step 6 must answer is therefore narrower and sharper:
+
+    > What is the smallest prefix a rejoiner can be handed such that it has a
+    > verified head, and can the two rails be joined — `ServedChainWire`
+    > (recovery-only, whole-blob, `chain.rs:459`) to bootstrap, then the
+    > per-block rail (`ChainRequest` → `serve_chain_from` → `Committed`) for
+    > the rest?
+
+    Note also that a catch-up costs O(n²) Ed25519 verifications on the
+    synchronous actor (`apply_next_block` re-verifies the whole chain per
+    appended block), which is fine for tens of blocks and not for thousands.
 
 11. ~~**Welcome size**~~: measure a real served chain in the 444 payload against
     the 65408 cap. Under → carry it; over → carry the HEAD and fetch blocks

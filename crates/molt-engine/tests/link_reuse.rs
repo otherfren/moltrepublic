@@ -45,6 +45,7 @@ async fn a_second_activation_of_the_same_link_fails_loudly_on_both_sides() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

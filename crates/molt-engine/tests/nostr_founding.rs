@@ -102,6 +102,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("a production founding starts over the confirmed relay");
@@ -334,6 +335,7 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -411,6 +413,7 @@ async fn a_join_with_no_relay_in_common_is_refused_with_an_actionable_message() 
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -552,6 +555,7 @@ async fn a_second_activation_of_the_same_link_fails_as_spent() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -619,6 +623,7 @@ async fn a_declined_charter_aborts_both_sides() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -699,6 +704,7 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -828,6 +834,7 @@ async fn founding_invalidates_an_in_flight_join() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -855,6 +862,7 @@ async fn founding_invalidates_an_in_flight_join() {
         member: "petra".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("b starts its own founding");
@@ -900,6 +908,7 @@ async fn recovery_invalidates_an_in_flight_join() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1031,6 +1040,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1091,6 +1101,7 @@ async fn a_founder_cancel_reaches_the_members_inside_the_born_group() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1150,6 +1161,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
         member: "walter".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1248,6 +1260,7 @@ async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1299,6 +1312,7 @@ async fn a_joiner_may_not_claim_the_founders_handle() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1354,6 +1368,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
         member: "walter".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1448,6 +1463,7 @@ async fn changing_the_pool_during_a_founding_says_the_invites_are_stale() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");
@@ -1519,5 +1535,65 @@ async fn a_refused_join_gets_a_short_headline_not_only_a_log_line() {
         s.join.run.log.iter().any(|l| l.contains("no relay in common")),
         "the log keeps the detail: {:?}",
         s.join.run.log
+    );
+}
+
+/// The founder PICKS the republic's relays; the invite carries exactly that
+/// pick, and a relay the founder cannot dial is refused rather than dropped.
+///
+/// Before this, the invite's list was an accident: `start_ritual` took the
+/// node's whole dialable pool and capped it at eight IN POOL ORDER, so nobody
+/// chose what the republic would run on — and R3 is about to make that set
+/// constitutional (every member signs it into the genesis). A joiner's refusal
+/// can only say "the republic uses these" if the founder meant them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_founder_picks_the_republics_relays_and_the_invite_carries_the_pick() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    // a second confirmed relay the founder deliberately leaves OUT
+    adopt_relay(&a, "wss://not-chosen.example").await;
+
+    a.execute(Command::CreateStart {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+        relays: vec![url.clone()],
+    })
+    .await
+    .expect("founding starts on the picked relay");
+
+    let s = wait_for(&a, "the seat link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let inv = molt_engine::FoundingInvite::parse(&s.create.seats[0].link).expect("parses");
+    assert_eq!(
+        inv.handover.relays,
+        vec![url.clone()],
+        "the invite names the PICK, not the whole pool"
+    );
+
+    // …and a pick this node cannot dial is refused, with the relay named
+    let b = engine(&tmp.path().join("other"));
+    adopt_relay(&b, &url).await;
+    let err = b
+        .execute(Command::CreateStart {
+            name: "Ghost".to_string(),
+            member: "walter".to_string(),
+            threshold: 2,
+            members: 2,
+            relays: vec!["wss://never-added.example".to_string()],
+        })
+        .await
+        .expect_err("a relay this node cannot dial must refuse the founding");
+    assert!(
+        format!("{err}").contains("never-added.example"),
+        "…naming the offending relay: {err}"
     );
 }

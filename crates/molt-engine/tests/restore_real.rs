@@ -56,6 +56,7 @@ async fn founded_source(
         member: "petra".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

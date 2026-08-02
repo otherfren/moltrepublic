@@ -65,6 +65,15 @@ export struct ChainRow {
     signers: string, // "petra, walter" ("" on pre-cut entries — signatures dropped with the history)
 }
 
+// One row of the create wizard's relay picker: a relay this node can dial,
+// and whether the founder chose it for the republic. The pick becomes the
+// invites' list and (R3) the pool every member signs into the genesis, so it
+// must be a deliberate set — not whatever the settings page held.
+export struct RelayPick {
+    url: string,
+    picked: bool,
+}
+
 // One relay of the Nostr relay pool, as Settings → Nostr relays renders it: the
 // stored facts (url, confirmed) plus what the ENGINE derived from them. The
 // GUI never re-decides the dial policy — `kind` and `blocked` arrive
@@ -428,6 +437,8 @@ export global Strings {
     in property <string> cw-grp-relays;
     in property <string> cw-relays-hint;
     in property <string> cw-relays-rule;
+    in property <string> cw-relays-none;
+    in property <string> cw-relays-toggle;
     in property <string> cw-grp-transport;
     in property <string> cw-transport-hint;
     in property <string> cw-net-label;

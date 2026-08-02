@@ -139,6 +139,7 @@ async fn a_deaf_group_channel_is_surfaced_to_both_wizards_and_heals() {
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create starts");

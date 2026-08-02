@@ -853,10 +853,39 @@ pub fn run_app(
         });
     }
     {
+        let st_toggle = chat_ui.clone();
+        let weak_toggle = ui.as_weak();
+        ui.on_cw_toggle_relay(move |idx| {
+            let Ok(mut st) = st_toggle.lock() else { return };
+            let rows = st.create_pick_rows();
+            let Some((url, _)) = rows.get(usize::try_from(idx).unwrap_or(0)) else {
+                return;
+            };
+            st.toggle_create_relay(url.clone());
+            let rows: Vec<RelayPick> = st
+                .create_pick_rows()
+                .into_iter()
+                .map(|(url, picked)| RelayPick { url: url.into(), picked })
+                .collect();
+            if let Some(ui) = weak_toggle.upgrade() {
+                ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
+            }
+        });
+    }
+    {
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let st_pick = chat_ui.clone();
         ui.on_create_start(move |name, member, threshold, members| {
+            // the founder's pick: every dialable relay the wizard did not
+            // deselect. Empty means "no explicit choice" to the engine, which
+            // is exactly right when nothing was deselected.
+            let picked = st_pick
+                .lock()
+                .ok()
+                .map(|st| st.create_pick())
+                .unwrap_or_default();
             issue(
                 &rt,
                 &w,
@@ -866,6 +895,7 @@ pub fn run_app(
                     member: member.to_string(),
                     threshold: u8::try_from(threshold).unwrap_or(0),
                     members: u8::try_from(members).unwrap_or(0),
+                    relays: picked,
                 },
             );
         });
@@ -1518,12 +1548,12 @@ pub fn run_app(
         let chat_ui = chat_ui.clone();
         rt.spawn(async move {
             let mut rx = w.subscribe();
-            push_session(&w, &weak, &last_settings, SessionScope::Full).await;
+            push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
             push_surfaces(&w, &weak, &chat_ui).await;
             loop {
                 match rx.recv().await {
                     Ok(Event::SessionChanged { scope }) => {
-                        push_session(&w, &weak, &last_settings, scope).await;
+                        push_session(&w, &weak, &last_settings, scope, &chat_ui).await;
                         // A Full session change can mean a workspace was
                         // opened or closed — the surface state (replayed
                         // chat history!) changed with it, without any
@@ -1606,7 +1636,7 @@ pub fn run_app(
                     }
                     Ok(_) => push_surfaces(&w, &weak, &chat_ui).await,
                     Err(RecvError::Lagged(_)) => {
-                        push_session(&w, &weak, &last_settings, SessionScope::Full).await;
+                        push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
                         push_surfaces(&w, &weak, &chat_ui).await;
                     }
                     Err(RecvError::Closed) => break,
@@ -2142,7 +2172,9 @@ async fn push_session(
     weak: &slint::Weak<AppWindow>,
     last_settings: &Arc<Mutex<Option<SessionSettings>>>,
     scope: SessionScope,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
 ) {
+    let chat_ui_for_apply = chat_ui.clone();
     let sv = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(sv)) => *sv,
         _ => return,
@@ -2175,7 +2207,7 @@ async fn push_session(
             // draft stays until they Save or discard.
             let editing = ui.get_screen() == AppScreen::Settings
                 && prev.is_some_and(|p| settings_draft_differs(&p, &ui));
-            apply_session(&ui, &sv, changed && !editing);
+            apply_session(&ui, &sv, changed && !editing, &chat_ui_for_apply);
         }
     });
 }
@@ -2185,7 +2217,12 @@ async fn push_session(
 /// draft fields are only overwritten when the session's settings actually
 /// changed — otherwise an unrelated change (language, theme, navigation)
 /// would wipe what the user is typing in the settings form.
-fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
+fn apply_session(
+    ui: &AppWindow,
+    sv: &SessionView,
+    settings_changed: bool,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
+) {
     let lang = i32::from(sv.language == "de");
     ui.set_screen(from_screen(sv.screen));
     ui.set_selected_surface(sv.surface.as_str().into());
@@ -2395,6 +2432,21 @@ fn apply_session(ui: &AppWindow, sv: &SessionView, settings_changed: bool) {
     // is advice that cannot help (review finding). The classification is
     // molt-core's single `pool_gap` — this used to hand-roll the same
     // predicate, which is how three copies of it came to exist.
+    // the create wizard's relay picker: what this node can dial, and the
+    // founder's choice among it. Refreshed from the session so a relay
+    // confirmed while the wizard is open shows up.
+    {
+        let dialable = molt_core::relay::dialable(&sv.settings.relays, sv.clearnet_session);
+        if let Ok(mut st) = chat_ui.lock() {
+            st.set_create_relays(dialable);
+            let rows: Vec<RelayPick> = st
+                .create_pick_rows()
+                .into_iter()
+                .map(|(url, picked)| RelayPick { url: url.into(), picked })
+                .collect();
+            ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
+        }
+    }
     let session_locked = molt_core::relay::pool_gap(&sv.settings.relays, sv.clearnet_session)
         == Some(molt_core::relay::PoolGap::NonOnionOff);
     ui.set_cfg_tor_test_text(
@@ -2837,6 +2889,14 @@ struct UnreadLedger {
 /// window looks at is presentation, not shared state.
 #[derive(Default)]
 struct ChatUiState {
+    /// The relays the create wizard offers — this node's dialable set, as
+    /// last pushed to the picker.
+    create_relays: Vec<String>,
+    /// Relays the founder DESELECTED there. Stored as the exclusion set, not
+    /// the selection, so a relay confirmed after the wizard opened is
+    /// included by default — the picker narrows a set, it does not freeze one.
+    create_relays_off: std::collections::BTreeSet<String>,
+
     /// The workspace id this state belongs to — a switch resets everything
     /// (see [`ChatUiState::enter_workspace`]).
     workspace: String,
@@ -2940,6 +3000,46 @@ impl ChatUiState {
     /// Click on an Uploads header column: toggle-or-switch the sort.
     fn sort_uploads_by(&mut self, column: &str) {
         toggle_sort(&mut self.uploads_sort, &mut self.uploads_asc, column);
+        self.generation += 1;
+    }
+
+    /// The founder's pick as URLs — filled by the caller from the dialable
+    /// set minus the deselected ones. Empty = no explicit choice.
+    fn create_pick(&self) -> Vec<String> {
+        if self.create_relays_off.is_empty() {
+            return Vec::new();
+        }
+        self.create_relays
+            .iter()
+            .filter(|u| !self.create_relays_off.contains(*u))
+            .cloned()
+            .collect()
+    }
+
+    /// The picker's rows: every dialable relay, with whether it is chosen.
+    fn create_pick_rows(&self) -> Vec<(String, bool)> {
+        self.create_relays
+            .iter()
+            .map(|u| (u.clone(), !self.create_relays_off.contains(u)))
+            .collect()
+    }
+
+    /// Refresh the offered set from the session's dialable pool, dropping any
+    /// exclusion for a relay that is no longer offered.
+    fn set_create_relays(&mut self, dialable: Vec<String>) {
+        if self.create_relays == dialable {
+            return;
+        }
+        self.create_relays_off.retain(|u| dialable.contains(u));
+        self.create_relays = dialable;
+        self.generation += 1;
+    }
+
+    /// Flip one relay's pick in the create wizard.
+    fn toggle_create_relay(&mut self, url: String) {
+        if !self.create_relays_off.remove(&url) {
+            self.create_relays_off.insert(url);
+        }
         self.generation += 1;
     }
 
@@ -5278,6 +5378,8 @@ lexicon! {
     // moment the choice is cheap (§10.15, user-ratified 2026-08-02).
     cw_grp_relays: "Relays", "Relays";
     cw_relays_hint: "Every member must reach the same relay.", "Jedes Mitglied muss denselben Relay erreichen.";
+    cw_relays_none: "No relay this node can dial — add one in Settings.", "Kein erreichbarer Relay — in den Einstellungen einen hinzufügen.";
+    cw_relays_toggle: "Use for this republic", "Für diese Republik verwenden";
     cw_relays_rule: "A self-hosted relay must be in every member's pool before they join.", "Ein selbst betriebener Relay muss vor dem Beitritt im Pool jedes Mitglieds stehen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members — one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht — eine globale Einstellung für jede Republik.";

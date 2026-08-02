@@ -153,6 +153,7 @@ async fn founded_engine(
         member: "petra".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

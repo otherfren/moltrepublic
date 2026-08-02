@@ -86,6 +86,7 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
         member: "walter".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("a production founding starts over the confirmed relay");

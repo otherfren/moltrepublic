@@ -211,6 +211,7 @@ async fn simulated_members_flag_spawns_no_fake_peers() {
         member: "petra".to_string(),
         threshold: 2,
         members: 3,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

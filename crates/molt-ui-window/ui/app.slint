@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow, RelayItem } from "theme.slint";
+import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -1228,6 +1228,10 @@ export component AppWindow inherits Window {
     // the GROUP's relay pool (StatusView.relays), shown beside the other
     // group settings — empty on a legacy queue-shaped republic
     in property <[string]> org-relays;
+    // the create wizard's relay picker: this node's dialable relays and the
+    // founder's choice among them
+    in property <[RelayPick]> cw-relay-picks;
+    callback cw-toggle-relay(int);
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
 
@@ -2221,11 +2225,44 @@ export component AppWindow inherits Window {
                         title: Strings.cw-grp-relays;
                         hint: Strings.cw-relays-hint;
                         icon: @image-url("assets/cloud.svg");
-                        Text {
-                            text: Strings.cw-relays-rule;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
+                        VerticalLayout {
+                            spacing: 5px;
+                            // the founder's PICK — what the invites carry and
+                            // what R3 signs into the genesis. Defaults to every
+                            // relay this node can dial.
+                            for r[i] in root.cw-relay-picks: HorizontalLayout {
+                                spacing: 8px;
+                                AppButton {
+                                    width: 26px;
+                                    height: 22px;
+                                    pad: 0px;
+                                    emoji: r.picked ? "✅" : "⬜";
+                                    tooltip: Strings.cw-relays-toggle;
+                                    clicked => {
+                                        root.cw-toggle-relay(i);
+                                    }
+                                }
+                                Text {
+                                    text: r.url;
+                                    color: r.picked ? Theme.text : Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            if root.cw-relay-picks.length == 0: Text {
+                                text: Strings.cw-relays-none;
+                                color: Theme.warn;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: Strings.cw-relays-rule;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
                         }
                     }
 

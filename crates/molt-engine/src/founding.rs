@@ -368,6 +368,9 @@ impl State {
         rule_m: u8,
         rule_n: u8,
         seed_phrase: &str,
+        // the founder's deliberate relay pick; empty = this node's whole
+        // dialable pool (the pre-pick behaviour)
+        picked_relays: &[String],
     ) -> Result<RitualStart, String> {
         // notes the CALLER must apply: `cmd_create_start` replaces
         // `session.create` wholesale after this returns, so a run-log line
@@ -475,8 +478,23 @@ impl State {
                 &self.session.settings.relays,
                 self.clearnet_session,
             );
-            let over = dialable.len().saturating_sub(molt_net::welcome::MAX_PAYLOAD_RELAYS);
-            let relays: Vec<String> = dialable
+            // The founder's PICK, when there is one. It is the republic's
+            // relay set — constitutional once R3 signs it into the genesis —
+            // so it must be a deliberate choice, not whatever this settings
+            // page happened to hold. A picked relay this node cannot dial is
+            // REFUSED, never dropped: a republic founded on a relay its own
+            // founder cannot reach is a republic nobody can join, and
+            // silently shrinking the set would hide that.
+            let chosen: Vec<String> = if picked_relays.is_empty() {
+                dialable.clone()
+            } else {
+                if let Some(bad) = picked_relays.iter().find(|r| !dialable.contains(r)) {
+                    return Err(format!("cannot found: {bad} is not dialable here"));
+                }
+                picked_relays.to_vec()
+            };
+            let over = chosen.len().saturating_sub(molt_net::welcome::MAX_PAYLOAD_RELAYS);
+            let relays: Vec<String> = chosen
                 .into_iter()
                 .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
                 .collect();

@@ -89,6 +89,7 @@ async fn found_with_mesh(
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

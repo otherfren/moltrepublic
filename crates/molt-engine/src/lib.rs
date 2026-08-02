@@ -1208,7 +1208,8 @@ impl State {
                 member,
                 threshold,
                 members,
-            } => self.cmd_create_start(name, member, threshold, members),
+                relays,
+            } => self.cmd_create_start(name, member, threshold, members, relays),
             Command::CreatePropose { name, agenda } => self.cmd_create_propose(name, agenda),
             Command::CreateCancel => self.cmd_create_cancel(),
             Command::CreateFinish => self.cmd_create_finish(),
@@ -1520,6 +1521,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("create start");
@@ -1697,6 +1699,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("create start");
@@ -1827,6 +1830,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("create start");
@@ -3760,6 +3764,7 @@ mod tests {
                     member: "petra".to_string(),
                     threshold: 2,
                     members: 3,
+                    relays: Vec::new(),
                 })
                 .await
                 .expect_err("no confirmed relay → no founding");
@@ -3798,6 +3803,7 @@ mod tests {
                     member: "petra".to_string(),
                     threshold: 2,
                     members: 3,
+                    relays: Vec::new(),
                 })
                 .await
                 .expect_err("nothing dialable → no founding");
@@ -3824,6 +3830,7 @@ mod tests {
                     member: "me".to_string(),
                     threshold: 4,
                     members: 3,
+                    relays: Vec::new(),
                 })
                 .await,
                 Err(MoltError::Create(_))
@@ -3835,6 +3842,7 @@ mod tests {
                         member: "me".to_string(),
                         threshold: 1,
                         members: bad_n,
+                        relays: Vec::new(),
                     })
                     .await,
                     Err(MoltError::Create(_))
@@ -3848,6 +3856,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("start");
@@ -3910,6 +3919,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("start");
@@ -3935,6 +3945,7 @@ mod tests {
                 member: "petra".to_string(),
                 threshold: 2,
                 members: 3,
+                relays: Vec::new(),
             })
             .await
             .expect("start tor");
@@ -4546,6 +4557,7 @@ mod tests {
                 member: "founder".to_string(),
                 threshold: 2,
                 members: 2,
+                relays: Vec::new(),
             })
             .await
             .expect("start");

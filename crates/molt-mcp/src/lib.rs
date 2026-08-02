@@ -1139,6 +1139,7 @@ pub fn tools() -> Vec<ToolDef> {
                 member: str_arg(args, "member")?,
                 threshold: u8_arg(args, "threshold")?,
                 members: u8_arg(args, "members")?,
+                relays: Vec::new(),
             }),
         },
         ToolDef {

@@ -87,6 +87,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

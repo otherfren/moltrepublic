@@ -248,6 +248,7 @@ async fn enforcement_survives_close_and_reopen() {
         member: "petra".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");

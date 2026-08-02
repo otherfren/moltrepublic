@@ -121,6 +121,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         member: "founder-a".to_string(),
         threshold: 2,
         members: 2,
+        relays: Vec::new(),
     })
     .await
     .expect("create start");
