@@ -238,3 +238,74 @@ async fn two_engines_converge_a_chat_message_over_one_relay() {
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 }
+
+/// **N5.3** — a broadcast ACK moves the sender's proven floor.
+///
+/// This is the mechanism the whole guarantee rests on, and on a broadcast it
+/// could not work by accident: log seqs are node-private (every node stamps
+/// every envelope from its own `next_seq`), so petra's sheet has to name
+/// WHOSE acceptance each window describes, and walter has to look up his own
+/// name in it. Get that inversion backwards — ship the window describing
+/// petra instead of the one describing walter — and it still compiles, still
+/// parses, and silently advances the wrong floor.
+///
+/// The proof is on DISK, in walter's `transport.state`: `ack_seen` latched and
+/// a floor above zero for petra.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_broadcast_ack_moves_the_senders_proven_floor() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let (a, b) = found_two_of_two(tmp.path(), &url).await;
+    let ws_a = read_session(&a).await.active_workspace.clone();
+
+    a.execute(Command::Chat {
+        body: "prove it".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::Group,
+    })
+    .await
+    .expect("walter speaks");
+
+    // petra receives it, accepts it, and acks — the ack rides the same 445
+    // channel as everything else
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = read_chat(&b).await;
+        if rows
+            .iter()
+            .any(|r| r.get("body").and_then(|v| v.as_str()) == Some("prove it"))
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the message never arrived");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // …and walter's own bookkeeping records it. The ack is debounced
+    // (ACK_DEBOUNCE_SECS) and flushed on the 1 s delivery beat, so give the
+    // round trip room, then close ONCE — closing repeatedly would mostly keep
+    // walter shut while petra's sheet was arriving.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+
+    let root_a = tmp.path().join("founder");
+    let dir = molt_storage::find_workspace_dir(&root_a, &ws_a).expect("walter's dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open walter");
+    let ts = ws.read_transport_state();
+    let cursor = ts
+        .outbound
+        .get("petra")
+        .unwrap_or_else(|| panic!("no floor for petra; outbound = {:?}", ts.outbound));
+    assert!(
+        cursor.ack_seen,
+        "petra's sheet must latch ack_seen — without it group_floor stays None and nothing is ever proven"
+    );
+    assert!(
+        cursor.acked_floor > 0,
+        "…and lift the floor above zero, got {}",
+        cursor.acked_floor
+    );
+}

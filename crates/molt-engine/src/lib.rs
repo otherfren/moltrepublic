@@ -530,6 +530,9 @@ pub(crate) struct State {
     /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
     /// Nostr one whose MLS group or relay set did not come up.
     pub(crate) group_net: Option<GroupNet>,
+    /// The last broadcast claim sheet published, so an unchanged one is not
+    /// republished — full state means silence is the correct steady state.
+    pub(crate) last_group_ack: Option<molt_net::group_ack::GroupAck>,
     /// Live recovery-inbox tasks (N4b step 5), one per minted link.
     ///
     /// They MUST be aborted when the workspace closes. The loopback twin gets
@@ -875,6 +878,7 @@ impl State {
             transport_kind: None,
             nostr: None,
             group_net: None,
+            last_group_ack: None,
             recovery_inboxes: Vec::new(),
             chain: Vec::new(),
             chain_head: None,

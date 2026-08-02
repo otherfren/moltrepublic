@@ -1862,6 +1862,51 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Publish ONE claim sheet covering every member we owe an ack.
+    ///
+    /// The mesh emits per leg and skips a member it has no link to; on a
+    /// broadcast that member is precisely the one the ack must still reach, so
+    /// the per-peer loop is deleted rather than ported.
+    ///
+    /// The sheet is FULL STATE, so an unchanged one is not republished: on a
+    /// quiet republic the steady state is zero frames.
+    fn flush_group_ack(&mut self, due: &[MemberId]) {
+        for m in due {
+            self.ack_due.remove(m);
+        }
+        // every subject we owe, plus everyone the last sheet already spoke
+        // about — dropping a subject from the sheet would read as "no longer
+        // accepting", and the receiver would keep resending what we hold
+        let mut claims: std::collections::BTreeMap<MemberId, molt_core::AcceptedWindow> =
+            std::collections::BTreeMap::new();
+        let subjects: Vec<MemberId> = due
+            .iter()
+            .cloned()
+            .chain(
+                self.last_group_ack
+                    .as_ref()
+                    .map(|a| a.claims.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .collect();
+        for m in subjects {
+            if let Some(win) = self.accepted.get(&m) {
+                claims.insert(m, win.clone());
+            }
+        }
+        if claims.is_empty() {
+            return;
+        }
+        let ack = molt_net::group_ack::GroupAck::new(self.member(), claims);
+        if self.last_group_ack.as_ref() == Some(&ack) {
+            return; // nothing changed — say nothing
+        }
+        if let Some(group) = self.group_net.as_ref() {
+            group.handle.publish_ack(ack.clone());
+            self.last_group_ack = Some(ack);
+        }
+    }
+
     /// A rejoiner's **mesh announce** arrived on the recovery queue (dynamic
     /// mesh membership, `docs_archive/transport/dynamic_mesh.md` ❷): authenticate the
     /// announcer by MLS decryption and check it is the member whose re-key
@@ -2392,6 +2437,15 @@ impl State {
             .map(|(m, _)| m.clone())
             .collect();
         if due.is_empty() {
+            return;
+        }
+        // N5.3: a Nostr workspace acks over the group channel — ONE 445 for
+        // the whole republic. Read FIRST, because everything below is a
+        // queue-mesh concept and the mesh branch would otherwise drop these
+        // deadlines on the floor, which is how the guarantee was silently
+        // 100% off over broadcast.
+        if self.group_net.is_some() {
+            self.flush_group_ack(&due);
             return;
         }
         let (transport, group, peers) = {

@@ -121,12 +121,23 @@ cursor advances on ≥1 relay-OK) and inbox (445 → MLS → `EngineSink`).
 - **Red:** two engines over one `MockRelay` converge a chat message with no
   mesh and no queues.
 
-### N5.3 — the guarantee over broadcast
+### N5.3 — the guarantee over broadcast ✅ ACK LAYER DONE 2026-08-02
 Re-home the four floor functions, re-specify `AckPayload` (§3), replace
 `flush_due_acks`'s per-peer loop (`molt-engine/src/net.rs:2294-2380`, ~90 lines,
 the most concentrated fork point) with ONE 445 carrying the group ack state.
-- **Red:** the Nostr twin of `delivery_guarantee.rs` — a relay dies/prunes,
-  rewind-resend delivers, ordering holds.
+- ✅ The ack layer: `group_ack.rs` (own tag, versioned, owner-keyed sheet),
+  `group_control_frame` (one-lock framer for control plaintext), the ack task
+  (a THIRD task, so a sheet never queues behind `publish_with_backoff`),
+  `flush_group_ack` engine-side, and `apply_group_ack` on receipt. Keystone:
+  `nostr_runtime.rs::a_broadcast_ack_moves_the_senders_proven_floor`.
+- **STILL OPEN — the resend timer.** Acks now move the proven floor and
+  `rewind_group` acts on it, but nothing yet RE-publishes a stalled tail on a
+  timer. Until that lands the guarantee proves delivery without repairing a
+  loss. **Red for it:** the Nostr twin of `delivery_guarantee.rs` over a
+  FORGETFUL relay (`LocalRelay` + `MemoryDatabase::new()` — it accepts, OKs,
+  live-broadcasts and serves zero history). Do NOT reach for `MockRelay`: it
+  stores ~75k events and every reopened subscription is a full history query,
+  so the keystone would pass with the entire guarantee absent.
 
 ### N5.4 — epoch-ring honesty (G4)
 A frame older than the exporter ring is undecryptable **by construction**.

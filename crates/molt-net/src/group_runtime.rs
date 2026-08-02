@@ -93,8 +93,13 @@ pub struct GroupHealth {
 /// A running group runtime.
 pub struct GroupHandle {
     stop: Arc<Notify>,
+    /// The latest claim sheet awaiting publication. FULL STATE, so a newer
+    /// sheet supersedes an unsent one by construction — no queue to drain and
+    /// no coalescing logic to get wrong.
+    acks: watch::Sender<Option<crate::group_ack::GroupAck>>,
     outbox: Option<tokio::task::JoinHandle<()>>,
     inbox: Option<tokio::task::JoinHandle<()>>,
+    ack: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl GroupHandle {
@@ -109,6 +114,19 @@ impl GroupHandle {
         if let Some(outbox) = self.outbox.take() {
             let _ = outbox.await;
         }
+        // the ack task is outbound too — drained, not aborted
+        if let Some(ack) = self.ack.take() {
+            let _ = ack.await;
+        }
+    }
+
+    /// Queue the latest claim sheet for publication.
+    ///
+    /// Synchronous and non-blocking: the engine actor never awaits, and the
+    /// sheet is full state, so dropping an unsent one in favour of a newer one
+    /// loses nothing.
+    pub fn publish_ack(&self, ack: crate::group_ack::GroupAck) {
+        let _ = self.acks.send(Some(ack));
     }
 }
 
@@ -173,6 +191,18 @@ where
     K: EngineSink,
 {
     let stop = Arc::new(Notify::new());
+    let (log2, store2) = (log.clone(), store.clone());
+    let (acks, acks_rx) = watch::channel(None);
+    // a THIRD task: an ack must not queue behind `publish_with_backoff`, whose
+    // chain runs three attempts up to the retry cap. Head-of-line blocking the
+    // guarantee's own feedback behind the traffic it is meant to prove is how
+    // a stall becomes permanent.
+    let ack = tokio::spawn(ack_loop(
+        channel.clone(),
+        mls.clone(),
+        acks_rx,
+        stop.clone(),
+    ));
     let outbox = tokio::spawn(outbox_loop(
         channel.clone(),
         mls.clone(),
@@ -183,11 +213,98 @@ where
         wakeup,
         stop.clone(),
     ));
-    let inbox = tokio::spawn(inbox_loop(channel, mls, sink, health, stop.clone()));
+    let inbox = tokio::spawn(inbox_loop(
+        channel,
+        mls,
+        log2,
+        store2,
+        cfg.member.clone(),
+        sink,
+        health,
+        stop.clone(),
+    ));
     GroupHandle {
         stop,
+        acks,
         outbox: Some(outbox),
         inbox: Some(inbox),
+        ack: Some(ack),
+    }
+}
+
+/// Apply one peer's claim sheet to our own outbound bookkeeping.
+///
+/// Two rules, and both exist because getting them wrong turns a small frame
+/// into a republic-wide republish:
+///
+/// 1. a sheet that says nothing about us proves nothing — it must NOT latch
+///    `ack_seen`, because a "proven" floor of zero makes the outbox rewind to
+///    the start of the log;
+/// 2. the window we receive from `from` is in OUR seq space, because it
+///    describes OUR events. The window we SEND about `from` is in THEIRS.
+///    The two directions are mirror images and the inversion compiles.
+async fn apply_group_ack<L: OutboxLog, S: StateStore>(
+    log: &L,
+    store: &S,
+    me: &MemberId,
+    from: &MemberId,
+    ack: &crate::group_ack::GroupAck,
+) {
+    let Some(window) = ack.window_for(me) else {
+        return; // silence, not a claim of zero
+    };
+    let mut state = store.load().await;
+    let old = state
+        .outbound
+        .get(from)
+        .map_or(0, |c| c.acked_floor);
+    let envs = log.read_from(old.saturating_add(1)).await;
+    let floor = crate::supervisor::advance_acked_floor(me, &envs, window, old);
+    if floor > old {
+        let cursor = state.outbound.entry(from.clone()).or_default();
+        cursor.acked_floor = floor;
+        cursor.ack_seen = true;
+        store.save(state).await;
+    } else if floor == old && old > 0 {
+        // no progress, but the peer HAS spoken about us before — keep the
+        // evidence flag without moving anything
+        let cursor = state.outbound.entry(from.clone()).or_default();
+        if !cursor.ack_seen {
+            cursor.ack_seen = true;
+            store.save(state).await;
+        }
+    }
+}
+
+/// Publish claim sheets as they are handed over.
+async fn ack_loop(
+    channel: GroupChannel,
+    mls: MlsChannel,
+    mut rx: watch::Receiver<Option<crate::group_ack::GroupAck>>,
+    stop: Arc<Notify>,
+) {
+    loop {
+        tokio::select! {
+            r = rx.changed() => {
+                if r.is_err() {
+                    return;
+                }
+            }
+            () = stop.notified() => return,
+        }
+        let Some(ack) = rx.borrow_and_update().clone() else {
+            continue;
+        };
+        let Some(frame) = mls.group_control_frame(&ack.to_frame()) else {
+            tracing::error!("framing a group ack failed — skipped");
+            continue;
+        };
+        // ONE publish, no retry chain: the sheet is full state, so the next
+        // one supersedes this one anyway and a retry would only duplicate
+        // what the next beat already carries.
+        if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+            tracing::warn!(error = %e, "publishing a group ack failed");
+        }
     }
 }
 
@@ -291,20 +408,26 @@ async fn outbox_loop<L, S, K>(
 }
 
 /// What one inbound frame turned into.
+#[derive(Debug)]
 enum Ingest {
     Delivered,
     /// No held exporter secret opened the outer layer: the frame predates this
     /// node's ring. Permanent, and counted.
     Opaque,
-    /// Decoded but carried nothing to deliver (a commit, an ack, a replay).
+    /// A peer's claim sheet — its floor over OUR events, already applied.
+    Acked,
+    /// Decoded but carried nothing to deliver (a commit, a replay).
     Nothing,
     /// The engine is gone.
     EngineGone,
 }
 
-async fn ingest_one<K: EngineSink>(
+async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     mls: &MlsChannel,
+    log: &L,
+    store: &S,
     sink: &K,
+    me: &MemberId,
     content: &str,
     created_at: u64,
 ) -> Ingest {
@@ -323,13 +446,38 @@ async fn ingest_one<K: EngineSink>(
             }
             Ingest::Delivered
         }
+        // a broadcast ack rides the same channel as everything else and is
+        // recognised by its own tag inside the MLS plaintext
+        // a MESH ack on a broadcast channel: authenticated, but subject-less,
+        // so there is nothing here that can be applied to anyone in
+        // particular. Presence only.
+        MlsDecode::Ack(from, _win) => {
+            sink.peer_seen(&from).await;
+            Ingest::Nothing
+        }
+        MlsDecode::GroupAck(from, ack) => {
+            sink.peer_seen(&from).await;
+            // `by` is SELF-DESCRIPTION; the MLS credential is the
+            // authentication. A mismatch is a routing bug or a forgery
+            // attempt, and either way the sheet is not actionable.
+            if ack.by != from {
+                tracing::warn!(%from, claimed = %ack.by, "a group ack disowns its sender — dropped");
+                return Ingest::Nothing;
+            }
+            apply_group_ack(log, store, me, &from, &ack).await;
+            Ingest::Acked
+        }
         _ => Ingest::Nothing,
     }
 }
 
-async fn inbox_loop<K: EngineSink>(
+#[allow(clippy::too_many_arguments)]
+async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     channel: GroupChannel,
     mls: MlsChannel,
+    log: L,
+    store: S,
+    me: MemberId,
     sink: K,
     health: watch::Sender<GroupHealth>,
     stop: Arc<Notify>,
@@ -361,13 +509,13 @@ async fn inbox_loop<K: EngineSink>(
                 if state.deaf.take().is_some() {
                     let _ = health.send(state.clone());
                 }
-                match ingest_one(&mls, &sink, &content, created_at).await {
+                match ingest_one(&mls, &log, &store, &sink, &me, &content, created_at).await {
                     Ingest::EngineGone => return,
                     Ingest::Opaque => {
                         state.opaque_frames += 1;
                         let _ = health.send(state.clone());
                     }
-                    Ingest::Delivered | Ingest::Nothing => {}
+                    Ingest::Delivered | Ingest::Acked | Ingest::Nothing => {}
                 }
             }
             GroupRecv::Idle => {}

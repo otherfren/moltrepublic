@@ -113,6 +113,19 @@ impl MlsChannel {
         Some(GroupFrame { ciphertext, exporter })
     }
 
+    /// Ciphertext + the exporter secret of the epoch it was made at, under ONE
+    /// lock, for arbitrary CONTROL plaintext (a broadcast ack).
+    ///
+    /// Same atomicity rule as [`Self::group_frame`], and the same reason: two
+    /// calls, and a commit merging between them seals a new-epoch outer over
+    /// an old-epoch inner that the receiver can then never open.
+    pub(crate) fn group_control_frame(&self, plaintext: &[u8]) -> Option<GroupFrame> {
+        let mut m = self.member.lock().ok()?;
+        let ciphertext = m.encrypt(plaintext).ok()?;
+        let exporter = m.exporter_secret().ok()?;
+        Some(GroupFrame { ciphertext, exporter })
+    }
+
     /// The outer-opening ladder: the CURRENT epoch's exporter secret first,
     /// then the retained ring, in one lock scope.
     ///
@@ -216,6 +229,17 @@ impl MlsChannel {
                         Err(_) => MlsDecode::Discard,
                     };
                 }
+                // the BROADCAST ack (N5.3): its own tag, because one 445
+                // reaches everyone and the sheet must say whose acceptance it
+                // reports — the leg that answered that on the mesh is gone
+                match crate::group_ack::GroupAck::from_frame(&plaintext) {
+                    Ok(ack) => return MlsDecode::GroupAck(from, Box::new(ack)),
+                    Err(crate::group_ack::GroupAckError::NotAnAck) => {}
+                    Err(e) => {
+                        tracing::debug!(error = %e, "dropping an unusable group ack");
+                        return MlsDecode::Discard;
+                    }
+                }
                 // the `\x00molt-mesh-*` space is reserved for control frames; a
                 // JSON envelope never starts with NUL. An unknown control tag (a
                 // newer control frame this build predates) is dropped as a no-op,
@@ -277,6 +301,9 @@ pub(crate) enum MlsDecode {
     /// reports its accept window over OUR events — advance that peer's
     /// `acked_floor`, stamp presence, deliver nothing.
     Ack(MemberId, Box<molt_core::AcceptedWindow>),
+    /// A BROADCAST claim sheet (N5.3): the authenticated sender reports what
+    /// it accepted, per subject. The receiver acts only on its OWN entry.
+    GroupAck(MemberId, Box<crate::group_ack::GroupAck>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     EpochAdvanced,
     /// Encrypted at an epoch this node has not reached — hold it (acks
@@ -1165,6 +1192,10 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     }
                     ack_all(held);
                 }
+                // a BROADCAST sheet on a queue leg: the mesh has per-leg acks
+                // and no use for one, and acting on it would apply a broadcast
+                // claim through pairwise bookkeeping
+                MlsDecode::GroupAck(_, _) => {}
                 MlsDecode::Ack(_, _) => {
                     // an ack held across an epoch advance: stamp presence and
                     // let it go — its window is stale by now, and the peer's
@@ -1427,6 +1458,9 @@ where
                         tracing::debug!(peer = %peer.member, "engine gone — recv task stops");
                         return RecvEnd::EngineGone;
                     }
+                    ack_all(acks);
+                }
+                MlsDecode::GroupAck(..) => {
                     ack_all(acks);
                 }
                 MlsDecode::Ack(from, win) => {
