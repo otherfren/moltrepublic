@@ -1,0 +1,208 @@
+# N4b step 6 — the Nostr rejoiner, and where its trust root comes from
+
+**Status: DESIGN, ratified by measurement 2026-08-02.** Read
+`nostr_n4_plan.md` §8.8 (steps 5–7, 10), `docs/chain/persistent_chain.md`
+§6.1, `docs/chain/log_compaction.md` §B.5.
+
+Step 6 is the `RecoverStart` twin of N4a's `spawn_member_join`. Everything
+about the ritual leg is mechanical. The one real design question is the one
+§8.8 step 10 ended on:
+
+> What is the smallest prefix a rejoiner can be handed such that it has a
+> verified head?
+
+## 1. Why the obvious answers are all wrong
+
+**Not the whole chain.** Measured (`welcome_chain_budget.rs`): one
+`set_image` block with a 25 KiB logo costs 69318 B against the 65408 B
+gift-wrap cap. Chain length is not a property a republic could stay under —
+it is one proposal away from false, forever.
+
+**Not the HEAD.** A head lifted out of a Welcome is an unverified claim:
+`verify_chain` is all-or-nothing from the anchor. And a headless node cannot
+use one anyway — `request_catchup` returns immediately when
+`chain_head.is_none()`, and `is_chain_governed()` **is** `chain_head.is_some()`,
+which gates the `Committed`/`ChainRequest` ingest.
+
+**Not the ANCHOR in the Welcome either.** This is the new finding.
+A full holder's anchor is the genesis: kilobytes, fine. A **pruned** holder
+has no genesis — its root is the WP4b checkpoint blob, and the blob carries
+`applied`, every payload below the cut, images included, because that is what
+keeps pre-cut entries readable after the drop. Measured: a blob holding one
+25 KiB logo costs **69628 B against the same 65408 B cap**.
+
+And pruned is the steady state, not an edge case: `AUTO_CHECKPOINT_MIN_LEN`
+is 32, so a republic compacts after 32 blocks — after which **no** survivor
+holds a genesis to serve instead.
+
+## 2. The bootstrap circularity, at its source
+
+`WorkspaceEvent::CheckpointServed` already crosses the wire
+(`net.rs:405`) and `receive_checkpoint_blob` (`chain.rs:2062`) explicitly
+handles `chain_head: None` — `behind = true`. `receive_block`'s headless
+branch (`chain.rs:1889`) is documented for exactly this case: "a headless
+rejoiner bootstraps its chain from the genesis a survivor serves".
+
+But the ingest gate at `net.rs:1379` is `if self.is_chain_governed()`. So a
+headless rejoiner **drops the very frame that would give it a head**. The
+headless branch is a dead branch: written for a case the caller cannot
+produce.
+
+## 3. Decision: the root travels over 445, assembled by the TASK
+
+Not by the engine's ingest. Two reasons, and the second is the load-bearing
+one:
+
+1. Ungating the engine's chain ingest means a node with no workspace, no
+   `replica` and no `republic_id()` accepting chain material — a new trust
+   path, for one moment in one flow.
+2. The rejoiner **task** already holds the anchor that path would need: the
+   recovery link's `republic_id`. It is off-actor, exactly like
+   `spawn_member_join`. And `cmd_net_recover_sealed` already takes the whole
+   `ServedChainWire` as a string and **re-verifies everything** before
+   materializing (defence in depth, symmetric with `cmd_net_join_sealed`).
+
+So the task assembles the root and hands the actor the same shape loopback
+hands it today. The actor's contract does not change at all.
+
+### 3.1 The coordinator serves the ANCHOR, not the chain
+
+New: `serve_chain_anchor()` beside `serve_chain_from`. It emits
+
+- `CheckpointServed { blob }` — only when this holder is pruned, and
+- exactly one `Committed(chain[0])` — the genesis, or the checkpoint anchor
+  block.
+
+That is the smallest prefix that verifies standalone:
+
+| holder | what verifies it | resulting head |
+|---|---|---|
+| full | `verify_chain(&[genesis])` | height 0 |
+| pruned | `verify_suffix_chain(blob, &[anchor], rid)` | `anchor.height` |
+
+Everything above the anchor arrives over the **ordinary** catch-up, because
+by then the rejoiner has materialized, has a head, and `is_chain_governed()`
+is true. No second rail, no bespoke fetch — the thing §8.8 step 10
+explicitly said would be the wrong move.
+
+The coordinator pushes it right after the Welcome, because the rejoiner
+cannot `record()` a `ChainRequest` before it has a workspace. **After the
+`MlsCommit`**, and that ordering is load-bearing: the anchor has to be
+encrypted at an epoch the returning member can read, which is the one the
+re-key just created for it.
+
+### 3.2 The residual limit, stated rather than hidden
+
+A blob larger than the 445 publish budget (`DEFAULT_SIZE_BUDGET`, 128 KiB,
+or the smallest relay's NIP-11 cap) still cannot be served. That limit is
+**pre-existing** — it is the same one WP4b already has for serving any
+lagging peer, not something this design introduces — but recovery makes it
+reachable by a user, so it must fail with a named reason, never silently.
+
+Recorded as the open item it is: bounding `applied` payload bytes (the
+`set_image` embedding) is the real fix and belongs with the image cap, not
+here.
+
+### 3.3 The coordinator cannot re-key at all yet — found 2026-08-02
+
+`coordinator_rekey` (`chain.rs:1537`) is **mesh-only**. It reaches the group
+through `restore_member_on_group` (`net.rs:530`), which reads
+`NetRuntime::real_crypto` — and a Nostr workspace has **no `NetRuntime`**.
+Its group MLS lives on `GroupNet` (`lib.rs:531`). So on a Nostr republic the
+whole function falls into its `None` arm and logs "no runtime MLS group to
+re-key (state-only)", which is not even true: there IS a group, in another
+field.
+
+This is bigger than §8.8 step 6 records, and it is the reason step 6b lands
+`serve_chain_anchor` without a caller: wiring it into the `else` of the queue
+branch would have been an **unreachable branch dressed as a feature** — the
+inert-code trap this project keeps meeting. The caller lands with the Nostr
+re-key (6c below).
+
+## 3.4 Traps this will be walked into (multi-agent recon, 2026-08-02)
+
+Recorded because each one produces a test that passes for the wrong reason,
+or a bug that only shows under load.
+
+- **Do not copy join's possession check.** `lifecycles.rs:1338` compares
+  `nostr_pk_for_sk(sk)` against `our_seat.nostr_pk` — for a rejoiner that is
+  the **dead founding anchor**. It either always fails, or gets "fixed" by
+  deletion, which silently accepts a mismatched key. Re-derive
+  `nostr_identity(seed_entropy(phrase), inv.ticket)` on the actor and require
+  equality with the delivered secret's pk.
+- **Do not copy join's relay-honesty gate.** `nostr_ritual.rs:839` compares
+  the payload's relays to the invite's, which is founding-only ("the two sets
+  are the same by construction"). Since R3 the pool is chain-governed: check
+  against the **verified anchor's** `sealed.relays`, and treat the link's
+  list as only what this node may dial.
+- **Do not bump `WELCOME_PAYLOAD_VERSION`.** `welcome.rs:127` hard-rejects a
+  mismatch, so a bump makes every FOUNDING Welcome unreadable to older
+  builds — for a field founding does not use. This design adds nothing to the
+  Welcome anyway.
+- **`catchup_from` is a latch.** Cleared only by `apply_next_block` and the
+  workspace reset. A lost serve never re-arms the request, so a dropped
+  anchor is a permanent silent stall, not a retry.
+- **Epoch ordering cuts both ways.** The rejoiner joins at epoch N+1. A
+  survivor that has not yet merged the `MlsCommit` cannot decrypt the
+  rejoiner's first `ChainRequest` and drops it. Assert on eventual
+  convergence, never on one request landing.
+- **A capstone whose lost member never spoke proves nothing about step 9.**
+  The survivor's `AcceptedWindow` for that member would be empty, so the
+  dedup never fires and the test goes green with the window reset absent.
+- **`MockRelay` replays full history**, so "the catch-up worked" can be
+  satisfied by the RELAY re-serving old 445s. Use the forgetful
+  `LocalRelay` + `MemoryDatabase`, as `nostr_delivery_guarantee.rs` does.
+
+**Separate pre-existing bug, found here and worth its own fix:** the outbox
+holds its cursor when a publish is refused (`group_runtime.rs:411`), and
+`RelayRuntime::publish` refuses anything over the smallest relay's NIP-11
+cap. So **one** oversized `Applied{set_image}` block wedges that node's
+entire outbox, not merely that block. Not caused by this design — but
+recovery walks straight into it on any republic with a logo.
+
+## 4. Steps (one commit each, red test first)
+
+### 6a — the pool survives the reconstruction ✅ DONE (`a0b864a`)
+`sealed_roster_from_genesis`/`_from_blob` dropped the ratified relay pool.
+Found while tracing this design; fixed first because step 6 stands on it.
+
+### 6b — `serve_chain_anchor`
+- **Red:** a pruned survivor asked for the anchor emits `CheckpointServed`
+  plus exactly ONE `Committed`, and the pair verifies standalone via
+  `verify_served`; a full survivor emits the genesis alone and it verifies.
+  The test must assert the emitted COUNT — an implementation that serves the
+  whole chain would otherwise pass while reintroducing the size cliff.
+
+### 6c — the coordinator can re-key on Nostr
+Give `coordinator_rekey` a `GroupNet` arm: re-key the group MLS held there,
+publish the commit as a 445 `MlsCommit`, gift-wrap the 444 Welcome to the
+rejoiner's **NEW** anchor (`working_nostr_pk` already returns it — the
+`Restored` block folded before `after_block_applied` runs), then
+`serve_chain_anchor()`.
+- **Red:** on a Nostr republic a committed `Restored` block produces a
+  Welcome and a chain-anchor offer; today it produces the "state-only" log
+  line and nothing else.
+
+### 6d — `NetRecoverSealed` carries the Nostr shape
+Mirror `NetJoinSealed`: `nostr_sk`, `relays`, `rotation_seed`, `kind`.
+`cmd_net_recover_sealed` stops passing `TransportShape::default()`.
+- **Red:** a recovered workspace's `transport.state` holds a `nostr_sk` that
+  pairs with the anchor in its own `Restored` block, and the ratified pool.
+
+### 6e — the rejoiner task
+`spawn_recovery_rejoiner`, the `spawn_member_join` twin: ephemeral key from
+the RECOVERY ticket → 1059 inbox → readable-gate → gift-wrapped
+`RecoverRequest` (new anchor + seat proof v2) → wait the 15-min absolute
+`RECOVERY_WELCOME_TIMEOUT` → peel the 444 → `join_from_welcome` → subscribe
+445 under the Welcome's `rotation_seed` → assemble until `verify_served`
+succeeds → `NetRecoverSealed`. Deletes the last `NO_TRANSPORT_YET`
+(`lifecycles.rs:1497`, const at `lib.rs:88`).
+- **Red:** the honest failure today (`recover-failed:` with the
+  not-built-yet text) flips to a materialized workspace on a real relay.
+
+### 6f — the PoP end-to-end pin (step 5's owed test)
+Step 5 could not test the wrap-author gate: a forged request fails the SEAT
+PROOF first, so the test would have passed for the wrong reason. Once 6e can
+produce a **correctly signed** request with a mismatched wrap author, the
+gate is pinnable.
+- **Red:** that exact request is refused with the ticket UNSPENT.

@@ -2056,6 +2056,54 @@ impl State {
         }
     }
 
+    /// The **smallest prefix that verifies standalone** — what a coordinator
+    /// hands a rejoiner so it can materialize a workspace at all.
+    ///
+    /// Not the chain: one `set_image` block exceeds the gift-wrap cap
+    /// (`welcome_chain_budget.rs`), so "the chain fits" is one proposal away
+    /// from false, forever. Not a bare head either: `verify_chain` is
+    /// all-or-nothing from the anchor, so a head without its chain is an
+    /// unverified claim, and a headless node drops every block served to it
+    /// (`is_chain_governed()` gates the ingest).
+    ///
+    /// So: this holder's `chain[0]` — the genesis, or after a compaction the
+    /// checkpoint anchor block with the blob that roots it, since by then no
+    /// node anywhere still holds a genesis. Everything above arrives over the
+    /// ordinary catch-up, once the rejoiner has a head and asking works.
+    pub(crate) fn anchor_bootstrap(&self) -> Vec<WorkspaceEvent> {
+        let Some(anchor) = self.chain.first() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Some(blob) = &self.checkpoint_blob {
+            out.push(WorkspaceEvent::CheckpointServed { blob: blob.clone() });
+        }
+        out.push(WorkspaceEvent::Committed(anchor.clone()));
+        out
+    }
+
+    /// Broadcast [`State::anchor_bootstrap`]. The coordinator pushes this
+    /// right after a recovery Welcome, because a rejoiner cannot ASK: it has
+    /// no workspace to record a `ChainRequest` from yet.
+    ///
+    /// **No production caller YET, deliberately.** Its one call site is the
+    /// Nostr arm of [`State::coordinator_rekey`], which does not exist:
+    /// `restore_member_on_group` reads `NetRuntime::real_crypto`, and a Nostr
+    /// workspace has no `NetRuntime` at all — its group MLS lives on
+    /// `GroupNet`. So today that path logs "no runtime MLS group to re-key"
+    /// and sends nothing. Wiring this into the `else` of the QUEUE branch
+    /// would have been an unreachable branch dressed as a feature; the caller
+    /// lands with the Nostr re-key, and the offer is pinned meanwhile by
+    /// `the_served_anchor_is_the_smallest_prefix_that_verifies`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn serve_chain_anchor(&mut self) {
+        let me = self.member();
+        for ev in self.anchor_bootstrap() {
+            let env = self.make_env(me.clone(), ev);
+            self.record(env);
+        }
+    }
+
     /// WP4b: a served blob arrives ahead of its anchor. Stash it (runtime
     /// only) after the cheap forgery check — the REAL verification happens
     /// in [`State::try_adopt_from_blob`] once the anchor block is here.
@@ -2754,6 +2802,89 @@ mod tests {
             "the lagging member caught up to the survivor"
         );
         assert!(peer.pending_blocks.is_empty());
+    }
+
+    /// Split a bootstrap offer back into the shape `verify_served` takes.
+    fn split_bootstrap(
+        events: &[WorkspaceEvent],
+    ) -> (Option<molt_core::CheckpointState>, Vec<ChainBlock>) {
+        let mut blob = None;
+        let mut blocks = Vec::new();
+        for ev in events {
+            match ev {
+                WorkspaceEvent::CheckpointServed { blob: b } => blob = Some(b.clone()),
+                WorkspaceEvent::Committed(bl) => blocks.push(bl.clone()),
+                other => panic!("a bootstrap offer carries nothing else: {other:?}"),
+            }
+        }
+        (blob, blocks)
+    }
+
+    /// **The anchor is the smallest prefix that verifies standalone.**
+    ///
+    /// A rejoiner cannot be handed the whole chain — one `set_image` block
+    /// exceeds the gift-wrap cap — and cannot be handed a bare head, because
+    /// `verify_chain` is all-or-nothing from the anchor and a headless node
+    /// drops every block served to it. So it is handed the ANCHOR, and asks
+    /// for the rest over the ordinary catch-up once it has a workspace.
+    ///
+    /// The COUNT is asserted, not merely the verification: an implementation
+    /// that served the whole chain would verify perfectly well and quietly
+    /// reintroduce the size cliff this exists to avoid.
+    #[test]
+    fn the_served_anchor_is_the_smallest_prefix_that_verifies() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+
+        // a FULL holder offers the genesis, alone
+        let full = chain_peer("walter", &b, b.blocks.clone());
+        let offer = full.anchor_bootstrap();
+        let (blob, blocks) = split_bootstrap(&offer);
+        assert!(blob.is_none(), "a full holder has no blob to offer");
+        assert_eq!(blocks.len(), 1, "the genesis and nothing else — not the chain");
+        assert_eq!(blocks[0].height, 0);
+        let (head, sealed) = verify_served(blob.as_ref(), &blocks, Some(&b.republic_id))
+            .expect("the genesis verifies standalone");
+        assert_eq!(head.height, 0, "a length-1 chain is a valid chain");
+        assert_eq!(sealed.republic_id, b.republic_id);
+
+        // …and a PRUNED holder offers its blob plus its anchor block, because
+        // by then no node anywhere still holds a genesis
+        let blob_at_2 = checkpoint_state(&b.blocks, 2).expect("state@2");
+        let anchor = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob_at_2),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor.clone());
+        let mut pruned = chain_peer("walter", &b, b.blocks[..3].to_vec());
+        pruned.receive_block(anchor);
+        assert!(pruned.checkpoint_blob.is_some(), "the holder pruned");
+
+        let offer = pruned.anchor_bootstrap();
+        let (blob, blocks) = split_bootstrap(&offer);
+        assert!(blob.is_some(), "a pruned holder's blob IS its trust root");
+        assert_eq!(blocks.len(), 1, "the anchor block alone, not the suffix");
+        assert_eq!(blocks[0].height, 3);
+        let (head, _) = verify_served(blob.as_ref(), &blocks, Some(&b.republic_id))
+            .expect("blob + anchor verify standalone under the suffix rules");
+        assert_eq!(head.height, 3, "the rejoiner starts at the cut, not at zero");
+
+        // …and broadcasting it must not disturb the SERVER: a 445 reaches
+        // every member, so the offer travels back through this node's own
+        // apply path (and through every survivor's) as a duplicate
+        let before = (pruned.chain.clone(), pruned.chain_head.clone());
+        pruned.serve_chain_anchor();
+        assert_eq!(pruned.chain, before.0, "serving must not move the server's chain");
+        assert_eq!(
+            pruned.chain_head.as_ref().map(|h| h.height),
+            before.1.as_ref().map(|h| h.height),
+            "nor its head"
+        );
     }
 
     /// WP3, the wire side of the decodability gate: a peer's `set_image`
