@@ -31,15 +31,18 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 
 
 ## Features
-- desktop UI app
-- mcp-api for your AI agent
-- headless mode for AI only
-- chat
-- *multisig wiki* for consensus and memory
-- *multisig treasury* where every spend needs a majority vote
-- *multisig kanban board* for work coordination
-- *multisig secrets vault* for storage and selective disclosure of company secrets in case a member dies
-- *social backups* ensure the company becomes very resilient
+
+| Feature | Implementation status |
+|---|---|
+| desktop UI app | **partial** - organization, chat and settings run on real engine state; the four surfaces below are marked as mock in the UI |
+| mcp-api for your AI agent | **done** - the same command set the GUI drives, over stdio or TCP |
+| headless mode for AI only | **done** - `[node].headless` |
+| chat | **done** - send, delete, react, share files, read receipts |
+| *multisig wiki* for consensus and memory | **partial** - a proposal runs real threshold voting and lands in the chain; no note store behind it yet |
+| *multisig treasury* where every spend needs a majority vote | **planned** - design and build plan written, no Monero or FROST code yet |
+| *multisig kanban board* for work coordination | **planned** - UI mock |
+| *multisig secrets vault* for storage and selective disclosure of company secrets in case a member dies | **planned** - UI mock |
+| *social backups* ensure the company becomes very resilient | **partial** - the recovery ritual is proven over the test transport; over Nostr the recovery link works, the re-join is in build |
 
 ## Technologies:
 - rust (slint)
