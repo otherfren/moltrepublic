@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard, Spinner
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard, Spinner
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -3408,6 +3408,15 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     text <=> root.jw-member;
                                     placeholder: Strings.ph-member;
+                                    // Enter confirms, exactly like the button
+                                    // beside it — and behind the SAME gate, so
+                                    // a keystroke can never start a join the
+                                    // button would have refused
+                                    accepted => {
+                                        if (root.jw-invite != "" && root.jw-member != "") {
+                                            root.join-start(root.jw-invite, root.jw-member);
+                                        }
+                                    }
                                 }
                                 AppButton {
                                     height: 38px;
@@ -7258,6 +7267,24 @@ export component AppWindow inherits Window {
     // becomes a real proposal the members approve by threshold. Applying
     // it does not yet rename the shown republic (mock effect).
     // =================================================================
+    // A join in flight blocks the screen: the work is remote and can take a
+    // while, so the operator gets a spinner (something IS happening, even
+    // before the bar moves), the bar, and a way out that really aborts —
+    // `JoinCancel` bumps the generation and aborts the task.
+    // …but NOT while the charter awaits ratification: that step is still
+    // "running" and needs the joiner's decision, so blocking the screen there
+    // would hang the join on a panel the operator cannot reach.
+    if root.jw-running && !root.jw-awaiting-ratify: BusyModal {
+        title: root.jw-republic == "" ? Strings.jw-busy-title : root.jw-republic;
+        detail: root.jw-progress < 0.3 ? Strings.jw-ph1
+            : (root.jw-progress < 0.75 ? Strings.jw-ph2 : Strings.jw-ph3);
+        progress: root.jw-progress;
+        cancel-label: Strings.jw-busy-cancel;
+        cancelled => {
+            root.join-cancel();
+        }
+    }
+
     if root.org-name-modal-open: orn-dlg := ConfirmModal {
         dialog-width: 440px;
         title: Strings.orn-title;

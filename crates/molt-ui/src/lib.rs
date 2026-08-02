@@ -5545,6 +5545,8 @@ lexicon! {
     jw_preview_hint: "Details are exchanged during the handshake.", "Details werden beim Handshake ausgetauscht.";
     jw_invited_by: "invited by", "eingeladen von";
     jw_join: "Join republic", "Republik beitreten";
+    jw_busy_title: "Joining the republic", "Beitritt zur Republik";
+    jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
     jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";

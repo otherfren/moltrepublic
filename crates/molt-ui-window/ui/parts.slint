@@ -1668,3 +1668,83 @@ export component RunView inherits VerticalLayout {
         }
     }
 }
+
+/// A blocking "this is running" overlay: the screen behind is dimmed, a
+/// spinner says the work is alive even while the progress bar is still at
+/// zero, and ONE button gets the operator back out.
+///
+/// The spinner and the bar answer different questions and neither replaces
+/// the other — the bar says how far, the spinner says whether anything is
+/// happening at all, which is the question during the first seconds when the
+/// bar has not moved yet.
+export component BusyModal inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <float> progress;
+    in property <string> cancel-label;
+    in property <length> dialog-width: 420px;
+    callback cancelled();
+    width: 100%;
+    height: 100%;
+    background: #0000008c;
+    // swallow clicks so the dimmed screen behind really is inert
+    TouchArea {}
+    Rectangle {
+        width: root.dialog-width;
+        height: card.preferred-height;
+        background: Theme.panel;
+        border-radius: Theme.win95 ? 0px : 12px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        card := VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                Spinner {
+                    size: 18px;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: Theme.fs-h2;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+            Rectangle {
+                height: 10px;
+                border-radius: Theme.win95 ? 0px : 5px;
+                background: Theme.panel-2;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width * root.progress;
+                    height: parent.height;
+                    background: Theme.accent;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                AppButton {
+                    label: root.cancel-label;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+            }
+        }
+    }
+}
