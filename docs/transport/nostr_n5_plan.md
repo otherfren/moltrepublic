@@ -88,21 +88,29 @@ with no window-roll (trap 2) and no cursors (trap 3).
   or a `MESH_ACK_TAG`-prefixed control frame (`supervisor.rs:155`).
 
 Today they never meet: the ritual owns the channel before the runtime exists.
-N5.2 is exactly the change that makes them meet, and then a receiver must tell
-a `RitualMsg` from an `EventEnvelope` by *trying to parse one and seeing if it
-works*. That is the accidental-parse ambiguity the ack tag already avoids —
-`MESH_ACK_TAG` is the precedent, and it exists because someone thought about
-this once already.
+N5.2 is exactly the change that makes them meet, and then a receiver tells a
+`RitualMsg` from an `EventEnvelope` by *trying to parse one and seeing if it
+works*.
 
-**Build:** one byte-prefix tag per plaintext kind, in the same shape as
-`MESH_ACK_TAG` (`molt-net/src/lib.rs:95`), with the untagged form kept meaning
-exactly what it means today so nothing on the wire changes for the ritual until
-we choose to move it.
+**✅ DONE, and smaller than it first looked.** The first version of this entry
+called that ambiguous and prescribed a byte tag. Checking before building
+showed the shapes are in fact robustly disjoint: `RitualMsg` is internally
+tagged (`#[serde(tag = "kind")]`) so it demands a `kind` field, `EventEnvelope`
+demands `seq`/`ts`/`by`/`body`, and the break that would collapse the
+difference — giving `EventEnvelope` struct-level serde defaults — does not even
+compile, because `WorkspaceEvent` has no `Default`.
 
-- **Red:** an `EventEnvelope` whose JSON happens to satisfy `RitualMsg`'s shape
-  must not be delivered as a ritual message, and vice versa. Construct the
-  colliding pair rather than asserting on the tag constant — a test that only
-  checks "the tag is what I wrote" pins nothing.
+So a wire-breaking tag would have bought a property we already have. What was
+actually missing is that **nothing pinned it**: the disjointness is a
+consequence of two unrelated serde choices, and it holds until someone adds an
+explicit `#[serde(default = "…")]` or a `kind` field. That is now a test
+(`molt-net/tests/frame_disjointness.rs`) asserting both directions fail to
+cross-decode AND that each still round-trips as itself — so it cannot pass by
+both shapes having become undecodable.
+
+`MESH_ACK_TAG` stays the model for anything genuinely new on this channel: it
+leads with NUL, which no JSON document may, so it is disjoint by construction
+rather than by accident. Pinned in the same test.
 
 ### N5.2 — the group runtime skeleton
 `spawn_group(...)` beside `supervisor::spawn` — a NEW function, not a
