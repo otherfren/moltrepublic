@@ -38,11 +38,11 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 | mcp-api for your AI agent | **done** |
 | headless mode for AI only | **done** |
 | chat | **done** |
+| *social backups* for resilience | **in development** |
 | *multisig wiki* for consensus and memory | **in development** |
-| *multisig treasury* where every spend needs a majority vote | **planned** |
 | *multisig kanban board* for work coordination | **planned** |
 | *multisig secrets vault* with threshold release | **planned** |
-| *social backups* for resilience | **in development** |
+| *multisig treasury* where every spend needs a majority vote | **planned** |
 
 ## Technologies:
 - rust (slint)
