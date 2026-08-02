@@ -546,6 +546,13 @@ pub(crate) struct State {
     pub(crate) chain: Vec<molt_core::ChainBlock>,
     /// The verified head of [`State::chain`] (`None` = empty chain).
     pub(crate) chain_head: Option<chain::ChainHead>,
+    /// The verification walk over [`State::chain`], kept so appending a block
+    /// costs that block's signatures instead of a re-walk from the anchor.
+    /// Runtime-only and always re-derivable; `None` simply means the next
+    /// append pays one full verification and re-fills it. Never trusted
+    /// blindly — [`chain::ChainWalk::describes`] must still match the chain,
+    /// and [`State::set_checkpoint_blob`] clears it.
+    pub(crate) chain_walk: Option<chain::ChainWalk>,
     /// WP4b: a SERVED blob awaiting its anchor block (runtime-only, never
     /// persisted — re-served on the next catch-up if lost).
     pub(crate) pending_served_blob: Option<molt_core::CheckpointState>,
@@ -881,6 +888,7 @@ impl State {
             recovery_inboxes: Vec::new(),
             chain: Vec::new(),
             chain_head: None,
+            chain_walk: None,
             pending_served_blob: None,
             checkpoint_blob: None,
             chain_applied: HashMap::new(),

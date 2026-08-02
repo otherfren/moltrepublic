@@ -1088,7 +1088,7 @@ impl State {
         if !chain.is_empty() {
             // WP4b: a pruned holder re-anchors on its persisted blob BEFORE
             // adopting — verify_own then runs the suffix rules
-            self.checkpoint_blob = checkpoint_blob;
+            self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
         }
         self.identity_sk = transport_state

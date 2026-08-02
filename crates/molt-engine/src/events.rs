@@ -629,7 +629,7 @@ impl State {
         }
         self.chain.clear();
         self.chain_head = None;
-        self.checkpoint_blob = None;
+        self.set_checkpoint_blob(None);
         self.pending_served_blob = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();

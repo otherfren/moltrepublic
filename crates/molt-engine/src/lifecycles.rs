@@ -203,7 +203,7 @@ impl State {
         // the next reopen)
         if !chain.is_empty() {
             self.identity_sk = signing_key;
-            self.checkpoint_blob = checkpoint_blob;
+            self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
             self.note_governance_readiness();
         }

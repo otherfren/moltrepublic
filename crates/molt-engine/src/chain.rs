@@ -240,14 +240,34 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
     })
 }
 
-/// Verify one post-genesis block against the current head, returning the
-/// advanced head. `seen_proposals` accumulates applied proposal ids across the
-/// chain so a proposal cannot be committed twice.
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of per-block verifications. **Thread-local on purpose**:
+    /// each test runs on its own thread, so a shared counter would be raced by
+    /// every other chain test in the binary.
+    ///
+    /// This is the only way to state the complexity claim as an assertion
+    /// rather than a timing: a holder that re-walks its chain per block shows
+    /// up here as `N²`, not `N`.
+    pub(crate) static VERIFY_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Verify one post-genesis block against the current head. Returns the
+/// advanced head and — for a gated change — the proposal id the caller must
+/// record as consumed, so a proposal cannot be committed twice.
+///
+/// **`seen_proposals` is READ-ONLY here, deliberately.** The walk this drives
+/// is cached across calls ([`ChainWalk`]), so a block that fails any check
+/// must leave the guard exactly as it was. An id recorded from a block that
+/// was then rejected would make this holder refuse a proposal every other
+/// node accepts — divergence, from bookkeeping alone.
 fn verify_next(
     head: &ChainHead,
     block: &ChainBlock,
-    seen_proposals: &mut BTreeSet<u64>,
-) -> Result<ChainHead, String> {
+    seen_proposals: &BTreeSet<u64>,
+) -> Result<(ChainHead, Option<u64>), String> {
+    #[cfg(test)]
+    VERIFY_STEPS.with(|c| c.set(c.get() + 1));
     if block.height != head.height + 1 {
         return Err(format!(
             "block height {} does not follow {}",
@@ -257,14 +277,16 @@ fn verify_next(
     if block.prev != head.hash {
         return Err(format!("block {} does not link to its predecessor", block.height));
     }
+    let mut consumed = None;
     match &block.change {
         ChainChange::Genesis { .. } => {
             return Err("a genesis cannot appear after height 0".to_string());
         }
         ChainChange::Applied { proposal_id, .. } => {
-            if !seen_proposals.insert(*proposal_id) {
+            if seen_proposals.contains(proposal_id) {
                 return Err(format!("proposal {proposal_id} is applied twice"));
             }
+            consumed = Some(*proposal_id);
         }
         ChainChange::Membership { .. } => {}
         // structural checks only — the CONTENT check (recompute the
@@ -306,13 +328,96 @@ fn verify_next(
     {
         apply_membership(&mut identities, *op, member, identity_pk)?;
     }
-    Ok(ChainHead {
-        height: block.height,
-        hash: block_hash(&head.republic_id, block),
-        republic_id: head.republic_id.clone(),
-        rule_m: head.rule_m,
-        identities,
-    })
+    Ok((
+        ChainHead {
+            height: block.height,
+            hash: block_hash(&head.republic_id, block),
+            republic_id: head.republic_id.clone(),
+            rule_m: head.rule_m,
+            identities,
+        },
+        consumed,
+    ))
+}
+
+/// Everything a chain verification accumulates as it folds — kept so a holder
+/// can EXTEND a prefix it has already verified instead of re-walking it.
+///
+/// **There is exactly one step function.** [`walk_chain`],
+/// [`walk_suffix_chain`] and the holder's incremental extension all drive
+/// [`ChainWalk::step`], so "extend by one block" cannot drift from "verify
+/// from the anchor" — they are the same code, not two implementations kept
+/// in sync. Whole-chain verification stays mandatory wherever a chain arrives
+/// from OUTSIDE this holder's own verified prefix (adoption, restore import,
+/// checkpoint re-anchor, load from disk); the incremental path only ever
+/// appends to a prefix this node walked itself. Nothing is skipped — it is
+/// remembered.
+pub(crate) struct ChainWalk {
+    /// The verified head after every block folded so far.
+    pub(crate) head: ChainHead,
+    /// Applied proposal ids — the double-apply guard. On a pruned holder this
+    /// is SEEDED FROM THE BLOB: the blocks carrying the pre-cut ids are gone,
+    /// so the surviving chain alone can no longer answer the question.
+    seen: BTreeSet<u64>,
+    /// The projection a checkpoint's `state_hash` is checked against.
+    running: molt_core::CheckpointState,
+    /// A suffix holder's blob coverage. A checkpoint claiming less would
+    /// leave blocks that neither the blob nor the suffix carries.
+    floor: Option<u64>,
+    /// How many blocks this walk covers, the seed block included — the
+    /// holder's cheap check that a cached walk still describes its chain.
+    folded: usize,
+}
+
+impl ChainWalk {
+    /// Fold ONE block into the walk.
+    ///
+    /// **Atomic on failure**: every fallible check runs before any field is
+    /// touched, so a refused block leaves the walk byte-identical. That is
+    /// what makes a CACHED walk safe to reuse after a rejection — and
+    /// `apply_membership`, the last thing that can fail, is check-then-mutate
+    /// for the same reason.
+    fn step(&mut self, block: &ChainBlock) -> Result<(), String> {
+        let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
+        if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
+            if let Some(floor) = self.floor {
+                if *upto < floor {
+                    return Err(format!(
+                        "checkpoint upto {upto} lies below the blob coverage {floor}"
+                    ));
+                }
+            }
+            // the running state IS the state at `upto` (upto == height - 1,
+            // enforced in verify_next), so the content check needs no refold
+            if &hash_walk_state(&self.running, *upto) != state_hash {
+                return Err(format!(
+                    "checkpoint at upto {upto} does not match this chain's own projection"
+                ));
+            }
+        }
+        fold_one(&mut self.running, block)?;
+        if let Some(id) = consumed {
+            self.seen.insert(id);
+        }
+        self.head = head;
+        self.folded += 1;
+        Ok(())
+    }
+
+    /// Does this walk still describe `chain` under `blob`? A cached walk is
+    /// only ever USED when it does; a mismatch costs a re-walk, never a wrong
+    /// accept. So a missed invalidation degrades performance, not safety.
+    pub(crate) fn describes(
+        &self,
+        chain: &[ChainBlock],
+        blob: Option<&molt_core::CheckpointState>,
+    ) -> bool {
+        self.folded == chain.len()
+            && self.floor == blob.map(|b| b.upto)
+            && chain
+                .last()
+                .is_some_and(|b| block_hash(&self.head.republic_id, b) == self.head.hash)
+    }
 }
 
 /// WP4b: fold the checkpoint state a signer attests from a VERIFIED chain
@@ -482,10 +587,16 @@ pub(crate) fn checkpoint_state_hash(state: &molt_core::CheckpointState) -> Strin
 /// hard: the chain is rejected in full (a partially-valid chain is not a thing
 /// — a rejoiner that trusted a prefix could fork the republic's state).
 pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
+    Ok(walk_chain(blocks)?.head)
+}
+
+/// [`verify_chain`], keeping the walk it built — what a holder caches so the
+/// NEXT block costs one block's signatures instead of another full re-walk.
+pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
     let Some((genesis, rest)) = blocks.split_first() else {
         return Err("empty chain".to_string());
     };
-    let mut head = verify_genesis(genesis)?;
+    let head = verify_genesis(genesis)?;
     let ChainChange::Genesis {
         name,
         republic_id,
@@ -498,25 +609,19 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
     else {
         unreachable!("verify_genesis accepted a non-genesis block 0");
     };
-    // 4d: the walk carries the projection incrementally — at a checkpoint
-    // block the running state IS the state at `upto` (upto == height - 1,
-    // enforced), so the content check needs no refold from the genesis
-    let mut running = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays);
-    let mut seen = BTreeSet::new();
+    // 4d: the walk carries the projection incrementally — a full holder
+    // accepts no checkpoint summary it cannot recompute from its own chain
+    let mut walk = ChainWalk {
+        head,
+        seen: BTreeSet::new(),
+        running: genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays),
+        floor: None,
+        folded: 1,
+    };
     for block in rest {
-        head = verify_next(&head, block, &mut seen)?;
-        // WP4b: a checkpoint's CONTENT is checked against this chain's own
-        // projection — a full holder accepts no summary it cannot recompute
-        if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            if &hash_walk_state(&running, *upto) != state_hash {
-                return Err(format!(
-                    "checkpoint at upto {upto} does not match this chain's own projection"
-                ));
-            }
-        }
-        fold_one(&mut running, block)?;
+        walk.step(block)?;
     }
-    Ok(head)
+    Ok(walk)
 }
 
 /// Verify a SERVED chain — the shared front door of the recovery adoption
@@ -584,6 +689,16 @@ pub(crate) fn verify_suffix_chain(
     blocks: &[ChainBlock],
     expected_republic_id: &str,
 ) -> Result<ChainHead, String> {
+    Ok(walk_suffix_chain(blob, blocks, expected_republic_id)?.head)
+}
+
+/// [`verify_suffix_chain`], keeping the walk — the pruned holder's twin of
+/// [`walk_chain`].
+pub(crate) fn walk_suffix_chain(
+    blob: &molt_core::CheckpointState,
+    blocks: &[ChainBlock],
+    expected_republic_id: &str,
+) -> Result<ChainWalk, String> {
     let Some((anchor, rest)) = blocks.split_first() else {
         return Err("empty suffix chain".to_string());
     };
@@ -658,37 +773,27 @@ pub(crate) fn verify_suffix_chain(
             blob.rule_m
         ));
     }
-    let mut head = ChainHead {
-        height: anchor.height,
-        hash: block_hash(&blob.republic_id, anchor),
-        republic_id: blob.republic_id.clone(),
-        rule_m: blob.rule_m,
-        identities: blob.roster.clone(),
+    // the walk state, seeded from the blob (the anchor block itself is
+    // state-neutral). `seen` MUST come from the blob's consumed ids: the
+    // blocks carrying the pre-cut proposal ids are gone, so the surviving
+    // suffix cannot answer the double-apply question on its own.
+    let mut walk = ChainWalk {
+        head: ChainHead {
+            height: anchor.height,
+            hash: block_hash(&blob.republic_id, anchor),
+            republic_id: blob.republic_id.clone(),
+            rule_m: blob.rule_m,
+            identities: blob.roster.clone(),
+        },
+        seen: blob.consumed_ids.iter().copied().collect(),
+        running: blob.clone(),
+        floor: Some(blob.upto),
+        folded: 1,
     };
-    let mut seen: BTreeSet<u64> = blob.consumed_ids.iter().copied().collect();
-    // 4d: the incremental walk state, seeded from the blob (the anchor
-    // block itself is state-neutral)
-    let mut running = blob.clone();
     for block in rest {
-        head = verify_next(&head, block, &mut seen)?;
-        // a LATER checkpoint inside the suffix: the running state IS the
-        // state at its upto (upto == height - 1, enforced)
-        if let ChainChange::Checkpoint { upto, state_hash } = &block.change {
-            if *upto < blob.upto {
-                return Err(format!(
-                    "checkpoint upto {upto} lies below the blob coverage {}",
-                    blob.upto
-                ));
-            }
-            if &hash_walk_state(&running, *upto) != state_hash {
-                return Err(format!(
-                    "checkpoint at upto {upto} does not match this chain's own projection"
-                ));
-            }
-        }
-        fold_one(&mut running, block)?;
+        walk.step(block)?;
     }
-    Ok(head)
+    Ok(walk)
 }
 
 impl State {
@@ -728,19 +833,35 @@ impl State {
     /// `None` and nothing is projected (a partially-trusted chain could fork
     /// state — `docs/chain/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
-        match self.verify_own(&chain) {
-            Ok(head) => {
+        // a chain from OUTSIDE this holder's own verified prefix: always the
+        // full walk, never the cache. The walk it produces is then kept, so
+        // the adoption pays for the next append too.
+        match self.walk_own(&chain) {
+            Ok(walk) => {
                 self.chain = chain;
-                self.chain_head = Some(head);
+                self.chain_head = Some(walk.head.clone());
+                self.chain_walk = Some(walk);
                 self.apply_chain_to_state();
             }
             Err(e) => {
                 tracing::warn!(error = %e, "rejecting an unverifiable chain");
                 self.chain.clear();
                 self.chain_head = None;
-                self.checkpoint_blob = None;
+                self.chain_walk = None;
+                self.set_checkpoint_blob(None);
             }
         }
+    }
+
+    /// Set (or clear) the checkpoint anchor. **The one way to do it** — the
+    /// cached walk is seeded from the blob (`seen` from its consumed ids,
+    /// `running` from its state), so a blob swap must invalidate it. The
+    /// chain-shape backstop in [`ChainWalk::describes`] cannot see a blob
+    /// replaced at the same coverage, which is why this is a setter and not
+    /// a comment asking callers to remember.
+    pub(crate) fn set_checkpoint_blob(&mut self, blob: Option<molt_core::CheckpointState>) {
+        self.checkpoint_blob = blob;
+        self.chain_walk = None;
     }
 
     /// Re-project the persistent state from the whole chain: the gated
@@ -1164,13 +1285,14 @@ impl State {
         self.maybe_auto_checkpoint();
     }
 
-    /// Verify a block against the current chain, append + persist it, and
-    /// re-project state. Returns whether it was accepted (a block that fails
-    /// full-chain verification is refused and rolled back).
+    /// Verify a block as the extension of our chain, append + persist it, and
+    /// re-project state. Returns whether it was accepted.
     fn append_committed_block(&mut self, block: ChainBlock) -> bool {
-        self.chain.push(block);
-        match self.verify_own(&self.chain) {
+        // verify BEFORE appending — the block only ever touches `self.chain`
+        // once it has passed, so there is nothing to roll back
+        match self.extend_own(&block) {
             Ok(head) => {
+                self.chain.push(block);
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 let chain = self.chain.clone();
@@ -1182,7 +1304,6 @@ impl State {
                 true
             }
             Err(e) => {
-                self.chain.pop();
                 tracing::error!(error = %e, "refused a block that fails chain verification");
                 false
             }
@@ -1252,7 +1373,7 @@ impl State {
                 let anchor_height = block.height;
                 match self.own_checkpoint_state(upto) {
                     Ok(blob) => {
-                        self.checkpoint_blob = Some(blob);
+                        self.set_checkpoint_blob(Some(blob));
                         self.chain.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
                         let chain = self.chain.clone();
@@ -1479,10 +1600,40 @@ impl State {
     /// checkpoint blob (`verify_suffix_chain`). The one entry every
     /// adopt/append/probe path routes through.
     pub(crate) fn verify_own(&self, blocks: &[ChainBlock]) -> Result<ChainHead, String> {
+        Ok(self.walk_own(blocks)?.head)
+    }
+
+    /// [`State::verify_own`], keeping the walk.
+    pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         match &self.checkpoint_blob {
-            None => verify_chain(blocks),
-            Some(blob) => verify_suffix_chain(blob, blocks, &self.republic_id()),
+            None => walk_chain(blocks),
+            Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id()),
         }
+    }
+
+    /// Verify ONE block as the extension of the chain we already hold — the
+    /// hot path, and the reason the walk is cached.
+    ///
+    /// Re-walking the whole chain per block made catching up N blocks cost
+    /// `m·N(N+1)` signature verifications inside a single actor turn; a
+    /// catching-up node then looked exactly like a dead one to its peers.
+    /// This is the same verification, with the intermediate state kept
+    /// instead of thrown away: the walk is driven by the identical
+    /// [`ChainWalk::step`] the full verifiers use.
+    ///
+    /// The cache is never trusted on its word — it is used only while it
+    /// still describes our chain, and rebuilt by a full walk otherwise. A
+    /// **refused** block leaves it intact (`step` is atomic), so a peer
+    /// spamming bad blocks cannot force a re-walk per block either.
+    fn extend_own(&mut self, block: &ChainBlock) -> Result<ChainHead, String> {
+        let mut walk = match self.chain_walk.take() {
+            Some(w) if w.describes(&self.chain, self.checkpoint_blob.as_ref()) => w,
+            _ => self.walk_own(&self.chain)?,
+        };
+        let stepped = walk.step(block);
+        let head = walk.head.clone();
+        self.chain_walk = Some(walk);
+        stepped.map(|()| head)
     }
 
     /// The canonical state at `upto` from THIS holder's own material —
@@ -1761,12 +1912,10 @@ impl State {
     /// Verify a block against the current head, append + apply it, and run the
     /// post-apply bookkeeping. Returns whether it was accepted.
     fn apply_next_block(&mut self, block: ChainBlock) -> bool {
-        let mut probe = self.chain.clone();
-        probe.push(block.clone());
-        if self.verify_own(&probe).is_err() {
-            tracing::warn!(height = block.height, "rejecting an unverifiable inbound block");
-            return false;
-        }
+        // no probe clone: `append_committed_block` verifies before it appends,
+        // so an unverifiable block never touches the chain. The probe used to
+        // verify the whole chain a SECOND time per block — an exact doubling
+        // of the catch-up cost that bought nothing.
         if self.append_committed_block(block.clone()) {
             self.after_block_applied(&block);
             // the head advanced — a catch-up request that reached this height is done
@@ -1915,7 +2064,7 @@ impl State {
         match verify_suffix_chain(&blob, &candidate, &self.republic_id()) {
             Ok(head) => {
                 let new_height = head.height;
-                self.checkpoint_blob = Some(blob);
+                self.set_checkpoint_blob(Some(blob));
                 self.chain = candidate.clone();
                 self.chain_head = Some(head);
                 self.pending_served_blob = None;
@@ -2852,6 +3001,164 @@ mod tests {
             reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
             Some(2)
         );
+    }
+
+    /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
+    /// the double-apply guard can no longer be read off `self.chain`: the
+    /// blocks carrying those proposal ids are gone. It has to come from the
+    /// blob's `consumed_ids` — which is exactly what a walk state carried
+    /// across the prune, or rebuilt from the surviving blocks, gets wrong.
+    ///
+    /// `verify_suffix_chain` seeds it correctly today
+    /// (`a_suffix_chain_bootstraps_from_a_checkpoint`), and this is the
+    /// ENGINE-level twin: the guard must survive the prune on a live holder,
+    /// which is the property an incremental verifier has to preserve.
+    #[test]
+    fn an_id_consumed_below_the_cut_cannot_replay_on_a_pruned_holder() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        let pre_cut = b.blocks.clone();
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+        let anchor = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(anchor.clone());
+
+        let mut peer = chain_peer("walter", &b, pre_cut);
+        peer.receive_block(anchor);
+        assert!(peer.checkpoint_blob.is_some(), "the cut sealed and anchored");
+        assert_eq!(peer.chain.len(), 1, "history below the cut is dropped");
+        assert_eq!(peer.chain_head.as_ref().expect("head").height, 3);
+
+        // proposal 1 was consumed at height 1 — a block this holder no longer
+        // has. Re-offering it must still be refused.
+        b.commit_applied(1, &["petra", "walter"]);
+        let replay = b.blocks.last().expect("the replay block").clone();
+        assert_eq!(replay.height, 4, "the replay sits on top of the anchor");
+        peer.receive_block(replay);
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            3,
+            "an id consumed below the cut cannot re-apply after the prune"
+        );
+        assert_eq!(peer.chain.len(), 1, "the refused block is not retained");
+
+        // …while a FRESH id on the same suffix still extends it, so the test
+        // cannot pass by the holder having stopped accepting anything
+        b.blocks.pop();
+        b.head_hash = block_hash(&b.republic_id, &peer.chain[0]);
+        b.commit_applied(9, &["petra", "walter"]);
+        peer.receive_block(b.blocks.last().expect("fresh block").clone());
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            4,
+            "a fresh id extends the pruned holder"
+        );
+    }
+
+    /// **The catch-up is linear.** Draining a buffered suffix used to verify
+    /// the whole chain from the anchor for every block, and TWICE per block
+    /// (a probe clone, then the append) — `2nN + m·N(N+1)` signature checks,
+    /// all inside one uninterruptible actor turn. A node catching up then
+    /// looked exactly like a dead one to its peers, which is what the
+    /// delivery guarantee escalates on.
+    ///
+    /// Counted, not timed: the assertion is the point of the whole change.
+    #[test]
+    fn catching_up_verifies_each_block_once() {
+        const N: usize = 40;
+        let b = grown_chain(N + 1);
+        let mut peer = chain_peer("walter", &b, b.blocks[..1].to_vec());
+
+        // reverse order, so every block buffers and the whole suffix drains
+        // in ONE turn — the shape a real catch-up has
+        VERIFY_STEPS.with(|c| c.set(0));
+        for block in b.blocks[1..].iter().rev() {
+            peer.receive_block(block.clone());
+        }
+        let steps = VERIFY_STEPS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            u64::try_from(N).expect("small chain"),
+            "the whole suffix drained"
+        );
+        assert_eq!(
+            steps, N,
+            "each block is verified exactly once — a re-walk per block would \
+             cost {} here, and 7M at N=1000",
+            N * (N + 1)
+        );
+    }
+
+    /// A **refused** block must leave the walk byte-identical, because the
+    /// walk is now cached across calls.
+    ///
+    /// The order inside `verify_next` is what makes this sharp: the
+    /// double-apply guard is consulted BEFORE the signatures are checked. An
+    /// implementation that recorded the id while checking would let one
+    /// unsigned block burn a proposal id forever — this holder would then
+    /// refuse a block every other node accepts, which is a fork produced by
+    /// bookkeeping alone.
+    #[test]
+    fn a_refused_block_does_not_poison_the_walk() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        let mut peer = chain_peer("walter", &b, genesis);
+
+        // a well-formed block for proposal 7, signed by ONE of two — refused
+        // at the threshold, but only after the guard has seen the id
+        let change = ChainChange::Applied {
+            proposal_id: 7,
+            surface: Surface::Memory,
+            payload: json!({ "op": "add_note", "id": 7 }),
+        };
+        peer.receive_block(b.seal(1, change, &["petra"]));
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            0,
+            "a below-threshold block is refused"
+        );
+
+        // …and the legitimate block for the SAME proposal still lands
+        b.commit_applied(7, &["petra", "walter"]);
+        peer.receive_block(b.blocks[1].clone());
+        assert_eq!(
+            peer.chain_head.as_ref().expect("head").height,
+            1,
+            "a refused block must not burn its proposal id"
+        );
+    }
+
+    /// Extending incrementally must equal verifying from the anchor — at
+    /// EVERY prefix, not just the end. The cached walk is only sound while
+    /// that holds, and it is the property a second implementation would
+    /// silently drift from.
+    #[test]
+    fn incremental_extension_equals_full_verification_at_every_prefix() {
+        let b = grown_chain(12);
+        let mut peer = chain_peer("walter", &b, b.blocks[..1].to_vec());
+        for (i, block) in b.blocks[1..].iter().enumerate() {
+            peer.receive_block(block.clone());
+            let full = verify_chain(&b.blocks[..=i + 1]).expect("the prefix verifies in full");
+            let cached = peer.chain_head.as_ref().expect("head");
+            assert_eq!(cached.height, full.height);
+            assert_eq!(cached.hash, full.hash, "prefix {} diverged", i + 1);
+            assert_eq!(cached.identities, full.identities);
+            assert!(
+                peer.chain_walk
+                    .as_ref()
+                    .expect("the walk is kept")
+                    .describes(&peer.chain, peer.checkpoint_blob.as_ref()),
+                "the cached walk must describe the chain it was built on"
+            );
+        }
     }
 
     /// Grow a builder chain to exactly `len` blocks (genesis included).
