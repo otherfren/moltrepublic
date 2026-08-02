@@ -155,9 +155,18 @@ where the "N5 pending" `Down` state finally goes green honestly.
 - **Red:** an idle republic does not report its members offline.
 
 ### N5.6 — N4b step 6 falls out
-The rejoiner gets the chain HEAD in the Welcome and catches up over the live
-runtime. Deletes the last `NO_TRANSPORT_YET` (`lifecycles.rs:1441`,
+The rejoiner gets a chain **ANCHOR** in the Welcome and catches up over the
+live runtime. Deletes the last `NO_TRANSPORT_YET` (`lifecycles.rs:1441`,
 `lib.rs:88`).
+
+**Not the HEAD** — that reading was wrong and is corrected in
+`nostr_n4_plan.md` §8.8 step 10: a headless node cannot even ask for blocks
+(`request_catchup` returns immediately), its `Committed`/`ChainRequest`
+ingest is gated on having a head, and a head lifted out of a Welcome is an
+unverified claim rather than a head, because `verify_chain` is
+all-or-nothing from the anchor. The anchor is `chain[0]` — the genesis, or
+for a compacted republic the WP4b checkpoint blob with its anchor block —
+and it is a valid chain of length 1 the rejoiner verifies for itself.
 
 ## 5. Ordering conflict to resolve
 

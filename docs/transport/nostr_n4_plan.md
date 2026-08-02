@@ -627,15 +627,13 @@ Each step is one commit, red test first, green on master before the next.
     > per-block rail (`ChainRequest` → `serve_chain_from` → `Committed`) for
     > the rest?
 
-    Note also that a catch-up costs O(n²) Ed25519 verifications on the
-    synchronous actor (`apply_next_block` re-verifies the whole chain per
-    appended block), which is fine for tens of blocks and not for thousands.
+    ~~Note also that a catch-up costs O(n²) Ed25519 verifications on the
+    synchronous actor.~~ **Fixed 2026-08-02** (`persistent_chain.md` §6.1): the
+    holder keeps its verification walk, so a catch-up of N blocks costs N
+    block verifications instead of `m·N(N+1)`, one write instead of N, and no
+    whole-chain refold per block. A rejoiner draining its history no longer
+    looks like a dead node to its peers.
 
-11. ~~**Welcome size**~~: measure a real served chain in the 444 payload against
-    the 65408 cap. Under → carry it; over → carry the HEAD and fetch blocks
-    over 445 catch-up. **Decide by measurement, keystone either way** — and
-    if the fetch path is needed, it is N5 machinery and N4b must say so
-    rather than half-build it.
 11. **Capstone**: the recovery twin of `tests/nostr_founding.rs` — found a
     2-of-3 over a MockRelay, hard-kill one member (the
     `delivery_guarantee.rs:33 hard_kill` pattern: drop the handle, wait for
