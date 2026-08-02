@@ -130,7 +130,12 @@ the most concentrated fork point) with ONE 445 carrying the group ack state.
   (a THIRD task, so a sheet never queues behind `publish_with_backoff`),
   `flush_group_ack` engine-side, and `apply_group_ack` on receipt. Keystone:
   `nostr_runtime.rs::a_broadcast_ack_moves_the_senders_proven_floor`.
-- **STILL OPEN — the resend timer.** Acks now move the proven floor and
+- ✅ **The resend timer (N5.3b), 2026-08-02.** Stall clock mirroring the mesh:
+  resend only when `ack_seen && own-ackable tail`, an anchored backoff
+  (10 s → 600 s), an hourly budget PERSISTED with the cursor, loud after 8
+  fruitless rounds. Keystone: `nostr_delivery_guarantee.rs`, over a relay that
+  is PRUNED at the moment of the gap.
+- ~~STILL OPEN — the resend timer.~~ Acks now move the proven floor and
   `rewind_group` acts on it, but nothing yet RE-publishes a stalled tail on a
   timer. Until that lands the guarantee proves delivery without repairing a
   loss. **Red for it:** the Nostr twin of `delivery_guarantee.rs` over a

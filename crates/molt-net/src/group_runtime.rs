@@ -39,6 +39,24 @@ const RECV_SLICE: Duration = Duration::from_secs(5);
 /// and holds the cursor where it is.
 const PUBLISH_ATTEMPTS: u32 = 3;
 
+/// First stall backoff: how long an unacked tail waits before it is re-offered.
+const RESEND_AFTER_SECS: u64 = 10;
+
+/// Ceiling of the doubling stall backoff.
+const RESEND_MAX_BACKOFF_SECS: u64 = 600;
+
+/// Fruitless rewinds before the stall is reported loudly. Not a stop — the
+/// resends keep going at the cap.
+const RESEND_GIVEUP_ROUNDS: u32 = 8;
+
+/// Resend rounds allowed per hour.
+///
+/// A broadcast resend costs one publish per relay and every member re-reads
+/// it, so an unbounded stall loop is an amplifier pointed at the whole
+/// republic. PERSISTED with the cursor, unlike the in-memory backoff: a crash
+/// loop must not buy itself a fresh budget on every start.
+const RESEND_ROUNDS_PER_HOUR: u32 = 12;
+
 /// One node's group-runtime configuration.
 #[derive(Debug, Clone)]
 pub struct GroupNetConfig {
@@ -353,9 +371,21 @@ async fn outbox_loop<L, S, K>(
     S: StateStore,
     K: EngineSink,
 {
+    // the stall clock: when the proven floor last moved, and how hard we are
+    // currently backing off
+    let mut last_floor: Option<u64> = None;
+    let mut backoff_secs = RESEND_AFTER_SECS;
+    let mut rounds_without_progress: u32 = 0;
+    let mut stall_reported = false;
+    let mut stalled_since: Option<tokio::time::Instant> = None;
     loop {
-        let mut state = store.load().await;
-        rewind_group(&mut state, &cfg);
+        // NO rewind here. It sat at the loop top through N5.2, where it was
+        // inert because nothing ever acked — N5.3's acks made it live, and a
+        // rewind on every wakeup re-publishes the whole unacked tail on every
+        // appended envelope, with the hourly budget gating only the persisted
+        // write downstream. The budget must ration the PUBLISH, so the rewind
+        // happens exactly once per granted round, below.
+        let state = store.load().await;
         let start = state.group.unwrap_or_default().log_seq;
         let batch = log.read_from(start + 1).await;
         let mut published_through = start;
@@ -378,12 +408,12 @@ async fn outbox_loop<L, S, K>(
             };
             if publish_with_backoff(&channel, &frame, &cfg, &stop).await.is_some() {
                 published_through = env.seq;
-                sink.send_ok(&cfg.member).await;
             } else {
                 // hold the cursor exactly here: nothing in N5.2 recovers a
                 // skipped envelope, so advancing past an unpublished one would
                 // lose it permanently
                 sink.send_failed(&cfg.member, "no relay accepted the frame").await;
+                stalled_since = None;
                 break;
             }
         }
@@ -396,15 +426,152 @@ async fn outbox_loop<L, S, K>(
                 store.save(state).await;
             }
         }
-        tokio::select! {
-            r = wakeup.changed() => {
-                if r.is_err() {
-                    return; // the engine dropped its side
+        // --- the stall clock -------------------------------------------------
+        let state = store.load().await;
+        let floor = group_floor(&state, &cfg);
+        let cursor = state.group.unwrap_or_default().log_seq;
+        // `None < Some(_)` for Options, which is what is wanted here: the
+        // first real floor de-escalates from "nothing proven", and a floor
+        // that REGRESSES (a peer whose window persistence lost a beat) does
+        // not — the guarantee only ever counts forward progress as progress.
+        if floor > last_floor {
+            // the republic confirmed progress — de-escalate entirely
+            last_floor = floor;
+            backoff_secs = RESEND_AFTER_SECS;
+            rounds_without_progress = 0;
+            if stall_reported {
+                stall_reported = false;
+                // clear it on the members it was raised against — naming this
+                // node would have the surface blame the operator's own seat
+                // for a peer that stopped acking
+                for m in &cfg.members {
+                    sink.send_ok(m).await;
                 }
             }
-            () = stop.notified() => return,
         }
+        // resend ONLY when somebody has proven something AND we have an own
+        // ackable envelope above that floor.
+        //
+        // "cursor > floor" alone is not that: the broadcast cursor walks over
+        // FOREIGN envelopes too, and a member that mostly listens would sit
+        // permanently above a frozen floor — reporting "deliveries keep going
+        // unacknowledged" on a perfectly healthy republic. The mesh learned
+        // this as its own-ackable span guard; this is the same rule.
+        let tail = match floor {
+            Some(f) if cursor > f => log
+                .read_from(f + 1)
+                .await
+                .iter()
+                .any(|e| crate::supervisor::own_ackable(&cfg.member, e)),
+            _ => false,
+        };
+        if !tail {
+            stalled_since = None;
+            tokio::select! {
+                r = wakeup.changed() => {
+                    if r.is_err() {
+                        return;
+                    }
+                }
+                () = stop.notified() => return,
+            }
+            continue;
+        }
+        // ANCHORED, not recomputed per iteration: traffic must not starve the
+        // timer. The mesh calls this `stalled_since` and the distinction is
+        // the whole point — a chatty republic would otherwise never resend.
+        let since = *stalled_since.get_or_insert_with(tokio::time::Instant::now);
+        let deadline = since + Duration::from_secs(backoff_secs);
+        let fired = tokio::select! {
+            r = wakeup.changed() => {
+                if r.is_err() {
+                    return;
+                }
+                false // new work first; the stall clock keeps running
+            }
+            () = stop.notified() => return,
+            () = tokio::time::sleep_until(deadline) => true,
+        };
+        if !fired {
+            continue;
+        }
+        let mut state = store.load().await;
+        // the floor may have moved during a sleep of up to ten minutes;
+        // rewinding to a stale snapshot would re-offer what has since been
+        // confirmed
+        let Some(f) = group_floor(&state, &cfg) else {
+            stalled_since = None;
+            continue;
+        };
+        let mut cur = state.group.unwrap_or_default();
+        if !consume_resend_round(&mut cur, wall_secs()) {
+            tracing::warn!(
+                floor = f,
+                "the resend budget for this hour is spent — holding the tail"
+            );
+            backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+            continue;
+        }
+        // rewind to the proven floor and re-offer the tail. Every group frame
+        // is a FRESH encryption (`group_frame` bypasses the fan-out cache), so
+        // there is no stale-ciphertext eviction to do and no resend epoch to
+        // bump — a relay-level duplicate dedups at each receiver's
+        // AcceptedWindow.
+        //
+        // Through `rewind_group`, not by assignment: one definition of "pull
+        // the broadcast cursor back to what is proven", and it is the one the
+        // unit tests pin.
+        state.group = Some(cur); // the consumed budget
+        rewind_group(&mut state, &cfg);
+        store.save(state).await;
+        rounds_without_progress = rounds_without_progress.saturating_add(1);
+        tracing::warn!(
+            floor = f,
+            cursor,
+            attempt = rounds_without_progress,
+            "unacknowledged deliveries — re-offering the tail"
+        );
+        if rounds_without_progress >= RESEND_GIVEUP_ROUNDS && !stall_reported {
+            // loud, honest, and NOT a stop: the surface names it while the
+            // resends keep trying at the cap
+            stall_reported = true;
+            for m in &cfg.members {
+                sink.send_failed(m, "not acknowledging deliveries — still resending")
+                    .await;
+            }
+        }
+        backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+        stalled_since = Some(tokio::time::Instant::now());
     }
+}
+
+/// Wall-clock seconds.
+///
+/// Deliberately NOT `ritual_net::now_secs`, which follows the h-window test
+/// shift: this budget rations real traffic at real relays, and a test that
+/// moves the window clock must not thereby buy itself resend rounds.
+fn wall_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Take one resend round from this hour's budget. `false` = spent.
+///
+/// Persisted with the cursor on purpose: an in-memory budget hands a crash
+/// loop a fresh allowance on every start, and the thing being rationed is a
+/// publish that every member of the republic then re-reads.
+pub(crate) fn consume_resend_round(cur: &mut molt_core::GroupCursor, now: u64) -> bool {
+    if now.saturating_sub(cur.resend_window_start) >= 3_600 {
+        cur.resend_window_start = now;
+        cur.resend_rounds = 0;
+    }
+    if cur.resend_rounds >= RESEND_ROUNDS_PER_HOUR {
+        return false;
+    }
+    cur.resend_rounds = cur.resend_rounds.saturating_add(1);
+    true
 }
 
 /// What one inbound frame turned into.
@@ -578,6 +745,33 @@ mod tests {
         assert_eq!(group_floor(&st, &cfg()), Some(4));
         rewind_group(&mut st, &cfg());
         assert_eq!(st.group.expect("cursor").log_seq, 4);
+    }
+
+    /// The hourly budget is spent, then refilled by the clock — not by a
+    /// restart.
+    ///
+    /// A broadcast resend is one publish that every member re-reads, so an
+    /// unbounded stall loop is an amplifier pointed at the whole republic.
+    /// The counter lives WITH the cursor for exactly that reason: an
+    /// in-memory budget would hand a crash loop a fresh allowance on every
+    /// start, which is the shape a stall loop already has.
+    #[test]
+    fn the_resend_budget_is_spent_by_rounds_and_refilled_by_the_clock() {
+        let mut cur = molt_core::GroupCursor::default();
+        let t0 = 1_700_000_000;
+        for i in 0..RESEND_ROUNDS_PER_HOUR {
+            assert!(consume_resend_round(&mut cur, t0), "round {i} must be allowed");
+        }
+        assert!(!consume_resend_round(&mut cur, t0), "the budget is spent");
+        // …still spent a minute later — the window is an hour, not a nap
+        assert!(!consume_resend_round(&mut cur, t0 + 60));
+        // …and a RESTART does not refill it: the counter is on the persisted
+        // cursor, so this is the same state a reopened workspace loads
+        let mut reloaded = cur;
+        assert!(!consume_resend_round(&mut reloaded, t0 + 60));
+        // the clock does
+        assert!(consume_resend_round(&mut reloaded, t0 + 3_600));
+        assert_eq!(reloaded.resend_rounds, 1, "a fresh window starts at one");
     }
 
     /// A floor at or above the cursor never pushes it forward.
