@@ -34,9 +34,13 @@ pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
 /// runtime exists. ONE literal: it is set both when a workspace is
 /// materialized (first session) and when one is reopened, and the two must
 /// not drift into two different promises.
+/// Why a Nostr workspace has no live channel. Since N5.2 the runtime exists,
+/// so this is no longer "the build cannot do it" but "this node could not
+/// bring it up" — a missing MLS group, or no relay of the republic's that
+/// this node may dial.
 pub(crate) const NOSTR_RUNTIME_PENDING: &str =
-    "the Nostr relay runtime is not built yet — it lands with N5; local reads/writes work \
-     and queued traffic delivers once it does";
+    "no relay channel — check this republic's relays in Settings; local reads/writes \
+     work and queued traffic delivers once one is reachable";
 
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
@@ -947,15 +951,17 @@ impl State {
         let offline = if resumed_real || !self.persist || dialer.is_none() {
             None
         } else if nostr_kind {
-            // A Nostr workspace's founding/join completed and its state is
-            // whole — what is missing is the live relay runtime, which this
-            // build does not carry yet. Honest Down, but NOT "detached":
-            // "detached" means broken/absent transport evidence and its GUI
-            // copy recommends a recovery rejoin, which would be wrong advice
-            // here. Local reads/writes work; the outbox log holds traffic
-            // until the runtime exists.
-            self.session.net_health = molt_core::NetHealth::Down {
-                reason: NOSTR_RUNTIME_PENDING.to_string(),
+            // N5.2: the runtime either came up above or it did not, and the
+            // pill says which. NOT "detached" either way — that means broken
+            // transport evidence and its GUI copy recommends a recovery
+            // rejoin, which would be wrong advice here: local reads/writes
+            // work and the outbox log holds traffic.
+            self.session.net_health = if self.group_net.is_some() {
+                molt_core::NetHealth::Ok
+            } else {
+                molt_core::NetHealth::Down {
+                    reason: NOSTR_RUNTIME_PENDING.to_string(),
+                }
             };
             None
         } else if transport_state.mls.is_some()

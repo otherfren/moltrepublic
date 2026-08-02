@@ -149,6 +149,7 @@ impl State {
         let adopt_kind = shape.kind;
         let adopt_relays = shape.relays.clone();
         let adopt_seed = shape.rotation_seed.clone();
+        let adopt_mls = mls_snapshot.clone();
         let adopt_nostr_sk: Option<zeroize::Zeroizing<Vec<u8>>> = if chain.is_empty() {
             None
         } else {
@@ -208,6 +209,8 @@ impl State {
             adopt_seed.as_deref(),
         );
         let prefs = opened.prefs.clone();
+        // NOTE the order: the runtime start below needs `self.active`, so it
+        // cannot sit up with the other adoptions.
         self.active = Some(ActiveStorage {
             id: id.clone(),
             dir,
@@ -220,8 +223,25 @@ impl State {
         // its whole first session — promising a runtime that does not exist
         // until N5. Both callers emit_session(Full) after this returns.
         if nostr_shape {
-            self.session.net_health = molt_core::NetHealth::Down {
-                reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
+            // bring the group runtime up NOW, not only on the next reopen: a
+            // freshly founded republic that could not talk until it was closed
+            // and opened again would be a first session less capable than a
+            // resumed one — the F1 honesty finding in another costume. It runs
+            // HERE because `build_group_net` needs `self.active`, which is set
+            // just above.
+            if self.nostr.is_some() {
+                if let Some(blob) = adopt_mls.as_deref() {
+                    self.group_net = self.build_group_net(blob);
+                }
+            }
+            // the FIRST session is as honest as a reopen: green only when the
+            // group runtime actually came up (N5.2), never on the serde default
+            self.session.net_health = if self.group_net.is_some() {
+                molt_core::NetHealth::Ok
+            } else {
+                molt_core::NetHealth::Down {
+                    reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
+                }
             };
         }
         Ok(id)

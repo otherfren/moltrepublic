@@ -264,6 +264,7 @@ async fn a_coordinator_that_cannot_reach_the_group_relays_says_which_switch() {
         .await
         .expect("session lock");
 
+    let health_before = read_session(&a).await.net_health.clone();
     a.execute(Command::RecoverInviteStart {
         member: "petra".to_string(),
     })
@@ -286,14 +287,13 @@ async fn a_coordinator_that_cannot_reach_the_group_relays_says_which_switch() {
         reason, "mesh-not-running",
         "a Nostr republic has no mesh — that answer sends the operator nowhere"
     );
-    // …and the honest "no relay runtime yet" state survives the mint. The
-    // dialer resolves fine here, and a resolver that wrote `Ok` on success
-    // would turn the network pill green for the rest of the session on a
-    // republic whose traffic still goes nowhere (N5 is not built).
-    assert!(
-        matches!(&s.net_health, molt_core::NetHealth::Down { reason } if reason.contains("N5")),
-        "minting must not promise a runtime that does not exist, got {:?}",
-        s.net_health
+    // …and minting did not TOUCH the network pill. That is the property, not
+    // any particular value: the mint resolves a dialer, and a resolver that
+    // wrote `Ok` on success would relabel the whole session's network state as
+    // a side effect of an unrelated action.
+    assert_eq!(
+        s.net_health, health_before,
+        "minting a recovery link must not change the network health"
     );
 
     a.execute(Command::CloseWorkspace).await.expect("close a");

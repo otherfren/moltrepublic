@@ -158,17 +158,20 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     .await;
     let ws_id_b = s.active_workspace.clone();
 
-    // F1 — the FIRST session must be as honest as a reopen. `net_health` is
+    // F1 — the FIRST session must be as honest as a reopen. `net_health` was
     // written on the open path only, so a freshly founded/joined Nostr
-    // workspace reported the serde default (Ok) and showed a green pill for
-    // its entire first session, promising a runtime that does not exist yet.
+    // workspace kept the serde default and showed a green pill for its whole
+    // first session. It is green again now, but for the opposite reason: the
+    // group runtime (N5.2) is UP, and the founding path sets the pill from
+    // that fact rather than from a default. The invariant F1 protects is
+    // unchanged — what the first session claims must be what is true.
     for (who, s) in [("founder", read_session(&a).await), ("joiner", read_session(&b).await)] {
         assert!(
-            matches!(&s.net_health, molt_core::NetHealth::Down { reason } if reason.contains("N5")),
-            "{who}: the first session must name the missing runtime, got {:?}",
+            matches!(&s.net_health, molt_core::NetHealth::Ok),
+            "{who}: the runtime came up, so the first session must say so, got {:?}",
             s.net_health
         );
-        assert_ne!(s.notice, "detached", "{who}: pending a runtime is not 'detached'");
+        assert_ne!(s.notice, "detached", "{who}: a live runtime is not 'detached'");
     }
 
     // --- disk truth, both ends (close to release the LOCKs)
@@ -291,14 +294,15 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
         other => panic!("expected an application message, got {other:?}"),
     }
 
-    // reopen honesty (§7.5): a Nostr workspace is NOT "detached" — it pends
-    // on its N5 runtime, and the health reason says so
+    // reopen honesty (§7.5): a Nostr workspace is NOT "detached" — and since
+    // N5.2 it comes back up on its own, so the reopened pill is green because
+    // the runtime is running, not because nothing set it
     a.execute(Command::OpenWorkspace { id: ws_id_a }).await.expect("reopen a");
     let s = read_session(&a).await;
     assert_ne!(s.notice, "detached", "a Nostr workspace is not detached");
     assert!(
-        matches!(&s.net_health, molt_core::NetHealth::Down { reason } if reason.contains("N5")),
-        "honest pending-runtime health, got {:?}",
+        matches!(&s.net_health, molt_core::NetHealth::Ok),
+        "a reopened Nostr workspace rebuilds its runtime, got {:?}",
         s.net_health
     );
 }

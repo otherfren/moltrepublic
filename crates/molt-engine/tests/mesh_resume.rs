@@ -427,7 +427,7 @@ async fn open_with_mls_but_no_creds_is_honestly_offline() {
 /// missing runtime, keeps the notice clear of "detached", and local
 /// (offline-first) writes keep working.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_nostr_workspace_opens_honestly_pending_its_runtime() {
+async fn a_nostr_workspace_with_no_reachable_relay_opens_honestly_down() {
     let tmp = tempfile::tempdir().expect("tmp");
     let root = tmp.path().join("node-n");
     let seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("gen"))
@@ -463,9 +463,12 @@ async fn a_nostr_workspace_opens_honestly_pending_its_runtime() {
     w.execute(Command::OpenWorkspace { id }).await.expect("open");
 
     let sv = read_session(&w).await;
+    // Down, and the reason names what is actually missing. Since N5.2 the
+    // runtime exists, so this workspace is down because it has no relay it can
+    // dial — not because the build cannot do it.
     assert!(
-        matches!(&sv.net_health, NetHealth::Down { reason } if reason.contains("N5")),
-        "a Nostr workspace pends on its N5 runtime — Down must name it, got {:?}",
+        matches!(&sv.net_health, NetHealth::Down { reason } if reason.contains("relay")),
+        "a Nostr workspace with no reachable relay must say so, got {:?}",
         sv.net_health
     );
     assert_ne!(
