@@ -252,6 +252,13 @@ pub struct CheckpointState {
     pub founding_identities: Vec<MemberIdentity>,
     /// The ratified founding charter (genesis).
     pub agenda: String,
+    /// The ratified relay pool (genesis, roster-v4). Carried for the same
+    /// reason as `founding_identities`: once the genesis block is pruned away,
+    /// this summary is the ONLY threshold-signed record of what the founders
+    /// agreed, and a pool that fell out of it could be swapped on a rejoiner
+    /// without changing any hash.
+    #[serde(default)]
+    pub relays: Vec<String>,
     /// The content-derived republic id (must equal the recomputation).
     pub republic_id: String,
     /// The CURRENT roster after every membership block `<= upto`, in
@@ -269,7 +276,8 @@ pub struct CheckpointState {
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v2` — v2
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v3` — v3 adds
+/// the ratified relay pool (roster-v4); v2
 /// covers each member's `nostr_pk` third anchor in BOTH tables; under v1 a
 /// served checkpoint's roster anchor could be swapped without changing the
 /// state hash, so the tamper-evidence roster-v3 gives the genesis vanished
@@ -280,7 +288,7 @@ pub struct CheckpointState {
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v2\0");
+    out.extend_from_slice(b"molt-chain-checkpoint-v3\0");
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -292,6 +300,14 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
         put_bytes(&mut out, i.nostr_pk.as_bytes());
     }
     put_bytes(&mut out, s.agenda.as_bytes());
+    // v3: the ratified relay pool. Without it a pruned republic's summary
+    // says nothing about who can reach whom, and the tamper-evidence
+    // roster-v4 gives the genesis vanishes the moment the genesis is dropped
+    // — exactly what the v1→v2 bump fixed for the third anchor.
+    out.extend_from_slice(&u64::try_from(s.relays.len()).unwrap_or(0).to_le_bytes());
+    for r in &s.relays {
+        put_bytes(&mut out, r.as_bytes());
+    }
     out.extend_from_slice(&u64::try_from(s.roster.len()).unwrap_or(0).to_le_bytes());
     for i in &s.roster {
         put_bytes(&mut out, i.member.as_bytes());

@@ -554,6 +554,7 @@ mod tests {
             applied: Vec::new(),
             consumed_ids: Vec::new(),
             upto: 0,
+            relays: Vec::new(),
         };
         let handle = crate::start_writer(ws);
         handle.persist_chain_blocking(Some(blob), Vec::new());

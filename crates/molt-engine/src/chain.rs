@@ -332,14 +332,14 @@ pub(crate) fn checkpoint_state(
                 rule_n,
                 identities,
                 agenda,
-                relays: _,
+                relays,
             },
         ..
     }) = blocks.first()
     else {
         return Err("chain does not start with a genesis".to_string());
     };
-    let base = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
+    let base = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays);
     fold_state(base, &blocks[1..], upto)
 }
 
@@ -352,6 +352,7 @@ fn genesis_base(
     identities: &[MemberIdentity],
     agenda: &str,
     republic_id: &str,
+    relays: &[String],
 ) -> molt_core::CheckpointState {
     molt_core::CheckpointState {
         founding_name: name.to_string(),
@@ -360,6 +361,7 @@ fn genesis_base(
         founding_identities: identities.to_vec(),
         agenda: agenda.to_string(),
         republic_id: republic_id.to_string(),
+        relays: relays.to_vec(),
         roster: identities.to_vec(),
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
@@ -458,6 +460,9 @@ fn fold_state(
 /// blob a PRUNED coordinator anchors on.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
+// same reason as `ChainStateFile`: the pruned arm carries a founding summary,
+// and this is a WIRE shape — boxing changes what a peer parses.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServedChainWire {
     Pruned {
         checkpoint_blob: molt_core::CheckpointState,
@@ -488,7 +493,7 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
         rule_n,
         identities,
         agenda,
-        relays: _,
+        relays,
     } = &genesis.change
     else {
         unreachable!("verify_genesis accepted a non-genesis block 0");
@@ -496,7 +501,7 @@ pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
     // 4d: the walk carries the projection incrementally — at a checkpoint
     // block the running state IS the state at `upto` (upto == height - 1,
     // enforced), so the content check needs no refold from the genesis
-    let mut running = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id);
+    let mut running = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays);
     let mut seen = BTreeSet::new();
     for block in rest {
         head = verify_next(&head, block, &mut seen)?;
@@ -3396,10 +3401,21 @@ mod tests {
             checkpoint_state_hash(&s2),
             "equal chains yield the identical checkpoint hash"
         );
-        // the canonical bytes carry the versioned tag (v2 since N1 — the
-        // roster/founding nostr anchors are inside the hashed bytes)
+        // the canonical bytes carry the versioned tag (v3 since R3 — the
+        // ratified relay pool joined the roster/founding nostr anchors inside
+        // the hashed bytes)
         let bytes = molt_core::checkpoint_canonical_bytes(&s1);
-        assert!(bytes.starts_with(b"molt-chain-checkpoint-v2\0"));
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v3\0"));
+        // …and the pool is really covered: a summary whose relays were swapped
+        // must not hash the same. Without this the tamper-evidence roster-v4
+        // gives the genesis would vanish the moment a republic pruned.
+        let mut swapped = s1.clone();
+        swapped.relays = vec!["wss://not-what-was-ratified.example".to_string()];
+        assert_ne!(
+            checkpoint_state_hash(&s1),
+            checkpoint_state_hash(&swapped),
+            "the checkpoint must bind the ratified pool"
+        );
         // consumed ids are sorted regardless of commit order
         assert_eq!(s1.consumed_ids, vec![1, 2]);
         // the founding table recomputes to the real republic id — the

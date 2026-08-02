@@ -98,6 +98,11 @@ const KEYS_SEGMENT: u64 = u64::MAX - 3;
 /// pruned file's blocks and refuses (additive-only rule).
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
+// the pruned arm carries a whole founding summary and the full arm a Vec; the
+// gap grew when the checkpoint gained the relay pool. Boxing would change the
+// serde shape of a PERSISTED file for a transient enum that exists only to
+// pick a parse — not a trade worth making.
+#[allow(clippy::large_enum_variant)]
 enum ChainStateFile {
     Pruned {
         checkpoint_blob: molt_core::CheckpointState,
@@ -3358,6 +3363,7 @@ mod tests {
             applied: Vec::new(),
             consumed_ids: Vec::new(),
             upto: 0,
+            relays: Vec::new(),
         };
         handle.persist_chain_blocking(Some(blob), Vec::new());
         handle.close(None);
