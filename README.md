@@ -46,11 +46,11 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 
 ## Technologies:
 - rust (slint)
-- Nostr (NIP-EE/Marmot, in build — loopback transport today)
-- Tor (embedded arti)
+- Nostr (NIP-EE/Marmot) - founding and join run over real relays, the group runtime is in build
+- Tor - SOCKS by default, embedded arti behind an opt-in feature
 - Nym (planned)
-- Monero (FROST/LASS Multi-Signatures)
-- blockchained git (multisig consensus layer/company brain)
+- Monero (FROST/LASS multi-signatures, planned)
+- blockchained git (multisig consensus layer/company brain) - the threshold-signed chain is real, the note store on top of it is not
 
 ![MoltRepublic](assets/hero.jpg)
 
