@@ -405,3 +405,112 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     })
     .await;
 }
+
+/// **N4b step 6f: the wrap-author gate, finally pinnable** (the test step 5
+/// owed).
+///
+/// The coordinator refuses a recovery request whose claimed transport anchor
+/// is not the key that sealed the gift wrap. Step 5 could not test it: every
+/// forged request it could build failed the SEAT PROOF first, so the test
+/// would have gone green with the gate deleted.
+///
+/// 6e is what makes it testable — the request here is **correctly signed**,
+/// with a real seat proof over a real anchor, and differs from an honest one
+/// in exactly one respect: somebody else wrapped it. That is the
+/// relay-level attacker the gate exists for, re-addressing the Welcome to a
+/// key nobody holds so the returning seat is stranded.
+///
+/// And the assertion is not "nothing happened", which any bug also
+/// satisfies: the ticket must still be UNSPENT afterwards, proven by the
+/// honest recovery going on to succeed over the very same link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspent() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 1).await;
+    drop(b);
+
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the mint is acked");
+    let s = wait_for(&a, "the recovery link to be minted", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed, got {:?}", s.notice))
+        .to_string();
+    let inv = molt_engine::RecoveryInvite::parse(&link).expect("parseable link");
+    let h = inv.handover.clone().expect("a v2 handover");
+
+    // Everything an honest rejoiner would produce…
+    let (sk, identity_pk) = molt_engine::member_identity(&petra_phrase).expect("seat identity");
+    let entropy = molt_storage::seed_entropy(&petra_phrase).expect("entropy");
+    let (_, anchor) = molt_net::nostr_identity(&entropy, &h.ticket);
+    let mls = molt_net::MlsMember::new(&sk, "petra").expect("mls identity");
+    let kp_hex = hex::encode(mls.key_package().expect("key package"));
+    let seat_proof =
+        molt_engine::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &anchor);
+
+    // …sent from a key that is NOT that anchor.
+    let (impostor_sk, impostor_pk) = molt_net::nostr_identity(b"a relay-level attacker", "x");
+    assert_ne!(impostor_pk, anchor, "the whole point is that these differ");
+    let dialer = molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let impostor = molt_net::ritual_net::RitualNet::new(dialer, vec![url.clone()], &impostor_sk)
+        .expect("impostor transport");
+    impostor
+        .send_ritual(
+            &h.npub,
+            &molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
+                member: "petra".to_string(),
+                identity_pk,
+                key_package: kp_hex,
+                ticket: h.ticket.clone(),
+                seat_proof,
+                new_nostr_pk: anchor,
+                reply: None,
+            }),
+        )
+        .await
+        .expect("the impostor's wrap publishes — being refused is the coordinator's job");
+
+    // the coordinator must not re-admit anyone: its chain stays at the genesis
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match a.execute(Command::ReadChain).await.expect("read chain") {
+            Reply::Chain { blocks } => assert_eq!(
+                blocks.len(),
+                1,
+                "a request the claimed anchor did not sign must not re-admit a seat: {blocks:?}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // …and the ticket is still spendable, which the honest return proves
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover start");
+    let s = wait_for(&c, "the honest recovery to complete", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "the refused impostor spent the ticket — the real seat can no longer return: {:?}",
+        s.notice
+    );
+}

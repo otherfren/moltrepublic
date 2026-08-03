@@ -350,9 +350,23 @@ chain speaks about our anchor, it must agree" — which still catches a
 coordinator re-admitting the seat under a different key, the only thing an
 anchor-sized prefix can get wrong about it.
 
-### 6f — the PoP end-to-end pin (step 5's owed test)
+### 6f — the PoP end-to-end pin (step 5's owed test) ✅ DONE 2026-08-03
 Step 5 could not test the wrap-author gate: a forged request fails the SEAT
 PROOF first, so the test would have passed for the wrong reason. Once 6e can
 produce a **correctly signed** request with a mismatched wrap author, the
 gate is pinnable.
-- **Red:** that exact request is refused with the ticket UNSPENT.
+- **Red:** that exact request is refused with the ticket UNSPENT. ✅ —
+  verified red with the gate disabled, and the failure is the real one: the
+  impostor's request re-admits the seat (a second block appears on the
+  coordinator's chain).
+
+Both halves are asserted, because either alone is satisfiable by a bug. The
+refusal: the coordinator's chain stays at the genesis for a bounded window.
+The ticket: the honest recovery goes on to succeed over the very same link —
+"nothing happened" would otherwise also be satisfied by a coordinator that
+silently burned the ticket, which strands the seat just as thoroughly as
+accepting the impostor would.
+
+`founding::member_identity` is public now so the test derives the seat's
+identity the way the product does; forking the salt convention into a test
+is exactly what its own doc comment warns against.

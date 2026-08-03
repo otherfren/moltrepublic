@@ -55,8 +55,8 @@ pub use recovery::RecoveryInvite;
 pub use recovery::{run_rejoin, RejoinOutcome};
 #[doc(hidden)]
 pub use founding::{
-    make_seat_proof, run_ritual_member, verify_seat_proof, FoundingInvite, InviteMaterial,
-    Ratifier, RitualTransport,
+    make_seat_proof, member_identity, run_ritual_member, verify_seat_proof, FoundingInvite,
+    InviteMaterial, Ratifier, RitualTransport,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 

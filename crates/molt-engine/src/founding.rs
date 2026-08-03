@@ -1453,7 +1453,11 @@ pub(crate) async fn founder_bootstrap(
 /// its own recovery phrase — the ONE derivation both the ritual (which anchors
 /// the public key in the roster) and the join finish (which needs the private
 /// key to sign chain governance) must agree on. Returns `(signing key, pk hex)`.
-pub(crate) fn member_identity(
+///
+/// Public so a test can build a request the way a real seat does: forking
+/// the salt convention into a test would defeat the "ONE derivation" the
+/// paragraph above is about.
+pub fn member_identity(
     phrase: &str,
 ) -> Result<(molt_storage::SigningKey, String), String> {
     let entropy = molt_storage::seed_entropy(phrase).map_err(|e| e.to_string())?;
