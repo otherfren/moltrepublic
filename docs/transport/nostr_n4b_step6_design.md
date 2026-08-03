@@ -254,15 +254,18 @@ Two decisions worth keeping:
   Relays store the commit, so one accepting relay makes it durable for a
   survivor that was offline.
 
-**What this does NOT yet prove, stated rather than hidden.** The tests pin
-the rules — the commit seals under the epoch its recipients are still at
-(verified red without the fix), the stamp it is keyed with is the stamp it
-carries, the Welcome really readmits the seat. They do NOT drive a live
-Nostr republic through a whole recovery: that needs a rejoiner to observe,
-which is 6e, and a 2-of-3 founding harness (`nostr_recovery.rs` founds
-2-of-2, where a lost member can never reach threshold). The composition —
-dispatch, delivery, anchor, rejoin — is the capstone's job, and until it
-exists the `group_net.is_some()` branch is correct by inspection only.
+The tests pin the rules — the commit seals under the epoch its recipients
+are still at (verified red without the fix), the stamp it is keyed with is
+the stamp it carries, the Welcome really readmits the seat.
+
+**The composition is pinned too, since 6e**: the step-6 capstone
+(`nostr_recovery.rs::a_lost_seat_rejoins_the_republic_over_relays`) drives a
+live republic through a whole recovery, and disabling this arm makes it time
+out. The 2-of-3 harness turned out to be unnecessary — **1-of-2 is the right
+shape**, and for a reason worth keeping: at m=2 the LOST seat's own signature
+would be needed to re-admit it, so a 2-of-2 republic can never recover a
+member at all. That is a real product limit, and the capstone is where it
+would otherwise have been discovered.
 
 ### 6d — `NetRecoverSealed` carries the Nostr shape
 Mirror `NetJoinSealed`: `nostr_sk`, `relays`, `rotation_seed`, `kind`.
@@ -320,7 +323,7 @@ it — needs a `checkpoint-v4 → v5` bump by the same argument v4 itself needed
 and needs the ripple checked: whether any recompute site reads a live
 roster's `nostr_pk` expecting the founding value.
 
-### 6e — the rejoiner task
+### 6e — the rejoiner task ✅ DONE 2026-08-03
 `spawn_recovery_rejoiner`, the `spawn_member_join` twin: ephemeral key from
 the RECOVERY ticket → 1059 inbox → readable-gate → gift-wrapped
 `RecoverRequest` (new anchor + seat proof v2) → wait the 15-min absolute
@@ -328,8 +331,24 @@ the RECOVERY ticket → 1059 inbox → readable-gate → gift-wrapped
 445 under the Welcome's `rotation_seed` → assemble until `verify_served`
 succeeds → `NetRecoverSealed`. Deletes the last `NO_TRANSPORT_YET`
 (`lifecycles.rs:1497`, const at `lib.rs:88`).
-- **Red:** the honest failure today (`recover-failed:` with the
-  not-built-yet text) flips to a materialized workspace on a real relay.
+- **Red:** the honest failure (`recover-failed:` with the not-built-yet
+  text) flips to a materialized workspace on a real relay. ✅ — and verified
+  red twice over, once with the rejoiner spawn disabled and once with the
+  Nostr re-key arm disabled.
+
+`NO_TRANSPORT_YET` is gone; what remains is `LEGACY_RECOVERY_LINK`, for a
+link carrying no v2 handover. That is not the same statement: recovery IS
+built now, and a queue-shaped link names an SMP server this build no longer
+speaks to.
+
+**One check had to be weakened, and the capstone is what found it.** 6d
+required the served chain to carry this seat's new anchor. It does not: a
+Nostr coordinator serves the chain ANCHOR, and the seat's own `Restored`
+block is at the HEAD, arriving later over the ordinary catch-up (§3.1).
+Demanding it refused every real recovery. The check now reads "if the served
+chain speaks about our anchor, it must agree" — which still catches a
+coordinator re-admitting the seat under a different key, the only thing an
+anchor-sized prefix can get wrong about it.
 
 ### 6f — the PoP end-to-end pin (step 5's owed test)
 Step 5 could not test the wrap-author gate: a forged request fails the SEAT

@@ -79,12 +79,24 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
 /// Found a real 2-of-2 "Chess Club" over one in-process relay, exactly as
 /// `nostr_founding.rs`'s capstone does, and hand back both live engines.
 async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
+    let (a, b, _) = found_republic(root, url, 2).await;
+    (a, b)
+}
+
+/// Found a real `threshold`-of-2 "Chess Club" over one in-process relay and
+/// hand back both live engines plus **petra's recovery phrase** — which a
+/// total-loss rejoiner is the only thing that still has.
+async fn found_republic(
+    root: &std::path::Path,
+    url: &str,
+    threshold: u8,
+) -> (WalletHandle, WalletHandle, String) {
     let a = engine(&root.join("founder"));
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
         member: "walter".to_string(),
-        threshold: 2,
+        threshold,
         members: 2,
         relays: Vec::new(),
     })
@@ -106,6 +118,15 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     })
     .await
     .expect("join starts");
+    // the phrase the engine minted for petra: shown once during the join, and
+    // after a total loss it is all that is left of the seat
+    let petra_phrase = wait_for(&b, "petra's recovery phrase to be minted", |s| {
+        !s.join.seed.is_empty()
+    })
+    .await
+    .join
+    .seed
+    .clone();
 
     wait_for(&a, "the founder to accept petra's join", |s| s.create.can_propose).await;
     a.execute(Command::CreatePropose {
@@ -126,7 +147,7 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
-    (a, b)
+    (a, b, petra_phrase)
 }
 
 /// A survivor mints a recovery link for a lost seat, over the relays — no
@@ -298,4 +319,89 @@ async fn a_coordinator_that_cannot_reach_the_group_relays_says_which_switch() {
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
+}
+
+/// **N4b step 6 capstone: a total-loss seat really comes back, over relays.**
+///
+/// Everything 6a–6e built, driven end to end through the public Command
+/// surface and nothing else — no injected transport material, no hand-built
+/// chain. A fresh node holding only petra's recovery phrase and the link
+/// walter minted rejoins the republic:
+///
+/// 1. the rejoiner gift-wraps a `RecoverRequest` carrying a NEW transport
+///    anchor and a seat proof over it (6e);
+/// 2. walter's recovery inbox hands it to the actor, which proposes and — at
+///    m=1, the only threshold a republic with one survivor can reach —
+///    commits the `Restored` block;
+/// 3. that commit fires the coordinator's **Nostr** re-key (6c): the MLS
+///    commit rides a 445 at a pinned stamp, the Welcome is gift-wrapped to
+///    the anchor the chain just ratified, and the chain ANCHOR is served;
+/// 4. the rejoiner assembles the anchor until it verifies standalone and
+///    materializes (6d) as a Nostr workspace.
+///
+/// Threshold 1-of-2 is not a convenience: with m=2 the lost seat's own
+/// signature would be needed to re-admit it, so no 2-of-2 republic can ever
+/// recover a member. That is a real product limit, and this test is where it
+/// would otherwise have been discovered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_seat_rejoins_the_republic_over_relays() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // 1-of-2: walter alone can seal the Restored block that re-admits petra
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 1).await;
+    // petra's device is gone
+    drop(b);
+
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the mint is acked");
+    let s = wait_for(&a, "the recovery link to be minted", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed over relays, got {:?}", s.notice))
+        .to_string();
+
+    // a FRESH node: it holds the phrase and the link, and nothing else
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover start");
+
+    let s = wait_for(&c, "the recovered republic to open", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "the recovery failed: {:?}",
+        s.notice
+    );
+    let ws = s
+        .workspaces
+        .iter()
+        .find(|w| w.name == "Chess Club")
+        .expect("the recovered republic is listed");
+    assert_eq!(ws.agenda, "play chess, decide together", "the ratified charter came back");
+    assert_eq!(ws.members.len(), 2, "the whole roster came back from the chain");
+
+    // …and walter sees the return, so the two ends agree the seat is back
+    wait_for(&a, "walter to record petra's return", |s| {
+        s.workspaces
+            .iter()
+            .any(|w| w.name == "Chess Club" && w.members.len() == 2)
+    })
+    .await;
 }

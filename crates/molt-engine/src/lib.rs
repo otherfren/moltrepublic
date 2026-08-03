@@ -81,12 +81,14 @@ const PRESENCE_TICK_MS: u64 = 30_000;
 /// safely inside the sender's 30 s resend timer.
 const DELIVERY_TICK_MS: u64 = 1_000;
 
-/// The honest gap error for the paths not yet over Nostr: founding and join
-/// run over relays since N4a, but **recovery** (the total-loss rejoin) does
-/// not — the recovery-link v2 story is N4b. Surfaced through recovery's
-/// EXISTING failure path (the recovery notice) — never a fake success.
-pub(crate) const NO_TRANSPORT_YET: &str = "recovery over Nostr is not built yet — the \
-     recovery-link v2 flow lands with N4b (founding and join already run over relays)";
+/// The honest refusal for a recovery link carrying no v2 transport handover.
+///
+/// Recovery runs over relays since N4b step 6e; a legacy link names an SMP
+/// server this build no longer speaks to, so there is nothing to dial.
+/// Surfaced through recovery's EXISTING failure path (the recovery notice) —
+/// never a fake success.
+pub(crate) const LEGACY_RECOVERY_LINK: &str =
+    "this recovery link is the old queue shape — ask the coordinator for a new one";
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {
@@ -798,6 +800,9 @@ pub(crate) struct State {
     /// restarted join (its generation-guarded commands would be dropped
     /// anyway; aborting also releases its relay sockets).
     pub(crate) join_task: Option<tokio::task::JoinHandle<()>>,
+    /// The running Nostr rejoiner task (N4b step 6e), the [`State::join_task`]
+    /// twin — aborted on a restarted recovery, for the same two reasons.
+    pub(crate) recover_task: Option<tokio::task::JoinHandle<()>>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -941,6 +946,7 @@ impl State {
             runtime_transport: None,
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_task: None,
+            recover_task: None,
             net_generation: 0,
             net_scope: 0,
             join_generation: 0,
@@ -4548,7 +4554,7 @@ mod tests {
             let s = read_session(&w).await;
             assert_eq!(
                 s.notice,
-                format!("recover-failed:{}", crate::NO_TRANSPORT_YET),
+                format!("recover-failed:{}", crate::LEGACY_RECOVERY_LINK),
                 "the honest N-demo gap error rides the recovery notice"
             );
 
@@ -4748,6 +4754,48 @@ mod tests {
         assert!(
             st.session.notice.starts_with("recover-failed:"),
             "the failure surfaces to the operator; notice = {:?}",
+            st.session.notice
+        );
+    }
+
+    /// A coordinator that re-admits the seat under SOMEBODY ELSE'S transport
+    /// anchor is refused — the one thing the served chain can still say wrong
+    /// about our own key.
+    ///
+    /// (It usually says nothing: a Nostr coordinator serves the chain ANCHOR,
+    /// and this seat's `Restored` block is at the head, arriving later over
+    /// catch-up. So the check is "if it speaks, it must agree" — demanding a
+    /// re-anchor here would refuse every real recovery, which is exactly what
+    /// the step-6 capstone caught.)
+    #[test]
+    fn recovery_refuses_a_chain_that_re_anchors_the_seat_elsewhere() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let (ours, _) = molt_net::nostr_identity(&entropy, &"ab".repeat(8));
+        // the chain re-anchors bob to a key that is NOT this recovery's
+        let (_, hostile_pk) = molt_net::nostr_identity(b"a-key-we-do-not-hold", "elsewhere");
+        let (chain, republic_id) = recovered_chain_with(
+            &phrase,
+            vec!["wss://relay.one.example/".to_string()],
+            Some(hostile_pk),
+        );
+
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            hex::encode(ours),
+            "5a".repeat(32),
+            Some(1),
+        )
+        .expect("the handler never errors");
+        assert!(st.active.is_none(), "a seat re-anchored elsewhere must not materialize");
+        assert!(
+            st.session.notice.contains("different transport key"),
+            "the refusal must name what is wrong; notice = {:?}",
             st.session.notice
         );
     }

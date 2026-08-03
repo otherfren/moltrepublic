@@ -747,6 +747,248 @@ pub(crate) fn spawn_founder_group_recv(
     })
 }
 
+/// What the rejoiner task needs — the `JoinCtx` twin.
+pub(crate) struct RecoverCtx {
+    /// The link's v2 transport handover: ticket, the coordinator's anchor,
+    /// the relays it listens on, and the republic id the seat proof binds.
+    pub handover: molt_net::invite::RecoveryHandoverV2,
+    /// What THIS node may dial — the handover's relays intersected with this
+    /// operator's own confirmed pool (ADR-0004).
+    pub dial_relays: Vec<String>,
+    pub member: String,
+    pub phrase: String,
+    pub generation: u64,
+}
+
+/// One inbound 445 as an engine envelope. The recovery anchor rides the
+/// coordinator's ordinary outbox, so it arrives as an `EventEnvelope` rather
+/// than a `RitualMsg` — the two shapes are provably disjoint
+/// (`molt-net/tests/frame_disjointness.rs`), so trying one is not ambiguous.
+fn open_group_envelope(
+    group: &Arc<Mutex<molt_net::MlsMember>>,
+    content: &str,
+    created_at: u64,
+) -> Option<molt_core::EventEnvelope> {
+    let mut g = group.lock().ok()?;
+    let mut secrets = Vec::with_capacity(1 + molt_net::mls::EXPORTER_RING_K);
+    if let Ok(current) = g.exporter_secret() {
+        secrets.push(current);
+    }
+    secrets.extend_from_slice(g.exporter_ring());
+    let wire = molt_net::envelope::open_outer(&secrets, content).ok()?;
+    match g.decrypt_at(&wire, created_at) {
+        Ok(molt_net::MlsIncoming::Application { plaintext, .. }) => {
+            serde_json::from_slice(&plaintext).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Spawn the whole rejoiner task (the production body of
+/// `Command::RecoverStart` on a Nostr republic) — the [`spawn_member_join`]
+/// twin. Every exit reports: success ends in `NetRecoverSealed`, every
+/// failure in `NetRecoverFailed` with a human reason.
+pub(crate) fn spawn_recovery_rejoiner(
+    dialer: molt_net::dial::Dialer,
+    ctx: RecoverCtx,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let generation = Some(ctx.generation);
+        if let Err(error) = recovery_rejoin(dialer, ctx, &tx).await {
+            let _ = send_cmd(&tx, Command::NetRecoverFailed { error, generation }).await;
+        }
+    })
+}
+
+/// The rejoiner state machine over Nostr (N4b step 6e).
+///
+/// Fresh anchor from the RECOVERY ticket → 1059 inbox (readable-gated before
+/// anything is advertised) → gift-wrapped `RecoverRequest` carrying the new
+/// anchor and a seat proof over it → the 444 Welcome → back inside the MLS
+/// group → 445 subscription under the Welcome's rotation seed → assemble the
+/// coordinator's served ANCHOR until it verifies standalone → `NetRecoverSealed`.
+///
+/// **One absolute deadline** ([`crate::recovery::RECOVERY_WELCOME_TIMEOUT`])
+/// covers the whole run rather than one per phase: what the returning human
+/// is waiting on is "am I back", and a per-phase budget silently multiplies
+/// into a wait nobody predicted.
+async fn recovery_rejoin(
+    dialer: molt_net::dial::Dialer,
+    ctx: RecoverCtx,
+    tx: &mpsc::WeakSender<Envelope>,
+) -> Result<(), String> {
+    let h = &ctx.handover;
+    let generation = Some(ctx.generation);
+    let deadline = tokio::time::Instant::now() + crate::recovery::RECOVERY_WELCOME_TIMEOUT;
+
+    // The seat's identity re-derives from the phrase; its transport anchor is
+    // NEW, salted with the RECOVERY ticket — the founding anchor was salted
+    // with a ticket that died with the device and cannot be re-derived.
+    let (sk, pk) = crate::founding::member_identity(&ctx.phrase)?;
+    let entropy = molt_storage::seed_entropy(&ctx.phrase).map_err(|e| e.to_string())?;
+    let (mut nostr_raw, new_nostr_pk) = molt_net::nostr_identity(&entropy, &h.ticket);
+    let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());
+    zeroize::Zeroize::zeroize(&mut nostr_raw);
+
+    // inbox BEFORE the request (subscribe-before-advertise): a request
+    // answered into an unreadable inbox strands a human who has already lost
+    // their device, with no second channel to notice on
+    let net = RitualNet::new(dialer.clone(), ctx.dial_relays.clone(), &nostr_sk)
+        .map_err(|e| format!("transport keys: {e}"))?;
+    let mut inbox = net
+        .inbox()
+        .await
+        .map_err(|e| format!("recovery inbox subscribe: {e}"))?;
+    if !inbox.live_state(LIVE_WAIT).await.any() {
+        return Err(
+            "the recovery inbox is not readable on any relay — no relay replayed the \
+             subscription (auth required, rate limited, or refused)"
+                .to_string(),
+        );
+    }
+
+    // a FRESH MLS identity + KeyPackage: the coordinator removes the lost
+    // leaf and adds this one in a single commit
+    let mut mls =
+        molt_net::MlsMember::new(&sk, &ctx.member).map_err(|e| format!("mls identity: {e}"))?;
+    let kp_hex = hex::encode(mls.key_package().map_err(|e| format!("key package: {e}"))?);
+    // the seat proof binds the new anchor, so a relay or a hostile
+    // coordinator cannot swap it on the way and re-address the seat
+    let seat_proof =
+        crate::founding::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &new_nostr_pk);
+    net.send_ritual(
+        &h.npub,
+        &RitualMsg::Recover(invite::RecoverRequest {
+            member: ctx.member.clone(),
+            identity_pk: pk,
+            key_package: kp_hex,
+            ticket: h.ticket.clone(),
+            seat_proof,
+            new_nostr_pk,
+            // Nostr replies to the gift-wrap anchor, not to a queue
+            reply: None,
+        }),
+    )
+    .await
+    .map_err(|e| format!("recovery request: {e}"))?;
+
+    // the Welcome, from the COORDINATOR's anchor and nobody else's
+    let payload = loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(
+                "no Welcome arrived within 15 minutes — the coordinator must be running \
+                 and approve the return"
+                    .to_string(),
+            );
+        }
+        match inbox.recv((deadline - now).min(RECV_SLICE)).await {
+            Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
+            _ => continue,
+        }
+    };
+    mls.join_from_welcome(&payload.welcome)
+        .map_err(|e| format!("mls welcome: {e}"))?;
+    let group = Arc::new(Mutex::new(mls));
+
+    // 445 under the Welcome's rotation seed, dialing only our own subset
+    let chan = GroupChannel::new(dialer, ctx.dial_relays.clone(), payload.rotation_seed);
+    let mut sub = chan
+        .subscribe()
+        .await
+        .map_err(|e| format!("group subscribe: {e}"))?;
+    if !sub.live_state(LIVE_WAIT).await.any() {
+        return Err(
+            "the group channel is not readable on any relay — the Welcome arrived but \
+             the chain cannot be fetched"
+                .to_string(),
+        );
+    }
+
+    // Assemble the served ANCHOR until it verifies STANDALONE. `verify_served`
+    // against the link's republic id is the whole gate: the frames carry no
+    // usable author binding for a node that does not yet know the roster, and
+    // it needs none — a chain that recomputes to this republic's id is this
+    // republic's chain, whoever relayed it.
+    let mut blob: Option<molt_core::CheckpointState> = None;
+    let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
+    let (head, sealed) = loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(
+                "the republic's chain anchor never arrived — the coordinator re-keyed \
+                 but served no chain"
+                    .to_string(),
+            );
+        }
+        let (content, created_at) = match sub.recv((deadline - now).min(RECV_SLICE)).await {
+            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => (content, created_at),
+            _ => continue,
+        };
+        let Some(env) = open_group_envelope(&group, &content, created_at) else {
+            continue;
+        };
+        match env.body {
+            molt_core::WorkspaceEvent::CheckpointServed { blob: b } => blob = Some(b),
+            molt_core::WorkspaceEvent::Committed(block) => {
+                if !blocks.iter().any(|b| b.height == block.height) {
+                    blocks.push(block);
+                    blocks.sort_by_key(|b| b.height);
+                }
+            }
+            _ => continue,
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        if let Ok(pair) =
+            crate::chain::verify_served(blob.as_ref(), &blocks, Some(&h.republic_id))
+        {
+            break pair;
+        }
+    };
+
+    // **Relay honesty, against the CHAIN.** The join twin compares the
+    // Welcome's relays to the invite's, which is founding-only ("the two sets
+    // are the same by construction"). Since roster-v4 the pool is governed, so
+    // the authority is the verified anchor — and the check can only run HERE,
+    // after the chain is verified, which is why it is not up with the Welcome.
+    if payload.relays != sealed.relays {
+        return Err(
+            "the Welcome names a different relay set than the republic ratified — \
+             refusing (relay changes are governed by the chain)"
+                .to_string(),
+        );
+    }
+
+    let snapshot = group
+        .lock()
+        .map_err(|_| "mls lock poisoned".to_string())?
+        .snapshot()
+        .map_err(|e| format!("mls snapshot: {e}"))?;
+    let wire = match blob {
+        Some(b) => crate::chain::ServedChainWire::Pruned { checkpoint_blob: b, blocks },
+        None => crate::chain::ServedChainWire::Full(blocks),
+    };
+    tracing::info!(member = %ctx.member, height = head.height, "rejoined and verified the chain anchor");
+    send_cmd(
+        tx,
+        Command::NetRecoverSealed {
+            member: ctx.member.clone(),
+            chain: serde_json::to_string(&wire).map_err(|e| e.to_string())?,
+            mls: hex::encode(snapshot),
+            // a Nostr republic has no queue mesh, by design not by omission
+            mesh: Vec::new(),
+            nostr_sk: hex::encode(&*nostr_sk),
+            rotation_seed: hex::encode(payload.rotation_seed),
+            generation,
+        },
+    )
+    .await;
+    Ok(())
+}
+
 /// Spawn the whole member join task (the production body of
 /// `Command::JoinStart`). Every exit path reports: success ends in
 /// `NetJoinSealed`, every failure in `NetJoinFailed` with a human reason.

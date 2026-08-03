@@ -1482,6 +1482,7 @@ impl State {
         // incarnation so the stale task's late result is dropped
         self.recover_generation += 1;
         let generation = self.recover_generation;
+        let task_phrase = phrase.clone();
         self.recover_ctx = Some((inv.clone(), phrase));
         // a fresh transport slot for this recovery incarnation, the
         // join_transport twin: cmd_net_recover_sealed stands the runtime
@@ -1490,11 +1491,63 @@ impl State {
         self.recover_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
-        // N-demo gap: there is no network transport to run the rejoin over
-        // (SMP is gone, Nostr lands with N4). Fail honestly on the recovery
-        // notice channel — the armed context stays, so an injected/verified
-        // NetRecoverSealed (the loopback test seam) still materializes.
-        self.cmd_net_recover_failed(crate::NO_TRANSPORT_YET.to_string(), Some(generation))
+        // A v2 handover is what makes a link runnable over Nostr (N4b step
+        // 6e). Without one there is nothing to dial — a legacy queue link
+        // names an SMP server this build no longer speaks to — so that path
+        // keeps failing honestly, and the armed context still lets an
+        // injected `NetRecoverSealed` materialize (the loopback test seam).
+        let Some(handover) = inv.handover.clone() else {
+            return self
+                .cmd_net_recover_failed(crate::LEGACY_RECOVERY_LINK.to_string(), Some(generation));
+        };
+        let dialer = match self.dialer_for() {
+            Ok(d) => d,
+            Err(e) => {
+                return self.cmd_net_recover_failed(format!("transport: {e}"), Some(generation))
+            }
+        };
+        // What the COORDINATOR listens on, narrowed to what this operator
+        // confirmed (ADR-0004: a pasted link never makes us dial somewhere
+        // unapproved). One relay in common is enough.
+        let verdicts = molt_core::relay::diagnose_invite_relays(
+            &handover.relays,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        let dial_relays: Vec<String> = verdicts
+            .iter()
+            .filter(|v| v.blocked.is_none())
+            .map(|v| v.url.clone())
+            .collect();
+        if dial_relays.is_empty() {
+            let refusal = crate::relay_msg::join_relay_refusal(
+                &verdicts,
+                &self.session.settings.relays,
+                self.clearnet_session,
+            );
+            return self.cmd_net_recover_failed(refusal.headline, Some(generation));
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return self.cmd_net_recover_failed("engine stopped".to_string(), Some(generation));
+        };
+        // a restarted recovery aborts the previous incarnation's task: its
+        // generation-guarded results would be dropped anyway, and aborting
+        // also releases its relay sockets
+        if let Some(task) = self.recover_task.take() {
+            task.abort();
+        }
+        self.recover_task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
+            dialer,
+            crate::nostr_ritual::RecoverCtx {
+                handover,
+                dial_relays,
+                member: inv.member.clone(),
+                phrase: task_phrase,
+                generation,
+            },
+            cmd_tx.downgrade(),
+        ));
+        Ok(Reply::Ack)
     }
 
     /// The off-actor rejoin task finished: the seat is back inside the MLS
@@ -1638,14 +1691,24 @@ impl State {
                     generation,
                 );
             }
-            // …and the republic must really have re-anchored us to it, or the
-            // seat would come back holding a key nobody addresses. The WORKING
-            // anchor, not the roster: `apply_membership` keeps the seat's
-            // anchored identity key across a Restored block, so the roster
-            // still carries the dead founding anchor by design.
-            if crate::chain::working_anchors(&blocks).get(&member) != Some(&derived_pk) {
+            // …and if the served chain already SAYS what our anchor is, it
+            // must say this. The WORKING anchor, not the roster:
+            // `apply_membership` keeps the seat's anchored identity key across
+            // a `Restored` block, so the roster still carries the dead
+            // founding anchor by design.
+            //
+            // Normally it says nothing yet, and that is not a weakness in the
+            // check — it is the shape of the flow. A Nostr coordinator serves
+            // the chain ANCHOR (the smallest prefix that verifies), and this
+            // seat's own `Restored` block is at the HEAD; it arrives over the
+            // ordinary catch-up once the workspace exists (§3.1). Demanding it
+            // here would refuse every real recovery. What this DOES catch is a
+            // coordinator serving a chain that re-anchors this seat somewhere
+            // else.
+            let served = crate::chain::working_anchors(&blocks);
+            if served.get(&member).is_some_and(|pk| *pk != derived_pk) {
                 return self.cmd_net_recover_failed(
-                    "the recovered chain does not anchor this recovery's transport key"
+                    "the recovered chain anchors this seat to a different transport key"
                         .to_string(),
                     generation,
                 );
