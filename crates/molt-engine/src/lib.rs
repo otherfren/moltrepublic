@@ -4758,6 +4758,54 @@ mod tests {
         );
     }
 
+    /// **A context switch abandons an in-flight recovery.**
+    ///
+    /// `cmd_recover_start` has always invalidated the join; the reverse
+    /// direction was missing and cost nothing while a recovery spawned
+    /// nothing. Since 6e it holds a 1059 inbox and a 445 subscription for up
+    /// to fifteen minutes, so a forgotten one sits on relay sockets long
+    /// after the human moved on — and its late result would materialize a
+    /// republic into whatever context replaced it.
+    ///
+    /// The generation bump is the observable half (the socket release rides
+    /// with it): a result from the abandoned incarnation must land nowhere.
+    #[test]
+    fn a_context_switch_abandons_an_in_flight_recovery() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let (chain, republic_id) = recovered_chain(&phrase);
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        assert!(st.recover_ctx.is_some(), "precondition: the context is armed");
+
+        // starting a founding is a context switch like any other. (A join
+        // start that is REFUSED — an unparseable link — deliberately is not
+        // one: nothing replaced the recovery, so nothing should abandon it.)
+        let _ = st.cmd_create_start(
+            "Other Republic".to_string(),
+            "bob".to_string(),
+            1,
+            2,
+            Vec::new(),
+        );
+        assert!(st.recover_ctx.is_none(), "the abandoned recovery kept its context");
+
+        // …and the abandoned incarnation's result lands nowhere
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            Some(1),
+        )
+        .expect("the handler never errors");
+        assert!(
+            st.active.is_none(),
+            "a superseded recovery must not materialize a republic into the new context"
+        );
+    }
+
     /// A coordinator that re-admits the seat under SOMEBODY ELSE'S transport
     /// anchor is refused — the one thing the served chain can still say wrong
     /// about our own key.

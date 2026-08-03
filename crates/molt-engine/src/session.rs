@@ -867,6 +867,7 @@ impl State {
         // recovery holes). This also fires on the restore-finish path, which
         // is intended — a restore is a context switch as well.
         self.invalidate_join();
+        self.invalidate_recovery();
         // reopening the already-open workspace is a navigation no-op — a
         // second open would collide with our own flock and report Busy, and a
         // running mesh (real or demo) must not be torn down under it

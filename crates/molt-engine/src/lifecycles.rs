@@ -761,6 +761,7 @@ impl State {
         self.abandon_ritual("the founder started a new founding");
         self.ritual_attestations.clear();
         self.invalidate_join();
+        self.invalidate_recovery();
         let crate::founding::RitualStart { links, notes } = self
             .start_ritual(&name, &member, threshold, members, &seed, &relays)
             .map_err(MoltError::Create)?;
@@ -1125,8 +1126,12 @@ impl State {
         let inv = crate::founding::FoundingInvite::parse(&invite).map_err(MoltError::Join)?;
         // starting a join abandons any founding the user had open — its
         // recv loops must not seal and hijack the session behind our back,
-        // and whoever was waiting on it is told
+        // and whoever was waiting on it is told. A recovery in flight goes
+        // the same way: `cmd_recover_start` has always invalidated the join,
+        // and the reverse direction only became load-bearing when a recovery
+        // grew a task holding relay subscriptions (6e).
         self.abandon_ritual("the founder started a join instead");
+        self.invalidate_recovery();
         // the joiner's own recovery phrase (shown once during the join); its
         // identity and its own workspace derive from it
         let seed =
@@ -1857,6 +1862,23 @@ impl State {
     /// Aborting the task is deliberate and matches cancel: this join's own
     /// last outbound frame may be lost. That is the OTHER republic's founder's
     /// problem to surface (cluster F), never a reason to keep the task alive.
+    /// Abandon an in-flight RECOVERY — the [`State::invalidate_join`] twin.
+    ///
+    /// It had nothing to abandon until step 6e: `cmd_recover_start` used to
+    /// fail immediately, so an abandoned recovery cost nothing and the
+    /// asymmetry (recovery invalidates join, never the other way round) was
+    /// invisible. A rejoiner task holds a 1059 inbox and a 445 subscription
+    /// for up to fifteen minutes, so the same context switches that abandon a
+    /// join must abandon this too — a forgotten task sits on relay sockets
+    /// long after the human moved on.
+    pub(crate) fn invalidate_recovery(&mut self) {
+        self.recover_generation += 1;
+        self.recover_ctx = None;
+        if let Some(task) = self.recover_task.take() {
+            task.abort();
+        }
+    }
+
     pub(crate) fn invalidate_join(&mut self) {
         self.join_generation += 1;
         self.join_confirm = None;
