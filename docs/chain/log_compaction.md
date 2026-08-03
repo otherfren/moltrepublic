@@ -330,6 +330,75 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
   Falle laufen; der saubere Stopp (Manifest-Format-Bump beim ersten
   Prune) ist als Etappe-5-Punkt gepinnt.
 
+## B.6a A checkpoint SUMMARIZES — it does not archive
+
+**Product decision, 2026-08-03 (user).** A checkpoint's state carries what
+the republic **is**, never the path that produced it. Superseded values and
+dead intermediates are dropped at the cut. That is what checkpoints are for.
+
+**Today it is the opposite**, and that is a defect rather than a design:
+§B.3 item 5 serializes the applied projection as `(proposal_id, payload)`
+**in block order, complete**. So every logo the republic ever had, every
+name it ever carried, stays in the blob forever.
+
+That is not a size nicety. The blob is the **trust root a rejoiner must be
+handed** once the genesis is gone (`nostr_n4b_step6_design.md`), and it is
+already over budget: measured, a blob holding ONE 25 KiB logo costs 69628 B
+against a 65408 B gift-wrap cap and a 128 KiB relay message budget
+(`welcome_chain_budget.rs`). Keeping the history means the blob grows for
+the life of the republic until recovery into an old republic simply stops
+working — and it stops working silently.
+
+### What "summarize" means precisely
+
+The two kinds of applied entry are not the same and must not be treated the
+same:
+
+- **Last-write-wins slots** — Organization's `set_name`, `set_charter`,
+  `set_chat_retention`, `set_image` / `remove_image`. Only the LAST applied
+  entry per slot survives the cut. This is not a new judgement about what
+  matters: `org_effective` (`proposals.rs`) already folds exactly this way,
+  so the summary is nothing but that fold's own answer, kept instead of
+  recomputed from a history nobody reads.
+- **Accumulating items** — an entry that is a distinct object rather than a
+  superseded state (Memory's notes). These are KEPT. A checkpoint is a
+  summary, not a delete.
+
+A surface must therefore declare which of the two each of its ops is. An op
+whose kind is undeclared is treated as accumulating — the conservative
+direction, since dropping something that was not superseded loses data.
+
+### Invariants this must not weaken
+
+- **`consumed_ids` keeps EVERY consumed id**, including those whose payload
+  was dropped. It is the double-apply guard, and a summarized-away payload
+  must never become a re-appliable proposal. It is already a field of its
+  own (§B.3 item 6), so this is a constraint to respect, not a change.
+- **Deterministic and versioned.** Every node folds independently and must
+  reach byte-identical `checkpoint_canonical_bytes`, or a cut can never
+  gather its m signatures — the failure would be a republic that can no
+  longer compact, with no error pointing at why. Changing what goes into
+  item 5 is a **`molt-chain-checkpoint-v3` → `-v4` bump** with every
+  byte-pin test moved together (the CLAUDE.md versioned-layout rule).
+- **Verify-before-sign is unchanged in shape**: a signer recomputes the same
+  summary from its own chain and compares `state_hash`. The rule only moves
+  what "the same summary" means, and it moves it identically on every node.
+
+### What a pruned holder loses, stated rather than hidden
+
+The history view below the cut stops showing superseded values — an old
+logo, a former republic name. That is intended and is the point of the
+decision. The chain keeps the complete record until a cut; after it, the
+republic remembers what it is, not every step of how it got there.
+
+### Open, and separate
+
+Even a perfect summary does not bound the CURRENT image. That is the
+transport-cap question (`ORG_IMAGE_MAX_BYTES` is 256 KiB while a 445 is
+budgeted at 128 KiB for the whole websocket message) and it is decided in
+its own place — the two together are what make a pruned republic
+recoverable, and neither suffices alone.
+
 ## B.7 Grenzen (bewusst)
 
 - Der flüchtige Log (Chat/Shares) bekommt NIE eine gemeinsame Checksum:
@@ -391,6 +460,22 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
    kein ListProposals-Eintrag für pending Cuts (kollidiert mit dem
    Id-Kollisions-Guard aus Etappe 3; die Events geben dem Proposer
    Closure), Nachzügler-Buffer, per-Peer-Blob-Stashes.
+
+6. **OPEN — the summary rule (§B.6a, decided 2026-08-03).** Item 5 of the
+   canonical serialization keeps the complete applied history; it must keep
+   the CURRENT state instead. Red tests, in this order:
+   - a chain with three `set_image` blocks yields a blob carrying ONE image,
+     and it is the last one (asserted by content, not by count — a summary
+     that kept the FIRST would also pass a count check);
+   - a note surface's entries all survive, so the rule cannot be read as
+     "keep only the last entry" globally;
+   - `consumed_ids` still lists every dropped payload's proposal id, and a
+     block re-applying one of them is refused (the guard is the thing most
+     likely to be lost by accident here);
+   - two independently built chains fold to byte-identical
+     `checkpoint_canonical_bytes` — without this a republic silently loses
+     the ability to compact at all;
+   - the `-v4` byte-pin fixture, recomputed independently.
 
 Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
 - `after_block_applied` braucht einen Checkpoint-Arm (Event emittieren,
