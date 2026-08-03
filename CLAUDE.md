@@ -152,12 +152,13 @@ finding, the same as a bug.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
   (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
   preimage stays injective for arbitrary field content; never regress it to
-  separators) and `molt-chain-checkpoint-v4`
+  separators) and `molt-chain-checkpoint-v5`
   (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
-  three anchors (v2), the ratified relay pool rides along (v3), and the
-  applied projection is SUMMARIZED rather than archived (v4,
-  `applied_lww_slot`)). Each has byte-pin tests that go red on an unbumped
-  change.
+  three anchors (v2), the ratified relay pool rides along (v3), the applied
+  projection is SUMMARIZED rather than archived (v4, `applied_lww_slot`),
+  and the WORKING transport anchors ride along too (v5) — without them a cut
+  strands every seat that had recovered). Each has byte-pin tests that go red
+  on an unbumped change.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
 - **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat

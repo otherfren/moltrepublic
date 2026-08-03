@@ -143,6 +143,7 @@ fn a_pruned_republics_anchor_carries_every_applied_payload() {
             vec![(1, serde_json::json!({"op": "set_image", "bytes_b64": b64}))],
         )],
         consumed_ids: vec![1],
+        anchors: Vec::new(),
         upto: 1,
     };
 

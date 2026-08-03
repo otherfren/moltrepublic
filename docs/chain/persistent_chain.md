@@ -254,7 +254,7 @@ Having verified a chain, a member knows — not trusts — that:
 - **Real (WP4b, 2026-07-18): threshold-signed chain checkpoints.** The
   republic compacts the way it governs: `propose_checkpoint` (a co-equal
   verb — MCP tool + GUI button) cuts at the current head; every member
-  recomputes the canonical state (`molt-chain-checkpoint-v4`: founding
+  recomputes the canonical state (`molt-chain-checkpoint-v5`: founding
   table for republic-id recomputation, current roster, ratified relay pool,
   per-surface applied projection — SUMMARIZED, not archived: a
   last-write-wins slot keeps only its current value, accumulating items all

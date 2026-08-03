@@ -559,6 +559,7 @@ fn genesis_base(
         roster: identities.to_vec(),
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
+        anchors: Vec::new(),
         upto: 0,
     }
 }
@@ -596,9 +597,19 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             op,
             member,
             identity_pk,
-            ..
+            nostr_pk,
         } => {
             apply_membership(&mut state.roster, *op, member, identity_pk)?;
+            // v5: the re-anchor rides BESIDE the roster, because
+            // `apply_membership` may not move a seat's anchored identity.
+            // Carrying it here is what keeps a recovered seat addressable
+            // after the block that re-anchored it is dropped at a cut.
+            if let Some(pk) = nostr_pk.as_ref().filter(|p| !p.is_empty()) {
+                match state.anchors.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
+                    Ok(i) => state.anchors[i].1 = pk.clone(),
+                    Err(i) => state.anchors.insert(i, (member.clone(), pk.clone())),
+                }
+            }
         }
         ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
     }
@@ -1051,8 +1062,18 @@ impl State {
             }
         }
         self.chain_applied = projected;
-        // …and the working transport anchors
-        self.chain_anchors = working_anchors(&self.chain);
+        // …and the working transport anchors. A pruned holder SEEDS them from
+        // the blob: the `Restored` blocks that established them were dropped
+        // at the cut, and the roster keeps each seat's founding anchor by
+        // design — so folding the surviving suffix alone would silently
+        // re-address every recovered member to the key it no longer holds.
+        let mut anchors: std::collections::HashMap<molt_core::MemberId, String> = self
+            .checkpoint_blob
+            .as_ref()
+            .map(|b| b.anchors.iter().cloned().collect())
+            .unwrap_or_default();
+        anchors.extend(working_anchors(&self.chain));
+        self.chain_anchors = anchors;
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {
@@ -2873,6 +2894,62 @@ mod tests {
         assert_eq!(st.working_nostr_pk("nobody"), "");
     }
 
+    /// **…and it survives the compaction that drops the block it came from.**
+    ///
+    /// The `Restored` block is what re-anchors a seat, and a cut drops it.
+    /// The roster in the blob keeps the FOUNDING anchor by design
+    /// (`apply_membership` refuses to move a seat's identity key), so without
+    /// the summary carrying the working anchors explicitly, a compaction
+    /// makes every recovered member addressable ONLY at the key it no longer
+    /// holds — silently, which is the exact failure `State::chain_anchors`
+    /// documents itself as existing to prevent.
+    ///
+    /// Reachable in the ordinary course: `AUTO_CHECKPOINT_MIN_LEN` is 32.
+    #[test]
+    fn a_compaction_keeps_the_working_anchor_of_a_recovered_seat() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let fresh = molt_net::nostr_identity(b"petra-recovered", "new-ticket").1;
+        b.commit_restored("petra", &fresh, &["petra", "walter"]);
+
+        // cut ABOVE the Restored block, so the block itself is dropped
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        assert_eq!(
+            blob.anchors,
+            vec![("petra".to_string(), fresh.clone())],
+            "the summary must carry the anchors the dropped blocks established"
+        );
+        let cut = b.seal(
+            2,
+            ChainChange::Checkpoint {
+                upto: 1,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(cut);
+
+        // the pruned holder: blob + the suffix from the anchor block on
+        let mut st = crate::tests::plain_state();
+        st.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "walter".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: "play chess".to_string(),
+            republic_id: b.republic_id.clone(),
+            founded_ts: 0,
+        });
+        st.set_checkpoint_blob(Some(blob));
+        st.adopt_chain(b.blocks[2..].to_vec());
+
+        assert_eq!(
+            st.working_nostr_pk("petra"),
+            fresh,
+            "after the cut the seat is addressable only at the key it no longer holds"
+        );
+    }
+
     #[test]
     fn chain_applied_entries_carry_their_proposal_id() {
         let mut b = Builder::new(&["petra", "walter", "dora"], 2);
@@ -4437,11 +4514,12 @@ mod tests {
             checkpoint_state_hash(&s2),
             "equal chains yield the identical checkpoint hash"
         );
-        // the canonical bytes carry the versioned tag (v4 since the summary
-        // rule — the same chain hashes differently than it did under v3, so
-        // the tag has to say so; v3 added the ratified relay pool)
+        // the canonical bytes carry the versioned tag (v5 since the working
+        // anchors joined; v4 was the summary rule, v3 the ratified pool —
+        // each a change in WHAT the same chain hashes to, which is exactly
+        // what the tag exists to announce)
         let bytes = molt_core::checkpoint_canonical_bytes(&s1);
-        assert!(bytes.starts_with(b"molt-chain-checkpoint-v4\0"));
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v5\0"));
         // …and the pool is really covered: a summary whose relays were swapped
         // must not hash the same. Without this the tamper-evidence roster-v4
         // gives the genesis would vanish the moment a republic pruned.

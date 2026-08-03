@@ -205,7 +205,7 @@ normalen positionsgebundenen Signaturen über
 Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
 sinngemäß).
 
-## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v4`)
+## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v5`)
 
 Deterministische Byte-Folge, längenpräfixierte Felder (dasselbe Framing
 wie `roster_canonical_bytes` — Geschwister-Layout, eigener
@@ -236,7 +236,13 @@ Versions-Tag). Inhalt in fester Reihenfolge:
    ≤ `upto` applied Ids — Seed für den Double-Apply-Guard eines
    Suffix-Verifiers (§B.5). **JEDE** Id, auch die eines
    zusammengefassten (weggefallenen) Payloads.
-7. `upto`.
+7. **Working-Transport-Anker** (v5): `(member, nostr_pk)` je Sitz, den ein
+   `Restored`-Block neu verankert hat, nach Member sortiert. Aus demselben
+   Grund getragen wie der Relay-Pool — die Blöcke, die den Anker gesetzt
+   haben, fallen am Schnitt weg, und der Roster behält bauartbedingt den
+   GRÜNDUNGS-Anker (ein `Restored` darf den Identity-Key eines Sitzes nicht
+   bewegen, also reist der Anker NEBEN dem Roster). Siehe §B.6b.
+8. `upto`.
 
 Gleiche Chain ⇒ gleiche Bytes ⇒ gleicher Hash, auf jedem Node. Im Block
 steht NUR der Hash; der **Zustands-Blob reist außerhalb der Chain**
@@ -445,6 +451,27 @@ reason instead of "no relay accepted the frame".
 The two together are what make a pruned republic recoverable, and neither
 suffices alone: without the summary the blob grows without bound, and
 without the cap a single current logo can already be unpublishable.
+
+## B.6b Ein Schnitt darf keinen wiederhergestellten Sitz stranden lassen
+
+**Verifizierter Defekt, gefunden 2026-08-03 beim Bau von N4b 6d, gefixt in
+v5.** `CheckpointState.roster` entsteht durch `apply_membership`, und das
+lässt den `nostr_pk` eines Sitzes bewusst unangetastet: ein `Restored`-Block
+darf den verankerten Identity-Key nicht bewegen (sonst könnten m-of-n
+Überlebende einen Sitz kapern). Der neue Transport-Anker ist deshalb eine
+Projektion NEBEN dem Roster (`State::chain_anchors`).
+
+Der Block, der ihn setzt, fiel aber am Schnitt weg, und `chain_anchors` wurde
+nur aus dem überlebenden Suffix gefaltet. Folge:
+
+> Nach einer Kompaktierung war jedes Mitglied, das je wiederhergestellt
+> wurde, nur noch unter dem Schlüssel adressierbar, den es nicht mehr
+> besitzt — still.
+
+Im Normalbetrieb erreichbar: `AUTO_CHECKPOINT_MIN_LEN` ist 32. Die
+Zusammenfassung trägt die Anker jetzt selbst (Item 7), und ein geprunter
+Halter SEEDET `chain_anchors` daraus, bevor er das Suffix darüberfaltet.
+Keystone: `a_compaction_keeps_the_working_anchor_of_a_recovered_seat`.
 
 ## B.7 Grenzen (bewusst)
 

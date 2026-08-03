@@ -277,6 +277,17 @@ pub struct CheckpointState {
     /// is the double-apply guard, and a summarized-away payload must never
     /// become a re-appliable proposal.
     pub consumed_ids: Vec<u64>,
+    /// The **working transport anchors** at the cut: `(member, nostr_pk)` for
+    /// every seat a `Restored` block re-anchored, sorted by member.
+    ///
+    /// Carried for the same reason as [`Self::relays`]: the blocks that
+    /// re-anchored a seat are dropped at the cut, and [`Self::roster`] keeps
+    /// each seat's FOUNDING anchor by design (a `Restored` block may not move
+    /// a seat's identity key, so the anchor rides beside the roster rather
+    /// than inside it). Without this, a compaction makes every recovered
+    /// member addressable only at the key it no longer holds — silently.
+    #[serde(default)]
+    pub anchors: Vec<(MemberId, String)>,
     /// The last folded-in block height.
     pub upto: u64,
 }
@@ -318,7 +329,9 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v4` — v4 is
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v5` — v5
+/// carries the WORKING transport anchors, without which a cut strands every
+/// seat that had recovered; v4 is
 /// the SUMMARY rule ([`applied_lww_slot`]): item 5 carries the current state
 /// rather than the complete applied history, so the same chain hashes
 /// differently than it did under v3 and the tag has to say so; v3 adds
@@ -333,7 +346,7 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v4\0");
+    out.extend_from_slice(b"molt-chain-checkpoint-v5\0");
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -370,6 +383,13 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     out.extend_from_slice(&u64::try_from(s.consumed_ids.len()).unwrap_or(0).to_le_bytes());
     for id in &s.consumed_ids {
         out.extend_from_slice(&id.to_le_bytes());
+    }
+    // v5: the working transport anchors. Without them a cut silently strands
+    // every seat that had recovered (see the field's own doc).
+    out.extend_from_slice(&u64::try_from(s.anchors.len()).unwrap_or(0).to_le_bytes());
+    for (member, pk) in &s.anchors {
+        put_bytes(&mut out, member.as_bytes());
+        put_bytes(&mut out, pk.as_bytes());
     }
     out.extend_from_slice(&s.upto.to_le_bytes());
     out
@@ -460,6 +480,7 @@ mod tests {
                 vec![(7, json!({ "op": "set_name", "value": "Chess Club Reloaded" }))],
             )],
             consumed_ids: vec![3, 7],
+            anchors: vec![("petra".to_string(), "ab".repeat(32))],
             upto: 9,
         }
     }
@@ -473,12 +494,12 @@ mod tests {
     /// If you meant to change the layout, bump the tag in the SAME commit
     /// and move this pin with it (the CLAUDE.md versioned-layout rule).
     #[test]
-    fn checkpoint_canonical_bytes_are_pinned_at_v4() {
+    fn checkpoint_canonical_bytes_are_pinned_at_v5() {
         let s = pinned_state();
 
         // the independent recomputation
         let mut want = Vec::new();
-        want.extend_from_slice(b"molt-chain-checkpoint-v4\0");
+        want.extend_from_slice(b"molt-chain-checkpoint-v5\0");
         let put = |out: &mut Vec<u8>, b: &[u8]| {
             out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
             out.extend_from_slice(b);
@@ -509,6 +530,9 @@ mod tests {
         want.extend_from_slice(&2u64.to_le_bytes());
         want.extend_from_slice(&3u64.to_le_bytes());
         want.extend_from_slice(&7u64.to_le_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        put(&mut want, "ab".repeat(32).as_bytes());
         want.extend_from_slice(&9u64.to_le_bytes());
 
         assert_eq!(
@@ -523,7 +547,7 @@ mod tests {
     #[test]
     fn the_checkpoint_layout_carries_its_version() {
         assert!(checkpoint_canonical_bytes(&pinned_state())
-            .starts_with(b"molt-chain-checkpoint-v4\0"));
+            .starts_with(b"molt-chain-checkpoint-v5\0"));
     }
 
     /// **The summary rule, declared** (§B.6a). Organization's four state

@@ -1084,6 +1084,7 @@ mod tests {
             roster: ids,
             applied: Vec::new(),
             consumed_ids: Vec::new(),
+            anchors: Vec::new(),
             upto: 7,
         };
         let sealed = sealed_roster_from_blob(&blob);
