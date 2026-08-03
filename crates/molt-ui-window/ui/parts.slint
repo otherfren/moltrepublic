@@ -220,12 +220,15 @@ export component ViewRow inherits Rectangle {
     // the total the alert is part of (pending count) — "1/4" reads "my vote
     // is missing on 1 of 4 open decisions"
     in property <int> alert-total: 0;
+    // extra indent for a row nested one level deeper (the pending decisions
+    // under Organization → Pending); 0 = a normal view row
+    in property <length> indent: 0px;
     callback chosen();
     height: 30px;
     border-radius: Theme.win95 ? 0px : 6px;
     background: root.selected ? Theme.raised : (ta.has-hover ? Theme.panel-2 : transparent);
     HorizontalLayout {
-        padding-left: 26px;
+        padding-left: 26px + root.indent;
         padding-right: 10px;
         spacing: 8px;
         // fixed clip box: an oversized emoji glyph must never bleed into

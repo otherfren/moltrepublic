@@ -1060,6 +1060,19 @@ export component AppWindow inherits Window {
     // decisions are handled differently and get no panel.
     in property <bool> selected-channel-org: false;
     in property <ProposalRow> selected-decision;
+    // Which surface the NAV shows expanded — normally the selected one.
+    //
+    // An Organization decision's chat lives on the CHAT surface while the
+    // user navigated to it from Organization, so following `selected-surface`
+    // alone would collapse the section the click came from and hide the row
+    // that just started working. Hence the override — but only while the chat
+    // pane is actually on screen: the channel does NOT change when the user
+    // picks another surface, and without that second term an open decision
+    // chat would pin Organization expanded and leave the surface they just
+    // clicked collapsed instead.
+    property <string> nav-expanded: root.selected-channel-org && root.selected-surface == "chat"
+        ? "organization"
+        : root.selected-surface;
     callback select-channel(string);
     // new-topic affordance: a MODAL that asks for the name and nothing else.
     // It used to be a reveal row beside the compose field, which put two
@@ -1769,7 +1782,7 @@ export component AppWindow inherits Window {
                         spacing: 2px;
                         SurfaceRow {
                             s: s;
-                            selected: s.key == root.selected-surface;
+                            selected: s.key == root.nav-expanded;
                             compact: root.nav-collapsed;
                             // every surface is selectable again: Memory,
                             // Quests, Vault and Wallet open their badged
@@ -1780,7 +1793,7 @@ export component AppWindow inherits Window {
                                 root.select-surface(s.key);
                             }
                         }
-                        if s.key == root.selected-surface && !root.nav-collapsed: VerticalLayout {
+                        if s.key == root.nav-expanded && !root.nav-collapsed: VerticalLayout {
                             spacing: 1px;
                             for v in s.views: VerticalLayout {
                                 // Organization → Pending exists only while
@@ -1829,6 +1842,36 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                // …and Organization → Pending lists its open
+                                // decisions BELOW itself: one row each, going
+                                // straight into that decision's chat (which
+                                // the compact card above the log then heads).
+                                //
+                                // The section survives the click because the
+                                // nav follows `nav-expanded`, not the visible
+                                // pane — the chat surface owns that pane, and
+                                // collapsing Organization here would hide the
+                                // row the user just used.
+                                if s.key == "organization" && v.key == "pending"
+                                    && s.pending-count > 0: VerticalLayout {
+                                    spacing: 1px;
+                                    for p in s.pending: ViewRow {
+                                        label: p.text;
+                                        icon: "🗳";
+                                        // one level deeper than the view rows
+                                        // they hang under — these are the
+                                        // first sub-sub-items in this nav, so
+                                        // without it they read as siblings of
+                                        // Pending rather than its contents
+                                        indent: 14px;
+                                        selected: root.selected-channel == "patch:\{p.id}";
+                                        chosen => {
+                                            root.mv-draft = "";
+                                            root.select-view("chat", "today");
+                                            root.select-channel("patch:\{p.id}");
+                                        }
+                                    }
+                                }
                             }
                         }
                         // chat discussions (chat bus): the patch channels of
@@ -1836,7 +1879,7 @@ export component AppWindow inherits Window {
                         // per-channel unread pill; the section exists only
                         // while something is up for a vote. Selecting
                         // re-reads through the engine's channel filter.
-                        if s.key == "chat" && s.key == root.selected-surface && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
+                        if s.key == "chat" && s.key == root.nav-expanded && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
                             spacing: 1px;
                             HorizontalLayout {
                                 padding-left: 26px;
