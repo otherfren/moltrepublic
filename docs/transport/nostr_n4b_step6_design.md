@@ -99,25 +99,26 @@ or the smallest relay's NIP-11 cap) still cannot be served. That limit is
 lagging peer, not something this design introduces — but recovery makes it
 reachable by a user, so it must fail with a named reason, never silently.
 
-Recorded as the open item it is: bounding `applied` payload bytes (the
-`set_image` embedding) is the real fix and belongs with the image cap, not
-here.
+Recorded as the open item it was: bounding `applied` payload bytes (the
+`set_image` embedding) is the real fix and belonged with the image cap, not
+here. **Both halves landed 2026-08-03**: the derived payload cap
+(`6c8e4ce`) and the checkpoint summary rule (`1367b99`, checkpoint-v4), so
+the blob no longer accumulates every logo a republic ever had.
 
-### 3.3 The coordinator cannot re-key at all yet — found 2026-08-02
+### 3.3 The coordinator could not re-key at all — found 2026-08-02, FIXED 2026-08-03
 
-`coordinator_rekey` (`chain.rs:1537`) is **mesh-only**. It reaches the group
-through `restore_member_on_group` (`net.rs:530`), which reads
-`NetRuntime::real_crypto` — and a Nostr workspace has **no `NetRuntime`**.
-Its group MLS lives on `GroupNet` (`lib.rs:531`). So on a Nostr republic the
-whole function falls into its `None` arm and logs "no runtime MLS group to
-re-key (state-only)", which is not even true: there IS a group, in another
-field.
+`coordinator_rekey` was **mesh-only**. It reached the group through
+`restore_member_on_group`, which reads `NetRuntime::real_crypto` — and a
+Nostr workspace has **no `NetRuntime`**. Its group MLS lives on `GroupNet`.
+So on a Nostr republic the whole function fell into its `None` arm and logged
+"no runtime MLS group to re-key (state-only)", which was not even true: there
+IS a group, in another field.
 
-This is bigger than §8.8 step 6 records, and it is the reason step 6b lands
+This was bigger than §8.8 step 6 records, and it is the reason step 6b landed
 `serve_chain_anchor` without a caller: wiring it into the `else` of the queue
 branch would have been an **unreachable branch dressed as a feature** — the
-inert-code trap this project keeps meeting. The caller lands with the Nostr
-re-key (6c below).
+inert-code trap this project keeps meeting. That caller landed with the Nostr
+re-key (6c below), so neither is inert now.
 
 ## 3.4 Traps this will be walked into (multi-agent recon, 2026-08-02)
 
@@ -153,12 +154,14 @@ or a bug that only shows under load.
   satisfied by the RELAY re-serving old 445s. Use the forgetful
   `LocalRelay` + `MemoryDatabase`, as `nostr_delivery_guarantee.rs` does.
 
-**Separate pre-existing bug, found here and worth its own fix:** the outbox
-holds its cursor when a publish is refused (`group_runtime.rs:411`), and
+**Separate pre-existing bug, found here — FIXED 2026-08-03 (`6c8e4ce`):**
+the outbox holds its cursor when a publish is refused, and
 `RelayRuntime::publish` refuses anything over the smallest relay's NIP-11
-cap. So **one** oversized `Applied{set_image}` block wedges that node's
-entire outbox, not merely that block. Not caused by this design — but
-recovery walks straight into it on any republic with a logo.
+cap. So **one** oversized `Applied{set_image}` block wedged that node's
+entire outbox, not merely that block. The propose-time cap is now derived
+from the publish budget (`proposals.rs::payload_fits`), so an over-budget
+payload never enters the chain, and a locally refused publish is reported as
+permanent instead of being retried on a futile backoff.
 
 ## 4. Steps (one commit each, red test first)
 
@@ -226,6 +229,40 @@ already returns it — `project_one` folds the `Restored` block before
   else. Plus: both ends compute the same `CommitKey` over the production
   entry points (the N3 lesson — a keystone driving an API the product does
   not call pins nothing).
+
+#### 6c ✅ DONE 2026-08-03
+
+`chain.rs::nostr_rekey` (the MLS half, a free function so its rules are
+testable without a live runtime) + `State::coordinator_rekey_nostr` (the
+wiring) + `nostr_ritual::spawn_rekey_delivery` (the off-actor publish).
+`coordinator_rekey` routes on `group_net.is_some()`; the mesh `None` arm no
+longer has to lie about a group it cannot see. `serve_chain_anchor` has its
+caller, so 6b is no longer inert.
+
+Two decisions worth keeping:
+
+- **The commit does NOT ride the log as an `MlsCommit` envelope** (the mesh
+  arm records one). It is published directly, because the outbox picks its
+  own publish time and the whole point of the pinned stamp is that the
+  coordinator chooses it. Recording it too would publish the same commit
+  twice, at two different stamps — the divergence, self-inflicted.
+- **The Welcome is sent only if the commit landed.** The two failures are
+  not symmetric: a Welcome without its commit puts the rejoiner at an epoch
+  no survivor reaches (a split, with nothing to heal it), while a commit
+  without its Welcome leaves the seat unable to return — which the re-mint
+  failover already covers. So the recoverable failure is the one to prefer.
+  Relays store the commit, so one accepting relay makes it durable for a
+  survivor that was offline.
+
+**What this does NOT yet prove, stated rather than hidden.** The tests pin
+the rules — the commit seals under the epoch its recipients are still at
+(verified red without the fix), the stamp it is keyed with is the stamp it
+carries, the Welcome really readmits the seat. They do NOT drive a live
+Nostr republic through a whole recovery: that needs a rejoiner to observe,
+which is 6e, and a 2-of-3 founding harness (`nostr_recovery.rs` founds
+2-of-2, where a lost member can never reach threshold). The composition —
+dispatch, delivery, anchor, rejoin — is the capstone's job, and until it
+exists the `group_net.is_some()` branch is correct by inspection only.
 
 ### 6d — `NetRecoverSealed` carries the Nostr shape
 Mirror `NetJoinSealed`: `nostr_sk`, `relays`, `rotation_seed`, `kind`.

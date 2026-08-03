@@ -195,6 +195,78 @@ pub(crate) fn spawn_founder_inbox(
 /// wait, not a deadline on this side. It therefore holds only a WEAK sender:
 /// the loop must never keep a dropped engine's actor (writer thread,
 /// workspace flock) alive.
+/// How many times the re-key commit is offered to the relays before the
+/// recovery is declared failed. Small on purpose: this is the ONE frame in a
+/// recovery that nothing else recovers, and the alternative to a few retries
+/// is a republic split nobody is told about.
+const REKEY_PUBLISH_ATTEMPTS: u32 = 3;
+/// Wait between those attempts.
+const REKEY_PUBLISH_BACKOFF: Duration = Duration::from_secs(2);
+
+/// **Deliver a Nostr re-key** (N4b step 6c): the commit as a kind-445 at its
+/// PINNED carrier stamp, and then the gift-wrapped kind-444 Welcome to the
+/// returning seat's NEW anchor.
+///
+/// The order is load-bearing and so is the coupling:
+///
+/// - The **commit first**. It is what moves every survivor to the epoch the
+///   Welcome puts the rejoiner at. A frame that beats its commit is held and
+///   retried (N5.3c), so the order is a preference rather than a guarantee —
+///   but publishing the Welcome first would make that hold the normal path
+///   instead of the exception.
+/// - The **Welcome only if the commit landed**. The two failures are not
+///   symmetric. A Welcome without its commit puts the rejoiner at an epoch no
+///   survivor ever reaches — a split, with nothing in the product to heal it.
+///   A commit without its Welcome leaves the seat unable to return, which the
+///   re-mint failover already covers: the coordinator's next round supplies a
+///   fresh link. So the recoverable failure is the one to prefer.
+///
+/// One landed relay is enough to be durable: relays store the frame, so a
+/// survivor that was offline picks the commit up on its catch-up.
+pub(crate) fn spawn_rekey_delivery(
+    channel: GroupChannel,
+    net: RitualNet,
+    to_npub: String,
+    rekey: crate::chain::NostrRekey,
+    payload: molt_net::welcome::WelcomePayload,
+    member: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut published = false;
+        for attempt in 1..=REKEY_PUBLISH_ATTEMPTS {
+            match channel
+                .publish_frame_at(&rekey.prev_exporter, &rekey.commit, rekey.stamp)
+                .await
+            {
+                Ok((stamp, report)) => {
+                    tracing::info!(
+                        %member,
+                        stamp,
+                        relays = report.accepted.len(),
+                        "published the recovery re-key commit"
+                    );
+                    published = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(%member, attempt, error = %e, "the re-key commit did not publish");
+                    if attempt < REKEY_PUBLISH_ATTEMPTS {
+                        tokio::time::sleep(REKEY_PUBLISH_BACKOFF).await;
+                    }
+                }
+            }
+        }
+        if !published {
+            // the ONE thing that matters, and the action that follows from it
+            tracing::error!(%member, "the re-key commit reached no relay — re-mint the recovery link");
+            return;
+        }
+        if let Err(e) = net.send_welcome(&to_npub, &payload).await {
+            tracing::error!(%member, error = %e, "the recovery welcome did not publish — re-mint the recovery link");
+        }
+    })
+}
+
 pub(crate) fn spawn_recovery_inbox(
     net: RitualNet,
     member: String,

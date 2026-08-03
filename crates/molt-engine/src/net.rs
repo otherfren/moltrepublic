@@ -779,23 +779,33 @@ impl State {
     /// `None` when anything the runtime needs is absent — a Nostr workspace
     /// that cannot dial one of its own relays, or whose MLS group did not
     /// restore, must stay honestly silent rather than half-run.
-    pub(crate) fn build_group_net(&mut self, mls_blob: &[u8]) -> Option<crate::GroupNet> {
-        let active = self.active.as_ref()?;
-        let nostr = self.nostr.as_ref()?;
-        let dialer = self.dialer_for().ok()?;
-        // what the GROUP uses intersected with what THIS node may dial: the
-        // two are different questions, and publishing to a relay nobody else
-        // reads is the partition §10.15 is about
-        let verdicts = molt_core::relay::diagnose_invite_relays(
+    /// The relays this node may actually dial for the OPEN republic: what the
+    /// group ratified, intersected with this node's own confirmed pool.
+    ///
+    /// The two are different questions, and publishing to a relay nobody else
+    /// reads is the partition §10.15 is about. Empty = this node shares no
+    /// relay with its own republic, which every caller must treat as a named
+    /// failure rather than as silence.
+    pub(crate) fn dialable_group_relays(&self) -> Vec<String> {
+        let Some(nostr) = self.nostr.as_ref() else {
+            return Vec::new();
+        };
+        molt_core::relay::diagnose_invite_relays(
             &nostr.relays,
             &self.session.settings.relays,
             self.clearnet_session,
-        );
-        let relays: Vec<String> = verdicts
-            .iter()
-            .filter(|v| v.blocked.is_none())
-            .map(|v| v.url.clone())
-            .collect();
+        )
+        .iter()
+        .filter(|v| v.blocked.is_none())
+        .map(|v| v.url.clone())
+        .collect()
+    }
+
+    pub(crate) fn build_group_net(&mut self, mls_blob: &[u8]) -> Option<crate::GroupNet> {
+        let relays = self.dialable_group_relays();
+        let active = self.active.as_ref()?;
+        let nostr = self.nostr.as_ref()?;
+        let dialer = self.dialer_for().ok()?;
         if relays.is_empty() {
             tracing::warn!("no dialable relay for this republic — the group runtime stays down");
             return None;

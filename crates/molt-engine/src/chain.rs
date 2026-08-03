@@ -59,6 +59,61 @@ pub(crate) struct PendingRecovery {
     pub reply: String,
 }
 
+/// What a Nostr re-key produced — everything the wire needs, keyed at the
+/// stamp the commit was made with.
+pub(crate) struct NostrRekey {
+    /// The raw MLS commit. It ships RAW inside the 445, never wrapped in an
+    /// application ciphertext: a recipient needs it to REACH the new epoch.
+    pub commit: Vec<u8>,
+    /// The MLS Welcome that puts the returning seat back in the group.
+    pub welcome: Vec<u8>,
+    /// The exporter secret of the epoch this node just **left** — the one its
+    /// recipients are still at.
+    ///
+    /// A receiver's exporter ring reaches BACKWARD only, so a commit sealed
+    /// under the new epoch is opaque to exactly the members it exists to move
+    /// forward (`9900f36`). The queue path has no outer layer, which is why
+    /// this only bites on 445.
+    pub prev_exporter: [u8; 32],
+    /// The carrier stamp the commit was keyed with, and the one it MUST be
+    /// published at.
+    ///
+    /// `CommitKey(created_at, sha256(commit))` breaks a concurrent same-epoch
+    /// race, and the rule (`molt-net/CLAUDE.md`) is that the stamp comes from
+    /// the same source on both sides. The 445 receive side reads the real
+    /// `created_at` off the wire, so a sender that let the outbox pick the
+    /// publish time would key its own commit at one value while every
+    /// receiver keys it at another — the two ends then pick different winners
+    /// and diverge permanently under ONE epoch number, silently.
+    pub stamp: u64,
+}
+
+/// Re-key a Nostr republic's group: replace `member`'s leaf, at a carrier
+/// stamp the caller pinned **before** the commit was made.
+///
+/// The mesh twin is `NetRuntime::restore_member_on_group`, which reaches the
+/// group through `real_crypto` — a Nostr republic has no `NetRuntime` at all,
+/// its group MLS lives on `GroupNet`.
+pub(crate) fn nostr_rekey(
+    mls: &std::sync::Mutex<molt_net::MlsMember>,
+    member: &str,
+    key_package: &[u8],
+    stamp: u64,
+) -> Result<NostrRekey, String> {
+    let mut group = mls
+        .lock()
+        .map_err(|_| "the group lock is poisoned".to_string())?;
+    let (commit, welcome) = group
+        .restore_member(member, key_package, stamp)
+        .map_err(|e| e.to_string())?;
+    // read AFTER the commit: the ring's newest entry is now the epoch the
+    // commit was made from, which is where its recipients still are
+    let prev_exporter = group.exporter_ring().first().copied().ok_or_else(|| {
+        "the re-key left no previous exporter — the commit would seal opaque".to_string()
+    })?;
+    Ok(NostrRekey { commit, welcome, prev_exporter, stamp })
+}
+
 /// The verified head of a chain plus the roster it establishes: everything a
 /// caller needs to check the *next* block or to trust a synced chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1529,6 +1584,11 @@ impl State {
     /// returning member's reply queue. Finally the rejoin is announced in the
     /// group chat. Consumes the pending recovery. A node with no runtime group
     /// logs and does nothing.
+    ///
+    /// A **Nostr** republic takes the other arm entirely
+    /// ([`State::coordinator_rekey_nostr`]): it has no `NetRuntime`, its group
+    /// MLS lives on `GroupNet`, its commit rides a 445 at a pinned stamp and
+    /// its Welcome is a gift wrap rather than a reply queue.
     fn coordinator_rekey(&mut self, member: &str) {
         let Some(pending) = self.pending_recovery.remove(member) else {
             return;
@@ -1537,6 +1597,10 @@ impl State {
             tracing::warn!(%member, "recovery KeyPackage is not valid hex");
             return;
         };
+        if self.group_net.is_some() {
+            self.coordinator_rekey_nostr(member, &kp);
+            return;
+        }
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
             Some(Ok((commit, welcome))) => {
                 let me = self.member();
@@ -1598,10 +1662,115 @@ impl State {
             // debugger looking for a missing group instead of a missing arm.
             None => tracing::warn!(
                 %member,
-                group = if self.group_net.is_some() { "nostr" } else { "none" },
+                group = "none",
                 "no re-key path for this workspace — the returning seat gets no welcome"
             ),
         }
+    }
+
+    /// **The Nostr coordinator's re-key** (N4b step 6c).
+    ///
+    /// Everything the mesh arm does through a `NetRuntime` and a reply queue,
+    /// done through `GroupNet` and the relays instead:
+    ///
+    /// 1. pin the carrier stamp BEFORE committing, and key the commit with it
+    ///    (choosing it afterwards is too late — the commit is already made);
+    /// 2. publish the commit as a 445 at exactly that stamp, sealed under the
+    ///    epoch this node just left;
+    /// 3. gift-wrap the 444 Welcome to the seat's **new** anchor —
+    ///    `working_nostr_pk` already returns it, because `project_one` folds
+    ///    the `Restored` block before `after_block_applied` runs;
+    /// 4. offer the chain ANCHOR (the smallest prefix that verifies), not the
+    ///    chain: a pruned holder's whole blob does not fit a gift wrap, and
+    ///    pruned is the normal state.
+    ///
+    /// Steps 2 and 3 are off the actor; 1 and 4 are on it. Every failure is
+    /// named — a recovery that quietly does nothing leaves a member locked out
+    /// with no way to find out why.
+    fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) {
+        // the stamp is chosen HERE, before anything is committed, and travels
+        // unchanged into both `restore_member` and `publish_frame_at`
+        let stamp = molt_storage::now_secs();
+        let Some(group) = self.group_net.as_ref() else {
+            return;
+        };
+        let rekey = match nostr_rekey(&group.mls, member, key_package, stamp) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(%member, error = %e, "the Nostr re-key failed — the returning seat gets no welcome");
+                return;
+            }
+        };
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            tracing::error!(%member, "no dialable relay for this republic — the re-key cannot be delivered");
+            return;
+        }
+        let Some(nostr) = self.nostr.as_ref() else {
+            return;
+        };
+        let Ok(dialer) = self.dialer_for() else {
+            tracing::error!(%member, "no usable dial route — the re-key cannot be delivered");
+            return;
+        };
+        let net = match molt_net::ritual_net::RitualNet::new(
+            dialer.clone(),
+            relays.clone(),
+            &nostr.sk,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(%member, error = %e, "recovery transport keys — the re-key cannot be delivered");
+                return;
+            }
+        };
+        let channel =
+            molt_net::ritual_net::GroupChannel::new(dialer, relays, nostr.rotation_seed);
+        // the payload carries what the GROUP ratified, not this node's own
+        // intersection: the rejoiner gates that list through its own pool,
+        // and handing it a narrowed one would silently shrink the republic
+        let payload = molt_net::welcome::WelcomePayload {
+            welcome: rekey.welcome.clone(),
+            rotation_seed: nostr.rotation_seed,
+            relays: nostr
+                .relays
+                .iter()
+                .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
+                .cloned()
+                .collect(),
+        };
+        // the NEW anchor: the `Restored` block that triggered this re-key has
+        // already been folded, so this is the key the seat just proved it holds
+        let to = self.working_nostr_pk(member);
+        if to.is_empty() {
+            tracing::error!(%member, "the restored seat carries no transport anchor — nothing to address the welcome to");
+            return;
+        }
+        crate::nostr_ritual::spawn_rekey_delivery(
+            channel,
+            net,
+            to,
+            rekey,
+            payload,
+            member.to_string(),
+        );
+        // the rejoiner's trust root, over the same 445 channel it just joined
+        self.serve_chain_anchor();
+        // …and the same quiet system line the mesh arm posts. It is encrypted
+        // at the NEW epoch, so it can outrun the commit that is still being
+        // published — a survivor holds it and retries after the merge
+        // (N5.3c), which is exactly what that hold exists for.
+        let me = self.member();
+        if let Err(e) = self.post_message_with_kind(
+            me,
+            format!("🔑 {member} rejoined the republic after recovery"),
+            None,
+            molt_core::ChannelRef::Group,
+            molt_core::ChatKind::System,
+        ) {
+            tracing::warn!(error = %e, "could not post the rejoin notice");
+        }
+        tracing::info!(%member, stamp, "re-keyed the group on Nostr and offered the chain anchor");
     }
 
     /// Re-sign this node's standing approvals at the new head+1: an approval
@@ -4576,6 +4745,128 @@ mod tests {
             verify_chain(&b.blocks).is_err(),
             "a Restored block with a non-anchored identity key must be rejected"
         );
+    }
+
+    /// A three-member MLS group (`coord`, `walter`, `dora`) — the shape a
+    /// coordinator re-keys from.
+    fn mls_trio() -> (molt_net::MlsMember, molt_net::MlsMember, molt_net::MlsMember) {
+        let key = |n: u8| SigningKey::from_bytes(&[n; 32]);
+        let mut coord = molt_net::MlsMember::new(&key(1), "coord").expect("coord");
+        let walter = molt_net::MlsMember::new(&key(2), "walter").expect("walter");
+        let dora = molt_net::MlsMember::new(&key(3), "dora").expect("dora");
+        coord.create_group().expect("create");
+        let welcome = coord
+            .add_members(&[
+                walter.key_package().expect("walter kp"),
+                dora.key_package().expect("dora kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let (mut walter, mut dora) = (walter, dora);
+        walter.join_from_welcome(&welcome).expect("walter joins");
+        dora.join_from_welcome(&welcome).expect("dora joins");
+        (coord, walter, dora)
+    }
+
+    /// **The Nostr re-key seals under the epoch its recipients are still at**
+    /// (N4b step 6c, the `9900f36` lesson re-pinned at the production entry
+    /// point).
+    ///
+    /// A receiver's exporter ring reaches BACKWARD only. So a commit whose
+    /// outer layer is sealed at the epoch the coordinator just moved TO is
+    /// opaque to exactly the members it exists to move forward — and the
+    /// whole recovery is undeliverable, silently, because an opaque frame
+    /// looks like relay spam. The negative half is the test: the NEW epoch's
+    /// exporter must NOT open it.
+    #[test]
+    fn a_nostr_rekey_commit_opens_for_the_survivors_it_is_meant_for() {
+        // dora is the SURVIVOR here — walter is the seat being restored, and
+        // its old leaf is evicted by the very commit under test
+        let (coord, _walter, survivor) = mls_trio();
+        // walter lost everything and re-derives the SAME identity
+        let returning =
+            molt_net::MlsMember::new(&SigningKey::from_bytes(&[2u8; 32]), "walter").expect("kp");
+        let kp = returning.key_package().expect("key package");
+
+        let survivor_secrets = {
+            let mut v = vec![survivor.exporter_secret().expect("survivor exporter")];
+            v.extend_from_slice(survivor.exporter_ring());
+            v
+        };
+        let mls = std::sync::Mutex::new(coord);
+        let rekey = nostr_rekey(&mls, "walter", &kp, 1_759_000_000).expect("the re-key runs");
+
+        // the commit, sealed the way the delivery task seals it…
+        let sealed = molt_net::envelope::seal_outer(&rekey.prev_exporter, &rekey.commit)
+            .expect("seal the commit");
+        assert!(
+            molt_net::envelope::open_outer(&survivor_secrets, &sealed).is_ok(),
+            "a survivor that has NOT yet merged the commit cannot open it — the whole \
+             re-key is undeliverable to exactly the members it is for"
+        );
+        // …and the counter-case: the epoch the coordinator moved TO must not
+        // be what it sealed under, or the assertion above passes by accident
+        let new_epoch = mls.lock().expect("lock").exporter_secret().expect("new exporter");
+        assert_ne!(
+            new_epoch, rekey.prev_exporter,
+            "the commit was sealed at the coordinator's NEW epoch — backward-only \
+             exporter rings make that opaque to every survivor"
+        );
+    }
+
+    /// The stamp the commit is KEYED with is the stamp it is carried at.
+    ///
+    /// `CommitKey(created_at, digest)` breaks a concurrent same-epoch race,
+    /// and both ends must derive it from the same value — the 445 receive side
+    /// reads the real `created_at` off the wire. A coordinator that let the
+    /// outbox pick the publish time would key its own commit at one value
+    /// while every receiver keys it at another, and the two would pick
+    /// different winners under ONE epoch number, silently.
+    #[test]
+    fn the_rekey_carries_the_stamp_it_was_keyed_with() {
+        let (coord, _survivor, _dora) = mls_trio();
+        let returning =
+            molt_net::MlsMember::new(&SigningKey::from_bytes(&[2u8; 32]), "walter").expect("kp");
+        let kp = returning.key_package().expect("key package");
+
+        let pinned = 1_759_123_456;
+        let mls = std::sync::Mutex::new(coord);
+        let rekey = nostr_rekey(&mls, "walter", &kp, pinned).expect("the re-key runs");
+        assert_eq!(
+            rekey.stamp, pinned,
+            "the re-key must carry its own pinned stamp — the delivery has no other \
+             source for it, and re-reading a clock is exactly the divergence"
+        );
+    }
+
+    /// The Welcome really admits the returning seat: it is the whole point of
+    /// the re-key, and a commit that produced an unusable Welcome would still
+    /// satisfy both tests above.
+    #[test]
+    fn the_rekey_welcome_puts_the_returning_seat_back_in_the_group() {
+        let (coord, _walter, mut survivor) = mls_trio();
+        let mut returning =
+            molt_net::MlsMember::new(&SigningKey::from_bytes(&[2u8; 32]), "walter").expect("kp");
+        let kp = returning.key_package().expect("key package");
+
+        let mls = std::sync::Mutex::new(coord);
+        let rekey = nostr_rekey(&mls, "walter", &kp, 1_759_000_000).expect("the re-key runs");
+
+        // the survivor merges the commit and reaches the new epoch
+        match survivor.decrypt(&rekey.commit).expect("survivor processes the commit") {
+            molt_net::mls::MlsIncoming::Commit => {}
+            other => panic!("expected a commit, got {other:?}"),
+        }
+        returning.join_from_welcome(&rekey.welcome).expect("the seat rejoins");
+        // …and the two can now talk, which is what "recovered" means
+        let ct = returning.encrypt(b"back").expect("encrypt");
+        match survivor.decrypt(&ct).expect("survivor reads the rejoiner") {
+            molt_net::mls::MlsIncoming::Application { from, plaintext } => {
+                assert_eq!(from, "walter");
+                assert_eq!(plaintext, b"back");
+            }
+            other => panic!("expected an application message, got {other:?}"),
+        }
     }
 
     /// **Re-mint failover, engine level: a survivor (or a restarted, amnesiac
