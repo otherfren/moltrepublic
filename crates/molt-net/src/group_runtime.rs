@@ -326,33 +326,69 @@ async fn ack_loop(
     }
 }
 
+/// Why a frame did not go out.
+#[derive(Debug)]
+enum PublishStall {
+    /// Every attempt failed, but the cause can clear by itself — a relay is
+    /// down, a dial timed out, the pool is momentarily empty. Retrying is
+    /// the right answer, and the outbox holds its cursor meanwhile.
+    Transient,
+    /// The frame can **never** be published as it stands: it was refused
+    /// locally, before any relay was contacted, by a check whose verdict does
+    /// not depend on anything outside this process. Retrying is futile by
+    /// construction, so the honest move is to report the real reason at once.
+    Permanent(String),
+    /// The runtime was told to stop.
+    Stopped,
+}
+
+/// Is this refusal one that retrying cannot change?
+///
+/// [`NetError::Framing`] is documented as "always a local bug, never a remote
+/// condition" — the over-budget publish gate raises it, and so does a
+/// malformed `h` tag. [`NetError::Crypto`] (sealing, signing) is local for
+/// the same reason. Everything else describes the world outside this process
+/// and may well look different in a second.
+fn permanent_refusal(e: &crate::NetError) -> Option<String> {
+    match e {
+        crate::NetError::Framing(_) | crate::NetError::Crypto(_) => Some(e.to_string()),
+        _ => None,
+    }
+}
+
 /// Publish one framed envelope, retrying a relay-side refusal on a backoff.
-/// `None` = the runtime was told to stop, or every attempt failed.
 async fn publish_with_backoff(
     channel: &GroupChannel,
     frame: &crate::supervisor::GroupFrame,
     cfg: &GroupNetConfig,
     stop: &Notify,
-) -> Option<()> {
+) -> Result<(), PublishStall> {
     let mut delay = cfg.retry_base;
     for _ in 0..PUBLISH_ATTEMPTS {
         // the SAME bytes across relay retries inside one attempt chain: a relay
         // NAK is not a peer rejection, and re-encrypting would burn a ratchet
         // generation for nothing. A REWIND re-frames instead (N5.3).
         match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
-            Ok((_stamp, report)) if !report.accepted.is_empty() => return Some(()),
+            Ok((_stamp, report)) if !report.accepted.is_empty() => return Ok(()),
             Ok((_stamp, _report)) => {
                 tracing::warn!("no relay accepted a group frame — retrying");
             }
-            Err(e) => tracing::warn!(error = %e, "publishing a group frame failed"),
+            Err(e) => {
+                if let Some(why) = permanent_refusal(&e) {
+                    // no backoff: this answer is the same in a second and in
+                    // an hour, and the delay only postpones the diagnosis
+                    return Err(PublishStall::Permanent(why));
+                }
+                tracing::warn!(error = %e, "publishing a group frame failed");
+            }
         }
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
-            () = stop.notified() => return None,
+            () = stop.notified() => return Err(PublishStall::Stopped),
         }
         delay = (delay * 2).min(cfg.retry_cap);
     }
-    None
+    Err(PublishStall::Transient)
 }
 
 /// Read the log from the broadcast cursor and publish this node's own events.
@@ -406,15 +442,33 @@ async fn outbox_loop<L, S, K>(
                 published_through = env.seq;
                 continue;
             };
-            if publish_with_backoff(&channel, &frame, &cfg, &stop).await.is_some() {
-                published_through = env.seq;
-            } else {
-                // hold the cursor exactly here: nothing in N5.2 recovers a
-                // skipped envelope, so advancing past an unpublished one would
-                // lose it permanently
-                sink.send_failed(&cfg.member, "no relay accepted the frame").await;
-                stalled_since = None;
-                break;
+            match publish_with_backoff(&channel, &frame, &cfg, &stop).await {
+                Ok(()) => published_through = env.seq,
+                // hold the cursor exactly here in EVERY failure case: nothing
+                // recovers a skipped envelope, so advancing past an
+                // unpublished one would lose it permanently. What differs is
+                // only what the operator is told.
+                Err(stall) => {
+                    let reason = match stall {
+                        // a wedge, not an outage: the node writes nothing more
+                        // until this envelope can go out, across restarts.
+                        // Loud, and naming the real cause — the propose-time
+                        // size gate (`molt-engine/proposals.rs`) is what keeps
+                        // this unreachable in the first place
+                        PublishStall::Permanent(why) => {
+                            tracing::error!(
+                                seq = env.seq,
+                                reason = %why,
+                                "a group frame can never be published — the outbox holds here"
+                            );
+                            why
+                        }
+                        _ => "no relay accepted the frame".to_string(),
+                    };
+                    sink.send_failed(&cfg.member, &reason).await;
+                    stalled_since = None;
+                    break;
+                }
             }
         }
         if published_through > start {
@@ -793,6 +847,74 @@ mod tests {
 
     fn cfg() -> GroupNetConfig {
         GroupNetConfig::fast("walter".into(), vec!["petra".into(), "zoe".into()])
+    }
+
+    /// **A publish that can never succeed is not retried, and says so.**
+    ///
+    /// `RelayRuntime::publish` refuses an over-budget event LOCALLY, before
+    /// any relay is contacted — the verdict is deterministic, so the outbox's
+    /// three attempts and their backoff buy nothing but delay before the same
+    /// answer. The reason mattered more than the delay: a permanent local
+    /// refusal reported as "no relay accepted the frame" sends an operator
+    /// hunting for a relay outage that does not exist.
+    ///
+    /// The relay URL here is never dialed — the size gate fires first — which
+    /// is exactly the property under test.
+    ///
+    /// Time is PAUSED, so the elapsed reading counts backoff sleeps and
+    /// nothing else. Wall-clock would measure the real CPU cost of sealing a
+    /// 256 KiB frame in a debug build (~90 ms) and drown the signal.
+    #[tokio::test(start_paused = true)]
+    async fn a_locally_refused_frame_is_not_retried() {
+        let channel = crate::ritual_net::GroupChannel::new(
+            crate::dial::Dialer::Direct,
+            vec!["ws://127.0.0.1:1".to_string()],
+            [7u8; 32],
+        );
+        let cfg = cfg();
+        // comfortably past DEFAULT_SIZE_BUDGET once base64 has had its way
+        let frame = crate::supervisor::GroupFrame {
+            ciphertext: vec![0x5au8; 256 * 1024],
+            exporter: [3u8; 32],
+        };
+        let stop = Notify::new();
+
+        let started = tokio::time::Instant::now();
+        let outcome = publish_with_backoff(&channel, &frame, &cfg, &stop).await;
+        let elapsed = started.elapsed();
+
+        let Err(PublishStall::Permanent(why)) = outcome else {
+            panic!("an over-budget frame must be a PERMANENT refusal, got {outcome:?}");
+        };
+        assert!(
+            why.contains("exceeds"),
+            "the reason must name the actual cause, not a relay condition: {why}"
+        );
+        assert!(
+            elapsed < cfg.retry_base,
+            "the refusal took {elapsed:?} — it was retried on a backoff that cannot \
+             change a locally deterministic verdict"
+        );
+    }
+
+    /// A relay that is merely unreachable is the opposite case and must keep
+    /// its retries: that verdict CAN change on its own.
+    #[tokio::test]
+    async fn an_empty_pool_stays_a_transient_stall() {
+        let channel = crate::ritual_net::GroupChannel::new(
+            crate::dial::Dialer::Direct,
+            Vec::new(),
+            [7u8; 32],
+        );
+        let frame = crate::supervisor::GroupFrame {
+            ciphertext: vec![0u8; 32],
+            exporter: [3u8; 32],
+        };
+        let outcome = publish_with_backoff(&channel, &frame, &cfg(), &Notify::new()).await;
+        assert!(
+            matches!(outcome, Err(PublishStall::Transient)),
+            "an empty pool can refill — it must not be classed permanent: {outcome:?}"
+        );
     }
 
     /// **A frame that arrives ahead of its commit is held, not dropped.**

@@ -46,10 +46,117 @@ pub(crate) fn parse_retention_days(value: &str) -> Option<u64> {
     (1..=365).contains(&days).then_some(days)
 }
 
-/// The hard cap on a republic image (decoded bytes). The bytes ride the
-/// proposal payload — sign-what-you-see: every member votes on the actual
-/// image — so the payload must stay a small gossip frame, not a file drop.
-pub(crate) const ORG_IMAGE_MAX_BYTES: usize = 256 * 1024;
+/// **What a proposal may cost on the wire — derived, never chosen.**
+///
+/// An applied proposal travels as a `Committed` block inside ONE kind-445
+/// frame, and `RelayRuntime::publish` refuses an over-budget frame *locally
+/// and deterministically*, before any relay is contacted. The outbox then
+/// holds its cursor at that envelope on purpose — nothing recovers a skipped
+/// one — so a payload that cannot be framed inside the budget wedges
+/// everything the node writes after it, across restarts.
+///
+/// The gate therefore belongs HERE, at propose time, where a human can still
+/// pick a smaller image or a shorter charter.
+///
+/// `DEFAULT_SIZE_BUDGET` rather than a probed pool value on purpose: every
+/// member must reach the SAME verdict on the same proposal, and a per-node
+/// probe would make one node's proposal another node's silent refusal. When
+/// pool probing lands (`with_size_budget` has no production caller yet), a
+/// SMALLER probed budget belongs here as a second, node-local refusal — not
+/// as a replacement for this shared one.
+fn transport_plaintext_ceiling() -> usize {
+    molt_net::envelope::max_plaintext_for(molt_net::relay_runtime::DEFAULT_SIZE_BUDGET)
+}
+
+/// The plaintext an applied `payload` costs, in the WORST case this republic
+/// can produce: the highest sequence numbers, and an attestation from every
+/// seat. `n` and not the threshold `m` because a block may carry more than
+/// `m` signatures, and the seat count is fixed at founding — so this is the
+/// honest bound, not a pessimistic one.
+pub(crate) fn applied_block_plaintext_len(
+    surface: Surface,
+    payload: &Value,
+    roster: &[molt_core::MemberId],
+) -> usize {
+    let block = molt_core::ChainBlock {
+        height: u64::MAX,
+        prev: "f".repeat(64),
+        change: molt_core::chain::ChainChange::Applied {
+            proposal_id: u64::MAX,
+            surface,
+            payload: payload.clone(),
+        },
+        sigs: roster
+            .iter()
+            .map(|m| molt_core::RosterAttestation {
+                member: m.clone(),
+                sig: "f".repeat(128),
+            })
+            .collect(),
+    };
+    let by = roster.iter().max_by_key(|m| m.len()).cloned().unwrap_or_default();
+    let env = molt_core::EventEnvelope {
+        seq: u64::MAX,
+        prev_seq: u64::MAX,
+        ts: u64::MAX,
+        by,
+        body: WorkspaceEvent::Committed(block),
+    };
+    // a payload that will not even serialize cannot be published either
+    serde_json::to_vec(&env).map_or(usize::MAX, |v| v.len())
+}
+
+/// Can this payload ever become a publishable block? The shared verdict —
+/// the propose path refuses on it, and the wire guard drops on it.
+pub(crate) fn payload_fits(
+    surface: Surface,
+    payload: &Value,
+    roster: &[molt_core::MemberId],
+) -> bool {
+    applied_block_plaintext_len(surface, payload, roster) <= transport_plaintext_ceiling()
+}
+
+/// How many DECODED image bytes still fit beside the rest of `payload` —
+/// what the refusal names, so "too large" arrives with the number to aim at.
+fn image_headroom(
+    surface: Surface,
+    payload: &Value,
+    roster: &[molt_core::MemberId],
+) -> usize {
+    let mut bare = payload.clone();
+    if let Some(obj) = bare.as_object_mut() {
+        obj.insert("bytes_b64".into(), Value::String(String::new()));
+    }
+    let base = applied_block_plaintext_len(surface, &bare, roster);
+    // what is left is base64 capacity: 4 encoded bytes carry 3 decoded ones
+    transport_plaintext_ceiling().saturating_sub(base) / 4 * 3
+}
+
+/// Refuse a proposal the transport could never carry. Names the ONE thing
+/// the human can change — for an image proposal that is the image, for
+/// anything else the overshoot.
+fn validate_payload_fits(
+    surface: Surface,
+    payload: &Value,
+    roster: &[molt_core::MemberId],
+) -> Result<(), MoltError> {
+    if payload_fits(surface, payload, roster) {
+        return Ok(());
+    }
+    if let Some(bytes) = image_bytes(payload) {
+        return Err(MoltError::BadPayload(format!(
+            "the image is {} KiB — this republic's relays carry {} KiB",
+            bytes.len() / 1024,
+            image_headroom(surface, payload, roster) / 1024
+        )));
+    }
+    let over = applied_block_plaintext_len(surface, payload, roster)
+        .saturating_sub(transport_plaintext_ceiling());
+    Err(MoltError::BadPayload(format!(
+        "the proposal is {} KiB over what this republic's relays carry",
+        over.div_ceil(1024)
+    )))
+}
 
 /// The logo file extension for a proposed image: taken from the display
 /// value's extension (lowercased, alphanumeric, short), "png" otherwise —
@@ -166,19 +273,14 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
             ))
         }
         // an image proposal must carry the actual bytes (sign-what-you-see:
-        // members vote on the image, not on a path only the proposer has)
+        // members vote on the image, not on a path only the proposer has).
+        // Its SIZE is judged by `validate_payload_fits`, against the
+        // transport budget — there is no second, independently chosen cap.
         "set_image" => match image_bytes(payload) {
             None => Err(MoltError::BadPayload(
                 "a set_image proposal must embed the image (base64 `bytes_b64`)".into(),
             )),
-            Some(bytes) if bytes.len() > ORG_IMAGE_MAX_BYTES => Err(MoltError::BadPayload(
-                format!(
-                    "the image is too large ({} KiB) — the limit is {} KiB",
-                    bytes.len() / 1024,
-                    ORG_IMAGE_MAX_BYTES / 1024
-                ),
-            )),
-            // WP3: within the cap, the bytes must also decode as a picture
+            // WP3: the bytes must also decode as a picture
             Some(bytes) => image_decodable(&bytes),
         },
         _ => Ok(()),
@@ -200,6 +302,7 @@ impl State {
             ));
         }
         validate_org_payload(surface, &payload)?;
+        validate_payload_fits(surface, &payload, &self.roster())?;
         let me = self.member();
         let id = ProposalId(self.next_id);
         let env = self.make_env(
@@ -966,5 +1069,153 @@ impl State {
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
         }
+    }
+}
+
+#[cfg(test)]
+mod size_gate_tests {
+    use super::*;
+    use base64::Engine as _;
+    use serde_json::json;
+
+    fn roster() -> Vec<molt_core::MemberId> {
+        ["walter", "petra", "hannelore-von-und-zu"]
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// A decodable image of exactly `len` bytes: a 2x2 BMP header padded out.
+    /// The sniff reads only the header, so the padding rides free — which is
+    /// what makes an arbitrary SIZE testable without shipping a fixture.
+    fn padded_bmp(len: usize) -> Vec<u8> {
+        let mut b = crate::tests::tiny_bmp_header(2, 2);
+        b.resize(len.max(b.len()), 0x00);
+        b
+    }
+
+    fn image_payload(bytes: &[u8]) -> Value {
+        json!({
+            "op": "set_image",
+            "title": "t",
+            "value": "logo.png",
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    /// **The keystone: the gate and the transport agree.**
+    ///
+    /// The largest payload the propose path accepts must frame inside the
+    /// budget `RelayRuntime::publish` enforces — measured through the same
+    /// cost model `molt-net/tests/group_frame_budget.rs` pins against the
+    /// real pipeline. This is the assertion whose absence let a 256 KiB cap
+    /// sit in front of a 128 KiB transport for as long as it did.
+    #[test]
+    fn the_largest_accepted_payload_frames_inside_the_transport_budget() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &image_payload(&[]), &roster);
+        let payload = image_payload(&padded_bmp(headroom));
+
+        assert!(
+            payload_fits(Surface::Organization, &payload, &roster),
+            "the advertised headroom of {headroom} B is not itself accepted"
+        );
+        let plaintext = applied_block_plaintext_len(Surface::Organization, &payload, &roster);
+        let cost = u64::try_from(molt_net::envelope::frame_cost(plaintext)).expect("cost fits");
+        assert!(
+            cost <= molt_net::relay_runtime::DEFAULT_SIZE_BUDGET,
+            "a payload at the accepted ceiling frames to {cost} B, over the \
+             {} B publish budget — every proposal at the cap would wedge the outbox",
+            molt_net::relay_runtime::DEFAULT_SIZE_BUDGET
+        );
+    }
+
+    /// …and the headroom is the REAL edge, not a number with slack behind it:
+    /// three more decoded bytes are one base64 quantum too many.
+    #[test]
+    fn one_quantum_above_the_headroom_is_refused() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &image_payload(&[]), &roster);
+        let payload = image_payload(&padded_bmp(headroom + 3));
+        assert!(
+            !payload_fits(Surface::Organization, &payload, &roster),
+            "the headroom leaves slack, so it is not the derived edge"
+        );
+    }
+
+    /// The refusal names the number to aim at, and names it in the unit the
+    /// human picked the file in.
+    #[test]
+    fn the_refusal_names_the_size_that_would_fit() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &image_payload(&[]), &roster);
+        let payload = image_payload(&padded_bmp(headroom * 2));
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+            .expect_err("an oversized image is refused");
+        let MoltError::BadPayload(msg) = err else {
+            panic!("expected BadPayload");
+        };
+        assert!(
+            msg.contains(&format!("{} KiB", headroom / 1024)),
+            "the refusal does not say what fits: {msg}"
+        );
+    }
+
+    /// **The gate is not about images.** A charter long enough to blow the
+    /// same budget is refused by the same rule, with a message that does not
+    /// mislead the reader into looking for a picture.
+    #[test]
+    fn an_over_long_charter_is_refused_by_the_same_rule() {
+        let roster = roster();
+        let payload = json!({
+            "op": "set_charter",
+            "value": "x".repeat(transport_plaintext_ceiling() + 1),
+        });
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+            .expect_err("an over-long charter is refused");
+        let MoltError::BadPayload(msg) = err else {
+            panic!("expected BadPayload");
+        };
+        assert!(
+            !msg.contains("image"),
+            "a charter refusal must not send the reader hunting for an image: {msg}"
+        );
+    }
+
+    /// The regression this whole change exists for: the accepted ceiling is
+    /// FAR below the 256 KiB that used to be allowed, and still large enough
+    /// for a real logo — so the answer was "derive the cap", not "images
+    /// cannot ride the chain".
+    #[test]
+    fn the_derived_ceiling_replaces_the_chosen_one() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &image_payload(&[]), &roster);
+        eprintln!("MEASURED image headroom: {} KiB", headroom / 1024);
+        assert!(
+            headroom < 256 * 1024 / 2,
+            "the derived headroom {headroom} B is not meaningfully below the 256 KiB \
+             that was there before — nothing was reconciled"
+        );
+        assert!(
+            headroom >= 32 * 1024,
+            "only {headroom} B fits — too small for a logo; the answer would have to \
+             be structural (a hash in the block, bytes elsewhere)"
+        );
+    }
+
+    /// A bigger republic pays for its own seats: every seat's attestation
+    /// rides the block, so the headroom shrinks as `n` grows. It must shrink
+    /// — a ceiling blind to the roster is the same class of mistake again.
+    #[test]
+    fn a_larger_roster_leaves_less_room() {
+        let small = image_headroom(Surface::Organization, &image_payload(&[]), &roster());
+        let big: Vec<molt_core::MemberId> =
+            (0..50).map(|i| format!("member-number-{i:03}")).collect();
+        let large = image_headroom(Surface::Organization, &image_payload(&[]), &big);
+        assert!(
+            large < small,
+            "50 seats ({large} B) left as much room as 3 ({small} B) — the block's \
+             own signatures are not being counted"
+        );
     }
 }

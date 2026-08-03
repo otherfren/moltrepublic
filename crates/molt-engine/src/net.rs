@@ -1316,19 +1316,26 @@ impl State {
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
             WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
-                // defense in depth: a peer's set_image must respect the same
-                // byte cap AND decodability sniff the propose validation
-                // enforces locally (WP3) — an oversized or undecodable
-                // payload is dropped, never recorded (convergence before
-                // enforcement, like every wire guard)
+                // defense in depth: the same two gates the local propose path
+                // applies — dropped, never recorded (convergence before
+                // enforcement, like every wire guard). Both verdicts are
+                // node-independent, so peers agree on what to drop.
+                //
+                // (1) a payload that cannot be framed inside the transport
+                // budget could never become a publishable block; recording it
+                // would only let this node approve a change that then wedges
+                // the sealer's outbox
+                if !crate::proposals::payload_fits(surface, &payload, &self.roster()) {
+                    tracing::warn!(from = %from, surface = ?surface, "dropping a proposal too large to publish");
+                    return Ok(Reply::Ack);
+                }
+                // (2) a set_image must decode as a picture (WP3)
                 if surface == molt_core::Surface::Organization
                     && payload.get("op").and_then(serde_json::Value::as_str) == Some("set_image")
-                    && !crate::proposals::image_bytes(&payload).is_some_and(|b| {
-                        b.len() <= crate::proposals::ORG_IMAGE_MAX_BYTES
-                            && crate::proposals::image_decodable(&b).is_ok()
-                    })
+                    && !crate::proposals::image_bytes(&payload)
+                        .is_some_and(|b| crate::proposals::image_decodable(&b).is_ok())
                 {
-                    tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes within the cap");
+                    tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes");
                     return Ok(Reply::Ack);
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or

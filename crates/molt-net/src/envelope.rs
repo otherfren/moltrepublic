@@ -91,6 +91,55 @@ pub fn open_outer(secrets: &[[u8; 32]], content: &str) -> Result<Vec<u8>, Envelo
     Err(EnvelopeError::EpochOpaque)
 }
 
+/// What the MLS layer adds around a plaintext before it is sealed: the
+/// `PrivateMessage` framing (group id, epoch, content type, encrypted sender
+/// data), the content's signature and confirmation tag, and the AEAD tag.
+/// Measured, then rounded up to a round number —
+/// `group_frame_budget.rs::the_cost_model_never_under_estimates_the_real_frame`
+/// is what keeps it honest.
+const MLS_FRAME_OVERHEAD: usize = 384;
+
+/// What the signed kind-445 event adds around the sealed content: `id`,
+/// `pubkey` and `sig` hex, the `h` tag, `kind`/`created_at`, the JSON
+/// punctuation, and the `["EVENT",{…}]` framing `RelayRuntime::publish`
+/// counts. Same measurement, same guard.
+const EVENT_FRAME_OVERHEAD: usize = 512;
+
+/// **The wire cost of a kind-445 frame carrying `plaintext_len` bytes** — an
+/// upper bound, never an estimate that could come in under.
+///
+/// This is the number a payload has to be judged against BEFORE it enters the
+/// chain. `RelayRuntime::publish` refuses an over-budget event locally and
+/// deterministically, and the outbox then holds its cursor at that envelope
+/// on purpose (nothing recovers a skipped one) — so a payload that cannot be
+/// framed inside the budget wedges everything the node writes after it,
+/// across restarts. The honest place to refuse it is where a human can still
+/// choose a smaller one, which is the propose path in molt-engine.
+///
+/// The content is base64, so it needs no JSON escaping: the cost is a
+/// function of the plaintext LENGTH alone, whatever the payload holds.
+#[must_use]
+pub fn frame_cost(plaintext_len: usize) -> usize {
+    let sealed = plaintext_len + MLS_FRAME_OVERHEAD + NONCE_LEN + TAG_LEN;
+    // base64 of the sealed bytes, padded to a multiple of 4
+    sealed.div_ceil(3) * 4 + EVENT_FRAME_OVERHEAD
+}
+
+/// The inverse of [`frame_cost`]: the largest plaintext whose frame still
+/// fits `budget` bytes. `0` when the budget cannot carry the framing at all.
+///
+/// Every step rounds DOWN, so `frame_cost(max_plaintext_for(b)) <= b` holds
+/// by construction rather than by luck.
+#[must_use]
+pub fn max_plaintext_for(budget: u64) -> usize {
+    let budget = usize::try_from(budget).unwrap_or(usize::MAX);
+    let Some(sealed_b64) = budget.checked_sub(EVENT_FRAME_OVERHEAD) else {
+        return 0;
+    };
+    let sealed = sealed_b64 / 4 * 3;
+    sealed.saturating_sub(MLS_FRAME_OVERHEAD + NONCE_LEN + TAG_LEN)
+}
+
 /// The base64 alphabet of the 445 content (standard, padded — what every
 /// Nostr client encodes with).
 pub fn encode_base64(raw: &[u8]) -> String {

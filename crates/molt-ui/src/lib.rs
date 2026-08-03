@@ -5560,7 +5560,7 @@ lexicon! {
     oa_list_pending: "List pending", "Offene zeigen";
     org_edit: "Edit", "Bearbeiten";
     ol_title: "Republic image", "Bild der Republik";
-    ol_body: "Pick a new image via the file dialog, or remove the current one. Either way the change is a gated proposal the members approve by threshold. The image itself (up to 256 KiB) travels inside the proposal, so every member sees exactly what they approve - once applied, it shows on every device.", "Wähle über den Datei-Dialog ein neues Bild oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. Das Bild selbst (bis 256 KiB) reist im Vorschlag mit - jedes Mitglied sieht genau, worüber es abstimmt; nach dem Anwenden erscheint es auf jedem Gerät.";
+    ol_body: "Pick a new image via the file dialog, or remove the current one. Either way the change is a gated proposal the members approve by threshold. The image itself (about 64 KiB) travels inside the proposal, so every member sees exactly what they approve - once applied, it shows on every device.", "Wähle über den Datei-Dialog ein neues Bild oder entferne das aktuelle. Beides ist eine geschützte Änderung, der die Mitglieder per Schwelle zustimmen. Das Bild selbst (rund 64 KiB) reist im Vorschlag mit - jedes Mitglied sieht genau, worüber es abstimmt; nach dem Anwenden erscheint es auf jedem Gerät.";
     ol_remove: "Remove image", "Bild entfernen";
     ol_current: "Current image", "Aktuelles Bild";
     ol_none: "No image set.", "Kein Bild gesetzt.";

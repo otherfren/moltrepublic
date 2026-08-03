@@ -73,13 +73,14 @@ fn an_ordinary_governance_chain_fits_for_a_useful_while() {
 ///
 /// A `set_image` proposal EMBEDS the picture — `payload.bytes_b64`
 /// (`proposals.rs::image_bytes`) — and the payload rides the applied CHAIN
-/// BLOCK, which is how every device materializes the logo. Images are capped
-/// at 256 KiB of decoded bytes (`ORG_IMAGE_MAX_BYTES`) — a cap set
-/// independently of any transport budget, and roughly 4x above what one can
-/// actually carry (`molt-net/tests/group_frame_budget.rs` measures 68 KiB).
-/// Even a modest logo blows a 65 KB Welcome: base64 costs ×1.33 and the
-/// payload hex costs ×2, so a 25 KB PNG lands at ~66 KB before any other
-/// block is counted.
+/// BLOCK, which is how every device materializes the logo. Even a modest
+/// logo blows a 65 KB Welcome: base64 costs ×1.33 and the payload hex costs
+/// ×2, so a 25 KB PNG lands at ~66 KB before any other block is counted.
+///
+/// The propose-time cap has since been DERIVED from the publish budget
+/// (`proposals.rs::payload_fits`, ~70 KiB of image for a small roster) —
+/// which does NOT rescue this case and was never meant to: 25 KB is well
+/// inside that cap and still over the gift wrap.
 ///
 /// So "the chain fits in a Welcome" is not a property of chain LENGTH that a
 /// republic could stay under — it is one proposal away from false, forever.
@@ -87,7 +88,7 @@ fn an_ordinary_governance_chain_fits_for_a_useful_while() {
 /// over 445 catch-up (N5).
 #[test]
 fn one_set_image_block_can_exceed_the_gift_wrap_cap_on_its_own() {
-    // a 25 KB image — small for a logo; the cap allows 8192×8192
+    // a 25 KB image — small for a logo, and well inside the derived cap
     let image = vec![0x89u8; 25 * 1024];
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&image);

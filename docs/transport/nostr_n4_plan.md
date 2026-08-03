@@ -560,12 +560,18 @@ Each step is one commit, red test first, green on master before the next.
 
     A `set_image` proposal EMBEDS the picture (`payload.bytes_b64`,
     `proposals.rs::image_bytes`) and the payload rides the applied chain block —
-    that is how every device materializes the logo. Images are capped
-    at 256 KiB of DECODED bytes (`ORG_IMAGE_MAX_BYTES`) — a cap chosen
-    independently of any transport budget, and about 4x above what a 445 can
-    carry (measured: 68 KiB, `molt-net/tests/group_frame_budget.rs`). So one
-    ordinary logo exceeds the whole gift-wrap budget by itself: base64 ×1.33,
-    payload hex ×2.
+    that is how every device materializes the logo. So one ordinary logo
+    exceeds the whole gift-wrap budget by itself: base64 ×1.33, payload hex ×2.
+
+    **FIXED 2026-08-03 (the propose-time half).** The image cap was a chosen
+    256 KiB sitting in front of a 128 KiB transport — about 4x too high. It is
+    now DERIVED: `proposals.rs` refuses at propose time on the SERIALIZED
+    PAYLOAD (an over-long charter blows the same budget) against
+    `molt_net::envelope::max_plaintext_for(DEFAULT_SIZE_BUDGET)`, and the
+    kind-445 cost model is pinned to the real pipeline in
+    `molt-net/tests/group_frame_budget.rs`. That closes the wedge — an
+    over-budget block would stall the outbox cursor forever — but it does not
+    change the conclusion below: even a cap-sized logo exceeds the gift wrap.
 
     So "the chain fits in a Welcome" is not a property of chain LENGTH a
     republic could stay under — it is **one proposal away from false, forever**.

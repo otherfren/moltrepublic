@@ -1701,12 +1701,16 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
 }
 
 
-/// A real, decodable ~150 KiB BMP of non-repeating pixels (WP3: set_image
+/// A real, decodable ~48 KiB BMP of non-repeating pixels (WP3: set_image
 /// bytes must decode — random bytes would be dropped by the sniff). BMP is
 /// uncompressed, so the size is exact and the content still exercises the
-/// chunker across many transport blocks. `seed` varies the pixels.
+/// chunker across many 16 KiB transport blocks. `seed` varies the pixels.
+///
+/// Sized to stay under the DERIVED propose cap (`proposals.rs`: what one
+/// kind-445 frame can carry), not under a number of its own — it used to be
+/// ~150 KiB against a 256 KiB cap that the transport could never honour.
 fn big_bmp(seed: u32) -> Vec<u8> {
-    let (w, h) = (224u32, 224u32); // 224*224*3 = 147 KiB of pixel rows
+    let (w, h) = (128u32, 128u32); // 128*128*3 = 48 KiB of pixel rows
     let row = (w * 3).div_ceil(4) * 4;
     let size = 54 + row * h;
     let mut b = Vec::with_capacity(usize::try_from(size).expect("small image"));
@@ -1736,7 +1740,7 @@ fn big_bmp(seed: u32) -> Vec<u8> {
 
 /// **A `set_image` proposal's bytes survive the mesh, both directions.**
 /// The image rides the `Proposed` gossip itself (sign-what-you-see: every
-/// member votes on the actual bytes), so a realistic ~150 KiB logo is the
+/// member votes on the actual bytes), so a realistic ~48 KiB logo is the
 /// first governance frame that must chunk across many transport blocks.
 /// Founder → member: the member's supervisor delivers the founder's
 /// proposal payload byte-identical. Member → founder: the founder engine
@@ -1837,9 +1841,9 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         Some(MlsChannel::new(member_group)),
     );
 
-    // a realistic logo: a real ~150 KiB BMP of non-repeating pixels (well
-    // over one transport block, under the 256 KiB engine cap, and decodable
-    // — WP3 refuses random bytes), base64 like the GUI
+    // a realistic logo: a real ~48 KiB BMP of non-repeating pixels (three
+    // transport blocks, under the derived propose cap, and decodable — WP3
+    // refuses random bytes), base64 like the GUI
     use base64::Engine as _;
     let founder_bytes: Vec<u8> = big_bmp(0);
     let founder_b64 = base64::engine::general_purpose::STANDARD.encode(&founder_bytes);

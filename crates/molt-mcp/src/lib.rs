@@ -605,7 +605,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "propose",
             command: "propose",
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` (≤256 KiB) and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp/svg, ≤8192x8192) — sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp/svg, ≤8192x8192) — sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits.",
             schema: || json!({
                 "type": "object",
                 "properties": {

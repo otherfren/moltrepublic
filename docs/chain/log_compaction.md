@@ -391,9 +391,9 @@ logo, a former republic name. That is intended and is the point of the
 decision. The chain keeps the complete record until a cut; after it, the
 republic remembers what it is, not every step of how it got there.
 
-### Open, and separate
+### The other half — DONE 2026-08-03
 
-Even a perfect summary does not bound the CURRENT image, and that is the
+Even a perfect summary does not bound the CURRENT image, and that was the
 other half of the same problem. **Measured 2026-08-03**
 (`molt-net/tests/group_frame_budget.rs`, through the real pipeline —
 payload base64, block JSON, MLS ciphertext, `seal_outer` base64, event
@@ -405,17 +405,37 @@ framing, counted exactly where `RelayRuntime::publish` counts it):
 | largest publishable image | **68 KiB** (125266 B event) |
 | first size over budget | 72 KiB (132546 B) |
 | `DEFAULT_SIZE_BUDGET` | 131072 B |
-| `ORG_IMAGE_MAX_BYTES` | **262144 B** |
+| `ORG_IMAGE_MAX_BYTES` (was) | **262144 B** |
 
-So the propose-time cap sits at nearly **4x** what the transport can carry.
-It has to be DERIVED from the budget rather than chosen — and derived
-conservatively, because 128 KiB is only the fallback: the real ceiling is
-the smallest relay's NIP-11 `max_message_length`, which a pool may set
-lower.
+The propose-time cap sat at nearly **4x** what the transport can carry.
 
-Note the check belongs on the **serialized payload**, not on images: a long
-charter can exceed the same budget by the same mechanism. Images are merely
-where it bites first.
+**Built.** `ORG_IMAGE_MAX_BYTES` is gone; there is no second, independently
+chosen number. `proposals.rs` now derives the ceiling from the budget:
+
+- `molt_net::envelope::frame_cost` / `max_plaintext_for` — the kind-445 cost
+  model, an upper bound proven against the real pipeline (MLS ciphertext,
+  `seal_outer` base64, event framing) in
+  `molt-net/tests/group_frame_budget.rs`.
+- `proposals.rs::payload_fits` judges the **serialized payload**, not
+  images: a long charter blows the same budget by the same mechanism, and
+  images are merely where it bites first. It is roster-aware — every seat's
+  attestation rides the block — and it is the SAME verdict on the wire
+  ingest path, so peers agree on what to drop.
+- The refusal names the figure that would fit, so "too large" comes with the
+  number to aim at.
+- Measured headroom for a 3-seat roster: **70 KiB** of image.
+
+`DEFAULT_SIZE_BUDGET` and not a probed pool value on purpose: every member
+must reach the same verdict on the same proposal. When pool probing lands
+(`with_size_budget` still has no production caller), a SMALLER probed budget
+belongs there as a second, node-local refusal — never as a replacement for
+the shared one.
+
+The wedge itself is also closed at the other end: a locally refused publish
+is no longer retried on a backoff that cannot change a deterministic verdict
+(`group_runtime.rs::PublishStall::Permanent`). The cursor still HOLDS —
+nothing recovers a skipped envelope — but the operator is told the real
+reason instead of "no relay accepted the frame".
 
 The two together are what make a pruned republic recoverable, and neither
 suffices alone: without the summary the blob grows without bound, and

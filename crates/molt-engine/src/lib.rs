@@ -3458,9 +3458,12 @@ mod tests {
                 .await
                 .expect_err("a set_image without bytes is refused");
             assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
-            // oversized bytes are refused with a clear error
+            // bytes beyond what the transport can carry are refused with a
+            // clear error — the ceiling is DERIVED from the publish budget
+            // (`proposals::size_gate_tests` pins the derivation), and 256 KiB
+            // is comfortably past it
             let big = base64::engine::general_purpose::STANDARD
-                .encode(vec![0u8; proposals::ORG_IMAGE_MAX_BYTES + 1]);
+                .encode(vec![0u8; 256 * 1024]);
             let err = w
                 .execute(Command::Propose {
                     surface: Surface::Organization,

@@ -3,20 +3,23 @@
 
 //! **What a kind-445 can actually carry — measured, not estimated.**
 //!
-//! `ORG_IMAGE_MAX_BYTES` is 256 KiB and `DEFAULT_SIZE_BUDGET` is 128 KiB for
-//! the whole websocket message. The two numbers were set independently and
-//! never reconciled, and the gap is not academic: `RelayRuntime::publish`
-//! measures the framed `["EVENT",{…}]` and refuses over budget **locally**,
-//! before any relay is contacted — so the refusal is deterministic, the
-//! outbox's three retries are futile by construction, and the cursor then
-//! holds at that envelope forever (`group_runtime.rs`, deliberately: nothing
-//! recovers a skipped envelope). One oversized image wedges everything the
-//! node writes after it, across restarts.
+//! The propose-time image cap used to be a chosen 256 KiB sitting in front of
+//! a 128 KiB `DEFAULT_SIZE_BUDGET` for the whole websocket message. The gap
+//! was not academic: `RelayRuntime::publish` measures the framed
+//! `["EVENT",{…}]` and refuses over budget **locally**, before any relay is
+//! contacted — so the refusal is deterministic and the cursor then holds at
+//! that envelope forever (`group_runtime.rs`, deliberately: nothing recovers
+//! a skipped envelope). One oversized image wedged everything the node wrote
+//! after it, across restarts.
 //!
-//! So the propose-time cap has to be DERIVED from this budget rather than
-//! chosen. This measures the derivation, through the real pipeline: the
-//! payload's base64, the block JSON, the MLS ciphertext, `seal_outer`'s
-//! base64, and the event framing that `publish` actually counts.
+//! So the cap is now DERIVED from this budget rather than chosen
+//! ([`molt_net::envelope::max_plaintext_for`], enforced on the serialized
+//! payload by `molt-engine/proposals.rs`). This file is the derivation's
+//! proof: it measures the real pipeline — the payload's base64, the block
+//! JSON, the MLS ciphertext, `seal_outer`'s base64, and the event framing
+//! that `publish` actually counts — and holds the cost model against it in
+//! both directions, so the model can neither under-estimate (which would
+//! pass a wedging payload) nor drift into uselessly pessimistic.
 
 use molt_core::chain::{ChainBlock, ChainChange};
 use molt_core::{EventEnvelope, RosterAttestation, WorkspaceEvent};
@@ -61,10 +64,101 @@ fn wire_cost(mls: &mut MlsMember, raw: usize) -> usize {
     nostr::ClientMessage::event(event).as_json().len()
 }
 
+/// The wire cost of an arbitrary `plaintext_len`-byte engine plaintext,
+/// measured where `RelayRuntime::publish` measures it. What the payload
+/// *contains* cannot change this: the content is base64, so it needs no JSON
+/// escaping and the cost is a function of length alone.
+fn measured_frame_cost(mls: &mut MlsMember, plaintext_len: usize) -> usize {
+    let ciphertext = mls.encrypt(&vec![0x5au8; plaintext_len]).expect("mls encrypt");
+    let exporter = mls.exporter_secret().expect("exporter");
+    let content = seal_outer(&exporter, &ciphertext).expect("seal");
+    let event = EventBuilder::new(Kind::Custom(molt_net::kinds::KIND_GROUP), content)
+        .tag(Tag::parse(["h", &"ab".repeat(32)]).expect("h tag"))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+    nostr::ClientMessage::event(event).as_json().len()
+}
+
 /// `cost / raw` in PER MILLE — integer arithmetic, because this workspace
 /// lints float maths and a ratio needs no floats to be readable (1800 = x1.8).
 fn permille(cost: usize, raw: usize) -> usize {
     cost * 1000 / raw
+}
+
+/// **The model may never under-estimate.** `frame_cost` is what the propose
+/// path refuses on, so a model that reports less than the wire really costs
+/// would let exactly the wedging payload through — the bug this whole file
+/// exists to close. Swept across three orders of magnitude, because the
+/// base64 rounding and the MLS framing behave differently at the small end.
+#[test]
+fn the_cost_model_never_under_estimates_the_real_frame() {
+    let mut mls = group_of_one();
+    for len in [0, 1, 2, 3, 64, 1024, 16 * 1024, 64 * 1024, 90 * 1024] {
+        let measured = measured_frame_cost(&mut mls, len);
+        let modelled = molt_net::envelope::frame_cost(len);
+        assert!(
+            modelled >= measured,
+            "frame_cost({len}) = {modelled} UNDER-estimates the measured {measured} — \
+             a propose-time gate built on this would pass a payload that wedges the outbox"
+        );
+    }
+}
+
+/// …and it may not be uselessly pessimistic either: a model with a huge
+/// safety margin would refuse logos that fit perfectly well, which is a
+/// silent product regression rather than a visible bug.
+#[test]
+fn the_cost_model_stays_within_a_kib_of_the_real_frame() {
+    let mut mls = group_of_one();
+    for len in [1024, 16 * 1024, 64 * 1024, 90 * 1024] {
+        let measured = measured_frame_cost(&mut mls, len);
+        let modelled = molt_net::envelope::frame_cost(len);
+        let slack = modelled - measured;
+        eprintln!("MEASURED slack at {len} B plaintext: {slack} B ({measured} -> {modelled})");
+        assert!(
+            slack < 1024,
+            "frame_cost({len}) is {slack} B above the measured {measured} — that margin \
+             costs real payload capacity"
+        );
+    }
+}
+
+/// The inverse is the number the engine actually gates on: the largest
+/// plaintext that still fits. It must fit **through the real pipeline**, and
+/// it must claim nearly all of the budget — a ceiling that leaves a quarter
+/// of the frame unused would be a cap chosen by accident all over again.
+#[test]
+fn the_plaintext_ceiling_really_fits_the_budget() {
+    let mut mls = group_of_one();
+    let budget = usize::try_from(DEFAULT_SIZE_BUDGET).expect("budget fits");
+    let ceiling = molt_net::envelope::max_plaintext_for(DEFAULT_SIZE_BUDGET);
+
+    let cost = measured_frame_cost(&mut mls, ceiling);
+    eprintln!("MEASURED ceiling: {ceiling} B plaintext -> {cost} B event (budget {budget} B)");
+    assert!(
+        cost <= budget,
+        "a plaintext of the advertised ceiling {ceiling} B frames to {cost} B, over the \
+         {budget} B budget — the ceiling is a lie and every payload at it wedges the outbox"
+    );
+    assert!(
+        cost * 100 >= budget * 95,
+        "the ceiling only claims {cost} B of the {budget} B budget — too conservative to be \
+         the derived answer"
+    );
+}
+
+/// A budget smaller than the framing overhead yields zero, not an underflow
+/// panic: a relay may advertise an absurd `max_message_length`, and the
+/// honest answer is "nothing fits here", reported by the propose path.
+#[test]
+fn a_budget_below_the_framing_overhead_yields_no_capacity() {
+    for budget in [0, 1, 64, 512] {
+        assert_eq!(
+            molt_net::envelope::max_plaintext_for(budget),
+            0,
+            "a {budget}-byte budget cannot carry a frame at all"
+        );
+    }
 }
 
 fn group_of_one() -> MlsMember {
@@ -74,12 +168,12 @@ fn group_of_one() -> MlsMember {
     m
 }
 
-/// **The number the propose-time cap must be derived from.**
+/// **The number the propose-time cap is derived from.**
 ///
-/// Reported, then bracketed: the test asserts the ceiling is far below
-/// `ORG_IMAGE_MAX_BYTES` (which is the finding) and above a floor that keeps
-/// a usable logo possible (which is what makes the finding actionable rather
-/// than a counsel of despair).
+/// Reported, then bracketed: the test asserts the ceiling is far below the
+/// 256 KiB that used to be allowed (which was the finding) and above a floor
+/// that keeps a usable logo possible (which is what made the finding
+/// actionable rather than a counsel of despair).
 #[test]
 fn the_publishable_image_ceiling_is_far_below_the_propose_time_cap() {
     let mut mls = group_of_one();
