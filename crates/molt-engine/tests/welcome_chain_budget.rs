@@ -74,9 +74,12 @@ fn an_ordinary_governance_chain_fits_for_a_useful_while() {
 /// A `set_image` proposal EMBEDS the picture — `payload.bytes_b64`
 /// (`proposals.rs::image_bytes`) — and the payload rides the applied CHAIN
 /// BLOCK, which is how every device materializes the logo. Images are capped
-/// by DIMENSION (8192×8192), not by bytes, so a single ordinary logo already
-/// blows a 65 KB budget: base64 costs ×1.33 and the payload hex costs ×2, so
-/// a 25 KB PNG lands at ~66 KB before any other block is counted.
+/// at 256 KiB of decoded bytes (`ORG_IMAGE_MAX_BYTES`) — a cap set
+/// independently of any transport budget, and roughly 4x above what one can
+/// actually carry (`molt-net/tests/group_frame_budget.rs` measures 68 KiB).
+/// Even a modest logo blows a 65 KB Welcome: base64 costs ×1.33 and the
+/// payload hex costs ×2, so a 25 KB PNG lands at ~66 KB before any other
+/// block is counted.
 ///
 /// So "the chain fits in a Welcome" is not a property of chain LENGTH that a
 /// republic could stay under — it is one proposal away from false, forever.

@@ -58,7 +58,14 @@ const CURSOR_OVERLAP: u64 = 172_800;
 /// `max_message_length` measured on public relays (nos.lol, N0 2026-07-30).
 /// Conservative — refuse rather than let one relay accept what another
 /// silently drops (the §7 wire-size cliff).
-const DEFAULT_SIZE_BUDGET: u64 = 128 * 1024;
+///
+/// **Public because it bounds what may ENTER the chain**, not merely what
+/// may leave it: a payload that cannot become a publishable 445 wedges the
+/// outbox at the envelope carrying it (the cursor holds, deliberately, so a
+/// transient relay failure loses nothing — and a permanent one then never
+/// clears). The honest place to refuse it is where the user can still act,
+/// which is the propose path in molt-engine, and that needs this number.
+pub const DEFAULT_SIZE_BUDGET: u64 = 128 * 1024;
 
 /// Bound on a NIP-11 response we are willing to read.
 const NIP11_MAX_RESPONSE: usize = 64 * 1024;

@@ -393,11 +393,33 @@ republic remembers what it is, not every step of how it got there.
 
 ### Open, and separate
 
-Even a perfect summary does not bound the CURRENT image. That is the
-transport-cap question (`ORG_IMAGE_MAX_BYTES` is 256 KiB while a 445 is
-budgeted at 128 KiB for the whole websocket message) and it is decided in
-its own place — the two together are what make a pruned republic
-recoverable, and neither suffices alone.
+Even a perfect summary does not bound the CURRENT image, and that is the
+other half of the same problem. **Measured 2026-08-03**
+(`molt-net/tests/group_frame_budget.rs`, through the real pipeline —
+payload base64, block JSON, MLS ciphertext, `seal_outer` base64, event
+framing, counted exactly where `RelayRuntime::publish` counts it):
+
+| | |
+|---|---|
+| wire expansion of an image | **x1.80** (base64 twice) |
+| largest publishable image | **68 KiB** (125266 B event) |
+| first size over budget | 72 KiB (132546 B) |
+| `DEFAULT_SIZE_BUDGET` | 131072 B |
+| `ORG_IMAGE_MAX_BYTES` | **262144 B** |
+
+So the propose-time cap sits at nearly **4x** what the transport can carry.
+It has to be DERIVED from the budget rather than chosen — and derived
+conservatively, because 128 KiB is only the fallback: the real ceiling is
+the smallest relay's NIP-11 `max_message_length`, which a pool may set
+lower.
+
+Note the check belongs on the **serialized payload**, not on images: a long
+charter can exceed the same budget by the same mechanism. Images are merely
+where it bites first.
+
+The two together are what make a pruned republic recoverable, and neither
+suffices alone: without the summary the blob grows without bound, and
+without the cap a single current logo can already be unpublishable.
 
 ## B.7 Grenzen (bewusst)
 

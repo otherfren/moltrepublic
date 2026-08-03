@@ -560,9 +560,12 @@ Each step is one commit, red test first, green on master before the next.
 
     A `set_image` proposal EMBEDS the picture (`payload.bytes_b64`,
     `proposals.rs::image_bytes`) and the payload rides the applied chain block —
-    that is how every device materializes the logo. Images are capped by
-    DIMENSION (8192×8192), never by bytes, so one ordinary logo exceeds the
-    whole gift-wrap budget by itself: base64 ×1.33, payload hex ×2.
+    that is how every device materializes the logo. Images are capped
+    at 256 KiB of DECODED bytes (`ORG_IMAGE_MAX_BYTES`) — a cap chosen
+    independently of any transport budget, and about 4x above what a 445 can
+    carry (measured: 68 KiB, `molt-net/tests/group_frame_budget.rs`). So one
+    ordinary logo exceeds the whole gift-wrap budget by itself: base64 ×1.33,
+    payload hex ×2.
 
     So "the chain fits in a Welcome" is not a property of chain LENGTH a
     republic could stay under — it is **one proposal away from false, forever**.
