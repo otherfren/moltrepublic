@@ -3834,6 +3834,23 @@ pub enum Command {
         /// over them. Empty when the mesh re-join was skipped or timed out.
         #[serde(default)]
         mesh: Vec<MeshLink>,
+        /// The returning seat's NEW Nostr transport secret (32-byte secp256k1
+        /// scalar, hex): salted with the RECOVERY ticket, so it is a different
+        /// key from the founding anchor that died with the lost device.
+        ///
+        /// The actor re-derives the same key from `(phrase, ticket)` and
+        /// refuses a mismatch — the value here proves the rejoin task signed
+        /// its request with the key the chain then anchored. Empty on a
+        /// loopback/test recovery.
+        #[serde(default)]
+        nostr_sk: String,
+        /// The group's h-tag rotation seed (32 bytes, hex) from the Welcome —
+        /// sealed into `transport.state.rotation_seed`. The one piece of the
+        /// Nostr shape the CHAIN cannot supply (the ratified relay pool comes
+        /// from the verified chain, not from here). Empty on a loopback/test
+        /// recovery.
+        #[serde(default)]
+        rotation_seed: String,
         /// Recovery incarnation (a superseded recovery drops stale results).
         #[serde(default)]
         generation: Option<u64>,

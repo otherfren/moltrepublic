@@ -2458,6 +2458,8 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         // injection seam, so no live supervisor stands up here — over real
         // SMP, RecoverStart's own task fills the slot and the net comes up)
         mesh: outcome.mesh.clone(),
+        nostr_sk: String::new(),
+        rotation_seed: String::new(),
         generation: Some(1),
     })
     .await
@@ -2513,6 +2515,8 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         chain: serde_json::to_string(&outcome.chain).expect("chain json"),
         mls: hex::encode(&outcome.mls_snapshot),
         mesh: Vec::new(), // option A: no live links re-established
+        nostr_sk: String::new(),
+        rotation_seed: String::new(),
         generation: Some(1),
     })
     .await
@@ -2777,6 +2781,8 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         chain: serde_json::to_string(&outcome.chain).expect("chain json"),
         mls: hex::encode(&outcome.mls_snapshot),
         mesh: outcome.mesh.clone(),
+        nostr_sk: String::new(),
+        rotation_seed: String::new(),
         generation: Some(1),
     })
     .await

@@ -270,6 +270,56 @@ Mirror `NetJoinSealed`: `nostr_sk`, `relays`, `rotation_seed`, `kind`.
 - **Red:** a recovered workspace's `transport.state` holds a `nostr_sk` that
   pairs with the anchor in its own `Restored` block, and the ratified pool.
 
+#### 6d ✅ DONE 2026-08-03
+
+`NetRecoverSealed` gained `nostr_sk` + `rotation_seed`, and
+`cmd_net_recover_sealed` stopped materializing `TransportShape::default()`.
+It does **not** simply mirror `NetJoinSealed`, because two of the three
+pieces have a better source than the task:
+
+| piece | from | why not the task |
+|---|---|---|
+| relay pool | the VERIFIED chain (`sealed.relays`) | the pool is chain-governed since roster-v4, so the chain is the authority; the Welcome's copy is only what the task checked against. Sealing the task's list would let a coordinator narrow a recovering seat's view of its own republic. |
+| rotation seed | the task | only the Welcome carries it; the chain has no record of the h-tag seed |
+| transport secret | re-derived on the actor from `(phrase, ticket)` | see below |
+
+The secret is re-derived rather than compared against the roster, which is
+the §3.4 trap made concrete: a rejoiner's roster entry is its **dead founding
+anchor**, so a join-style comparison either always fails or gets "fixed" by
+deleting it, which then accepts any key at all. The delivered value is kept
+as a cross-check (it proves the task signed its request with the key the
+chain anchored), and the chain must really carry that key as the seat's
+working anchor.
+
+**Which is not `head.identities`** — `apply_membership` keeps a seat's
+anchored *identity* key across a `Restored` block on purpose (a different one
+there would let m-of-n survivors hijack the seat), so the re-anchored
+transport key is a projection ALONGSIDE the roster. That fold now lives in
+one place, `chain::working_anchors`.
+
+#### VERIFIED DEFECT, found here, still open: a compaction loses the working anchor
+
+`CheckpointState.roster` is built by the same `apply_membership`, so it
+carries the **founding** anchor. The `Restored` block that re-anchored a seat
+is dropped with the history at a cut, and `chain_anchors` is folded from the
+surviving suffix only. So after a compaction:
+
+> every member that had recovered becomes addressable only at the key it no
+> longer holds — silently, which is exactly what `State::chain_anchors`
+> documents itself as existing to prevent.
+
+Reachable in the ordinary course: `AUTO_CHECKPOINT_MIN_LEN` is 32. Today one
+send site reads it (`coordinator_rekey_nostr`'s Welcome address), so the
+blast radius is "a member that recovers twice, after a compaction, is sent
+its Welcome at a dead key" — but N5 adds send sites, and the projection's own
+doc comment warns about precisely this.
+
+The fix is to let the checkpoint carry the working anchor. The cheap form —
+re-anchoring `nostr_pk` inside `apply_membership` so the blob's roster holds
+it — needs a `checkpoint-v4 → v5` bump by the same argument v4 itself needed,
+and needs the ripple checked: whether any recompute site reads a live
+roster's `nostr_pk` expecting the founding value.
+
 ### 6e — the rejoiner task
 `spawn_recovery_rejoiner`, the `spawn_member_join` twin: ephemeral key from
 the RECOVERY ticket → 1059 inbox → readable-gate → gift-wrapped

@@ -88,6 +88,35 @@ pub(crate) struct NostrRekey {
     pub stamp: u64,
 }
 
+/// The **working transport anchor** per seat, folded from a verified chain in
+/// block order — the last `Restored` block for a seat wins (a seat can
+/// recover more than once).
+///
+/// Deliberately separate from the roster: `apply_membership` keeps a seat's
+/// anchored *identity* key across a `Restored` block (a different one there
+/// would let m-of-n survivors hijack the seat), so the re-anchored transport
+/// key is a projection ALONGSIDE the roster rather than an edit of it. Which
+/// means a reader asking "where do I address this member" must ask here, not
+/// `head.identities`.
+pub(crate) fn working_anchors(
+    blocks: &[ChainBlock],
+) -> std::collections::HashMap<molt_core::MemberId, String> {
+    let mut anchors = std::collections::HashMap::new();
+    for block in blocks {
+        if let ChainChange::Membership {
+            member,
+            nostr_pk: Some(pk),
+            ..
+        } = &block.change
+        {
+            if !pk.is_empty() {
+                anchors.insert(member.clone(), pk.clone());
+            }
+        }
+    }
+    anchors
+}
+
 /// Re-key a Nostr republic's group: replace `member`'s leaf, at a carrier
 /// stamp the caller pinned **before** the commit was made.
 ///
@@ -1022,23 +1051,8 @@ impl State {
             }
         }
         self.chain_applied = projected;
-        // …and the working transport anchors, folded in chain order so the
-        // LAST Restored block for a seat wins (a seat can recover twice)
-        let mut anchors: std::collections::HashMap<molt_core::MemberId, String> =
-            std::collections::HashMap::new();
-        for block in &self.chain {
-            if let ChainChange::Membership {
-                member,
-                nostr_pk: Some(pk),
-                ..
-            } = &block.change
-            {
-                if !pk.is_empty() {
-                    anchors.insert(member.clone(), pk.clone());
-                }
-            }
-        }
-        self.chain_anchors = anchors;
+        // …and the working transport anchors
+        self.chain_anchors = working_anchors(&self.chain);
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {

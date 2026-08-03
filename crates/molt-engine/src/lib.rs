@@ -1288,8 +1288,18 @@ impl State {
                 chain,
                 mls,
                 mesh,
+                nostr_sk,
+                rotation_seed,
                 generation,
-            } => self.cmd_net_recover_sealed(member, chain, mls, mesh, generation),
+            } => self.cmd_net_recover_sealed(
+                member,
+                chain,
+                mls,
+                mesh,
+                nostr_sk,
+                rotation_seed,
+                generation,
+            ),
             Command::NetRecoverFailed { error, generation } => {
                 self.cmd_net_recover_failed(error, generation)
             }
@@ -4366,6 +4376,18 @@ mod tests {
     /// block (m=1, signed by the coordinator). Recovering must adopt the FULL
     /// chain: the genesis alone would not project block 1's surface state.
     fn recovered_chain(phrase: &str) -> (Vec<molt_core::ChainBlock>, String) {
+        recovered_chain_with(phrase, Vec::new(), None)
+    }
+
+    /// [`recovered_chain`] with a ratified relay pool and, when `re_anchor`
+    /// is given, a third block: the `Restored` membership change that puts
+    /// the seat back with a NEW transport anchor — the shape a real Nostr
+    /// recovery produces before the rejoiner materializes.
+    fn recovered_chain_with(
+        phrase: &str,
+        relays: Vec<String>,
+        re_anchor: Option<String>,
+    ) -> (Vec<molt_core::ChainBlock>, String) {
         use molt_core::{ChainBlock, ChainChange, MemberIdentity, RosterAttestation, GENESIS_PREV};
         let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[7u8; 32], "coordinator");
         let (bob_sk, bob_pk) =
@@ -4378,7 +4400,7 @@ mod tests {
             },
             MemberIdentity {
                 member: "bob".to_string(),
-                identity_pk: bob_pk,
+                identity_pk: bob_pk.clone(),
                 nostr_pk: "dd".repeat(32),
             },
         ];
@@ -4390,7 +4412,7 @@ mod tests {
             rule_n: 2,
             identities,
             agenda: "survive total loss".to_string(),
-            relays: Vec::new(),
+            relays,
         };
         let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
         let genesis = ChainBlock {
@@ -4423,7 +4445,26 @@ mod tests {
             }],
             change: change1,
         };
-        (vec![genesis, block1], republic_id)
+        let Some(new_anchor) = re_anchor else {
+            return (vec![genesis, block1], republic_id);
+        };
+        let change2 = ChainChange::Membership {
+            op: molt_core::MembershipOp::Restored,
+            member: "bob".to_string(),
+            identity_pk: bob_pk,
+            nostr_pk: Some(new_anchor),
+        };
+        let bytes2 = molt_core::approval_bytes(&republic_id, 2, &change2);
+        let block2 = ChainBlock {
+            height: 2,
+            prev: molt_storage::content_hash(&molt_core::block_link_bytes(&republic_id, &block1)),
+            sigs: vec![RosterAttestation {
+                member: "coordinator".to_string(),
+                sig: molt_storage::identity_sign(&coord_sk, &bytes2),
+            }],
+            change: change2,
+        };
+        (vec![genesis, block1, block2], republic_id)
     }
 
     /// An actionable recovery link with a bogus host — parseable, so
@@ -4518,6 +4559,8 @@ mod tests {
                 chain: chain_json.clone(),
                 mls: String::new(),
                 mesh: Vec::new(),
+                nostr_sk: String::new(),
+                rotation_seed: String::new(),
                 generation: Some(999),
             })
             .await
@@ -4531,6 +4574,8 @@ mod tests {
                 chain: chain_json,
                 mls: String::new(),
                 mesh: Vec::new(),
+                nostr_sk: String::new(),
+                rotation_seed: String::new(),
                 generation: Some(1),
             })
             .await
@@ -4550,6 +4595,161 @@ mod tests {
             assert_eq!(mem.applied.len(), 1, "block 1 projected");
             assert_eq!(mem.applied[0]["title"], "survived the loss");
         });
+    }
+
+    /// A persisting `State` rooted at `tmp` with a recovery context armed for
+    /// `member`. The direct-actor seam the join twin uses, so the workspace
+    /// flock is released by dropping the state rather than by racing a task.
+    fn recovering_state(
+        tmp: &tempfile::TempDir,
+        member: &str,
+        republic_id: &str,
+        phrase: &str,
+    ) -> State {
+        let (ev_tx, _keep) = broadcast::channel::<Event>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
+        let mut st = State::new(
+            GroupConfig::demo(),
+            SessionView {
+                settings: molt_core::SessionSettings {
+                    workspace_dir: tmp.path().display().to_string(),
+                    ..molt_core::SessionSettings::default()
+                },
+                ..SessionView::default()
+            },
+            ev_tx,
+            cmd_tx,
+            None,
+            true, // persist — transport.state is what these tests read
+            None,
+        );
+        // the production path: it arms the context, then fails honestly
+        // because this build has no rejoin transport
+        st.cmd_recover_start(recover_link(member, republic_id), phrase.to_string())
+            .expect("recover start arms the context");
+        st
+    }
+
+    /// Reopen a materialized workspace directory once its writer is gone.
+    fn reopen(dir: &std::path::Path) -> molt_storage::OpenedWorkspace {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match molt_storage::open_workspace(dir) {
+                Ok((ws, _)) => return ws,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("reopening the recovered workspace: {e}"),
+            }
+        }
+    }
+
+    /// **N4b step 6d: a recovered workspace comes back as a NOSTR workspace.**
+    ///
+    /// Recovery used to materialize `TransportShape::default()` and a `None`
+    /// transport secret — the legacy queue shape — so a seat that recovered
+    /// into a Nostr republic came back unable to speak to it at all.
+    ///
+    /// The three things it must hold, and where each honestly comes from:
+    ///
+    /// - the **new** transport anchor's private half, re-derived on the actor
+    ///   from `(phrase, recovery ticket)`. Not checked against the seat's
+    ///   roster entry, which is the DEAD founding anchor — the returning seat
+    ///   is re-anchored by its own `Restored` block, and comparing against
+    ///   the roster would either always fail or, once "fixed" by deleting the
+    ///   comparison, accept any key at all.
+    /// - the **chain-ratified** relay pool, from the verified chain rather
+    ///   than from whatever the rejoin task reported. The pool is governed
+    ///   (roster-v4), so the chain is the authority and the Welcome's copy is
+    ///   only a hint.
+    /// - the group's rotation seed, which only the Welcome can supply.
+    #[test]
+    fn recovery_materializes_the_nostr_shape_and_the_new_anchor() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let ticket = "ab".repeat(8);
+        // the anchor the rejoiner proves it holds: ticket-salted with THIS
+        // recovery's ticket, exactly as the request signed it
+        let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let (new_sk, new_pk) = molt_net::nostr_identity(&entropy, &ticket);
+        let pool = vec!["wss://relay.one.example/".to_string()];
+        let (chain, republic_id) = recovered_chain_with(&phrase, pool.clone(), Some(new_pk.clone()));
+
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            hex::encode(new_sk),
+            "5a".repeat(32),
+            Some(1),
+        )
+        .expect("the handler never errors");
+        assert_eq!(
+            st.session.screen,
+            Screen::Main,
+            "the recovery must enter the republic; notice = {:?}",
+            st.session.notice
+        );
+        let dir = st.active.as_ref().expect("materialized").dir.clone();
+        drop(st); // release the writer + flock before reopening
+
+        let ts = reopen(&dir).read_transport_state();
+        assert_eq!(
+            ts.kind,
+            Some(molt_core::TransportKind::Nostr),
+            "a recovered Nostr seat must not come back as a queue workspace"
+        );
+        assert_eq!(ts.relays, pool, "the CHAIN-ratified pool, not the task's copy");
+        assert_eq!(
+            ts.rotation_seed.as_deref(),
+            Some(&[0x5au8; 32][..]),
+            "without the h-tag seed the seat can neither publish nor subscribe"
+        );
+        let sk = ts.nostr_sk.as_ref().expect("the new transport secret is sealed");
+        assert_eq!(
+            molt_net::nostr_pk_for_sk(sk).expect("valid scalar"),
+            new_pk,
+            "the sealed secret must be the private half of the anchor the Restored \
+             block put in the chain"
+        );
+    }
+
+    /// The counter-case, and the reason the check cannot simply be deleted: a
+    /// rejoin task delivering a secret that is NOT this recovery's derived key
+    /// fails the recovery instead of sealing a workspace whose transport key
+    /// nobody addresses.
+    #[test]
+    fn recovery_refuses_a_transport_secret_that_is_not_the_seats_own() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let (_, new_pk) = molt_net::nostr_identity(&entropy, &"ab".repeat(8));
+        let (chain, republic_id) = recovered_chain_with(
+            &phrase,
+            vec!["wss://relay.one.example/".to_string()],
+            Some(new_pk),
+        );
+        let (foreign_sk, _) = molt_net::nostr_identity(b"someone-else-entirely", "other");
+
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            hex::encode(foreign_sk),
+            "5a".repeat(32),
+            Some(1),
+        )
+        .expect("the handler never errors");
+        assert!(st.active.is_none(), "a foreign transport secret must not materialize");
+        assert!(
+            st.session.notice.starts_with("recover-failed:"),
+            "the failure surfaces to the operator; notice = {:?}",
+            st.session.notice
+        );
     }
 
     /// Defence in depth on the actor: a chain whose roster does not anchor the
@@ -4576,6 +4776,8 @@ mod tests {
                 chain: serde_json::to_string(&chain).expect("chain json"),
                 mls: String::new(),
                 mesh: Vec::new(),
+                nostr_sk: String::new(),
+                rotation_seed: String::new(),
                 generation: Some(1),
             })
             .await

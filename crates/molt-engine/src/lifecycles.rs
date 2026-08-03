@@ -1504,12 +1504,15 @@ impl State {
     /// [`State::cmd_net_join_sealed`]), then writes the recovered workspace,
     /// adopting the FULL chain, and enters the republic. Option A: no live
     /// mesh yet — re-meshing is the separate dynamic-membership feature.
+    #[allow(clippy::too_many_arguments)] // one internal command, one handler
     pub(crate) fn cmd_net_recover_sealed(
         &mut self,
         member: String,
         chain: String,
         mls: String,
         mesh: Vec<molt_core::MeshLink>,
+        nostr_sk: String,
+        rotation_seed: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted recovery bumped the generation — drop stale results
@@ -1574,6 +1577,81 @@ impl State {
                 }
             }
         };
+        // --- the Nostr shape (N4b step 6d) -----------------------------------
+        //
+        // Each of the three pieces comes from the only place that can honestly
+        // supply it, and they are deliberately NOT all taken from the task:
+        //
+        // - the **relay pool** from the VERIFIED chain (`sealed.relays`). The
+        //   pool is chain-governed since roster-v4, so the chain is the
+        //   authority; the Welcome's copy is a hint the task checked against.
+        //   Sealing the task's list instead would let a coordinator narrow a
+        //   recovering seat's view of its own republic.
+        // - the **rotation seed** from the task, because only the Welcome
+        //   carries it — the chain has no record of the h-tag seed.
+        // - the **transport secret** re-derived HERE from `(phrase, ticket)`,
+        //   with the task's copy as the cross-check.
+        //
+        // A seed present makes this a Nostr recovery; absent keeps the legacy
+        // queue shape (loopback tests, pre-N4 republics).
+        let shape = if rotation_seed.is_empty() {
+            TransportShape::default()
+        } else {
+            match hex::decode(&rotation_seed) {
+                Ok(seed) if seed.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&seed);
+                    TransportShape::nostr(sealed.relays.clone(), arr)
+                }
+                _ => {
+                    return self.cmd_net_recover_failed(
+                        "the rejoin task delivered a malformed rotation seed".to_string(),
+                        generation,
+                    )
+                }
+            }
+        };
+        // The returning seat's NEW anchor. It is re-derived rather than read
+        // off the roster ON PURPOSE: the roster entry is the seat's DEAD
+        // founding anchor, salted with a ticket that died with the device, so
+        // comparing against it would either always fail — or get "fixed" by
+        // deleting the comparison, which silently accepts any key at all.
+        let recovered_nostr_sk = if nostr_sk.is_empty() {
+            None
+        } else {
+            let entropy = match molt_storage::seed_entropy(&phrase) {
+                Ok(e) => e,
+                Err(e) => return self.cmd_net_recover_failed(e.to_string(), generation),
+            };
+            let (mut derived, derived_pk) = molt_net::nostr_identity(&entropy, &inv.ticket);
+            let raw = derived.to_vec();
+            zeroize::Zeroize::zeroize(&mut derived);
+            let delivered_ok = hex::decode(&nostr_sk)
+                .ok()
+                .filter(|d| d.len() == 32)
+                .and_then(|d| molt_net::nostr_pk_for_sk(&d).ok())
+                .is_some_and(|pk| pk == derived_pk);
+            if !delivered_ok {
+                return self.cmd_net_recover_failed(
+                    "the rejoin task's transport secret is not this recovery's derived key"
+                        .to_string(),
+                    generation,
+                );
+            }
+            // …and the republic must really have re-anchored us to it, or the
+            // seat would come back holding a key nobody addresses. The WORKING
+            // anchor, not the roster: `apply_membership` keeps the seat's
+            // anchored identity key across a Restored block, so the roster
+            // still carries the dead founding anchor by design.
+            if crate::chain::working_anchors(&blocks).get(&member) != Some(&derived_pk) {
+                return self.cmd_net_recover_failed(
+                    "the recovered chain does not anchor this recovery's transport key"
+                        .to_string(),
+                    generation,
+                );
+            }
+            Some(raw)
+        };
         // keep copies to stand the runtime supervisor up after materialising
         let net_seed = (mls_blob.clone(), mesh.clone());
         let id = match self.materialize_workspace(
@@ -1586,14 +1664,9 @@ impl State {
             sealed.attestations.clone(),
             sealed.republic_id.clone(),
             sealed.agenda.clone(),
-            // recovery still materializes the legacy shape — the N4b
-            // recovery-link v2 story carries the Nostr shape (+ re-anchor)
-            TransportShape::default(),
+            shape,
             Some(sk),
-            // the nostr transport secret was salted with the ORIGINAL seat's
-            // ticket, which died with the lost device — honestly None; the
-            // recovery-link v2 story (N4b) re-establishes the third anchor
-            None,
+            recovered_nostr_sk,
             mls_blob,
             mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),
