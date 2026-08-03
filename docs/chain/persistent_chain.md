@@ -254,10 +254,12 @@ Having verified a chain, a member knows — not trusts — that:
 - **Real (WP4b, 2026-07-18): threshold-signed chain checkpoints.** The
   republic compacts the way it governs: `propose_checkpoint` (a co-equal
   verb — MCP tool + GUI button) cuts at the current head; every member
-  recomputes the canonical state (`molt-chain-checkpoint-v2`: founding
-  table for republic-id recomputation, current roster, per-surface
-  applied projection, consumed proposal ids) from its OWN chain and
-  auto-co-signs only on an exact hash match. The sealed
+  recomputes the canonical state (`molt-chain-checkpoint-v4`: founding
+  table for republic-id recomputation, current roster, ratified relay pool,
+  per-surface applied projection — SUMMARIZED, not archived: a
+  last-write-wins slot keeps only its current value, accumulating items all
+  survive — and consumed proposal ids, every one of them) from its OWN chain
+  and auto-co-signs only on an exact hash match. The sealed
   `ChainChange::Checkpoint { upto, state_hash }` block (upto == height-1,
   enforced) lets every node drop history below the cut automatically;
   the blob becomes the suffix's trust anchor (`verify_suffix_chain`:

@@ -660,7 +660,7 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
         // signatures are what a suffix verifier trusts instead
         attestations: Vec::new(),
         agenda: blob.agenda.clone(),
-        // …but the ratified pool DOES survive the cut: checkpoint-v3 binds it
+        // …but the ratified pool DOES survive the cut: the checkpoint layout binds it
         // into the signed summary exactly so a rejoiner arriving after a
         // compaction still learns which relays the republic agreed on
         relays: blob.relays.clone(),
@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(
             sealed.relays,
             vec!["wss://relay.one".to_string()],
-            "the pool survives the cut, because checkpoint-v3 binds it"
+            "the pool survives the cut, because the checkpoint layout binds it"
         );
         assert!(
             sealed.attestations.is_empty(),

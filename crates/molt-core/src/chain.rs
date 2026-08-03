@@ -266,17 +266,62 @@ pub struct CheckpointState {
     pub roster: Vec<MemberIdentity>,
     /// The applied projection: per surface (in [`Surface::ALL`] order,
     /// surfaces without entries included empty), the `(proposal id,
-    /// payload)` list in block order.
+    /// payload)` list in block order — **summarized**, not archived: a
+    /// last-write-wins slot keeps only its latest entry, accumulating items
+    /// all survive ([`applied_lww_slot`], v4).
     pub applied: Vec<(Surface, Vec<(u64, Value)>)>,
     /// Every proposal id consumed by an `Applied` block `<= upto`, sorted —
     /// seeds the double-apply guard of a suffix verifier.
+    ///
+    /// **Every** id, including those whose payload the summary dropped: this
+    /// is the double-apply guard, and a summarized-away payload must never
+    /// become a re-appliable proposal.
     pub consumed_ids: Vec<u64>,
     /// The last folded-in block height.
     pub upto: u64,
 }
 
+/// **How a checkpoint summarizes one applied entry** (`log_compaction.md`
+/// §B.6a, product decision 2026-08-03).
+///
+/// A checkpoint's state carries what the republic **is**, never the path that
+/// produced it. The two kinds of applied entry are not the same:
+///
+/// - a **last-write-wins slot** holds a superseded *state* — only its latest
+///   entry survives a cut. This is no new judgement about what matters:
+///   `org_effective` already folds exactly this way, so the summary is that
+///   fold's own answer, kept instead of recomputed from a history nobody
+///   reads.
+/// - an **accumulating item** is a distinct object rather than a superseded
+///   state (Memory's notes). Those all survive — a checkpoint is a summary,
+///   not a delete.
+///
+/// Returns the slot an entry occupies, or `None` when it accumulates. **An
+/// undeclared op accumulates**: dropping something that was not superseded
+/// loses data, so the unknown case takes the conservative direction. That
+/// also makes the rule safe for an op an older build never heard of.
+///
+/// `set_image` and `remove_image` share ONE slot — a removal supersedes the
+/// image it removes, which is precisely what "last write wins" means here.
+#[must_use]
+pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static str> {
+    if surface != Surface::Organization {
+        return None;
+    }
+    match payload.get("op").and_then(Value::as_str)? {
+        "set_name" => Some("organization.name"),
+        "set_charter" => Some("organization.charter"),
+        "set_chat_retention" => Some("organization.retention"),
+        "set_image" | "remove_image" => Some("organization.image"),
+        _ => None,
+    }
+}
+
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v3` — v3 adds
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v4` — v4 is
+/// the SUMMARY rule ([`applied_lww_slot`]): item 5 carries the current state
+/// rather than the complete applied history, so the same chain hashes
+/// differently than it did under v3 and the tag has to say so; v3 adds
 /// the ratified relay pool (roster-v4); v2
 /// covers each member's `nostr_pk` third anchor in BOTH tables; under v1 a
 /// served checkpoint's roster anchor could be swapped without changing the
@@ -288,7 +333,7 @@ pub struct CheckpointState {
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v3\0");
+    out.extend_from_slice(b"molt-chain-checkpoint-v4\0");
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -396,6 +441,132 @@ mod tests {
             serde_json::to_vec(&reparsed).expect("serialize"),
             r#"{"a":2,"m":3,"z":1}"#.as_bytes()
         );
+    }
+
+    /// A small, hand-built checkpoint state — the fixture the byte pin and
+    /// the slot tests share.
+    fn pinned_state() -> CheckpointState {
+        CheckpointState {
+            founding_name: "Chess Club".to_string(),
+            rule_m: 2,
+            rule_n: 2,
+            founding_identities: vec![ident("petra", "aa"), ident("walter", "bb")],
+            agenda: "play chess".to_string(),
+            relays: vec!["wss://relay.example".to_string()],
+            republic_id: "f00".to_string(),
+            roster: vec![ident("petra", "aa"), ident("walter", "bb")],
+            applied: vec![(
+                Surface::Organization,
+                vec![(7, json!({ "op": "set_name", "value": "Chess Club Reloaded" }))],
+            )],
+            consumed_ids: vec![3, 7],
+            upto: 9,
+        }
+    }
+
+    /// **The `-v4` byte pin.** The canonical bytes are what an m-of-n
+    /// signature is taken over, so a change to the layout that nobody
+    /// noticed breaks every signature silently. This recomputes the layout
+    /// INDEPENDENTLY, field by field, rather than trusting a magic digest:
+    /// when it goes red the diff says which field moved.
+    ///
+    /// If you meant to change the layout, bump the tag in the SAME commit
+    /// and move this pin with it (the CLAUDE.md versioned-layout rule).
+    #[test]
+    fn checkpoint_canonical_bytes_are_pinned_at_v4() {
+        let s = pinned_state();
+
+        // the independent recomputation
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-chain-checkpoint-v4\0");
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        put(&mut want, b"f00");
+        put(&mut want, b"Chess Club");
+        want.push(2);
+        want.push(2);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        put(&mut want, b"play chess");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://relay.example");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        put(&mut want, b"organization");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        put(&mut want, br#"{"op":"set_name","value":"Chess Club Reloaded"}"#);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(&3u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        want.extend_from_slice(&9u64.to_le_bytes());
+
+        assert_eq!(
+            checkpoint_canonical_bytes(&s),
+            want,
+            "the checkpoint layout moved — bump the version tag and move this pin with it"
+        );
+    }
+
+    /// The tag itself, called out separately: a layout change that forgets
+    /// the bump is the failure mode the whole versioning rule exists for.
+    #[test]
+    fn the_checkpoint_layout_carries_its_version() {
+        assert!(checkpoint_canonical_bytes(&pinned_state())
+            .starts_with(b"molt-chain-checkpoint-v4\0"));
+    }
+
+    /// **The summary rule, declared** (§B.6a). Organization's four state
+    /// slots are last-write-wins — `set_image` and `remove_image` sharing
+    /// ONE slot, because a removal supersedes the image it removes. Every
+    /// other surface, and every undeclared op, ACCUMULATES: dropping
+    /// something that was not superseded loses data, so the unknown case
+    /// takes the conservative direction.
+    #[test]
+    fn the_last_write_wins_slots_are_exactly_the_declared_ones() {
+        let op = |o: &str| json!({ "op": o, "value": "x" });
+        assert_eq!(
+            applied_lww_slot(Surface::Organization, &op("set_image")),
+            applied_lww_slot(Surface::Organization, &op("remove_image")),
+            "a removal must land in the same slot as the image it removes"
+        );
+        for o in ["set_name", "set_charter", "set_chat_retention"] {
+            assert!(
+                applied_lww_slot(Surface::Organization, &op(o)).is_some(),
+                "{o} holds superseded state and must be summarized"
+            );
+        }
+        // …and the three of them are distinct slots
+        let slots: std::collections::BTreeSet<_> =
+            ["set_name", "set_charter", "set_chat_retention", "set_image"]
+                .iter()
+                .filter_map(|o| applied_lww_slot(Surface::Organization, &op(o)))
+                .collect();
+        assert_eq!(slots.len(), 4, "distinct settings must not share a slot");
+
+        // an op this build never heard of accumulates
+        assert_eq!(applied_lww_slot(Surface::Organization, &op("set_mascot")), None);
+        assert_eq!(applied_lww_slot(Surface::Organization, &json!({})), None);
+        // and no other surface declares slots — a note is a distinct object
+        for s in Surface::ALL {
+            if s != Surface::Organization {
+                assert_eq!(
+                    applied_lww_slot(s, &op("add_note")),
+                    None,
+                    "{s:?} must accumulate — a checkpoint is a summary, not a delete"
+                );
+            }
+        }
     }
 
     /// The genesis approval bytes must equal the roster bytes every member

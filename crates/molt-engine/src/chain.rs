@@ -492,8 +492,20 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             payload,
         } => {
             if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
+                // §B.6a (v4): a checkpoint SUMMARIZES. A last-write-wins slot
+                // keeps only its latest entry — the answer `org_effective`
+                // computes anyway — while a distinct object accumulates.
+                // Applied HERE rather than at the cut so a suffix holder
+                // folding onto a summarized blob reaches the same state as a
+                // full holder folding from the genesis.
+                if let Some(slot) = molt_core::applied_lww_slot(*surface, payload) {
+                    list.retain(|(_, p)| molt_core::applied_lww_slot(*surface, p) != Some(slot));
+                }
                 list.push((*proposal_id, payload.clone()));
             }
+            // EVERY consumed id, including one whose payload the summary just
+            // dropped: this is the double-apply guard, and a summarized-away
+            // payload must never become a re-appliable proposal
             state.consumed_ids.push(*proposal_id);
         }
         ChainChange::Membership {
@@ -524,6 +536,12 @@ fn hash_walk_state(state: &molt_core::CheckpointState, upto: u64) -> String {
 /// checkpoint blob (suffix holder), so chained checkpoints recompute
 /// identically on both. Checkpoint/Genesis blocks in the range are
 /// state-neutral.
+///
+/// Delegates every block to [`fold_one`] rather than repeating the match.
+/// The duplication was a live divergence trap: the batch fold and the
+/// incremental walk hash the SAME state, so any rule that reached one and
+/// not the other (the v4 summary is exactly such a rule) would make a
+/// republic unable to agree on a cut, with no error pointing at why.
 fn fold_state(
     mut state: molt_core::CheckpointState,
     blocks: &[ChainBlock],
@@ -533,30 +551,7 @@ fn fold_state(
         if b.height > upto {
             break;
         }
-        match &b.change {
-            ChainChange::Applied {
-                proposal_id,
-                surface,
-                payload,
-            } => {
-                if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
-                    list.push((*proposal_id, payload.clone()));
-                }
-                state.consumed_ids.push(*proposal_id);
-            }
-            ChainChange::Membership {
-                op,
-                member,
-                identity_pk,
-            ..
-            } => {
-                apply_membership(&mut state.roster, *op, member, identity_pk)?;
-            }
-            // exhaustive on purpose (additive-only rule): a FUTURE
-            // state-bearing variant must not silently fold as neutral —
-            // adding one forces a decision here at compile time
-            ChainChange::Genesis { .. } | ChainChange::Checkpoint { .. } => {}
-        }
+        fold_one(&mut state, b)?;
     }
     state.consumed_ids.sort_unstable();
     state.upto = upto;
@@ -2456,6 +2451,19 @@ mod tests {
             self.push(block);
         }
 
+        /// Commit an Organization edit — the surface whose ops occupy
+        /// last-write-wins slots (§B.6a), so a checkpoint summarizes them.
+        fn commit_org(&mut self, proposal_id: u64, op: &str, value: &str, signers: &[&str]) {
+            let height = u64::try_from(self.blocks.len()).expect("small chain");
+            let change = ChainChange::Applied {
+                proposal_id,
+                surface: Surface::Organization,
+                payload: json!({ "op": op, "value": value }),
+            };
+            let block = self.seal(height, change, signers);
+            self.push(block);
+        }
+
         /// Commit a `Restored` membership block — the seat keeps its anchored
         /// identity key and re-anchors its transport key.
         fn commit_restored(&mut self, member: &str, nostr_pk: &str, signers: &[&str]) {
@@ -3971,6 +3979,236 @@ mod tests {
         assert_eq!(head.height, 4);
     }
 
+    /// **A checkpoint SUMMARIZES — it does not archive** (§B.6a, decided
+    /// 2026-08-03). The republic's logo changed three times; the blob carries
+    /// the CURRENT one, and only that one.
+    ///
+    /// Asserted by CONTENT, not by count: a summary that kept the FIRST entry
+    /// would satisfy a count check just as well, and would be silently,
+    /// permanently wrong about what the republic looks like.
+    #[test]
+    fn a_checkpoint_keeps_the_current_value_of_a_slot_not_its_history() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_image", "first.png", &["petra", "walter"]);
+        b.commit_org(2, "set_image", "second.png", &["petra", "walter"]);
+        b.commit_org(3, "set_image", "third.png", &["petra", "walter"]);
+
+        let state = checkpoint_state(&b.blocks, 3).expect("state");
+        let org: Vec<&(u64, serde_json::Value)> = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .map(|(_, list)| list.iter().collect())
+            .unwrap_or_default();
+
+        assert_eq!(org.len(), 1, "three logos survived the cut: {org:?}");
+        assert_eq!(
+            org[0].1.get("value").and_then(serde_json::Value::as_str),
+            Some("third.png"),
+            "the summary kept the wrong logo — a republic would show a superseded image forever"
+        );
+        // …and every consumed id survives, including the two whose payload
+        // was dropped. This is the guard most likely to be lost by accident.
+        assert_eq!(
+            state.consumed_ids,
+            vec![1, 2, 3],
+            "a summarized-away payload must still be an un-re-appliable proposal id"
+        );
+    }
+
+    /// Distinct slots do NOT collide, and a removal supersedes the image it
+    /// removes — the two halves of "slot", both of which a naive
+    /// keep-the-last-Organization-entry rule would get wrong.
+    #[test]
+    fn slots_are_independent_and_a_removal_supersedes_its_image() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_image", "logo.png", &["petra", "walter"]);
+        b.commit_org(2, "set_name", "Chess Club Reloaded", &["petra", "walter"]);
+        b.commit_org(3, "remove_image", "", &["petra", "walter"]);
+
+        let state = checkpoint_state(&b.blocks, 3).expect("state");
+        let (_, org) = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .expect("organization entries");
+        let ops: Vec<&str> = org
+            .iter()
+            .filter_map(|(_, p)| p.get("op").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            ops,
+            vec!["set_name", "remove_image"],
+            "the name and image slots must survive independently, and the removal must \
+             supersede the set_image it removes: {org:?}"
+        );
+    }
+
+    /// **A checkpoint is a summary, not a delete.** Memory's notes are
+    /// distinct objects, not superseded state, so every one of them survives
+    /// the cut — the rule cannot be read as "keep only the last entry".
+    #[test]
+    fn accumulating_entries_all_survive_the_cut() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        b.commit_applied(3, &["petra", "walter"]);
+
+        let state = checkpoint_state(&b.blocks, 3).expect("state");
+        let (_, notes) = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Memory)
+            .expect("memory entries");
+        assert_eq!(
+            notes.len(),
+            3,
+            "notes are distinct objects — summarizing them away deletes the shared brain: {notes:?}"
+        );
+    }
+
+    /// An op no build declares takes the CONSERVATIVE direction: it
+    /// accumulates. Dropping something that was not superseded loses data,
+    /// and an older node meeting a newer op must not guess otherwise.
+    #[test]
+    fn an_undeclared_op_accumulates() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_mascot", "otter", &["petra", "walter"]);
+        b.commit_org(2, "set_mascot", "heron", &["petra", "walter"]);
+
+        let state = checkpoint_state(&b.blocks, 2).expect("state");
+        let (_, org) = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .expect("organization entries");
+        assert_eq!(org.len(), 2, "an undeclared op must not be summarized away: {org:?}");
+    }
+
+    /// **The incremental walk and the batch fold must agree on the summary.**
+    ///
+    /// A proposer computes a cut's `state_hash` with the batch fold; every
+    /// verifier re-checks it with the incremental walk inside `verify_chain`.
+    /// A rule that reached one and not the other would leave a republic
+    /// unable to gather signatures for ANY cut, and nothing would say why —
+    /// which is why `fold_state` delegates to `fold_one` rather than
+    /// repeating the match. This test is what keeps that true.
+    ///
+    /// The chain deliberately mixes both kinds: a superseded slot, an
+    /// accumulating note, and a second slot.
+    #[test]
+    fn the_walk_and_the_fold_summarize_identically() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_image", "first.png", &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        b.commit_org(3, "set_image", "second.png", &["petra", "walter"]);
+        b.commit_org(4, "set_charter", "play more chess", &["petra", "walter"]);
+
+        let folded = checkpoint_state(&b.blocks, 4).expect("batch fold");
+        let cut = b.seal(
+            5,
+            ChainChange::Checkpoint {
+                upto: 4,
+                state_hash: checkpoint_state_hash(&folded),
+            },
+            &["petra", "walter"],
+        );
+        let mut chain = b.blocks.clone();
+        chain.push(cut);
+        let head = verify_chain(&chain).expect(
+            "the walk must reach the same summary the fold did — otherwise no cut is signable",
+        );
+        assert_eq!(head.height, 5);
+    }
+
+    /// **A payload the summary dropped is still an un-re-appliable id.**
+    ///
+    /// The single most likely thing to be lost by accident here: `applied`
+    /// shrinks, so it is tempting to let `consumed_ids` shrink with it. That
+    /// would turn every superseded logo back into a proposal a suffix holder
+    /// would happily apply again — the double-apply guard, silently repealed
+    /// for exactly the entries a cut just summarized away.
+    #[test]
+    fn a_summarized_away_payload_can_never_re_apply() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_image", "first.png", &["petra", "walter"]);
+        b.commit_org(2, "set_image", "second.png", &["petra", "walter"]);
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+
+        // proposal 1's payload is GONE from the summary…
+        let (_, org) = blob
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .expect("organization entries");
+        assert_eq!(org.len(), 1, "precondition: the first logo was summarized away");
+        assert!(!org.iter().any(|(id, _)| *id == 1), "precondition: id 1's payload is dropped");
+        // …and it is still consumed
+        assert!(blob.consumed_ids.contains(&1), "the dropped payload's id must survive");
+
+        let cut = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(cut);
+        b.commit_org(1, "set_image", "resurrected.png", &["petra", "walter"]);
+        let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
+        assert!(
+            verify_suffix_chain(&blob, &suffix, &b.republic_id).is_err(),
+            "a summarized-away proposal id re-applied in the suffix — the double-apply \
+             guard was repealed for exactly the entries the cut dropped"
+        );
+    }
+
+    /// **A suffix holder folding onto a summarized blob lands where a full
+    /// holder folding from the genesis does.** Without it, the first cut
+    /// after a prune would disagree across the republic — the pruned nodes
+    /// against the ones that kept their history.
+    #[test]
+    fn a_suffix_holder_summarizes_onto_the_blob_the_same_way() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_org(1, "set_image", "first.png", &["petra", "walter"]);
+        b.commit_applied(2, &["petra", "walter"]);
+        // cut at 2, then keep changing the SAME slot past the cut
+        let blob = checkpoint_state(&b.blocks, 2).expect("state@2");
+        let cut = b.seal(
+            3,
+            ChainChange::Checkpoint {
+                upto: 2,
+                state_hash: checkpoint_state_hash(&blob),
+            },
+            &["petra", "walter"],
+        );
+        b.push(cut);
+        b.commit_org(4, "set_image", "second.png", &["petra", "walter"]);
+
+        // the full holder's answer…
+        let full = checkpoint_state(&b.blocks, 4).expect("full fold@4");
+        // …and the pruned holder's, folding the suffix onto the blob
+        let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
+        let from_blob = fold_state(blob, &suffix, 4).expect("suffix fold@4");
+
+        assert_eq!(
+            checkpoint_state_hash(&full),
+            checkpoint_state_hash(&from_blob),
+            "a pruned holder and a full holder disagree about the summarized state"
+        );
+        let (_, org) = from_blob
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .expect("organization entries");
+        assert_eq!(org.len(), 1, "the blob's superseded image survived the second fold: {org:?}");
+        assert_eq!(
+            org[0].1.get("value").and_then(serde_json::Value::as_str),
+            Some("second.png")
+        );
+    }
+
     /// WP4b stage 1: two nodes that hold the SAME chain compute the SAME
     /// checkpoint state, canonical bytes and hash — the property that
     /// makes an m-of-n signature over the hash meaningful. Different
@@ -3978,27 +4216,37 @@ mod tests {
     /// recomputes to the real republic id (the genesis forgery check
     /// survives the genesis block being dropped later); consumed ids ride
     /// sorted.
+    ///
+    /// The chains deliberately carry BOTH kinds of applied entry: without a
+    /// summarized slot in here, the determinism keystone would say nothing
+    /// about the one rule most able to break it — every node must drop the
+    /// same superseded entries, or a republic silently loses the ability to
+    /// compact at all.
     #[test]
     fn checkpoint_state_is_deterministic_and_binds_the_founding() {
         let mut b1 = Builder::new(&["petra", "walter", "dora"], 2);
         b1.commit_applied(2, &["petra", "walter"]);
         b1.commit_applied(1, &["walter", "dora"]);
+        b1.commit_org(3, "set_image", "old.png", &["petra", "walter"]);
+        b1.commit_org(4, "set_image", "new.png", &["walter", "dora"]);
         let mut b2 = Builder::new(&["petra", "walter", "dora"], 2);
         b2.commit_applied(2, &["petra", "walter"]);
         b2.commit_applied(1, &["walter", "dora"]);
+        b2.commit_org(3, "set_image", "old.png", &["petra", "walter"]);
+        b2.commit_org(4, "set_image", "new.png", &["walter", "dora"]);
 
-        let s1 = checkpoint_state(&b1.blocks, 2).expect("state 1");
-        let s2 = checkpoint_state(&b2.blocks, 2).expect("state 2");
+        let s1 = checkpoint_state(&b1.blocks, 4).expect("state 1");
+        let s2 = checkpoint_state(&b2.blocks, 4).expect("state 2");
         assert_eq!(
             checkpoint_state_hash(&s1),
             checkpoint_state_hash(&s2),
             "equal chains yield the identical checkpoint hash"
         );
-        // the canonical bytes carry the versioned tag (v3 since R3 — the
-        // ratified relay pool joined the roster/founding nostr anchors inside
-        // the hashed bytes)
+        // the canonical bytes carry the versioned tag (v4 since the summary
+        // rule — the same chain hashes differently than it did under v3, so
+        // the tag has to say so; v3 added the ratified relay pool)
         let bytes = molt_core::checkpoint_canonical_bytes(&s1);
-        assert!(bytes.starts_with(b"molt-chain-checkpoint-v3\0"));
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v4\0"));
         // …and the pool is really covered: a summary whose relays were swapped
         // must not hash the same. Without this the tamper-evidence roster-v4
         // gives the genesis would vanish the moment a republic pruned.
@@ -4009,8 +4257,9 @@ mod tests {
             checkpoint_state_hash(&swapped),
             "the checkpoint must bind the ratified pool"
         );
-        // consumed ids are sorted regardless of commit order
-        assert_eq!(s1.consumed_ids, vec![1, 2]);
+        // consumed ids are sorted regardless of commit order, and the
+        // summarized-away logo (3) is still among them
+        assert_eq!(s1.consumed_ids, vec![1, 2, 3, 4]);
         // the founding table recomputes to the real republic id — the
         // forgery check a suffix bootstrapper will rely on
         assert_eq!(
@@ -4023,7 +4272,7 @@ mod tests {
             s1.republic_id
         );
         // a different cut or different content changes the hash
-        let shorter = checkpoint_state(&b1.blocks, 1).expect("shorter cut");
+        let shorter = checkpoint_state(&b1.blocks, 3).expect("shorter cut");
         assert_ne!(checkpoint_state_hash(&s1), checkpoint_state_hash(&shorter));
 
         // acceptance of checkpoint BLOCKS is pinned by the stage-2 tests

@@ -205,7 +205,7 @@ normalen positionsgebundenen Signaturen über
 Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
 sinngemäß).
 
-## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v2`)
+## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v4`)
 
 Deterministische Byte-Folge, längenpräfixierte Felder (dasselbe Framing
 wie `roster_canonical_bytes` — Geschwister-Layout, eigener
@@ -228,10 +228,14 @@ Versions-Tag). Inhalt in fester Reihenfolge:
    `(proposal_id, payload_canonical_json)` in Block-Reihenfolge.
    `payload_canonical_json` = serde_json mit sortierten Map-Keys
    (Default-BTreeMap; ein Test PINNT, dass `preserve_order` im Workspace
-   nirgends aktiv ist).
+   nirgends aktiv ist). **Seit v4 ZUSAMMENGEFASST, nicht archiviert**
+   (§B.6a): ein Last-Write-Wins-Slot behält nur seinen letzten Eintrag,
+   akkumulierende Einträge überleben alle — die Deklaration ist
+   `molt_core::applied_lww_slot`, angewandt in `fold_one`.
 6. **Verbrauchte Proposal-Ids**: sortierte Liste aller in Blöcken
    ≤ `upto` applied Ids — Seed für den Double-Apply-Guard eines
-   Suffix-Verifiers (§B.5).
+   Suffix-Verifiers (§B.5). **JEDE** Id, auch die eines
+   zusammengefassten (weggefallenen) Payloads.
 7. `upto`.
 
 Gleiche Chain ⇒ gleiche Bytes ⇒ gleicher Hash, auf jedem Node. Im Block
@@ -332,14 +336,15 @@ mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
 
 ## B.6a A checkpoint SUMMARIZES — it does not archive
 
-**Product decision, 2026-08-03 (user).** A checkpoint's state carries what
-the republic **is**, never the path that produced it. Superseded values and
-dead intermediates are dropped at the cut. That is what checkpoints are for.
+**Product decision, 2026-08-03 (user). BUILT 2026-08-03 (v4).** A
+checkpoint's state carries what the republic **is**, never the path that
+produced it. Superseded values and dead intermediates are dropped at the cut.
+That is what checkpoints are for.
 
-**Today it is the opposite**, and that is a defect rather than a design:
-§B.3 item 5 serializes the applied projection as `(proposal_id, payload)`
+**It used to be the opposite**, and that was a defect rather than a design:
+§B.3 item 5 serialized the applied projection as `(proposal_id, payload)`
 **in block order, complete**. So every logo the republic ever had, every
-name it ever carried, stays in the blob forever.
+name it ever carried, stayed in the blob forever.
 
 That is not a size nicety. The blob is the **trust root a rejoiner must be
 handed** once the genesis is gone (`nostr_n4b_step6_design.md`), and it is
@@ -503,17 +508,34 @@ without the cap a single current logo can already be unpublishable.
    Id-Kollisions-Guard aus Etappe 3; die Events geben dem Proposer
    Closure), Nachzügler-Buffer, per-Peer-Blob-Stashes.
 
-6. **OPEN — the summary rule (§B.6a, decided 2026-08-03).** Item 5 of the
-   canonical serialization keeps the complete applied history; it must keep
-   the CURRENT state instead. Red tests, in this order:
+6. ✅ **DONE 2026-08-03 — the summary rule (§B.6a).** Item 5 carried the
+   complete applied history; it now carries the CURRENT state.
+   `molt_core::applied_lww_slot` is the declaration (Organization's four
+   slots, `set_image`/`remove_image` sharing one; everything else and every
+   undeclared op accumulates), applied inside `fold_one` so a suffix holder
+   folding onto a summarized blob lands exactly where a full holder folding
+   from the genesis does. Bumped to `molt-chain-checkpoint-v4`.
+
+   **`fold_state` now delegates to `fold_one`.** The two folds had the same
+   match written twice — the batch fold a proposer computes a cut with, and
+   the incremental walk every verifier re-checks it with. A rule reaching
+   one and not the other would have left the republic unable to sign ANY
+   cut, with nothing pointing at why; the duplication was the trap, so it is
+   gone rather than kept in sync by hand.
+
+   Red tests, in this order (all landed):
    - a chain with three `set_image` blocks yields a blob carrying ONE image,
      and it is the last one (asserted by content, not by count — a summary
      that kept the FIRST would also pass a count check);
+   - distinct slots stay independent, and a `remove_image` supersedes the
+     `set_image` it removes;
    - a note surface's entries all survive, so the rule cannot be read as
-     "keep only the last entry" globally;
+     "keep only the last entry" globally; an undeclared op accumulates;
    - `consumed_ids` still lists every dropped payload's proposal id, and a
      block re-applying one of them is refused (the guard is the thing most
      likely to be lost by accident here);
+   - the walk and the fold summarize identically, and a suffix holder
+     summarizes onto the blob the same way;
    - two independently built chains fold to byte-identical
      `checkpoint_canonical_bytes` — without this a republic silently loses
      the ability to compact at all;

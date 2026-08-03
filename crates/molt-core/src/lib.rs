@@ -24,8 +24,8 @@ use serde_json::Value;
 pub mod chain;
 pub mod relay;
 pub use chain::{
-    approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock, ChainChange,
-    CheckpointState, MembershipOp, GENESIS_PREV,
+    applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
+    ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
 };
 
 /// A member of the republic (the holder of one threshold share). In this
