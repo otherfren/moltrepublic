@@ -143,7 +143,12 @@ fn validate_payload_fits(
     if payload_fits(surface, payload, roster) {
         return Ok(());
     }
-    if let Some(bytes) = image_bytes(payload) {
+    // the image wording belongs to a set_image and nothing else: any payload
+    // may happen to carry a `bytes_b64`, and telling its author to shrink an
+    // image they never proposed is a message that costs them the fix
+    let is_set_image = surface == Surface::Organization
+        && payload.get("op").and_then(Value::as_str) == Some("set_image");
+    if let Some(bytes) = image_bytes(payload).filter(|_| is_set_image) {
         return Err(MoltError::BadPayload(format!(
             "the image is {} KiB — this republic's relays carry {} KiB",
             bytes.len() / 1024,

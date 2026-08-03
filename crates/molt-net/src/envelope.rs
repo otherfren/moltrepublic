@@ -118,11 +118,19 @@ const EVENT_FRAME_OVERHEAD: usize = 512;
 ///
 /// The content is base64, so it needs no JSON escaping: the cost is a
 /// function of the plaintext LENGTH alone, whatever the payload holds.
+/// Saturating throughout: an absurd length must report "far over budget",
+/// never panic on overflow. The answer is the same either way — refuse.
 #[must_use]
 pub fn frame_cost(plaintext_len: usize) -> usize {
-    let sealed = plaintext_len + MLS_FRAME_OVERHEAD + NONCE_LEN + TAG_LEN;
+    let sealed = plaintext_len
+        .saturating_add(MLS_FRAME_OVERHEAD)
+        .saturating_add(NONCE_LEN)
+        .saturating_add(TAG_LEN);
     // base64 of the sealed bytes, padded to a multiple of 4
-    sealed.div_ceil(3) * 4 + EVENT_FRAME_OVERHEAD
+    sealed
+        .div_ceil(3)
+        .saturating_mul(4)
+        .saturating_add(EVENT_FRAME_OVERHEAD)
 }
 
 /// The inverse of [`frame_cost`]: the largest plaintext whose frame still

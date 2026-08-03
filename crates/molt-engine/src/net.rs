@@ -769,16 +769,6 @@ impl State {
         self.build_real_net_shared(transport, mesh, Arc::new(Mutex::new(mls)))
     }
 
-    /// Bring up the kind-445 GROUP runtime of a Nostr workspace (N5.2).
-    ///
-    /// The Nostr twin of [`Self::build_real_net`], and it reuses that one's
-    /// engine seam verbatim — the same `StorageLog` / `FileStateStore` /
-    /// `CmdSink` triple. What differs is everything below the seam: one
-    /// broadcast channel instead of n queues, and no `NetRuntime` at all.
-    ///
-    /// `None` when anything the runtime needs is absent — a Nostr workspace
-    /// that cannot dial one of its own relays, or whose MLS group did not
-    /// restore, must stay honestly silent rather than half-run.
     /// The relays this node may actually dial for the OPEN republic: what the
     /// group ratified, intersected with this node's own confirmed pool.
     ///
@@ -801,6 +791,16 @@ impl State {
         .collect()
     }
 
+    /// Bring up the kind-445 GROUP runtime of a Nostr workspace (N5.2).
+    ///
+    /// The Nostr twin of [`Self::build_real_net`], and it reuses that one's
+    /// engine seam verbatim — the same `StorageLog` / `FileStateStore` /
+    /// `CmdSink` triple. What differs is everything below the seam: one
+    /// broadcast channel instead of n queues, and no `NetRuntime` at all.
+    ///
+    /// `None` when anything the runtime needs is absent — a Nostr workspace
+    /// that cannot dial one of its own relays, or whose MLS group did not
+    /// restore, must stay honestly silent rather than half-run.
     pub(crate) fn build_group_net(&mut self, mls_blob: &[u8]) -> Option<crate::GroupNet> {
         let relays = self.dialable_group_relays();
         let active = self.active.as_ref()?;

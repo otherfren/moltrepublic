@@ -1688,7 +1688,59 @@ impl State {
     /// named — a recovery that quietly does nothing leaves a member locked out
     /// with no way to find out why.
     fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) {
-        // the stamp is chosen HERE, before anything is committed, and travels
+        // **Everything that can fail is resolved BEFORE the group is touched.**
+        //
+        // `nostr_rekey` advances the epoch and evicts the old leaf, and there
+        // is no undo. A re-key whose delivery then turns out to be impossible
+        // leaves this node alone on an epoch no survivor knows about, unable
+        // to be read by anyone until some later commit rescues it — the same
+        // split the commit-before-welcome rule exists to prevent, reached
+        // through an earlier door.
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            tracing::error!(%member, "no dialable relay for this republic — the re-key cannot be delivered");
+            return;
+        }
+        let Ok(dialer) = self.dialer_for() else {
+            tracing::error!(%member, "no usable dial route — the re-key cannot be delivered");
+            return;
+        };
+        // the transport material, copied out so the group borrow below is free
+        let Some(nostr) = self.nostr.as_ref() else {
+            return;
+        };
+        let rotation_seed = nostr.rotation_seed;
+        // the payload carries what the GROUP ratified, not this node's own
+        // intersection: the rejoiner gates that list through its own pool,
+        // and handing it a narrowed one would silently shrink the republic
+        let ratified: Vec<String> = nostr
+            .relays
+            .iter()
+            .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
+            .cloned()
+            .collect();
+        let net = match molt_net::ritual_net::RitualNet::new(
+            dialer.clone(),
+            relays.clone(),
+            &nostr.sk,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(%member, error = %e, "recovery transport keys — the re-key cannot be delivered");
+                return;
+            }
+        };
+        let channel = molt_net::ritual_net::GroupChannel::new(dialer, relays, rotation_seed);
+        // the NEW anchor: the `Restored` block that triggered this re-key has
+        // already been folded, so this is the key the seat just proved it holds
+        let to = self.working_nostr_pk(member);
+        if to.is_empty() {
+            tracing::error!(%member, "the restored seat carries no transport anchor — nothing to address the welcome to");
+            return;
+        }
+
+        // --- past here the group really changes -------------------------------
+        // the stamp is chosen before anything is committed and travels
         // unchanged into both `restore_member` and `publish_frame_at`
         let stamp = molt_storage::now_secs();
         let Some(group) = self.group_net.as_ref() else {
@@ -1701,51 +1753,11 @@ impl State {
                 return;
             }
         };
-        let relays = self.dialable_group_relays();
-        if relays.is_empty() {
-            tracing::error!(%member, "no dialable relay for this republic — the re-key cannot be delivered");
-            return;
-        }
-        let Some(nostr) = self.nostr.as_ref() else {
-            return;
-        };
-        let Ok(dialer) = self.dialer_for() else {
-            tracing::error!(%member, "no usable dial route — the re-key cannot be delivered");
-            return;
-        };
-        let net = match molt_net::ritual_net::RitualNet::new(
-            dialer.clone(),
-            relays.clone(),
-            &nostr.sk,
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(%member, error = %e, "recovery transport keys — the re-key cannot be delivered");
-                return;
-            }
-        };
-        let channel =
-            molt_net::ritual_net::GroupChannel::new(dialer, relays, nostr.rotation_seed);
-        // the payload carries what the GROUP ratified, not this node's own
-        // intersection: the rejoiner gates that list through its own pool,
-        // and handing it a narrowed one would silently shrink the republic
         let payload = molt_net::welcome::WelcomePayload {
             welcome: rekey.welcome.clone(),
-            rotation_seed: nostr.rotation_seed,
-            relays: nostr
-                .relays
-                .iter()
-                .take(molt_net::welcome::MAX_PAYLOAD_RELAYS)
-                .cloned()
-                .collect(),
+            rotation_seed,
+            relays: ratified,
         };
-        // the NEW anchor: the `Restored` block that triggered this re-key has
-        // already been folded, so this is the key the seat just proved it holds
-        let to = self.working_nostr_pk(member);
-        if to.is_empty() {
-            tracing::error!(%member, "the restored seat carries no transport anchor — nothing to address the welcome to");
-            return;
-        }
         crate::nostr_ritual::spawn_rekey_delivery(
             channel,
             net,
