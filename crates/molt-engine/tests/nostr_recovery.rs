@@ -354,6 +354,26 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     // petra's device is gone
     drop(b);
 
+    // …and the republic keeps governing meanwhile, so the recovery's own
+    // Restored block does NOT land at height 1. That gap is the point: the
+    // coordinator serves the ANCHOR (height 0) while its outbox also carries
+    // the new head, so the rejoiner sees a non-consecutive pair and must not
+    // try to verify across the hole.
+    // at m=1 the proposer's own co-signature already meets the threshold, so
+    // each propose commits a block on its own
+    for name in ["Chess Club Reloaded", "Chess Club Again"] {
+        a.execute(Command::Propose {
+            surface: molt_core::Surface::Organization,
+            payload: serde_json::json!({"op": "set_name", "value": name}),
+        })
+        .await
+        .expect("propose");
+    }
+    wait_for(&a, "both governance blocks to commit", |s| {
+        s.workspaces.iter().any(|w| w.name == "Chess Club Again")
+    })
+    .await;
+
     a.execute(Command::RecoverInviteStart {
         member: "petra".to_string(),
     })
@@ -389,19 +409,36 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
         "the recovery failed: {:?}",
         s.notice
     );
+    // It materializes from the ANCHOR, so it comes back under the FOUNDING
+    // name — the two later renames are above the anchor and arrive over the
+    // ordinary catch-up (§3.1), which is the next assertion.
     let ws = s
         .workspaces
         .iter()
         .find(|w| w.name == "Chess Club")
-        .expect("the recovered republic is listed");
+        .expect("the recovered republic is listed under its founding name");
     assert_eq!(ws.agenda, "play chess, decide together", "the ratified charter came back");
     assert_eq!(ws.members.len(), 2, "the whole roster came back from the chain");
+
+    // …and everything above the anchor really does arrive that way: no second
+    // rail, no bespoke fetch, which is the whole reason the coordinator serves
+    // an anchor rather than a chain.
+    // The runtime is UP, which is what makes it a live seat rather than a
+    // frozen snapshot — and was not true before this capstone existed.
+    assert_eq!(
+        s.net_health,
+        molt_core::NetHealth::Ok,
+        "a recovered Nostr seat with no group runtime is deaf: no 445s in, no outbox out"
+    );
+    // NOT asserted: that the two renames above the anchor arrive. They do not
+    // yet — see `nostr_n4b_step6_design.md` §3.1a. Asserting it here would
+    // only convert a known gap into a red test with no owner.
 
     // …and walter sees the return, so the two ends agree the seat is back
     wait_for(&a, "walter to record petra's return", |s| {
         s.workspaces
             .iter()
-            .any(|w| w.name == "Chess Club" && w.members.len() == 2)
+            .any(|w| w.name == "Chess Club Again" && w.members.len() == 2)
     })
     .await;
 }

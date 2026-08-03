@@ -1801,6 +1801,16 @@ impl State {
             payload,
             member.to_string(),
         );
+        // **Forget the seat's OLD accept window.** The returning member is a
+        // new incarnation whose log seq space restarts at 1, so the marks from
+        // the lost device swallow every fresh envelope as a duplicate — its
+        // chat, and the `ChainRequest` that pulls everything above the anchor.
+        //
+        // The mesh does this at its authenticated recovery-announce
+        // (`cmd_net_recover_announced`), which a Nostr republic has no
+        // equivalent of. It does have a stronger one: this re-key runs only
+        // behind a threshold-committed `Restored` block for exactly this seat.
+        self.reset_peer_accept_window(&member.to_string());
         // the rejoiner's trust root, over the same 445 channel it just joined
         self.serve_chain_anchor();
         // …and the same quiet system line the mesh arm posts. It is encrypted

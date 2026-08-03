@@ -1720,7 +1720,9 @@ impl State {
             }
             Some(raw)
         };
-        // keep copies to stand the runtime supervisor up after materialising
+        // keep copies to stand the runtime supervisors up after materialising
+        // (the queue mesh below, and the Nostr group runtime after it)
+        let group_mls = mls_blob.clone();
         let net_seed = (mls_blob.clone(), mesh.clone());
         let id = match self.materialize_workspace(
             &sealed.name,
@@ -1803,6 +1805,41 @@ impl State {
                     self.net = Some(net);
                 }
             }
+        }
+        // …and on a NOSTR republic, the group runtime — the founding/join twin
+        // does this for exactly the same reason (`materialize_workspace`'s
+        // caller, "a first session as capable as a resumed one").
+        //
+        // Without it a recovered seat came back DEAF: no 445 subscription, so
+        // no chat and no catch-up, and no outbox, so the `ChainRequest` that
+        // pulls everything above the served anchor never went out. It looked
+        // recovered — roster, charter, chain head — and was frozen at the
+        // anchor until the workspace was closed and reopened. §3.1's "the rest
+        // arrives over the ordinary catch-up" quietly depended on this.
+        if self.nostr.is_some() {
+            if let Some(blob) = group_mls.as_deref() {
+                self.group_net = self.build_group_net(blob);
+            }
+            self.session.net_health = if self.group_net.is_some() {
+                molt_core::NetHealth::Ok
+            } else {
+                molt_core::NetHealth::Down {
+                    reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
+                }
+            };
+        }
+        // **Ask for everything above the anchor.** §3.1 says the rest arrives
+        // over the ordinary catch-up, and nothing was issuing the request: the
+        // two existing triggers are a gap-block arriving and a workspace OPEN,
+        // and a recovery hits neither. It cannot hit the first, either — the
+        // coordinator's own head block was published at the epoch BEFORE the
+        // re-key, which a rejoiner that joined at the new one can never
+        // decrypt (an exporter ring reaches backward only).
+        //
+        // After the runtime, because the request is an envelope the outbox has
+        // to carry.
+        if let Some(height) = self.chain_head.as_ref().map(|h| h.height) {
+            self.request_catchup(height + 1);
         }
         self.session.notice = format!("recovered:{member}");
         self.session.screen = Screen::Main;

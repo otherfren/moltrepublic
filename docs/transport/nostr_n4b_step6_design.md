@@ -91,6 +91,42 @@ cannot `record()` a `ChainRequest` before it has a workspace. **After the
 encrypted at an epoch the returning member can read, which is the one the
 re-key just created for it.
 
+### 3.1a OPEN: the catch-up above the anchor does not run yet
+
+**Verified 2026-08-03 by the capstone, with a republic whose head is three
+blocks above its anchor.** §3.1 above says "everything above the anchor
+arrives over the ORDINARY catch-up". A rejoiner materializes correctly from
+the anchor and stays there.
+
+Three blockers were found and FIXED on the way, each real on its own:
+
+1. **The recovered seat had no group runtime.** `cmd_net_recover_sealed`
+   stood up the queue mesh and never `build_group_net` — so a recovered Nostr
+   seat came back deaf: no 445 subscription, no outbox. It looked recovered
+   and was frozen. (`net_health` now asserts `Ok` in the capstone.)
+2. **Nothing issued the request.** The two triggers are a gap-block arriving
+   and a workspace OPEN, and a recovery hits neither. It cannot hit the
+   first: the coordinator's own head block was published at the epoch BEFORE
+   the re-key, and a rejoiner that joined at the new one can never decrypt it
+   (an exporter ring reaches backward only). `cmd_net_recover_sealed` asks
+   explicitly now, after the runtime is up.
+3. **The coordinator swallowed the rejoiner's envelopes as duplicates.** The
+   returning seat is a new incarnation whose log seq space restarts at 1, and
+   `reset_peer_accept_window` was wired only into the MESH recovery-announce,
+   which a Nostr republic has no equivalent of. It now runs at the re-key,
+   which is a stronger authenticated point (a threshold-committed `Restored`
+   block for exactly this seat).
+
+**Still not arriving after all three.** The next hop is unidentified; do not
+guess at a fourth fix — instrument the rejoiner's outbox and the
+coordinator's 445 ingest and find out where the `ChainRequest` stops. The
+capstone deliberately does NOT assert the catch-up, so this is a known gap
+rather than a red test with no owner.
+
+Consequence today: a recovered seat holds the founding constitution, the
+roster and a verified head, and does not see governance committed since. It
+is not silently wrong — it is honestly behind.
+
 ### 3.2 The residual limit, stated rather than hidden
 
 A blob larger than the 445 publish budget (`DEFAULT_SIZE_BUDGET`, 128 KiB,

@@ -939,12 +939,26 @@ async fn recovery_rejoin(
             }
             _ => continue,
         }
-        if blocks.is_empty() {
+        // Only a CONSECUTIVE run can verify — and the stream is not one. The
+        // coordinator's outbox publishes whatever sits above its cursor, so
+        // the rejoiner also sees the head block the recovery just committed:
+        // on any republic longer than a couple of blocks that is the anchor
+        // plus a block several heights up, with the middle never served.
+        // Feeding the gap to `verify_served` fails forever, which reads as
+        // "the anchor never arrived" fifteen minutes later.
+        let run: Vec<molt_core::ChainBlock> = blocks
+            .iter()
+            .enumerate()
+            .take_while(|(i, b)| {
+                u64::try_from(*i).is_ok_and(|i| b.height == blocks[0].height + i)
+            })
+            .map(|(_, b)| b.clone())
+            .collect();
+        if run.is_empty() {
             continue;
         }
-        if let Ok(pair) =
-            crate::chain::verify_served(blob.as_ref(), &blocks, Some(&h.republic_id))
-        {
+        if let Ok(pair) = crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
+            blocks = run;
             break pair;
         }
     };

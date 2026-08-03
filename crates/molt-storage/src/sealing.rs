@@ -553,6 +553,7 @@ mod tests {
             roster: Vec::new(),
             applied: Vec::new(),
             consumed_ids: Vec::new(),
+            anchors: Vec::new(),
             upto: 0,
             relays: Vec::new(),
         };
