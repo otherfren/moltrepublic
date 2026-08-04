@@ -813,6 +813,7 @@ pub(crate) fn recover_command(
         ticket: r.ticket,
         seat_proof: r.seat_proof,
         new_nostr_pk: r.new_nostr_pk,
+        relays: r.relays,
         reply: r
             .reply
             .as_ref()
@@ -1086,6 +1087,7 @@ pub(crate) fn seat_proof_bytes(
     key_package_hex: &str,
     republic_id: &str,
     new_nostr_pk: &str,
+    relays: &[String],
 ) -> Vec<u8> {
     // v2 (N4b): the NEW transport anchor is inside the signed bytes. Without
     // it a captured proof could be replayed with somebody else's transport
@@ -1104,6 +1106,19 @@ pub(crate) fn seat_proof_bytes(
         m.extend_from_slice(&len.to_le_bytes());
         m.extend_from_slice(field.as_bytes());
     }
+    // R5: the relay declaration, bound CONDITIONALLY — an empty one signs
+    // the exact v2 bytes (every pre-R5 proof keeps verifying); a non-empty
+    // one extends with a marker + counted run, so "no declaration" and a
+    // stripped one can never verify against each other.
+    if !relays.is_empty() {
+        m.push(1);
+        m.extend_from_slice(&u32::try_from(relays.len()).unwrap_or(u32::MAX).to_le_bytes());
+        for r in relays {
+            let len = u32::try_from(r.len()).unwrap_or(u32::MAX);
+            m.extend_from_slice(&len.to_le_bytes());
+            m.extend_from_slice(r.as_bytes());
+        }
+    }
     m
 }
 
@@ -1115,10 +1130,11 @@ pub fn make_seat_proof(
     key_package_hex: &str,
     republic_id: &str,
     new_nostr_pk: &str,
+    relays: &[String],
 ) -> String {
     molt_storage::identity_sign(
         identity_sk,
-        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk),
+        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk, relays),
     )
 }
 
@@ -1133,11 +1149,12 @@ pub fn verify_seat_proof(
     key_package_hex: &str,
     republic_id: &str,
     new_nostr_pk: &str,
+    relays: &[String],
     sig_hex: &str,
 ) -> bool {
     molt_storage::identity_verify(
         anchored_pk,
-        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk),
+        &seat_proof_bytes(ticket, key_package_hex, republic_id, new_nostr_pk, relays),
         sig_hex,
     )
 }
@@ -3019,6 +3036,7 @@ mod tests {
             ticket: "cc".to_string(),
             seat_proof: "dd".to_string(),
             new_nostr_pk: String::new(),
+            relays: Vec::new(),
             reply: Some(invite::ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),
@@ -3052,6 +3070,7 @@ mod tests {
             ticket: String::new(),
             seat_proof: String::new(),
             new_nostr_pk: String::new(),
+            relays: Vec::new(),
             reply: None,
         };
         let Command::NetRecoverRequested { reply, .. } = recover_command(bare, String::new(), 1) else {
@@ -3063,16 +3082,16 @@ mod tests {
     #[test]
     fn seat_proof_binds_ticket_key_package_and_republic() {
         let (sk, pk) = molt_storage::derive_identity_key(&[7u8; 32], "ws");
-        let sig = make_seat_proof(&sk, "ticket-abc", "aabbcc", "rep-id-1", "");
+        let sig = make_seat_proof(&sk, "ticket-abc", "aabbcc", "rep-id-1", "", &[]);
         // the genuine proof verifies against the anchored key
-        assert!(verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-1", "", &sig));
+        assert!(verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-1", "", &[], &sig));
         // tampering ANY of the three bound fields breaks it
-        assert!(!verify_seat_proof(&pk, "other", "aabbcc", "rep-id-1", "", &sig));
-        assert!(!verify_seat_proof(&pk, "ticket-abc", "ffff", "rep-id-1", "", &sig));
-        assert!(!verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-2", "", &sig));
+        assert!(!verify_seat_proof(&pk, "other", "aabbcc", "rep-id-1", "", &[], &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "ffff", "rep-id-1", "", &[], &sig));
+        assert!(!verify_seat_proof(&pk, "ticket-abc", "aabbcc", "rep-id-2", "", &[], &sig));
         // a different identity key (a leaked link without the phrase) can't forge it
         let (_, pk2) = molt_storage::derive_identity_key(&[8u8; 32], "ws");
-        assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", "", &sig));
+        assert!(!verify_seat_proof(&pk2, "ticket-abc", "aabbcc", "rep-id-1", "", &[], &sig));
     }
 
     /// A real, canonical nostr anchor for the founder-seat fixtures.
@@ -3145,20 +3164,68 @@ mod tests {
         let other = molt_net::nostr_identity(b"attacker-entropy", "recovery-ticket").1;
         let (ticket, kp, rid) = ("ab".repeat(8), "cc".repeat(20), "f00d".to_string());
 
-        let proof = make_seat_proof(&sk, &ticket, &kp, &rid, &npk);
+        let proof = make_seat_proof(&sk, &ticket, &kp, &rid, &npk, &[]);
         assert!(
-            verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &proof),
+            verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &[], &proof),
             "the honest proof verifies"
         );
         // the whole point: the anchor cannot be swapped after signing
         assert!(
-            !verify_seat_proof(&pk, &ticket, &kp, &rid, &other, &proof),
+            !verify_seat_proof(&pk, &ticket, &kp, &rid, &other, &[], &proof),
             "a proof must NOT verify against a different transport anchor"
         );
         // …and every other bound field still binds
-        assert!(!verify_seat_proof(&pk, "ff".repeat(8).as_str(), &kp, &rid, &npk, &proof));
-        assert!(!verify_seat_proof(&pk, &ticket, "dd".repeat(20).as_str(), &rid, &npk, &proof));
-        assert!(!verify_seat_proof(&pk, &ticket, &kp, "beef", &npk, &proof));
+        assert!(!verify_seat_proof(&pk, "ff".repeat(8).as_str(), &kp, &rid, &npk, &[], &proof));
+        assert!(!verify_seat_proof(&pk, &ticket, "dd".repeat(20).as_str(), &rid, &npk, &[], &proof));
+        assert!(!verify_seat_proof(&pk, &ticket, &kp, "beef", &npk, &[], &proof));
+    }
+
+    /// R5: the relay declaration is inside the signed seat proof — a
+    /// relay-level rewrite of the declared pool must fail the proof, not
+    /// silently re-route the ledger. CONDITIONALLY: an empty declaration
+    /// signs the exact v2 bytes, so every pre-R5 proof keeps verifying.
+    #[test]
+    fn a_seat_proof_binds_the_relay_declaration() {
+        let (sk, pk) = molt_storage::derive_identity_key(&[13u8; 32], "dora");
+        let npk = molt_net::nostr_identity(b"dora-entropy", "t").1;
+        let (ticket, kp, rid) = ("ab".repeat(8), "cc".repeat(20), "f00d".to_string());
+
+        // an empty declaration IS the v2 preimage, byte for byte
+        assert_eq!(
+            seat_proof_bytes(&ticket, &kp, &rid, &npk, &[]),
+            {
+                let mut v2 = Vec::new();
+                v2.extend_from_slice(b"molt-seat-proof-v2\0");
+                for f in [ticket.as_str(), kp.as_str(), rid.as_str(), npk.as_str()] {
+                    v2.extend_from_slice(
+                        &u32::try_from(f.len()).expect("small").to_le_bytes(),
+                    );
+                    v2.extend_from_slice(f.as_bytes());
+                }
+                v2
+            },
+            "an empty declaration must not move a signed byte"
+        );
+
+        let declared = vec!["wss://relay.two.example".to_string()];
+        let proof = make_seat_proof(&sk, &ticket, &kp, &rid, &npk, &declared);
+        assert!(verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &declared, &proof));
+        assert!(
+            !verify_seat_proof(
+                &pk,
+                &ticket,
+                &kp,
+                &rid,
+                &npk,
+                &["wss://evil.example".to_string()],
+                &proof
+            ),
+            "a swapped declaration must fail the proof"
+        );
+        assert!(
+            !verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &[], &proof),
+            "a STRIPPED declaration must fail it too"
+        );
     }
 
     /// A v1 proof must not verify against a v2 seat — the tag bump is what
@@ -3179,7 +3246,7 @@ mod tests {
         v1.extend_from_slice(rid.as_bytes());
         let v1_sig = molt_storage::identity_sign(&sk, &v1);
         assert!(
-            !verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &v1_sig),
+            !verify_seat_proof(&pk, &ticket, &kp, &rid, &npk, &[], &v1_sig),
             "a v1 signature must be refused by the v2 verifier"
         );
     }

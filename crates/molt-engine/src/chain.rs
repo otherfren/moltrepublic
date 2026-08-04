@@ -1023,14 +1023,50 @@ impl State {
     /// declared pool if a `Membership` block carried one, else the ratified
     /// GROUP pool — a founding member never declared anything because the
     /// genesis pool it co-signed covers it. The split-detection input (R4).
-    // The production consumer is R4's split verdict; pinned by
-    // `the_ledger_reports_declared_relays_and_survives_a_cut` meanwhile.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn member_relays(&self, member: &str) -> Vec<String> {
         if let Some(declared) = self.chain_member_relays.get(member) {
             return declared.clone();
         }
         self.ratified_relays()
+    }
+
+    /// R4 — split detection: every pair of roster members whose EFFECTIVE
+    /// relay sets do not intersect, `(a, b)` in roster order. Such a pair
+    /// can never exchange a frame no matter how healthy each side's own
+    /// relay is, so the republic's threshold may silently be unable to
+    /// assemble — a named state, never a silence. Computable by every
+    /// member from the same chain (the ledger, R3b).
+    pub(crate) fn relay_splits(&self) -> Vec<(molt_core::MemberId, molt_core::MemberId)> {
+        let roster = self.roster();
+        let mut out = Vec::new();
+        for i in 0..roster.len() {
+            for j in i + 1..roster.len() {
+                let a = self.member_relays(&roster[i]);
+                let b = self.member_relays(&roster[j]);
+                // no data is no verdict: a non-Nostr chain has no pools, and
+                // an empty side must not read as "split from everyone"
+                if a.is_empty() || b.is_empty() {
+                    continue;
+                }
+                if a.iter().any(|r| b.contains(r)) {
+                    continue;
+                }
+                out.push((roster[i].clone(), roster[j].clone()));
+            }
+        }
+        out
+    }
+
+    /// R4: log every split pair ONCE (structured, greppable) — the run-log
+    /// half of the verdict; the members surface carries the per-member
+    /// marker. Rides every chain adoption/append.
+    pub(crate) fn note_relay_splits(&mut self) {
+        for (a, b) in self.relay_splits() {
+            if self.split_noted.insert((a.clone(), b.clone())) {
+                let bridge = self.member_relays(&a).first().cloned().unwrap_or_default();
+                tracing::warn!(%a, %b, %bridge, "relay split - no shared relay");
+            }
+        }
     }
 
     /// The ratified GROUP pool: the checkpoint summary's if this holder
@@ -1084,6 +1120,7 @@ impl State {
                 // R3b: the relay ledger follows the same last-wins fold
                 if !relays.is_empty() {
                     self.chain_member_relays.insert(member.clone(), relays.clone());
+                    self.note_relay_splits();
                 }
             }
             _ => {}
@@ -1147,6 +1184,7 @@ impl State {
             .unwrap_or_default();
         ledger.extend(declared_relays(&self.chain));
         self.chain_member_relays = ledger;
+        self.note_relay_splits();
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {
@@ -1302,6 +1340,7 @@ impl State {
     /// and `after_block_applied` keys the re-key on this entry. Registering it
     /// afterwards would silently skip the re-key (the recovery E2E pins this).
     #[allow(clippy::too_many_arguments)] // one verified request's fields, not a bag
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify_and_propose_restore(
         &mut self,
         member: &str,
@@ -1310,6 +1349,7 @@ impl State {
         ticket: &str,
         seat_proof: &str,
         new_nostr_pk: &str,
+        declared_relays: &[String],
         reply: &str,
     ) -> Result<u64, String> {
         let anchored = self
@@ -1322,18 +1362,37 @@ impl State {
             return Err("recovery must re-derive the seat's own identity key".to_string());
         }
         let rid = self.republic_id();
-        // the anchor is verified as the rejoiner SIGNED it: a tampered
-        // new_nostr_pk on the wire makes the proof fail rather than silently
-        // re-anchoring the seat's traffic somewhere else
+        // the anchor AND the relay declaration are verified as the rejoiner
+        // SIGNED them: tampering either on the wire makes the proof fail
+        // rather than silently re-anchoring the seat or re-routing its ledger
         if !crate::founding::verify_seat_proof(
             &anchored,
             ticket,
             key_package_hex,
             &rid,
             new_nostr_pk,
+            declared_relays,
             seat_proof,
         ) {
             return Err(format!("seat proof for {member} does not verify"));
+        }
+        // R5 — the re-join gate: a declaration that shares no relay with
+        // some member would commit the very split R4 exists to detect. The
+        // refusal names the relay the others must add — that message IS the
+        // feature. Ordered AFTER the proof (only an authentic declaration
+        // earns the named answer) and BEFORE the ticket is consumed upstream.
+        if !declared_relays.is_empty() {
+            for other in self.roster() {
+                if other == member {
+                    continue;
+                }
+                let theirs = self.member_relays(&other);
+                if theirs.is_empty() || declared_relays.iter().any(|r| theirs.contains(r)) {
+                    continue;
+                }
+                let named = declared_relays.first().cloned().unwrap_or_default();
+                return Err(format!("{named} is in nobody else's pool - add it first"));
+            }
         }
         self.pending_recovery.insert(
             member.to_string(),
@@ -1351,10 +1410,16 @@ impl State {
         } else {
             Some(new_nostr_pk.to_string())
         };
-        // R3b: the pool the rejoiner was welcomed over is its declared
-        // reachability until a re-join says otherwise (R5) — on the loopback
-        // path there is no pool and the declaration stays empty
-        let relays = if anchor.is_some() { self.ratified_relays() } else { Vec::new() };
+        // R3b/R5: the seat's OWN declaration when it made one; else the pool
+        // it was welcomed over — on the loopback path there is no pool and
+        // the declaration stays empty
+        let relays = if !declared_relays.is_empty() {
+            declared_relays.to_vec()
+        } else if anchor.is_some() {
+            self.ratified_relays()
+        } else {
+            Vec::new()
+        };
         Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays))
     }
 
@@ -3130,6 +3195,72 @@ mod tests {
             "a cut must not forget a declaration"
         );
         assert_eq!(pruned.member_relays("walter"), pool, "…nor the ratified fallback");
+    }
+
+    /// R4 — split detection: two members whose effective relay sets are
+    /// disjoint produce a verdict naming both, and the members surface says
+    /// so per member — compactly, with the relay that would bridge — rather
+    /// than staying a silence while the threshold quietly cannot assemble.
+    #[test]
+    fn disjoint_relay_sets_produce_a_split_verdict_naming_the_bridge() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool.clone());
+        let rid = b.republic_id.clone();
+        let mut st = crate::tests::plain_state();
+        st.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "walter".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: "play chess".to_string(),
+            republic_id: rid,
+            founded_ts: 0,
+        });
+        st.adopt_chain(b.blocks.clone());
+        assert!(st.relay_splits().is_empty(), "one shared pool - no split");
+
+        // petra re-joins over a relay NOBODY else carries
+        let fresh = molt_net::nostr_identity(b"petra-recovered", "new-ticket").1;
+        let restored = b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: b.pk("petra"),
+                nostr_pk: Some(fresh),
+                relays: vec!["wss://relay.two.example".to_string()],
+            },
+            &["petra", "walter"],
+        );
+        b.push(restored);
+        st.adopt_chain(b.blocks.clone());
+
+        let splits = st.relay_splits();
+        assert_eq!(
+            splits,
+            vec![("petra".to_string(), "walter".to_string())],
+            "the verdict names both seats"
+        );
+        // …and the members surface carries the marker, naming the bridge
+        let view = st.members_view();
+        let row = |m: &str| {
+            view.iter()
+                .find(|v| v.member == m)
+                .unwrap_or_else(|| panic!("{m} row"))
+                .split
+                .clone()
+        };
+        assert!(
+            row("petra").contains("walter") && row("petra").contains("wss://relay.two.example"),
+            "petra's marker names the counterpart and her odd relay: {:?}",
+            row("petra")
+        );
+        assert!(
+            row("walter").contains("petra") && row("walter").contains("wss://relay.one"),
+            "walter's marker mirrors it: {:?}",
+            row("walter")
+        );
     }
 
     #[test]
@@ -4913,9 +5044,9 @@ mod tests {
         let kp_hex = "beef";
 
         // the returning member (dora) signs the seat proof with its OWN key
-        let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "");
+        let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
         let id = coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", "")
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "")
             .expect("a valid seat proof re-admits");
         assert!(matches!(
             coord.proposal_changes.get(&id),
@@ -4929,16 +5060,92 @@ mod tests {
         assert!(coord.pending_recovery.contains_key("dora"));
 
         // a proof signed by the WRONG key (petra forging dora's) is rejected
-        let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "");
+        let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "", &[]);
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", "")
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "")
             .is_err());
 
         // a request that re-keys the seat to a DIFFERENT identity is rejected —
         // recovery re-derives the SAME key
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", "")
+            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "")
             .is_err());
+    }
+
+    /// R5 — the re-join gate: a declaration that shares no relay with some
+    /// member is refused, NAMING the relay the others must add — that
+    /// message is the whole feature. The same declaration passes once the
+    /// pool carries the relay.
+    #[test]
+    fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
+        let ticket = "recovery-ticket-r5";
+        let kp_hex = "beef";
+        let declared = vec!["wss://relay.two.example".to_string()];
+
+        // republic pool: relay.one only — dora's declared relay bridges nobody
+        let b = Builder::new_on_relays(
+            &["petra", "walter", "dora"],
+            2,
+            vec!["wss://relay.one".to_string()],
+        );
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        let proof = crate::make_seat_proof(
+            b.key("dora"),
+            ticket,
+            kp_hex,
+            &b.republic_id,
+            "",
+            &declared,
+        );
+        let err = coord
+            .verify_and_propose_restore(
+                "dora",
+                &b.pk("dora"),
+                kp_hex,
+                ticket,
+                &proof,
+                "",
+                &declared,
+                "",
+            )
+            .expect_err("a declaration bridging nobody must be refused");
+        assert!(
+            err.contains("wss://relay.two.example") && err.contains("add"),
+            "the refusal names the relay the others must add: {err}"
+        );
+
+        // the SAME declaration passes once the pool carries the relay
+        let b2 = Builder::new_on_relays(
+            &["petra", "walter", "dora"],
+            2,
+            vec!["wss://relay.one".to_string(), "wss://relay.two.example".to_string()],
+        );
+        let mut coord2 = chain_signer("petra", &b2, b2.blocks.clone());
+        let proof2 = crate::make_seat_proof(
+            b2.key("dora"),
+            ticket,
+            kp_hex,
+            &b2.republic_id,
+            "",
+            &declared,
+        );
+        let id = coord2
+            .verify_and_propose_restore(
+                "dora",
+                &b2.pk("dora"),
+                kp_hex,
+                ticket,
+                &proof2,
+                "",
+                &declared,
+                "",
+            )
+            .expect("the same declaration passes once the pool carries it");
+        // …and the block carries the seat's OWN declaration (its ledger entry)
+        assert!(matches!(
+            coord2.proposal_changes.get(&id),
+            Some(ChainChange::Membership { relays, .. }) if *relays == declared
+        ));
     }
 
     /// When a `Restored` block commits, the coordinator (the node holding the

@@ -461,6 +461,7 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         &kp_hex,
         &inv.republic_id,
         &new_nostr_pk,
+        &[],
     );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         member: inv.member.clone(),
@@ -469,6 +470,8 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         ticket: inv.ticket.clone(),
         seat_proof,
         new_nostr_pk,
+        // the loopback path has no relays to declare
+        relays: Vec::new(),
         reply: Some(invite::ReplyHandover {
             server: reply_q.snd.server.clone(),
             queue_id: hex::encode(&reply_q.snd.id.0),

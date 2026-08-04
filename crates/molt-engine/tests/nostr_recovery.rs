@@ -503,7 +503,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
     let mls = molt_net::MlsMember::new(&sk, "petra").expect("mls identity");
     let kp_hex = hex::encode(mls.key_package().expect("key package"));
     let seat_proof =
-        molt_engine::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &anchor);
+        molt_engine::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &anchor, &[]);
 
     // …sent from a key that is NOT that anchor.
     let (impostor_sk, impostor_pk) = molt_net::nostr_identity(b"a relay-level attacker", "x");
@@ -521,6 +521,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
                 ticket: h.ticket.clone(),
                 seat_proof,
                 new_nostr_pk: anchor,
+                relays: Vec::new(),
                 reply: None,
             }),
         )

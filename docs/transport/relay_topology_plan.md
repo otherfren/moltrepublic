@@ -163,27 +163,39 @@ create-wizard choice into the founding table every member ratifies.
 - Then `State::group_relays()` reads the VERIFIED genesis, not
   `TransportState.relays`.
 
-### R3b — The ledger
-`State::member_relays(member) -> &[String]`, a projection over applied blocks,
-like `working_nostr_pk`. Filled from each member's join/re-join event.
+### R3b — The ledger ✅ DONE 2026-08-04
+`State::member_relays(member)`, a projection over applied blocks like
+`working_nostr_pk`: a `Membership` block can carry the relays a seat declares
+(conditionally signed — empty appends nothing, pre-R3b preimages stay
+byte-identical), the checkpoint summary carries the ledger across a cut
+(`molt-chain-checkpoint-v6`), and a member without a declaration is covered
+by the ratified genesis pool.
 - **Red:** after a member joins over relay X, every OTHER member's ledger
   reports X for that member.
+  (`the_ledger_reports_declared_relays_and_survives_a_cut`)
 
-### R4 — Split detection
+### R4 — Split detection ✅ DONE 2026-08-04
 With the ledger, a split is computable: any pair of members with an empty
-relay intersection.
-- Surfaced as a named state, not a silence: the run log gets a line, and the
-  members surface gets a per-member marker.
+relay intersection (`State::relay_splits`).
+- Surfaced as a named state, not a silence: a structured warn once per pair,
+  and the members surface carries a per-member `split` marker naming the
+  counterpart and the bridging relay.
 - **Red:** two members with disjoint relay sets produce a split verdict naming
   both and the missing relay.
+  (`disjoint_relay_sets_produce_a_split_verdict_naming_the_bridge`)
 
-### R5 — Relay change → re-join
-A member switching relays re-joins; the gate refuses until the others carry
-the new relay.
+### R5 — Relay change → re-join ✅ DONE 2026-08-04
+The rejoiner declares the relays it can actually dial (`RecoverRequest.relays`,
+bound inside the seat proof — conditionally, pre-R5 proofs keep verifying);
+the coordinator's gate refuses a declaration that shares no relay with some
+member, and a passing declaration becomes the seat's ledger entry on the
+`Restored` block.
 - The refusal names the relay the others must add — that message is the whole
   feature (rule 5).
 - **Red:** a re-join whose new relay is in nobody else's pool fails with that
   relay named; adding it on the others makes the same re-join succeed.
+  (`a_rejoin_over_a_foreign_relay_is_refused_naming_it`,
+  `a_seat_proof_binds_the_relay_declaration`)
 
 ### R6 — The pool is editable under threshold, from the details window
 A new gated change (a `ChainChange` variant, additive) that edits the pool, and

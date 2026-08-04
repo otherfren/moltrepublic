@@ -2165,7 +2165,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
     // republic id carried in the link, and sends the RecoverRequest on the
     // coordinator's minted queue — the recovery-ritual transport in action
     let seat_proof =
-        molt_engine::make_seat_proof(&b_sk, &material.ticket, kp_hex, &material.republic_id, "");
+        molt_engine::make_seat_proof(&b_sk, &material.ticket, kp_hex, &material.republic_id, "", &[]);
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         new_nostr_pk: String::new(),
         member: "member-b".to_string(),
@@ -2173,6 +2173,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         key_package: kp_hex.to_string(),
         ticket: material.ticket.clone(),
         seat_proof,
+        relays: Vec::new(),
         reply: None,
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
@@ -2656,7 +2657,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         .expect("round-1 reply queue (never read)");
     let dead_reply_wrap = WrapKey::fresh().expect("round-1 reply wrap");
     let seat_proof =
-        molt_engine::make_seat_proof(&b_sk, &material1.ticket, &kp_hex, &material1.republic_id, "");
+        molt_engine::make_seat_proof(&b_sk, &material1.ticket, &kp_hex, &material1.republic_id, "", &[]);
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         new_nostr_pk: String::new(),
         member: "member-b".to_string(),
@@ -2664,6 +2665,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         key_package: kp_hex,
         ticket: material1.ticket.clone(),
         seat_proof,
+        relays: Vec::new(),
         reply: Some(invite::ReplyHandover {
             server: dead_reply_q.snd.server.clone(),
             queue_id: hex::encode(&dead_reply_q.snd.id.0),
@@ -3420,6 +3422,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
             &req.key_package,
             republic_id,
             &req.new_nostr_pk,
+            &[],
             &req.seat_proof,
         ),
         "the seat proof verifies against the anchored key"
@@ -3583,6 +3586,7 @@ async fn a_rejoiner_with_the_wrong_phrase_is_rejected() {
             &req.key_package,
             republic_id,
             &req.new_nostr_pk,
+            &[],
             &req.seat_proof,
         ),
         "a wrong-phrase seat proof must NOT verify against the anchored key"
@@ -3614,6 +3618,7 @@ async fn a_doctored_recovery_link_id_is_rejected() {
             &req.key_package,
             real_republic_id,
             &req.new_nostr_pk,
+            &[],
             &req.seat_proof,
         ),
         "a proof signed over a doctored republic id must NOT verify against the real id"
@@ -3626,6 +3631,7 @@ async fn a_doctored_recovery_link_id_is_rejected() {
         &req.key_package,
         doctored_republic_id,
         &req.new_nostr_pk,
+        &[],
         &req.seat_proof,
     ));
 }
@@ -4269,7 +4275,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
     let (c_sk, _) = member_identity(&c_phrase);
     let kp_hex = "abcd"; // an opaque fresh key package for this test
     let seat_proof =
-        molt_engine::make_seat_proof(&c_sk, &material.ticket, kp_hex, &material.republic_id, "");
+        molt_engine::make_seat_proof(&c_sk, &material.ticket, kp_hex, &material.republic_id, "", &[]);
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         new_nostr_pk: String::new(),
         member: "member-c".to_string(),
@@ -4277,6 +4283,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         key_package: kp_hex.to_string(),
         ticket: material.ticket.clone(),
         seat_proof,
+        relays: Vec::new(),
         reply: None,
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");

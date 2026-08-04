@@ -409,6 +409,13 @@ pub struct RecoverRequest {
     /// anchor at all.
     #[serde(default)]
     pub new_nostr_pk: String,
+    /// The relays the rejoiner declares it reaches (R5) — bound by the seat
+    /// proof like `new_nostr_pk`, gated at the coordinator (a declaration
+    /// sharing no relay with some member is refused, naming the relay), and
+    /// made the seat's ledger entry by riding the `Restored` block (R3b).
+    /// Empty = no declaration (pre-R5 requests, loopback).
+    #[serde(default)]
+    pub relays: Vec<String>,
     /// The member's reply queue, so the coordinator can send the Welcome back.
     #[serde(default)]
     pub reply: Option<ReplyHandover>,
@@ -672,6 +679,7 @@ mod tests {
             ticket: "cc".to_string(),
             seat_proof: "dd".to_string(),
             new_nostr_pk: String::new(),
+            relays: Vec::new(),
             reply: Some(ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),

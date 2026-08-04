@@ -853,10 +853,17 @@ async fn recovery_rejoin(
     let mut mls =
         molt_net::MlsMember::new(&sk, &ctx.member).map_err(|e| format!("mls identity: {e}"))?;
     let kp_hex = hex::encode(mls.key_package().map_err(|e| format!("key package: {e}"))?);
-    // the seat proof binds the new anchor, so a relay or a hostile
-    // coordinator cannot swap it on the way and re-address the seat
-    let seat_proof =
-        crate::founding::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &new_nostr_pk);
+    // the seat proof binds the new anchor AND the relay declaration, so a
+    // relay or a hostile coordinator can swap neither on the way
+    let declared = ctx.dial_relays.clone();
+    let seat_proof = crate::founding::make_seat_proof(
+        &sk,
+        &h.ticket,
+        &kp_hex,
+        &h.republic_id,
+        &new_nostr_pk,
+        &declared,
+    );
     net.send_ritual(
         &h.npub,
         &RitualMsg::Recover(invite::RecoverRequest {
@@ -866,6 +873,8 @@ async fn recovery_rejoin(
             ticket: h.ticket.clone(),
             seat_proof,
             new_nostr_pk,
+            // R5: what this seat can actually dial — its ledger entry
+            relays: declared,
             // Nostr replies to the gift-wrap anchor, not to a queue
             reply: None,
         }),

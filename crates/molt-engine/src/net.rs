@@ -1554,6 +1554,7 @@ impl State {
     /// the ticket is spent and before it can reach a `Restored` block —
     /// exactly like `cmd_net_join_requested`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_recover_requested(
         &mut self,
         member: MemberId,
@@ -1562,6 +1563,7 @@ impl State {
         ticket: String,
         seat_proof: String,
         new_nostr_pk: String,
+        relays: Vec<String>,
         reply: String,
         sender_npub: String,
         generation: Option<u64>,
@@ -1631,6 +1633,7 @@ impl State {
             &ticket,
             &seat_proof,
             &canonical,
+            &relays,
             &reply,
         ) {
             Ok(_id) => {

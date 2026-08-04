@@ -3495,6 +3495,10 @@ pub enum Command {
         /// point before it can reach a chain block.
         #[serde(default)]
         new_nostr_pk: String,
+        /// The rejoiner's relay declaration (R5), bound by the seat proof.
+        /// Empty = no declaration.
+        #[serde(default)]
+        relays: Vec<String>,
         /// The member's reply-queue handover, for the coordinator to send the
         /// Welcome back once re-admission commits. Opaque here.
         #[serde(default)]
@@ -4332,6 +4336,11 @@ pub struct MemberView {
     pub open_proposals: usize,
     /// Files this member shared into the chat.
     pub uploads: usize,
+    /// R4 split marker: non-empty when this member shares NO relay with
+    /// some other member — the compact fault line, naming the counterpart
+    /// and the relay that would bridge. Empty = no split.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub split: String,
 }
 
 /// A live download's progress, per share (requester side): what the

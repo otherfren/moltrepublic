@@ -588,6 +588,9 @@ pub(crate) struct State {
     /// [`State::member_relays`], which falls back to the ratified group pool
     /// for seats that never declared. The split-detection input (R4).
     pub(crate) chain_member_relays: HashMap<MemberId, Vec<String>>,
+    /// R4: split pairs already warned about (runtime-only) — the log line
+    /// fires once per pair, the members-surface marker stays live.
+    pub(crate) split_noted: std::collections::HashSet<(MemberId, MemberId)>,
     /// Ephemeral per-proposal signature collection for chain governance
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
@@ -905,6 +908,7 @@ impl State {
             chain_applied: HashMap::new(),
             chain_anchors: HashMap::new(),
             chain_member_relays: HashMap::new(),
+            split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
@@ -1335,6 +1339,7 @@ impl State {
                 member,
                 identity_pk,
                 new_nostr_pk,
+                relays,
                 key_package,
                 ticket,
                 seat_proof,
@@ -1348,6 +1353,7 @@ impl State {
                 ticket,
                 seat_proof,
                 new_nostr_pk,
+                relays,
                 reply,
                 sender_npub,
                 generation,

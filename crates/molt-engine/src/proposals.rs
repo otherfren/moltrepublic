@@ -914,6 +914,7 @@ impl State {
             .workspaces
             .iter()
             .find(|w| w.id == self.session.active_workspace);
+        let splits = self.relay_splits();
         self.roster()
             .into_iter()
             .map(|member| {
@@ -930,6 +931,23 @@ impl State {
                     .map(|m| m.last_seen)
                     .unwrap_or(molt_core::MemberInfo::NEVER);
                 let presence = self.presence_of(&member, last_seen, now);
+                // R4: the split marker — one compact line naming the
+                // counterpart(s) and this member's own first relay (the one
+                // the others would have to add to bridge)
+                let others: Vec<&str> = splits
+                    .iter()
+                    .filter_map(|(a, b)| match (&member == a, &member == b) {
+                        (true, _) => Some(b.as_str()),
+                        (_, true) => Some(a.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let split = if others.is_empty() {
+                    String::new()
+                } else {
+                    let own = self.member_relays(&member).first().cloned().unwrap_or_default();
+                    format!("no shared relay with {} ({own})", others.join(", "))
+                };
                 MemberView {
                     open_proposals: self
                         .proposals
@@ -940,6 +958,7 @@ impl State {
                         .chat_visible()
                         .filter(|m| m.from == member && m.file.is_some())
                         .count(),
+                    split,
                     member,
                     id,
                     identity_pk,
