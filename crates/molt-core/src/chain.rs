@@ -355,6 +355,9 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
         "set_charter" => Some("organization.charter"),
         "set_chat_retention" => Some("organization.retention"),
         "set_image" | "remove_image" => Some("organization.image"),
+        // R6: the governed pool is a state, not a history — the latest edit
+        // IS the pool
+        "set_relays" => Some("organization.relays"),
         _ => None,
     }
 }
@@ -667,7 +670,7 @@ mod tests {
             applied_lww_slot(Surface::Organization, &op("remove_image")),
             "a removal must land in the same slot as the image it removes"
         );
-        for o in ["set_name", "set_charter", "set_chat_retention"] {
+        for o in ["set_name", "set_charter", "set_chat_retention", "set_relays"] {
             assert!(
                 applied_lww_slot(Surface::Organization, &op(o)).is_some(),
                 "{o} holds superseded state and must be summarized"

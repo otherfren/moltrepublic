@@ -197,17 +197,29 @@ member, and a passing declaration becomes the seat's ledger entry on the
   (`a_rejoin_over_a_foreign_relay_is_refused_naming_it`,
   `a_seat_proof_binds_the_relay_declaration`)
 
-### R6 — The pool is editable under threshold, from the details window
-A new gated change (a `ChainChange` variant, additive) that edits the pool, and
-the propose-pencil in `OrgSettingsCard` that raises it — the same shape as the
-retention edit next to it: a change is a PROPOSAL, applied at m-of-n.
+### R6 — The pool is editable under threshold, from the details window ✅ DONE 2026-08-04
+Built as an ordinary gated Organization op (`set_relays`, space-separated
+URLs) rather than a new `ChainChange` variant: the retention edit next to it
+already IS the exact shape (proposal → threshold → applied), so the pool edit
+reuses the whole propose/approve/commit machinery, the checkpoint summary
+carries it as a last-write-wins slot (`organization.relays`,
+`applied_lww_slot`), and no new signing path exists. The effective pool =
+latest applied edit, else the ratified founding pool
+(`State::effective_relays`); a commit reaches the LIVE transport by
+rebuilding the group runtime over the shared ratchet Arc (the accepted
+whole-group blip, Track C option A — the §4.4 rotation grace is deliberately
+NOT built). The propose-pencil sits in `OrgSettingsCard`; the modal proposes
+via the generic `org-propose`.
 
 This is what makes rule 2 real: the pool stops being "whatever the founder's
 pool was at founding" and becomes group state any member can move and no
 member can move alone.
 - **Red:** a non-founder can carry a pool change to completion; a change below
-  threshold does not alter `group_relays()`; removing the last relay a member
-  can reach is refused, or at minimum reported as the split it creates (R4).
+  threshold does not alter the effective pool; removing the last relay a
+  DECLARED member can reach is refused naming the member and its relay
+  (undeclared members follow the governed pool and never gate).
+  (`a_pool_edit_commits_under_threshold_and_moves_the_effective_pool`,
+  `a_pool_edit_that_would_strand_a_member_is_refused`)
 
 ## 6. Ordering against N4b
 

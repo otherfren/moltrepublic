@@ -603,6 +603,8 @@ impl State {
         self.net_unreachable.clear();
         self.net_link_down.clear();
         self.net_send_stuck.clear();
+        // …as does the transport-kind affordance flag (§10.7/§6.5)
+        self.session.transport = String::new();
         self.last_mesh_out = 0;
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config

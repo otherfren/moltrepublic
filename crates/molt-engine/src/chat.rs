@@ -132,6 +132,14 @@ impl State {
         path: String,
         channel: ChannelRef,
     ) -> Result<Reply, MoltError> {
+        // §10.7 (DECIDED — OFF in V1): the file data plane is a dedicated
+        // queue pair, and a relay republic has none — refuse by name
+        // instead of queueing bytes into nowhere
+        if self.nostr.is_some() {
+            return Err(MoltError::BadPayload(
+                "file sharing is not available over relays yet".into(),
+            ));
+        }
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
         self.ensure_channel_writable(&channel)?;
@@ -766,6 +774,26 @@ mod tests {
         assert_eq!(st.chat[2].body, "B", "order is the sender's, not arrival");
         assert!(st.accepted["peer-2"].is_accepted(10) && st.accepted["peer-2"].is_accepted(12));
         assert!(st.ordered_park.is_empty(), "the park drained");
+    }
+
+    /// §10.7 (DECIDED — OFF in V1): the file data plane is queue pairs, and
+    /// a relay republic has none. A share is refused with the named reason,
+    /// never a silent queue-send into nowhere.
+    #[test]
+    fn sharing_a_file_on_a_relay_republic_is_refused_by_name() {
+        let mut st = plain_state();
+        st.nostr = Some(crate::NostrTransport {
+            sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            relays: vec!["ws://relay.example".to_string()],
+            rotation_seed: [0u8; 32],
+        });
+        let err = st
+            .cmd_share_file("/tmp/x.pdf".to_string(), molt_core::ChannelRef::Group)
+            .expect_err("a relay republic has no file data plane");
+        assert!(
+            format!("{err:?}").contains("relays"),
+            "the refusal names the transport, not a phantom IO error: {err:?}"
+        );
     }
 
     /// G7's fresh-incarnation rule (N4b §3.1a): an envelope from a sender we

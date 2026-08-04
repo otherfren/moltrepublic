@@ -1027,7 +1027,7 @@ impl State {
         if let Some(declared) = self.chain_member_relays.get(member) {
             return declared.clone();
         }
-        self.ratified_relays()
+        self.effective_relays()
     }
 
     /// R4 — split detection: every pair of roster members whose EFFECTIVE
@@ -1069,6 +1069,58 @@ impl State {
         }
     }
 
+    /// The EFFECTIVE group pool (R6): the latest applied `set_relays` edit,
+    /// else the ratified founding pool. This is the answer every reader
+    /// wants — the pool as governed, not as founded.
+    pub(crate) fn effective_relays(&self) -> Vec<String> {
+        let mut pool = self.ratified_relays();
+        for v in self.applied_org_entries() {
+            if v.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
+                let parsed: Vec<String> = v
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                // wire arrivals are not re-validated, so the fold is
+                // defensive (the org_effective rule): an empty edit keeps
+                // the previous pool
+                if !parsed.is_empty() {
+                    pool = parsed;
+                }
+            }
+        }
+        pool
+    }
+
+    /// R6: the governed pool moved — carry it into the LIVE transport. The
+    /// runtime rebuild is the accepted whole-group blip (Track C option A,
+    /// 2026-07-23); the ratchet is handed over as the SHARED Arc, exactly
+    /// like the mesh-extension rebuild, so no sender generation is reused.
+    /// A workspace without a live runtime just adopts the list.
+    pub(crate) fn adopt_pool_change(&mut self) {
+        let pool = self.effective_relays();
+        let Some(nostr) = self.nostr.as_mut() else {
+            return;
+        };
+        if pool.is_empty() || nostr.relays == pool {
+            return;
+        }
+        nostr.relays = pool;
+        if let Some(old) = self.group_net.take() {
+            tracing::info!(
+                relays = self.nostr.as_ref().map_or(0, |n| n.relays.len()),
+                "the governed relay pool moved - rebuilding the group runtime"
+            );
+            let mls = old.mls.clone();
+            // dropping the handle latches the stop (watch, not Notify) —
+            // the old outbox ends at its next poll
+            drop(old);
+            self.group_net = self.build_group_net_shared(mls);
+        }
+    }
+
     /// The ratified GROUP pool: the checkpoint summary's if this holder
     /// pruned, else the genesis block's. Empty on a non-Nostr chain.
     pub(crate) fn ratified_relays(&self) -> Vec<String> {
@@ -1104,6 +1156,10 @@ impl State {
                     .entry(*surface)
                     .or_default()
                     .push((Some(*proposal_id), payload.clone()));
+                // R6: a committed pool edit reaches the live transport
+                if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
+                    self.adopt_pool_change();
+                }
             }
             // the LAST Restored block for a seat wins, and an append is the
             // last; an empty anchor leaves the previous one standing, exactly
@@ -1185,6 +1241,9 @@ impl State {
         ledger.extend(declared_relays(&self.chain));
         self.chain_member_relays = ledger;
         self.note_relay_splits();
+        // R6: an adopted chain may carry pool edits this node has not lived
+        // through (catch-up, restore) — adopt the governed pool it lands on
+        self.adopt_pool_change();
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {
@@ -5070,6 +5129,96 @@ mod tests {
         assert!(coord
             .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "")
             .is_err());
+    }
+
+    /// R6 — the pool is group state any member can move and no member can
+    /// move alone: a `set_relays` edit is an ordinary gated Organization
+    /// proposal; below threshold the effective pool does not move, at m it
+    /// does — for every member folding the same chain.
+    #[test]
+    fn a_pool_edit_commits_under_threshold_and_moves_the_effective_pool() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool.clone());
+        // WALTER — not the founder — raises the edit
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://relay.one wss://relay.three.example",
+                }),
+            )
+            .expect("a member may propose a pool edit");
+        let (id, surface, payload) = {
+            let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+            (*id, rec.surface, rec.payload.clone())
+        };
+        assert_eq!(
+            walter.effective_relays(),
+            pool,
+            "below threshold the pool must not move"
+        );
+        // petra learns the proposal + walter's signature, then co-signs
+        petra.receive_proposed(id, surface, payload);
+        let walter_sig = walter
+            .pending_sigs
+            .get(&id)
+            .expect("walter's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "walter")
+            .expect("walter signed")
+            .sig
+            .clone();
+        petra.receive_approval(id, "walter", 1, &walter_sig);
+        petra.chain_sign_and_gossip_approval(id);
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+        assert_eq!(
+            petra.effective_relays(),
+            vec!["wss://relay.one".to_string(), "wss://relay.three.example".to_string()],
+            "at m the pool moves"
+        );
+    }
+
+    /// R6: an edit that would strand a member — a new pool sharing no relay
+    /// with what that member is on record as reaching — is refused at
+    /// propose time, naming the member and its relay (the R4 split it would
+    /// otherwise commit).
+    #[test]
+    fn a_pool_edit_that_would_strand_a_member_is_refused() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        // petra is on record as reaching ONLY relay.two
+        let fresh = molt_net::nostr_identity(b"petra-recovered", "new-ticket").1;
+        let restored = b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: b.pk("petra"),
+                nostr_pk: Some(fresh),
+                relays: vec!["wss://relay.two.example".to_string()],
+            },
+            &["petra", "walter"],
+        );
+        b.push(restored);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let err = walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://relay.three.example",
+                }),
+            )
+            .expect_err("a pool that strands a member must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("petra") && msg.contains("wss://relay.two.example"),
+            "the refusal names the stranded member and its relay: {msg}"
+        );
     }
 
     /// R5 — the re-join gate: a declaration that shares no relay with some

@@ -821,6 +821,9 @@ impl State {
             }
             _ => None,
         };
+        // what the GUI keys transport-specific affordances on (§10.7/§6.5)
+        self.session.transport =
+            if self.nostr.is_some() { "nostr".to_string() } else { String::new() };
     }
 
     /// The display label for the EFFECTIVE global anonymity network — what

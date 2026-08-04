@@ -802,6 +802,18 @@ impl State {
     /// that cannot dial one of its own relays, or whose MLS group did not
     /// restore, must stay honestly silent rather than half-run.
     pub(crate) fn build_group_net(&mut self, mls_blob: &[u8]) -> Option<crate::GroupNet> {
+        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
+        self.build_group_net_shared(std::sync::Arc::new(std::sync::Mutex::new(mls)))
+    }
+
+    /// [`Self::build_group_net`] over an **already-live** shared group — the
+    /// R6 pool-change rebuild hands the running `Arc` straight through (the
+    /// `build_real_net_shared` twin): a late encrypt by the dying outbox
+    /// advances the SAME ratchet the new runtime continues from.
+    pub(crate) fn build_group_net_shared(
+        &mut self,
+        mls_arc: std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
+    ) -> Option<crate::GroupNet> {
         let relays = self.dialable_group_relays();
         let active = self.active.as_ref()?;
         let nostr = self.nostr.as_ref()?;
@@ -810,8 +822,6 @@ impl State {
             tracing::warn!("no dialable relay for this republic — the group runtime stays down");
             return None;
         }
-        let mls = molt_net::MlsMember::restore(mls_blob).ok()?;
-        let mls_arc = std::sync::Arc::new(std::sync::Mutex::new(mls));
         let channel = molt_net::ritual_net::GroupChannel::new(
             dialer,
             relays,

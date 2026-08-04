@@ -2,7 +2,8 @@
 
 MoltRepublic is a real product (not a demo): a Rust workspace for founding and
 running small encrypted "republics"/DAOs over Nostr relays (NIP-EE/Marmot — in
-build, `docs/transport/nostr_transport_marmot.md`; loopback transport today),
+build, `docs/transport/nostr_transport_marmot.md`; Nostr is the production
+transport since N4/N5, loopback stays the test transport),
 with MLS group encryption and a Slint GUI. Grow the UI/UX stepwise while
 implementing the real thing behind the same contract — never fake behavior a
 user could mistake for real.
@@ -296,20 +297,20 @@ Moved to `crates/molt-net/CLAUDE.md`, which loads only when you work under
 that crate: OpenMLS version pairing and API traps, the concurrent-commit
 convergence rule, and the reusable test doubles.
 
-## Transport (loopback today) + the delivery guarantee
+## Transport (Nostr in production, loopback in tests) + the delivery guarantee
 
-The SMP transport and its machinery (the permissive-loopback-vs-SMP creds
-asymmetry, `reopen_transport`, SKEY sender seeds, the Stage-B N-queue
-redundancy, self-heal/rotate/keepalive/probe) were removed in etappe N-demo
-(2026-07-30) of the Nostr replacement
-(`docs/transport/nostr_transport_marmot.md`); the design docs under
-`docs_archive/transport/mesh/` are historical records. What remains: the queue-shaped
-`Transport` trait, the loopback hub — now THE test transport and the only
-transport until the Nostr runtime lands (production founding/join/recover fail
-honestly until N4) — the supervisor's delivery-guarantee core with a
+**Since N4/N5 (2026-08) the production transport is Nostr/NIP-EE**: founding,
+join, recovery and the running 445 group runtime all go over relays
+(`docs/transport/nostr_transport_marmot.md`; the governed relay pool is
+`relay_topology_plan.md`). The SMP transport and its machinery (the
+permissive-loopback-vs-SMP creds asymmetry, `reopen_transport`, SKEY sender
+seeds, the Stage-B N-queue redundancy, self-heal/rotate/keepalive/probe) were
+removed in etappe N-demo (2026-07-30); the design docs under
+`docs_archive/transport/mesh/` are historical records. What remains beside the
+Nostr runtime: the queue-shaped `Transport` trait, the loopback hub — THE
+test transport — the supervisor's delivery-guarantee core with a
 single-queue inbound redial loop, and the T4 Tor dialer at
-`crates/molt-net/src/dial.rs` (S3 uses it today; N2's WebSocket relays reuse
-it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
+`crates/molt-net/src/dial.rs` (S3 and the relay WebSockets use it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
 so any clone can subscribe to any queue; a real transport gates receive on
 credentials, so don't lean on that forgiveness. **The delivery
 guarantee (2026-07-28, `docs/transport/delivery_guarantee.md`) sits on top of

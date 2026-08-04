@@ -2886,6 +2886,7 @@ mod tests {
             agenda: "alte Satzung".into(),
             retention_days: 7,
             image: image.to_string(),
+            relays: String::new(),
         };
         let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
             surface,

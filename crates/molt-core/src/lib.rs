@@ -2791,6 +2791,12 @@ pub struct SessionView {
     /// The GUI renders it as a persistent "restart required" warning.
     #[serde(default)]
     pub restart_required: Vec<String>,
+    /// The OPEN workspace's transport kind: `"nostr"` for a relay republic,
+    /// `""` otherwise. What the GUI keys transport-specific affordances on
+    /// (§10.7 file gating, §6.5 coarse presence) — the engine enforces the
+    /// same rules co-equally on its command surface.
+    #[serde(default)]
+    pub transport: String,
     /// The editable settings.
     pub settings: SessionSettings,
     /// The Nostr relay pool with its DERIVED state (kind, why a relay is or
@@ -2842,6 +2848,7 @@ impl Default for SessionView {
             s3_list: String::new(),
             tor_test: TorTest::default(),
             restart_required: Vec::new(),
+            transport: String::new(),
             settings: SessionSettings::default(),
             relays: Vec::new(),
             clearnet_session: false,

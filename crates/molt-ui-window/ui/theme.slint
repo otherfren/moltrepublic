@@ -135,6 +135,7 @@ export struct MemberRow {
     last: string, // human "last seen" label (mock)
     state: int, // 0 = synced, 1 = syncing, 2 = offline (mock presence)
     uploads: int, // files this member shared into the chat
+    split: string, // R4 relay-split marker, pre-built by the engine ("" = none)
 }
 
 // One row of the Organization → Uploads table (engine ReadUploads — the
@@ -554,6 +555,10 @@ export global Strings {
     in property <string> ocs-chat-retention;
     in property <string> ocs-relays;
     in property <string> ocs-relays-hint;
+    in property <string> ocr2-title;
+    in property <string> ocr2-body;
+    in property <string> om-coarse;
+    in property <string> cs-files-off;
     in property <string> ocs-days;
     in property <string> ocr-title;
     in property <string> ocr-body;

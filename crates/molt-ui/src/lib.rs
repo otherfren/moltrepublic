@@ -2383,6 +2383,8 @@ fn apply_session(
     ui.global::<Theme>().set_theme_index(theme_index(&sv.theme));
     ui.set_lang_index(lang);
     ui.set_notice(sv.notice.clone().into());
+    // what §10.7 file gating and the §6.5 coarse-presence hint key on
+    ui.set_session_transport(sv.transport.as_str().into());
     // a failed write carries its detail in the notice; split it off so the
     // settings footer can render it in the error tone without string ops
     ui.set_notice_failed(
@@ -2884,6 +2886,8 @@ struct MemberRowData {
     /// real stamp engine-side).
     state: i32,
     uploads: i32,
+    /// R4 relay-split marker, pre-built by the engine ("" = none).
+    split: String,
 }
 
 /// One rendered row of the Organization → Uploads table (labels are
@@ -3331,6 +3335,7 @@ async fn push_surfaces(
                 last_ts: m.last_seen,
                 state: i32::from(m.presence),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
+                split: m.split,
             })
             .collect(),
         _ => Vec::new(),
@@ -3783,6 +3788,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             last: m.last.as_str().into(),
             state: m.state,
             uploads: m.uploads,
+            split: m.split.as_str().into(),
         })
         .collect();
     sync_rows(&ui.get_org_members(), members, |m| ui.set_org_members(m));
@@ -3826,6 +3832,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the Members table offers "recovery link" only where recovery exists
     ui.set_org_chain_governed(b.org_stats.chain_governed);
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
+    // the R6 pencil's draft prefill: the same pool, space-joined
+    ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes rode the applied set_image proposal, so
@@ -5611,6 +5619,10 @@ lexicon! {
     // partitioned, so the pool is the first thing to look at (§10.15)
     ocs_relays_hint: "Every member must reach one of these.", "Jedes Mitglied muss einen davon erreichen.";
     ocs_days: "days", "Tage";
+    ocr2_title: "Change relay pool", "Relay-Pool ändern";
+    ocr2_body: "Space-separated relay URLs. A pool change is a gated change - the draft becomes a proposal the members approve by threshold. Every member must reach at least one of these.", "Relay-URLs, durch Leerzeichen getrennt. Eine Pool-Änderung ist eine geschützte Änderung - der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Jedes Mitglied muss mindestens einen davon erreichen.";
+    om_coarse: "Presence over relays is coarse: last seen at the last message, not pinged live.", "Präsenz über Relays ist grob: zuletzt gesehen bei der letzten Nachricht, kein Live-Ping.";
+    cs_files_off: "File sharing is not available over relays yet", "Dateifreigabe über Relays gibt es noch nicht";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change - the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung - der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
     ou_note: "Only metadata is shared - the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten - die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
@@ -7191,6 +7203,7 @@ mod tests {
             last_ts,
             state,
             uploads,
+            split: String::new(),
         }
     }
 

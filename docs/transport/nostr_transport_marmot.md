@@ -979,10 +979,21 @@ once. So:
   an idle-republic presence-honesty test. The E2E choreography of the deleted
   `scripts/dev_2of3_smp.py` (a 2-of-3 founding plus the Organization/Status
   flows against running nodes) is worth resurrecting as a Nostr twin here.
-- **N6 — Governance bridge + GUI:** `ChainChange::TransportPolicy` filling in
-  the N3 block-hash-bound commit gate; wizard transport choice + the migration
-  outcome (§10.9); file-transfer GUI gating (§10.7); relay-shaped health copy
-  (§6.5); doc closeout (CLAUDE.md, this document to BUILT).
+- **N6 — Governance bridge + GUI — ✅ DONE (2026-08-04):** the governed pool
+  change landed as an ordinary gated Organization op (`set_relays`,
+  relay_topology_plan.md R6) rather than a dedicated
+  `ChainChange::TransportPolicy` variant — the retention edit already is the
+  exact propose→threshold→apply shape, so no new variant and no new signing
+  path; the N3 block-hash-bound commit gate stays reserved for MLS-COUPLED
+  changes (a relay edit needs no MLS commit, so there is nothing to bind).
+  Wizard transport choice + migration (§10.9) resolved by events: SMP is
+  deleted, new republics are Nostr-only, the create dialog already picks the
+  relays (R2c) — there is no second transport to choose. File-transfer
+  gating (§10.7) is two-sided: the ENGINE refuses a share on a relay
+  republic by name (co-equality), the GUI dims the button and the click says
+  why. Health copy (§6.5): net_health is the relay verdict since N5.5, the
+  banner copy is member-neutral, and the members table states the coarse
+  presence rule once. Doc closeout: this paragraph + CLAUDE.md.
 
 Rough sizing, revised after BOTH review passes (findings I-1/2/3/7 and
 II-1/2/3/5 are design changes, not mappings; N0.5 and presence and the ritual

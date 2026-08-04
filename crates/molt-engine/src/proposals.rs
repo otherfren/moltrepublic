@@ -37,6 +37,9 @@ pub(crate) struct OrgEffective {
     pub retention_days: u64,
     /// Last applied `set_image` reference, cleared by `remove_image`.
     pub image: String,
+    /// The effective governed pool (R6), space-joined for display — the
+    /// ratified founding pool until a `set_relays` edit applies.
+    pub relays: String,
 }
 
 /// Parse a retention window ("14 days" or a bare "14") into days.
@@ -251,6 +254,7 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
         "set_chat_retention" => format!("{} days", eff.retention_days),
         // the image ops show what they change: the current image reference
         "set_image" | "remove_image" => eff.image.clone(),
+        "set_relays" => eff.relays.clone(),
         // an op this build doesn't know (ops are free-form wire strings, so
         // an older log may carry one) — tolerated, nothing to show
         _ => String::new(),
@@ -288,6 +292,19 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
             // WP3: the bytes must also decode as a picture
             Some(bytes) => image_decodable(&bytes),
         },
+        // R6: a pool edit — space-separated relay URLs, each one canonical
+        // (an applied entry is forever)
+        "set_relays" => {
+            let tokens: Vec<&str> = value.split_whitespace().collect();
+            if tokens.is_empty() {
+                return Err(MoltError::BadPayload("the pool needs at least one relay".into()));
+            }
+            for t in tokens {
+                molt_core::relay::normalize_relay_url(t)
+                    .map_err(|e| MoltError::BadPayload(format!("{t}: {e}")))?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -308,6 +325,29 @@ impl State {
         }
         validate_org_payload(surface, &payload)?;
         validate_payload_fits(surface, &payload, &self.roster())?;
+        // R6: a pool edit that would strand a DECLARED member — sharing no
+        // relay with what that seat is on record as reaching (R3b) — is the
+        // R4 split as a proposal. Refuse it naming the member and its relay.
+        // Undeclared members follow the governed pool and never gate.
+        if surface == Surface::Organization
+            && payload.get("op").and_then(Value::as_str) == Some("set_relays")
+        {
+            let new_pool: Vec<&str> = payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect();
+            for (m, reach) in &self.chain_member_relays {
+                if reach.iter().any(|r| new_pool.contains(&r.as_str())) {
+                    continue;
+                }
+                let named = reach.first().cloned().unwrap_or_default();
+                return Err(MoltError::BadPayload(format!(
+                    "{m} reaches only {named} - keep it or bridge it"
+                )));
+            }
+        }
         let me = self.member();
         let id = ProposalId(self.next_id);
         let env = self.make_env(
@@ -610,6 +650,7 @@ impl State {
             agenda: self.replica.as_ref().map(|r| r.agenda.clone()).unwrap_or_default(),
             retention_days: molt_core::default_chat_retention_days(),
             image: String::new(),
+            relays: self.ratified_relays().join(" "),
         };
         // fold over the BORROWED applied entries (never clone — a `set_image`
         // entry carries the base64 image, so cloning the log here would copy
@@ -649,6 +690,10 @@ impl State {
                     };
                 }
                 Some("remove_image") => eff.image.clear(),
+                // defensive like the rest: an empty edit keeps the pool
+                Some("set_relays") if value.split_whitespace().next().is_some() => {
+                    eff.relays = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                }
                 _ => {}
             }
         }

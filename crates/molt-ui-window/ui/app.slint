@@ -614,11 +614,10 @@ component PagerRow inherits HorizontalLayout {
 component OrgSettingsCard inherits DetailGroup {
     in property <int> retention;
     // the GROUP's relay pool — a group setting like the name or the
-    // retention window. Read-only until the threshold-approved pool change
-    // exists (relay_topology_plan.md R5): a pencil that proposed nothing
-    // would be a promise the engine cannot keep.
+    // retention window, editable as a threshold-gated proposal (R6).
     in property <[string]> relays;
     callback edit();
+    callback edit-relays();
     title: Strings.ocs-title;
     if root.relays.length > 0: VerticalLayout {
         spacing: 4px;
@@ -636,6 +635,17 @@ component OrgSettingsCard inherits DetailGroup {
                 color: Theme.dim;
                 font-size: Theme.fs-body;
                 vertical-alignment: center;
+            }
+            AppButton {
+                width: 26px;
+                height: 26px;
+                pad: 0px;
+                label: "✎";
+                tooltip: Strings.org-edit;
+                tooltip-left: true;
+                clicked => {
+                    root.edit-relays();
+                }
             }
         }
         for r in root.relays: Text {
@@ -991,6 +1001,7 @@ export component AppWindow inherits Window {
         || root.org-charter-modal-open
         || root.org-name-modal-open
         || root.org-retention-modal-open
+        || root.org-relays-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
         || root.relay-clearnet-modal-open
@@ -1280,6 +1291,13 @@ export component AppWindow inherits Window {
     callback cw-toggle-relay(int);
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
+    property <bool> org-relays-modal-open: false;
+    property <string> org-relays-draft;
+    // the pool, space-joined by Rust — the pencil's draft prefill
+    in property <string> org-relays-joined;
+    // the OPEN workspace's transport kind ("nostr" on a relay republic) —
+    // what §10.7 file gating and the §6.5 coarse-presence hint key on
+    in property <string> session-transport;
 
     // settings: a local editable draft, seeded from the engine session by Rust.
     in-out property <bool> cfg-headless: false;
@@ -1579,6 +1597,8 @@ export component AppWindow inherits Window {
             root.charter-view-open = false;
         } else if (root.org-retention-modal-open) {
             root.org-retention-modal-open = false;
+        } else if (root.org-relays-modal-open) {
+            root.org-relays-modal-open = false;
         } else if (root.decrypt-modal-open) {
             root.decrypt-modal-open = false;
         } else if (root.relay-clearnet-modal-open) {
@@ -4585,10 +4605,18 @@ export component AppWindow inherits Window {
                                             font-size: 19px;
                                             x: (parent.width - self.width) / 2;
                                             y: (parent.height - self.height) / 2;
+                                            // §10.7: no file data plane over
+                                            // relays in V1 — dimmed, and the
+                                            // click says why
+                                            opacity: root.session-transport == "nostr" ? 0.35 : 1;
                                         }
                                         at-ta := TouchArea {
                                             clicked => {
-                                                root.share-pick();
+                                                if (root.session-transport == "nostr") {
+                                                    root.show-toast(Strings.cs-files-off);
+                                                } else {
+                                                    root.share-pick();
+                                                }
                                             }
                                         }
                                     }
@@ -4833,6 +4861,10 @@ export component AppWindow inherits Window {
                                             root.org-retention-draft = root.org-chat-retention;
                                             root.org-retention-modal-open = true;
                                         }
+                                        edit-relays => {
+                                            root.org-relays-draft = root.org-relays-joined;
+                                            root.org-relays-modal-open = true;
+                                        }
                                     }
                                 }
                                 DetailGroup {
@@ -4894,6 +4926,10 @@ export component AppWindow inherits Window {
                                     edit => {
                                         root.org-retention-draft = root.org-chat-retention;
                                         root.org-retention-modal-open = true;
+                                    }
+                                    edit-relays => {
+                                        root.org-relays-draft = root.org-relays-joined;
+                                        root.org-relays-modal-open = true;
                                     }
                                 }
                                 // WP4b: chain compaction (checkpoints) runs
@@ -5134,15 +5170,25 @@ export component AppWindow inherits Window {
                                                     y: (parent.height - self.height) / 2;
                                                     background: m.state == 0 ? Theme.good : (m.state == 1 ? Theme.warn : Theme.faint);
                                                 }
-                                                Text {
-                                                    text: m.name == root.node-member ? "\{m.name} \{Strings.om-me}" : m.name;
-                                                    color: m.name == root.node-member ? Theme.accent : Theme.text;
-                                                    font-size: Theme.fs-body;
-                                                    font-weight: 700;
-                                                    vertical-alignment: center;
+                                                VerticalLayout {
+                                                    alignment: center;
                                                     horizontal-stretch: 3;
                                                     min-width: 100px;
-                                                    overflow: elide;
+                                                    Text {
+                                                        text: m.name == root.node-member ? "\{m.name} \{Strings.om-me}" : m.name;
+                                                        color: m.name == root.node-member ? Theme.accent : Theme.text;
+                                                        font-size: Theme.fs-body;
+                                                        font-weight: 700;
+                                                        overflow: elide;
+                                                    }
+                                                    // R4: the relay-split marker — one compact
+                                                    // engine-built line, warn tone
+                                                    if m.split != "": Text {
+                                                        text: m.split;
+                                                        color: Theme.warn;
+                                                        font-size: Theme.fs-cap;
+                                                        overflow: elide;
+                                                    }
                                                 }
                                                 // identity anchor: fingerprint +
                                                 // full key ("—" on a workspace
@@ -5266,6 +5312,14 @@ export component AppWindow inherits Window {
                                     content-h: om-fl.viewport-height;
                                     scroll-y: om-fl.viewport-y;
                                 }
+                            }
+                            // §6.5: presence over relays is traffic-derived
+                            // and COARSE — say so, once, under the table
+                            if root.session-transport == "nostr": Text {
+                                text: Strings.om-coarse;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
 
@@ -7529,6 +7583,27 @@ export component AppWindow inherits Window {
     // Settings). A gated change like the other organization edits: the
     // drafted period becomes a real proposal.
     // =================================================================
+    // R6: the pool edit — a gated proposal like the retention next to it
+    if root.org-relays-modal-open: ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.ocr2-title;
+        body: Strings.ocr2-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.org-relays-draft != "" && root.org-relays-draft != root.org-relays-joined;
+        dismissed => {
+            root.org-relays-modal-open = false;
+        }
+        confirmed => {
+            root.org-relays-modal-open = false;
+            root.org-propose("set_relays", root.org-relays-draft);
+            root.show-toast(Strings.toast-proposed);
+        }
+        AppField {
+            text <=> root.org-relays-draft;
+            placeholder: "wss://relay-a.example wss://relay-b.example";
+        }
+    }
+
     if root.org-retention-modal-open: ConfirmModal {
         dialog-width: 460px;
         title: Strings.ocr-title;
