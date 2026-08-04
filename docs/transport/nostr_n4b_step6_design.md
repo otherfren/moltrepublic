@@ -111,10 +111,24 @@ arrive, and 14/15 park behind it. The park's pathology valve is 900 s.
 
 The delivery guarantee's own repair — the rejoiner ACKs, the coordinator
 rewinds its broadcast cursor to the proven floor and republishes the span —
-is the mechanism that SHOULD close this, and it left no trace within the
-30 s window. That is the next thing to instrument: whether the fresh
-incarnation's ack sheet reaches the coordinator at all, and whether
-`group_floor` counts it.
+is the mechanism that SHOULD close this. Instrumenting it found **one real
+defect, now fixed**: `apply_group_ack` latched its `ack_seen` evidence flag
+only when the implied floor was non-zero, and a rejoiner's honest floor IS
+zero (it entered mid-stream and never saw the early events). So
+`group_floor` stayed `None`, `rewind_group` returned early, and nothing was
+ever republished. The rule the guard exists for is "a sheet that says
+nothing ABOUT US proves nothing", and its test is `window_for(me)` alone —
+pinned now from both sides
+(`a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero`,
+`a_sheet_that_is_silent_about_us_still_proves_nothing`).
+
+**The race survives that fix** — measured 4 red in 14 capstone runs
+afterwards. The remaining suspects, in order: the outbox's stall clock
+(`RESEND_AFTER_SECS`, anchored at `stalled_since`) may not fire inside the
+capstone's 30 s window; and the resend's own-ackable `tail` guard asks
+whether an own-ackable envelope sits above the floor, which is a question
+about the SENDER's log, not about what this particular peer is missing.
+Instrument those two next — do not guess a third fix.
 
 **Consequence today:** a recovered seat usually catches up within a second,
 and sometimes stays at its anchor until the park's valve releases. Honestly

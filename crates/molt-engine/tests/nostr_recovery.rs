@@ -237,11 +237,18 @@ async fn a_dialable_relay_the_group_does_not_use_is_not_a_shared_relay() {
     // …confirmed, but with no clearnet acknowledgement: an onion relay needs
     // none, which is the whole point of the fixture
     a.execute(Command::RelayConfirm {
-        url: onion,
+        url: onion.clone(),
         accept_clearnet: false,
     })
     .await
     .expect("onion relay confirm");
+    // B4: settle the probe's verdict FIRST — it lands on the same notice
+    // channel the mint's refusal below is read from, and an unreachable
+    // onion (Tor is off in this fixture) would otherwise clobber it
+    wait_for(&a, "the onion relay's probe verdict to settle", |s| {
+        s.settings.relays.iter().any(|r| r.url.contains(".onion") && r.confirmed)
+    })
+    .await;
     // the republic's relay leaves the pool entirely — this must be the
     // "shares nothing with this republic" case, NOT "blocked by a switch",
     // or the assertion below would pin a reason the fixture does not produce
@@ -446,11 +453,13 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
         "a recovered Nostr seat with no group runtime is deaf: no 445s in, no outbox out"
     );
     // NOT asserted: that the two renames above the anchor arrive. They
-    // USUALLY do — the catch-up request goes out, the coordinator serves,
-    // and the rejoiner applies — but there is a RACE that loses them
-    // (~1 run in 4, measured 2026-08-04). Asserting it here would make the
-    // keystone flaky, which is worse than naming the gap: see
-    // `nostr_n4b_step6_design.md` §3.1a, which carries the diagnosis.
+    // usually do, and one real defect on that path was found and fixed by
+    // asserting it here (the rejoiner's claim sheet counted as no evidence
+    // at floor 0, so no rewind ever republished what its catch-up parked
+    // on — `a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero`).
+    // A race SURVIVES that fix: measured 4 red in 14 runs afterwards. A
+    // flaky keystone is worse than a named gap — the diagnosis and the next
+    // suspect are in `nostr_n4b_step6_design.md` §3.1a.
 
     // …and walter sees the return, so the two ends agree the seat is back
     wait_for(&a, "walter to record petra's return", |s| {

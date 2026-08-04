@@ -565,6 +565,15 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   skips_commits`, `the_park_clears_on_reset_and_releases_stale_entries`,
   `prev_seq_is_byte_invisible_at_zero_and_roundtrips_otherwise`,
   `frames_far_behind_the_ratchet_still_decrypt_after_the_heal`.
+- **Evidence vs. silence in a claim sheet (2026-08-04):** `apply_group_ack`
+  latches `ack_seen` whenever the sheet SPEAKS about us
+  (`window_for(me).is_some()`) — the implied floor may be 0. The rule the
+  guard exists for is "a sheet that says nothing ABOUT US proves nothing",
+  and requiring a non-zero floor on top of it stranded a REJOINER, whose
+  honest floor is zero: `group_floor` stayed `None`, so `rewind_group`
+  never republished the span its catch-up was parked on. Pinned from both
+  sides (`a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero`,
+  `a_sheet_that_is_silent_about_us_still_proves_nothing`).
 - **Fresh-incarnation rule (2026-08-04, N4b §3.1a):** a sender this node
   holds NO accepted history with (empty `AcceptedWindow`) delivers its first
   envelope UNORDERED and seeds the window as the ordering baseline; G7 is

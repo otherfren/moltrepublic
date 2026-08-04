@@ -258,9 +258,15 @@ where
 /// Two rules, and both exist because getting them wrong turns a small frame
 /// into a republic-wide republish:
 ///
-/// 1. a sheet that says nothing about us proves nothing — it must NOT latch
-///    `ack_seen`, because a "proven" floor of zero makes the outbox rewind to
-///    the start of the log;
+/// 1. a sheet that says nothing ABOUT US proves nothing — it must not latch
+///    `ack_seen`, because a "proven" floor of zero would then make the
+///    outbox rewind to the start of the log on a peer's mere silence. The
+///    test of that rule is `window_for(me)`, and nothing else: a sheet that
+///    DOES speak about us is evidence the peer is listening, whatever floor
+///    it implies. (Requiring a non-zero floor as well is what stranded a
+///    REJOINER, whose honest floor is 0 — it entered the broadcast
+///    mid-stream and never saw the early events — so no rewind ever
+///    republished the frames its catch-up was waiting on: §3.1a.)
 /// 2. the window we receive from `from` is in OUR seq space, because it
 ///    describes OUR events. The window we SEND about `from` is in THEIRS.
 ///    The two directions are mirror images and the inversion compiles.
@@ -286,9 +292,11 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         cursor.acked_floor = floor;
         cursor.ack_seen = true;
         store.save(state).await;
-    } else if floor == old && old > 0 {
-        // no progress, but the peer HAS spoken about us before — keep the
-        // evidence flag without moving anything
+    } else {
+        // no progress — but the peer spoke about US, so it is listening.
+        // Latch the evidence without moving the floor; the floor stays
+        // honest (0 = nothing proven) and the rewind can now reach back
+        // to what this peer is actually missing.
         let cursor = state.outbound.entry(from.clone()).or_default();
         if !cursor.ack_seen {
             cursor.ack_seen = true;
@@ -1251,6 +1259,85 @@ mod tests {
             done.is_ok(),
             "the stop was sent before the loops first polled and was lost — \
              the outbox never exits"
+        );
+    }
+
+    /// **A fresh incarnation's claim sheet is EVIDENCE, even at floor 0.**
+    ///
+    /// A rejoiner enters the broadcast mid-stream: it never saw the
+    /// sender's early events, so its claim sheet computes a floor of 0 —
+    /// truthfully, nothing is proven delivered. `apply_group_ack` then hit
+    /// its `floor == old && old > 0` arm and latched NOTHING, so
+    /// `group_floor` stayed `None`, the rewind never ran, and the frames
+    /// the rejoiner is missing were never republished. It parked its
+    /// catch-up on a predecessor that could not arrive and sat there until
+    /// the 900 s pathology valve — the §3.1a race, measured 1 run in 4.
+    ///
+    /// The rule the guard exists for is "a sheet that says NOTHING about us
+    /// proves nothing" — and that case is the `window_for(me).is_none()`
+    /// early return, not this one. A sheet that DOES speak about us is
+    /// evidence the peer is listening, whatever floor it implies.
+    #[tokio::test]
+    async fn a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        // three own events; the peer accepted only the LAST one (it joined
+        // the broadcast after 1 and 2 were published)
+        for seq in 1..=3u64 {
+            log.push(molt_core::EventEnvelope {
+                prev_seq: seq.saturating_sub(1),
+                seq,
+                ts: 1_751_000_000 + seq,
+                by: "walter".to_string(),
+                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
+                    "walter",
+                    "x",
+                    1_751_000_000,
+                )),
+            });
+        }
+        let mut window = molt_core::AcceptedWindow::default();
+        assert!(window.accept(3), "the rejoiner accepted only the newest");
+        let ack = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([("walter".to_string(), window)]),
+        );
+
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &ack).await;
+
+        let state = <crate::MemStateStore as StateStore>::load(&store).await;
+        let cursor = state.outbound.get("petra").expect("the sheet spoke about us");
+        assert!(
+            cursor.ack_seen,
+            "a sheet that speaks about us is evidence - without the latch the \
+             rewind never runs and the rejoiner's missing frames are never resent"
+        );
+        assert_eq!(cursor.acked_floor, 0, "…and the floor stays honest: nothing is proven");
+        // …which is what makes the rewind reach back and republish the span
+        let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into()]);
+        assert_eq!(group_floor(&state, &cfg), Some(0));
+    }
+
+    /// The counter-case the guard exists for, unchanged: a sheet that says
+    /// NOTHING about us proves nothing and must not latch — else a silent
+    /// peer's floor of zero rewinds the whole log for everyone.
+    #[tokio::test]
+    async fn a_sheet_that_is_silent_about_us_still_proves_nothing() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        let ack = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([(
+                "zoe".to_string(),
+                molt_core::AcceptedWindow::default(),
+            )]),
+        );
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &ack).await;
+        let state = <crate::MemStateStore as StateStore>::load(&store).await;
+        assert!(
+            state.outbound.get("petra").is_none_or(|c| !c.ack_seen),
+            "silence about us is not evidence about us"
         );
     }
 
