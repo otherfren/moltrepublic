@@ -22,11 +22,10 @@
 //! helpers are shaped so N5.3 lights them up by SENDING rather than by
 //! reshaping anything.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use molt_core::{MemberId, TransportState};
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 
 use crate::ritual_net::{GroupChannel, GroupRecv};
 use crate::supervisor::{EngineSink, MlsChannel, MlsDecode, OutboxLog, StateStore};
@@ -110,7 +109,11 @@ pub struct GroupHealth {
 
 /// A running group runtime.
 pub struct GroupHandle {
-    stop: Arc<Notify>,
+    /// A `watch`, NOT a `Notify`: the stop must LATCH. `notify_waiters` wakes
+    /// only tasks parked at that instant, so a handle dropped in the same
+    /// synchronous stretch that built it (the recovery path did) signalled
+    /// into the void and left an orphaned outbox publishing every frame twice.
+    stop: watch::Sender<bool>,
     /// The latest claim sheet awaiting publication. FULL STATE, so a newer
     /// sheet supersedes an unsent one by construction — no queue to drain and
     /// no coalescing logic to get wrong.
@@ -125,7 +128,7 @@ impl GroupHandle {
     /// finishes. Drain-don't-abort applies to the outbox only; the inbox is
     /// pure inbound and is aborted.
     pub async fn shutdown(mut self) {
-        self.stop.notify_waiters();
+        let _ = self.stop.send(true);
         if let Some(inbox) = self.inbox.take() {
             inbox.abort();
         }
@@ -150,7 +153,7 @@ impl GroupHandle {
 
 impl Drop for GroupHandle {
     fn drop(&mut self) {
-        self.stop.notify_waiters();
+        let _ = self.stop.send(true);
         if let Some(inbox) = self.inbox.take() {
             inbox.abort();
         }
@@ -208,7 +211,7 @@ where
     S: StateStore,
     K: EngineSink,
 {
-    let stop = Arc::new(Notify::new());
+    let (stop, stop_rx) = watch::channel(false);
     let (log2, store2) = (log.clone(), store.clone());
     let (acks, acks_rx) = watch::channel(None);
     // a THIRD task: an ack must not queue behind `publish_with_backoff`, whose
@@ -219,7 +222,7 @@ where
         channel.clone(),
         mls.clone(),
         acks_rx,
-        stop.clone(),
+        stop_rx.clone(),
     ));
     let outbox = tokio::spawn(outbox_loop(
         channel.clone(),
@@ -229,7 +232,7 @@ where
         store,
         sink.clone(),
         wakeup,
-        stop.clone(),
+        stop_rx.clone(),
     ));
     let inbox = tokio::spawn(inbox_loop(
         channel,
@@ -239,7 +242,7 @@ where
         cfg.member.clone(),
         sink,
         health,
-        stop.clone(),
+        stop_rx,
     ));
     GroupHandle {
         stop,
@@ -299,7 +302,7 @@ async fn ack_loop(
     channel: GroupChannel,
     mls: MlsChannel,
     mut rx: watch::Receiver<Option<crate::group_ack::GroupAck>>,
-    stop: Arc<Notify>,
+    mut stop: watch::Receiver<bool>,
 ) {
     loop {
         tokio::select! {
@@ -308,7 +311,7 @@ async fn ack_loop(
                     return;
                 }
             }
-            () = stop.notified() => return,
+            _ = stop.changed() => return,
         }
         let Some(ack) = rx.borrow_and_update().clone() else {
             continue;
@@ -361,7 +364,7 @@ async fn publish_with_backoff(
     channel: &GroupChannel,
     frame: &crate::supervisor::GroupFrame,
     cfg: &GroupNetConfig,
-    stop: &Notify,
+    stop: &mut watch::Receiver<bool>,
 ) -> Result<(), PublishStall> {
     let mut delay = cfg.retry_base;
     for _ in 0..PUBLISH_ATTEMPTS {
@@ -384,7 +387,7 @@ async fn publish_with_backoff(
         }
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
-            () = stop.notified() => return Err(PublishStall::Stopped),
+            _ = stop.changed() => return Err(PublishStall::Stopped),
         }
         delay = (delay * 2).min(cfg.retry_cap);
     }
@@ -401,7 +404,7 @@ async fn outbox_loop<L, S, K>(
     store: S,
     sink: K,
     mut wakeup: watch::Receiver<u64>,
-    stop: Arc<Notify>,
+    mut stop: watch::Receiver<bool>,
 ) where
     L: OutboxLog,
     S: StateStore,
@@ -442,8 +445,11 @@ async fn outbox_loop<L, S, K>(
                 published_through = env.seq;
                 continue;
             };
-            match publish_with_backoff(&channel, &frame, &cfg, &stop).await {
-                Ok(()) => published_through = env.seq,
+            match publish_with_backoff(&channel, &frame, &cfg, &mut stop).await {
+                Ok(()) => {
+                    tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                    published_through = env.seq;
+                }
                 // hold the cursor exactly here in EVERY failure case: nothing
                 // recovers a skipped envelope, so advancing past an
                 // unpublished one would lose it permanently. What differs is
@@ -527,7 +533,7 @@ async fn outbox_loop<L, S, K>(
                         return;
                     }
                 }
-                () = stop.notified() => return,
+                _ = stop.changed() => return,
             }
             continue;
         }
@@ -543,7 +549,7 @@ async fn outbox_loop<L, S, K>(
                 }
                 false // new work first; the stall clock keeps running
             }
-            () = stop.notified() => return,
+            _ = stop.changed() => return,
             () = tokio::time::sleep_until(deadline) => true,
         };
         if !fired {
@@ -677,6 +683,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     match mls.decode_at(&wire, created_at) {
         MlsDecode::Deliver(from, env) => {
             sink.peer_seen(&from).await;
+            tracing::debug!(me = %me, %from, seq = env.seq, "group frame delivered to engine");
             if sink.deliver(&from, *env).await.is_err() {
                 return Ingest::EngineGone;
             }
@@ -762,7 +769,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     me: MemberId,
     sink: K,
     health: watch::Sender<GroupHealth>,
-    stop: Arc<Notify>,
+    mut stop: watch::Receiver<bool>,
 ) {
     let mut sub = match channel.subscribe().await {
         Ok(s) => s,
@@ -786,7 +793,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     loop {
         let recv = tokio::select! {
             r = sub.recv(RECV_SLICE) => r,
-            () = stop.notified() => return,
+            _ = stop.changed() => return,
         };
         match recv {
             GroupRecv::Frame { content, created_at } => {
@@ -877,10 +884,10 @@ mod tests {
             ciphertext: vec![0x5au8; 256 * 1024],
             exporter: [3u8; 32],
         };
-        let stop = Notify::new();
+        let (_stop_tx, mut stop) = watch::channel(false);
 
         let started = tokio::time::Instant::now();
-        let outcome = publish_with_backoff(&channel, &frame, &cfg, &stop).await;
+        let outcome = publish_with_backoff(&channel, &frame, &cfg, &mut stop).await;
         let elapsed = started.elapsed();
 
         let Err(PublishStall::Permanent(why)) = outcome else {
@@ -910,7 +917,8 @@ mod tests {
             ciphertext: vec![0u8; 32],
             exporter: [3u8; 32],
         };
-        let outcome = publish_with_backoff(&channel, &frame, &cfg(), &Notify::new()).await;
+        let (_stop_tx, mut stop) = watch::channel(false);
+        let outcome = publish_with_backoff(&channel, &frame, &cfg(), &mut stop).await;
         assert!(
             matches!(outcome, Err(PublishStall::Transient)),
             "an empty pool can refill — it must not be classed permanent: {outcome:?}"
@@ -1059,6 +1067,67 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         handle.shutdown().await;
+    }
+
+    /// **A stop sent before the tasks first poll must still stop them.**
+    ///
+    /// The stop rode a `Notify`, and `notify_waiters` wakes only tasks parked
+    /// on it AT THAT MOMENT — it does not latch. An engine that builds a
+    /// runtime and replaces or shuts it down within the same synchronous
+    /// stretch (the recovery path did exactly that) signalled into the void:
+    /// the loops had never polled yet, the wake was lost, and the ORPHANED
+    /// outbox kept publishing next to its replacement — every group frame of
+    /// the rejoiner went out twice.
+    ///
+    /// On a current-thread runtime the race is deterministic: nothing spawned
+    /// has run before `shutdown()` is called, so a signal that does not latch
+    /// is GUARANTEED lost — and `shutdown()`, which awaits the outbox, never
+    /// returns.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_sent_before_the_tasks_first_poll_still_stops_them() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        #[derive(Clone)]
+        struct NullSink;
+        impl EngineSink for NullSink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                _env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let mls = MlsMember::new(&SigningKey::from_bytes(&[9u8; 32]), "walter").expect("mls");
+        let channel = crate::ritual_net::GroupChannel::new(
+            crate::dial::Dialer::Direct,
+            vec!["ws://127.0.0.1:1".to_string()],
+            [7u8; 32],
+        );
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            channel,
+            MlsChannel::from_shared(std::sync::Arc::new(std::sync::Mutex::new(mls))),
+            cfg(),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        // nothing spawned has polled yet — this IS the lost-wakeup window
+        let done =
+            tokio::time::timeout(std::time::Duration::from_secs(30), handle.shutdown()).await;
+        assert!(
+            done.is_ok(),
+            "the stop was sent before the loops first polled and was lost — \
+             the outbox never exits"
+        );
     }
 
     /// With nobody acking, the floor is unknown and the cursor does not move.
