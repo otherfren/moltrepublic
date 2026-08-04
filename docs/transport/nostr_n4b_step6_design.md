@@ -91,12 +91,14 @@ cannot `record()` a `ChainRequest` before it has a workspace. **After the
 encrypted at an epoch the returning member can read, which is the one the
 re-key just created for it.
 
-### 3.1a OPEN: the catch-up above the anchor does not run yet
+### 3.1a RESOLVED (2026-08-04): the catch-up above the anchor runs
 
 **Verified 2026-08-03 by the capstone, with a republic whose head is three
 blocks above its anchor.** §3.1 above says "everything above the anchor
-arrives over the ORDINARY catch-up". A rejoiner materializes correctly from
-the anchor and stays there.
+arrives over the ORDINARY catch-up". A rejoiner materialized correctly from
+the anchor and stayed there. FIVE defects stacked on this one path; the
+capstone now asserts the renames above the anchor arrive
+(`a_lost_seat_rejoins_the_republic_over_relays`).
 
 Three blockers were found and FIXED on the way, each real on its own:
 
@@ -117,15 +119,25 @@ Three blockers were found and FIXED on the way, each real on its own:
    which is a stronger authenticated point (a threshold-committed `Restored`
    block for exactly this seat).
 
-**Still not arriving after all three.** The next hop is unidentified; do not
-guess at a fourth fix — instrument the rejoiner's outbox and the
-coordinator's 445 ingest and find out where the `ChainRequest` stops. The
-capstone deliberately does NOT assert the catch-up, so this is a known gap
-rather than a red test with no owner.
+Instrumentation (2026-08-04) then found the remaining two — the request went
+out, was served, and the ANSWER was discarded:
 
-Consequence today: a recovered seat holds the founding constitution, the
-roster and a verified head, and does not see governance committed since. It
-is not silently wrong — it is honestly behind.
+4. **The rejoiner held every served block as out-of-order, forever.** G7's
+   in-order hold parks an envelope whose stamped `prev_seq` is not in the
+   receiver's accept window — and a fresh incarnation holds NO history with
+   the coordinator, whose predecessors were published at epochs the
+   rejoiner's exporter ring can never open. The park waited on frames that
+   cannot exist for this member. Fix: the fresh-incarnation rule — an empty
+   `AcceptedWindow` delivers its first envelope unordered and seeds the
+   window as the ordering baseline (`delivery_guarantee.md` §9, pinned by
+   `a_first_contact_envelope_delivers_without_a_history_to_order_against`).
+5. **The recovery arm built a SECOND group runtime** next to the one
+   `materialize_workspace` had already brought up, and replacing the first
+   lost its stop: the stop rode `Notify::notify_waiters`, which does not
+   latch, so a handle dropped before its tasks first polled signalled into
+   the void — an orphaned outbox published every frame of the rejoiner
+   twice. Fix: one build (materialize's), and the stop is a `watch` channel
+   (pinned by `a_stop_sent_before_the_tasks_first_poll_still_stops_them`).
 
 ### 3.2 The residual limit, stated rather than hidden
 

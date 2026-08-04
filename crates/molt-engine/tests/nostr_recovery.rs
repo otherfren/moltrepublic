@@ -345,6 +345,12 @@ async fn a_coordinator_that_cannot_reach_the_group_relays_says_which_switch() {
 /// would otherwise have been discovered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_seat_rejoins_the_republic_over_relays() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
@@ -430,9 +436,13 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
         molt_core::NetHealth::Ok,
         "a recovered Nostr seat with no group runtime is deaf: no 445s in, no outbox out"
     );
-    // NOT asserted: that the two renames above the anchor arrive. They do not
-    // yet — see `nostr_n4b_step6_design.md` §3.1a. Asserting it here would
-    // only convert a known gap into a red test with no owner.
+    // …and the two renames above the anchor really arrive over the ordinary
+    // catch-up (§3.1a): the rejoiner ends at the republic's CURRENT name, not
+    // frozen at its founding snapshot.
+    wait_for(&c, "the catch-up to bring the renames above the anchor", |s| {
+        s.workspaces.iter().any(|w| w.name == "Chess Club Again")
+    })
+    .await;
 
     // …and walter sees the return, so the two ends agree the seat is back
     wait_for(&a, "walter to record petra's return", |s| {

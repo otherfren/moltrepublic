@@ -2247,6 +2247,7 @@ impl State {
         }
         self.catchup_from = Some(from);
         let me = self.member();
+        tracing::debug!(me = %me, from, "chain catch-up requested");
         let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from });
         self.record(env);
     }
@@ -2262,6 +2263,7 @@ impl State {
             .filter(|b| b.height >= from)
             .cloned()
             .collect();
+        tracing::debug!(me = %self.member(), from, served = blocks.len(), "serving chain catch-up");
         if blocks.is_empty() {
             return;
         }

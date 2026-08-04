@@ -1720,9 +1720,8 @@ impl State {
             }
             Some(raw)
         };
-        // keep copies to stand the runtime supervisors up after materialising
-        // (the queue mesh below, and the Nostr group runtime after it)
-        let group_mls = mls_blob.clone();
+        // keep copies to stand the queue-mesh supervisor up after
+        // materialising (the Nostr group runtime is materialize's own job)
         let net_seed = (mls_blob.clone(), mesh.clone());
         let id = match self.materialize_workspace(
             &sealed.name,
@@ -1806,28 +1805,13 @@ impl State {
                 }
             }
         }
-        // …and on a NOSTR republic, the group runtime — the founding/join twin
-        // does this for exactly the same reason (`materialize_workspace`'s
-        // caller, "a first session as capable as a resumed one").
+        // On a NOSTR republic the group runtime is ALREADY UP here:
+        // `materialize_workspace` brings it up for every Nostr
+        // materialization — founding, join and recovery alike — and sets
+        // `net_health` honestly. Building it AGAIN here (as this arm once
+        // did) spawned a second outbox over the same log next to the first,
+        // and every frame of the rejoiner went out twice.
         //
-        // Without it a recovered seat came back DEAF: no 445 subscription, so
-        // no chat and no catch-up, and no outbox, so the `ChainRequest` that
-        // pulls everything above the served anchor never went out. It looked
-        // recovered — roster, charter, chain head — and was frozen at the
-        // anchor until the workspace was closed and reopened. §3.1's "the rest
-        // arrives over the ordinary catch-up" quietly depended on this.
-        if self.nostr.is_some() {
-            if let Some(blob) = group_mls.as_deref() {
-                self.group_net = self.build_group_net(blob);
-            }
-            self.session.net_health = if self.group_net.is_some() {
-                molt_core::NetHealth::Ok
-            } else {
-                molt_core::NetHealth::Down {
-                    reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
-                }
-            };
-        }
         // **Ask for everything above the anchor.** §3.1 says the rest arrives
         // over the ordinary catch-up, and nothing was issuing the request: the
         // two existing triggers are a gap-block arriving and a workspace OPEN,

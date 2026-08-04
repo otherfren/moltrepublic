@@ -565,3 +565,12 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   skips_commits`, `the_park_clears_on_reset_and_releases_stale_entries`,
   `prev_seq_is_byte_invisible_at_zero_and_roundtrips_otherwise`,
   `frames_far_behind_the_ratchet_still_decrypt_after_the_heal`.
+- **Fresh-incarnation rule (2026-08-04, N4b §3.1a):** a sender this node
+  holds NO accepted history with (empty `AcceptedWindow`) delivers its first
+  envelope UNORDERED and seeds the window as the ordering baseline; G7 is
+  fully in force from there on. A rejoiner or late joiner enters the
+  broadcast mid-stream: the stamped predecessors were published at epochs
+  its exporter ring can never open, so parking held the recovery catch-up
+  hostage to frames that cannot exist for it — the rejoiner verified its
+  anchor and then never saw a block again. Pin:
+  `a_first_contact_envelope_delivers_without_a_history_to_order_against`.

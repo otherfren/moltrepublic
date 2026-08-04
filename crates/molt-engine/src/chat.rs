@@ -768,6 +768,49 @@ mod tests {
         assert!(st.ordered_park.is_empty(), "the park drained");
     }
 
+    /// G7's fresh-incarnation rule (N4b §3.1a): an envelope from a sender we
+    /// hold NO accepted history with delivers immediately, even though its
+    /// `prev_seq` points into that history. A rejoiner (or late joiner)
+    /// enters the broadcast mid-stream, and the stamped predecessors were
+    /// published at epochs its exporter ring can never open — parking would
+    /// hold the whole catch-up hostage to frames that cannot exist for it.
+    /// Ordering starts at what it CAN see; G7 holds from there on.
+    #[test]
+    fn a_first_contact_envelope_delivers_without_a_history_to_order_against() {
+        let mut st = plain_state();
+        let chat = |seq: u64, prev: u64, id: u8, body: &str| EventEnvelope {
+            seq,
+            ts: 200 + seq,
+            by: "peer-2".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                MessageId([id; 16]),
+                "peer-2",
+                body,
+                200 + seq,
+            )),
+            prev_seq: prev,
+        };
+        let deliver_env = |st: &mut crate::State, env: EventEnvelope| {
+            st.cmd_net_delivered("peer-2".to_string(), env, None)
+                .expect("a wire delivery never errors");
+        };
+        // first contact: seq 12 chained onto a history this node never saw
+        deliver_env(&mut st, chat(12, 11, 1, "first contact"));
+        assert_eq!(st.chat.len(), 1, "nothing to order against — it must deliver");
+        assert!(
+            st.accepted["peer-2"].is_accepted(12),
+            "…and it seeds the window as the ordering baseline"
+        );
+        // from the baseline on, G7 is fully in force: a successor parks…
+        deliver_env(&mut st, chat(14, 13, 3, "B"));
+        assert_eq!(st.chat.len(), 1, "post-baseline ordering is not weakened");
+        // …until its predecessor lands, then the park drains in order
+        deliver_env(&mut st, chat(13, 12, 2, "A"));
+        assert_eq!(st.chat.len(), 3);
+        assert_eq!(st.chat[1].body, "A");
+        assert_eq!(st.chat[2].body, "B");
+    }
+
     /// G7: the chain `make_env` stamps — a second own event links to the
     /// first, an `MlsCommit` never joins the chain (receivers could never
     /// accept it), and a re-recorded PEER event carries no chain at all.
@@ -806,6 +849,27 @@ mod tests {
     fn the_park_clears_on_reset_and_releases_stale_entries() {
         let mut st = plain_state();
         st.clock_override = Some(1_750_000_000);
+        // seed the window: with a history to order against, G7 parks (the
+        // fresh-incarnation rule would otherwise deliver the orphan as a
+        // first-contact baseline)
+        st.cmd_net_delivered(
+            "peer-2".to_string(),
+            EventEnvelope {
+                seq: 1,
+                ts: 201,
+                by: "peer-2".to_string(),
+                body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    MessageId([6u8; 16]),
+                    "peer-2",
+                    "baseline",
+                    201,
+                )),
+                prev_seq: 0,
+            },
+            None,
+        )
+        .expect("delivered");
+        assert_eq!(st.chat.len(), 1);
         let orphan = EventEnvelope {
             seq: 12,
             ts: 212,
@@ -820,17 +884,36 @@ mod tests {
         };
         st.cmd_net_delivered("peer-2".to_string(), orphan.clone(), None)
             .expect("delivered");
-        assert!(st.chat.is_empty(), "parked, not applied");
+        assert_eq!(st.chat.len(), 1, "parked, not applied");
         // a recovery reset forgets the old incarnation's park
         st.reset_peer_accept_window(&"peer-2".to_string());
         assert!(st.ordered_park.is_empty(), "the reset clears the park");
 
-        // park again; the valve releases it (loudly) after the giveup window
+        // the reset also forgot the history, so re-seed before parking again;
+        // the valve releases it (loudly) after the giveup window
+        st.cmd_net_delivered(
+            "peer-2".to_string(),
+            EventEnvelope {
+                seq: 1,
+                ts: 202,
+                by: "peer-2".to_string(),
+                body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    MessageId([8u8; 16]),
+                    "peer-2",
+                    "baseline two",
+                    202,
+                )),
+                prev_seq: 0,
+            },
+            None,
+        )
+        .expect("delivered");
+        assert_eq!(st.chat.len(), 2);
         st.cmd_net_delivered("peer-2".to_string(), orphan, None).expect("delivered");
         st.release_stale_parked(1_750_000_000 + 10);
-        assert!(st.chat.is_empty(), "inside the window it stays held");
+        assert_eq!(st.chat.len(), 2, "inside the window it stays held");
         st.release_stale_parked(1_750_000_000 + crate::net::ORDERED_PARK_GIVEUP_SECS + 1);
-        assert_eq!(st.chat.len(), 1, "the valve releases rather than wedges");
+        assert_eq!(st.chat.len(), 3, "the valve releases rather than wedges");
         assert!(st.ordered_park.is_empty());
     }
 

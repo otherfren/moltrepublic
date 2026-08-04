@@ -1073,7 +1073,16 @@ impl State {
         // resend machinery re-earns it after any crash. A resent predecessor
         // can therefore never become visible AFTER its successor. `prev_seq
         // == 0` (pre-G7 sender / chain start) delivers unordered as before.
+        //
+        // Fresh-incarnation rule (N4b §3.1a): a sender we hold NO accepted
+        // history with cannot be ordered against that history. A rejoiner or
+        // late joiner enters the broadcast mid-stream, and the predecessors
+        // were published at epochs its exporter ring can never open — parking
+        // would hold the whole catch-up hostage to frames that cannot exist
+        // for it. The first envelope delivers as the ordering baseline.
+        let has_history = self.accepted.get(&from).is_some_and(|w| w.high > 0);
         if envelope.prev_seq != 0
+            && has_history
             && !self
                 .accepted
                 .get(&from)
@@ -1366,6 +1375,7 @@ impl State {
                 self.receive_block(block);
             }
             WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
+                tracing::debug!(me = %self.member(), %from, from_height, "chain catch-up request arrived");
                 self.serve_chain_from(from_height);
                 // WP2: the requester is (re)joining the conversation — beyond
                 // the committed suffix it also lost the ephemeral open
