@@ -245,6 +245,20 @@ async fn a_confirmed_relay_is_the_target_and_a_lying_proxy_earns_no_circuit() {
     })
     .await
     .expect("relay confirmed");
+    // B4: the confirmation lands on the PROBE's verdict (this fictional
+    // relay is unreachable -> unverified, and the consent stands)
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let s = match w.execute(Command::ReadSession).await.expect("read") {
+            molt_core::Reply::Session(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        if s.settings.relays.iter().any(|r| r.confirmed) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "probe verdict never landed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     w.execute(Command::RelayClearnetSession { unlock: true })
         .await
         .expect("clearnet unlocked");

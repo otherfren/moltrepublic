@@ -66,6 +66,15 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     })
     .await
     .expect("relay confirm");
+    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
+    // unusable relay never becomes a confirmed one
+    wait_for(w, "the relay probe to confirm the relay", |s| {
+        s.settings
+            .relays
+            .iter()
+            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+    })
+    .await;
     w.execute(Command::RelayClearnetSession { unlock: true })
         .await
         .expect("session unlock");
@@ -308,4 +317,69 @@ async fn a_broadcast_ack_moves_the_senders_proven_floor() {
         "…and lift the floor above zero, got {}",
         cursor.acked_floor
     );
+}
+
+/// B4 at the engine seam: an UNREACHABLE relay (down right now — or onion
+/// while Tor is off) cannot be judged, so the operator's consent stands:
+/// the entry confirms, and the verdict says so honestly
+/// (`relay-unverified:`). Without this middle class a relay's downtime
+/// would veto the operator, and no onion relay could ever be confirmed
+/// before Tor is up. The add itself stays dial-free and safe (ADR-0004).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreachable_relay_confirms_unverified_by_name() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let w = engine(tmp.path());
+    // nothing listens here: bind a port, learn it, drop the listener
+    let dead = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        drop(l);
+        format!("ws://127.0.0.1:{port}")
+    };
+    w.execute(Command::RelayAdd { url: dead.clone() })
+        .await
+        .expect("adding is dial-free and always safe");
+    w.execute(Command::RelayConfirm { url: dead.clone(), accept_clearnet: true })
+        .await
+        .expect("the confirm is acked; the PROBE's verdict decides");
+    let s = wait_for(&w, "the probe verdict to land as unverified", |s| {
+        s.notice.starts_with("relay-unverified:")
+    })
+    .await;
+    assert!(
+        s.settings.relays.iter().any(|r| r.confirmed),
+        "the operator consented and the relay could not be judged - the \
+         confirmation stands, honestly marked: {:?}",
+        s.settings.relays
+    );
+}
+
+/// B4's hard half: a relay that ANSWERED and disqualified itself (no kind
+/// 445, no retention, tiny cap) is NEVER confirmed — the verdict names the
+/// refusal and the entry stays exactly as unconfirmed (= inert) as it was.
+/// The verdict is injected here; its honest production is pinned in
+/// molt-net's probe tests against scripted relay doubles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unusable_relay_is_never_confirmed() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let w = engine(tmp.path());
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    w.execute(Command::RelayAdd { url: url.clone() }).await.expect("add");
+    let stored = read_session(&w).await.settings.relays[0].url.clone();
+    w.execute(Command::NetRelayProbed {
+        url: stored,
+        error: "does not accept kind 445: blocked".to_string(),
+        unreachable: false,
+        confirm: true,
+    })
+    .await
+    .expect("verdict");
+    let s = wait_for(&w, "the refusal to land", |s| s.notice.starts_with("relay-refused:")).await;
+    assert!(
+        s.settings.relays.iter().all(|r| !r.confirmed),
+        "an unusable relay must never become a confirmed one: {:?}",
+        s.settings.relays
+    );
+    assert!(s.notice.contains("kind 445"), "the one reason travels: {:?}", s.notice);
 }

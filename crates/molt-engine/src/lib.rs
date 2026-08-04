@@ -1210,6 +1210,10 @@ impl State {
                 self.cmd_relay_confirm(url, accept_clearnet)
             }
             Command::RelayRevoke { url } => self.cmd_relay_revoke(url),
+            Command::RelayProbe { url } => self.cmd_relay_probe(url),
+            Command::NetRelayProbed { url, error, unreachable, confirm } => {
+                self.cmd_net_relay_probed(url, error, unreachable, confirm)
+            }
             Command::RelayClearnetSession { unlock } => self.cmd_relay_clearnet_session(unlock),
             Command::Navigate { screen } => self.cmd_navigate(screen),
             Command::SelectSurface { surface } => self.cmd_select_surface(surface),
@@ -3879,6 +3883,21 @@ mod tests {
             })
             .await
             .expect("confirm");
+            // B4: the confirmation lands on the PROBE's verdict, and this
+            // relay does not exist — inject the verdict directly; the test
+            // is about the clearnet SWITCH, not about reachability
+            let url = match w.execute(Command::ReadSession).await.expect("read") {
+                Reply::Session(s) => s.settings.relays[0].url.clone(),
+                other => panic!("unexpected: {other:?}"),
+            };
+            w.execute(Command::NetRelayProbed {
+                url,
+                error: String::new(),
+                unreachable: false,
+                confirm: true,
+            })
+            .await
+            .expect("verdict");
             // the operator (or their config file) leaves non-onion dialing off
             w.execute(Command::RelayClearnetSession { unlock: false })
                 .await

@@ -216,22 +216,17 @@ impl State {
             }
             _ => {}
         }
-        let entry = self
-            .session
-            .settings
-            .relays
-            .iter_mut()
-            .find(|r| r.url == url)
-            .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
-        entry.confirmed = true;
-        self.note_if_invites_went_stale();
+        if !self.session.settings.relays.iter().any(|r| r.url == url) {
+            return Err(MoltError::Settings(format!("{url} is not in the relay pool")));
+        }
         // ADR-0004 amendment (2026-07-31): the acknowledgement IS the
         // consent, and consent is REMEMBERED. Confirming a non-onion relay
         // with `accept_clearnet` therefore also activates non-onion dialing
         // and persists that — instead of demanding a second, session-only
         // unlock that reset on every restart (which turned one informed
         // decision into an endless re-confirmation loop, without making the
-        // node any safer).
+        // node any safer). Applied BEFORE the probe: the probe dials, and
+        // dialing is exactly what was just consented to.
         if accept_clearnet
             && molt_core::relay::relay_kind(&url) != molt_core::relay::RelayKind::Onion
         {
@@ -239,6 +234,85 @@ impl State {
             self.session.settings.clearnet_relays_enabled = true;
         }
         self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        // B4: the confirmation lands on the PROBE's verdict, off-actor — an
+        // unusable relay never becomes a confirmed one. The add stays
+        // dial-free (ADR-0004's "adding is safe"); the confirm is the
+        // moment dialing was consented to, so the probe dials here.
+        self.spawn_relay_probe(url, true)
+    }
+
+    /// B4: vet a relay without touching the pool — the standalone tool half
+    /// of the probe (`RelayProbe`); the verdict lands on the notice channel.
+    pub(crate) fn cmd_relay_probe(&mut self, url: String) -> Result<Reply, MoltError> {
+        let url = molt_core::relay::normalize_relay_url(&url)
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        self.spawn_relay_probe(url, false)
+    }
+
+    /// Spawn the off-actor relay probe; its verdict returns as
+    /// [`molt_core::Command::NetRelayProbed`].
+    fn spawn_relay_probe(&mut self, url: String, confirm: bool) -> Result<Reply, MoltError> {
+        let dialer = self.resolve_dialer().map_err(MoltError::Settings)?;
+        self.session.notice = format!("relay-probing:{url}");
+        self.emit_session(SessionScope::Full);
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Ok(Reply::Ack);
+        };
+        tokio::spawn(async move {
+            let (error, unreachable) = match molt_net::relay_runtime::probe_relay(&dialer, &url)
+                .await
+            {
+                molt_net::relay_runtime::ProbeVerdict::Usable => (String::new(), false),
+                molt_net::relay_runtime::ProbeVerdict::Unreachable(e) => (e, true),
+                molt_net::relay_runtime::ProbeVerdict::Unusable(e) => (e, false),
+            };
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(crate::Envelope {
+                    cmd: molt_core::Command::NetRelayProbed { url, error, unreachable, confirm },
+                    reply,
+                })
+                .await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The probe verdict lands ([`molt_core::Command::NetRelayProbed`]):
+    /// a USABLE relay completes its pending confirmation; an UNUSABLE one
+    /// (it answered, and disqualified itself) never does; an UNREACHABLE
+    /// one cannot be judged — the operator's consent stands, the entry
+    /// confirms, and the verdict says so honestly (`relay-unverified:`).
+    /// Without that middle class an onion relay could never be confirmed
+    /// while Tor is off, and a relay's downtime would veto the operator.
+    pub(crate) fn cmd_net_relay_probed(
+        &mut self,
+        url: String,
+        error: String,
+        unreachable: bool,
+        confirm: bool,
+    ) -> Result<Reply, MoltError> {
+        if !error.is_empty() && !unreachable {
+            self.session.notice = format!("relay-refused:{url} - {error}");
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
+        if confirm {
+            // the entry may have been removed while the probe ran — a
+            // verdict for a gone entry is a no-op, never a re-insert
+            if let Some(entry) =
+                self.session.settings.relays.iter_mut().find(|r| r.url == url)
+            {
+                entry.confirmed = true;
+                self.note_if_invites_went_stale();
+                self.persist_settings(false);
+            }
+        }
+        self.session.notice = if unreachable {
+            format!("relay-unverified:{url} - {error}")
+        } else {
+            format!("relay-ok:{url}")
+        };
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

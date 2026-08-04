@@ -71,6 +71,15 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     })
     .await
     .expect("relay confirm");
+    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
+    // unusable relay never becomes a confirmed one
+    wait_for(w, "the relay probe to confirm the relay", |s| {
+        s.settings
+            .relays
+            .iter()
+            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+    })
+    .await;
     w.execute(Command::RelayClearnetSession { unlock: true })
         .await
         .expect("session unlock");

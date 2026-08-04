@@ -3163,6 +3163,35 @@ pub enum Command {
         /// The relay to un-confirm.
         url: String,
     },
+    /// B4: probe a relay — does it accept kind 445, can its auth demand be
+    /// satisfied, does it retain events, does its frame cap fit the group?
+    /// One verdict, one reason, on the notice channel. A human decision
+    /// aid, so it is a TOOL on both surfaces; `RelayConfirm` runs the same
+    /// probe implicitly and confirms only a usable relay.
+    RelayProbe {
+        /// The relay URL to vet.
+        url: String,
+    },
+    /// The off-actor probe task reporting its verdict (INTERNAL — an agent
+    /// must not be able to forge one and thereby confirm a dead relay).
+    NetRelayProbed {
+        /// The probed relay.
+        url: String,
+        /// The single reason; empty = usable.
+        #[serde(default)]
+        error: String,
+        /// `true` = the relay could not be REACHED (no judgement — down, or
+        /// onion while Tor is off); `false` with a non-empty `error` = it
+        /// answered and disqualified itself. An unreachable relay may still
+        /// be confirmed (the operator consented; it is honestly reported
+        /// unverified); an unusable one never is.
+        #[serde(default)]
+        unreachable: bool,
+        /// Whether this verdict completes a `RelayConfirm` (true) or a bare
+        /// `RelayProbe` (false).
+        #[serde(default)]
+        confirm: bool,
+    },
     /// Turn dialing of NON-onion relays (clearnet, LAN, loopback) on or off.
     /// **Persisted** since the ADR-0004 amendment (2026-07-31) — both the on
     /// and the off decision — so an operator states it once instead of after

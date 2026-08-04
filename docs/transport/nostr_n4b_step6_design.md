@@ -398,15 +398,17 @@ chain speaks about our anchor, it must agree" — which still catches a
 coordinator re-admitting the seat under a different key, the only thing an
 anchor-sized prefix can get wrong about it.
 
-#### Follow-up, recorded not built: the rejoiner is quiet while it waits
+#### Follow-up — BUILT 2026-08-04: the rejoiner is quiet while it waits
 
 The join task surfaces a deaf relay live (`NetJoinNote`, cluster F's widening
-ladder). The rejoiner has no equivalent channel, so a deaf group channel is
-invisible until the absolute deadline expires and it says the anchor never
-arrived. That message is honest, and the wait is bounded — but recovery is
-the one flow whose user has already lost their device, which is exactly the
-argument §3.4 makes for the readable-gate. A `NetRecoverNote` twin would cost
-one Command variant and its INTERNAL-list entry.
+ladder). The rejoiner had no equivalent channel, so a deaf group channel was
+invisible until the absolute deadline expired. **Built:** `NetRecoverNote`
+(INTERNAL, the `NetJoinNote` twin) — "request sent", a once-a-minute widening
+ladder across the coordinator's human-approval wait, "welcomed back -
+fetching the chain anchor"; notice-borne (`recover-note:`), shown live in the
+recover pane, generation-gated so a restarted recovery's stale task cannot
+talk over the live one
+(`a_recover_note_speaks_only_for_the_live_incarnation`).
 
 ### 6f — the PoP end-to-end pin (step 5's owed test) ✅ DONE 2026-08-03
 Step 5 could not test the wrap-author gate: a forged request fails the SEAT

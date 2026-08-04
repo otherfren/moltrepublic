@@ -74,6 +74,45 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     })
     .await
     .expect("relay confirm");
+    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
+    // unusable relay never becomes a confirmed one
+    wait_for(w, "the relay probe to confirm the relay", |s| {
+        s.settings
+            .relays
+            .iter()
+            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+    })
+    .await;
+    w.execute(Command::RelayClearnetSession { unlock: true })
+        .await
+        .expect("session unlock");
+}
+
+/// Adopt a relay with an INJECTED ok-verdict, bypassing the B4 probe: for
+/// tests whose relay double is deliberately hostile in exactly the way the
+/// probe would catch — their subject is the DEEPER line of defense (the
+/// founding's own readable/publish gates), which must hold for a relay
+/// that turns hostile AFTER it was vetted.
+async fn adopt_relay_unprobed(w: &WalletHandle, url: &str) {
+    w.execute(Command::RelayAdd { url: url.to_string() })
+        .await
+        .expect("relay add");
+    w.execute(Command::RelayConfirm { url: url.to_string(), accept_clearnet: true })
+        .await
+        .expect("relay confirm");
+    let stored = read_session(w).await.settings.relays[0].url.clone();
+    w.execute(Command::NetRelayProbed {
+        url: stored,
+        error: String::new(),
+        unreachable: false,
+        confirm: true,
+    })
+    .await
+    .expect("verdict");
+    wait_for(w, "the injected verdict to confirm the relay", |s| {
+        s.settings.relays.iter().any(|r| r.confirmed)
+    })
+    .await;
     w.execute(Command::RelayClearnetSession { unlock: true })
         .await
         .expect("session unlock");
@@ -1043,7 +1082,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     let tmp = tempfile::tempdir().expect("tmp");
 
     let a = engine(&tmp.path().join("founder"));
-    adopt_relay(&a, &url).await;
+    adopt_relay_unprobed(&a, &url).await;
     a.execute(Command::CreateStart {
         name: "Doomed".to_string(),
         member: "walter".to_string(),
@@ -1060,7 +1099,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     .await;
 
     let b = engine(&tmp.path().join("joiner"));
-    adopt_relay(&b, &url).await;
+    adopt_relay_unprobed(&b, &url).await;
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
@@ -1263,7 +1302,7 @@ async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
     let tmp = tempfile::tempdir().expect("tmp");
 
     let a = engine(&tmp.path().join("founder"));
-    adopt_relay(&a, &url).await;
+    adopt_relay_unprobed(&a, &url).await;
     a.execute(Command::CreateStart {
         name: "Unreadable".to_string(),
         member: "walter".to_string(),

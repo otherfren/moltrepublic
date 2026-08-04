@@ -813,3 +813,147 @@ async fn probe_relay_direct() {
         Err(e) => println!("UNREACHABLE-DIRECT: {url} -> {e}"),
     }
 }
+
+// ======================================================================
+// B4 — the add-time relay probe (`docs/reviews/buzz_followups.md`): four
+// questions, one verdict, ONE reason. An unusable relay never enters the
+// pool, so the probe's honesty is the pool's hygiene.
+// ======================================================================
+
+/// A scripted relay double for the two hostile shapes the well-behaved
+/// `nostr-relay-builder` cannot play: refusing kind 445, and accepting an
+/// event while never returning it (no retention). It speaks just enough
+/// NIP-01 for the probe: EVENT → a fixed OK verdict, REQ → immediate EOSE.
+mod probe_double {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    pub async fn run(accept_events: bool, refusal: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return; // e.g. the best-effort NIP-11 HTTP GET
+                    };
+                    while let Some(Ok(msg)) = ws.next().await {
+                        let Message::Text(t) = msg else { continue };
+                        let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                            continue;
+                        };
+                        match v.get(0).and_then(|s| s.as_str()) {
+                            Some("EVENT") => {
+                                let id = v
+                                    .get(1)
+                                    .and_then(|e| e.get("id"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let reason = if accept_events { "" } else { refusal };
+                                let ok = serde_json::json!(["OK", id, accept_events, reason]);
+                                let _ = ws.send(Message::text(ok.to_string())).await;
+                            }
+                            Some("REQ") => {
+                                // never a stored event: EOSE right away
+                                let sub =
+                                    v.get(1).and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                let _ = ws
+                                    .send(Message::text(
+                                        serde_json::json!(["EOSE", sub]).to_string(),
+                                    ))
+                                    .await;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+        format!("ws://{addr}")
+    }
+}
+
+/// A well-behaved relay (stores + returns 445s): the probe says USABLE.
+/// This is the same shape every green-path test in this file relies on, so
+/// a probe that refused it would gate every honest relay out of the pool.
+#[tokio::test]
+async fn the_probe_passes_a_well_behaved_relay() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    assert_eq!(
+        molt_net::relay_runtime::probe_relay(&dialer, &url).await,
+        molt_net::relay_runtime::ProbeVerdict::Usable,
+        "a relay that stores and returns 445s is usable"
+    );
+}
+
+/// A relay demanding READ auth we can satisfy (NIP-42, the ephemeral probe
+/// key) is USABLE — subscriptions authenticate, publishes stay
+/// unauthenticated by design (mdk_eval §5).
+#[tokio::test]
+async fn the_probe_passes_a_read_auth_relay() {
+    use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
+    let relay = nostr_relay_builder::LocalRelay::new(
+        RelayBuilder::default().nip42(RelayBuilderNip42 { mode: RelayBuilderNip42Mode::Read }),
+    );
+    relay.run().await.expect("run auth relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    assert_eq!(
+        molt_net::relay_runtime::probe_relay(&dialer, &url).await,
+        molt_net::relay_runtime::ProbeVerdict::Usable,
+        "read-auth we can answer must not gate the relay out"
+    );
+}
+
+/// A relay refusing kind 445 is UNUSABLE, and the verdict carries the
+/// relay's own refusal — which names the kind.
+#[tokio::test]
+async fn the_probe_refuses_a_relay_that_blocks_kind_445() {
+    let url = probe_double::run(false, "blocked: kind 445 not accepted here").await;
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let molt_net::relay_runtime::ProbeVerdict::Unusable(err) =
+        molt_net::relay_runtime::probe_relay(&dialer, &url).await
+    else {
+        panic!("a 445-refusing relay is UNUSABLE (it answered, and disqualified itself)");
+    };
+    assert!(err.contains("kind 445"), "the reason names the kind: {err}");
+}
+
+/// A relay that ACCEPTS an event but never returns it has no retention —
+/// UNUSABLE, named as such: a join ritual could never complete on it.
+#[tokio::test]
+async fn the_probe_refuses_a_relay_that_does_not_retain() {
+    let url = probe_double::run(true, "").await;
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let molt_net::relay_runtime::ProbeVerdict::Unusable(err) =
+        molt_net::relay_runtime::probe_relay(&dialer, &url).await
+    else {
+        panic!("a relay that drops events is UNUSABLE");
+    };
+    assert!(err.contains("retain"), "the reason names retention: {err}");
+}
+
+/// Nothing listening is UNREACHABLE — a fact about the moment, not a
+/// judgement about the relay — and the probe comes back inside its bound
+/// instead of hanging.
+#[tokio::test]
+async fn the_probe_calls_a_dead_relay_unreachable_within_its_bound() {
+    let url = dead_relay_url().await;
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let started = tokio::time::Instant::now();
+    let molt_net::relay_runtime::ProbeVerdict::Unreachable(err) =
+        molt_net::relay_runtime::probe_relay(&dialer, &url).await
+    else {
+        panic!("a dead relay is UNREACHABLE - no judgement, never a disqualification");
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "a probe that hangs is worse than one that fails: took {:?}",
+        started.elapsed()
+    );
+    assert!(!err.is_empty(), "the reason is never empty");
+}

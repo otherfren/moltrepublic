@@ -29,6 +29,29 @@ async fn session(w: &molt_engine::WalletHandle) -> SessionView {
     }
 }
 
+/// B4: the confirmation lands on the PROBE's verdict, off-actor — these
+/// fictional relays are unreachable, so the verdict is "unverified" and
+/// the operator's acknowledged consent stands. Wait for it.
+async fn wait_confirmed(w: &molt_engine::WalletHandle, url: &str) -> SessionView {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let s = session(w).await;
+        if s.settings
+            .relays
+            .iter()
+            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+        {
+            return s;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the probe verdict never confirmed {url}: notice={:?}",
+            s.notice
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// KEYSTONE — a fresh node ships with no relay at all, and adding one does
 /// NOT connect: it lands unconfirmed.
 #[test]
@@ -96,7 +119,7 @@ fn an_acknowledged_clearnet_confirmation_is_durable_and_sufficient() {
         })
         .await
         .expect("acknowledged");
-        let s = session(&w).await;
+        let s = wait_confirmed(&w, CLEARNET).await;
         assert!(s.relays[0].confirmed);
         assert_eq!(
             s.relays[0].blocked, None,
@@ -188,7 +211,7 @@ fn a_local_relay_needs_the_same_acknowledgement_as_clearnet() {
         })
         .await
         .expect("acknowledged");
-        let s = session(&w).await;
+        let s = wait_confirmed(&w, LOCAL).await;
         assert_eq!(
             s.relays[0].blocked, None,
             "the acknowledged confirmation is enough, and it is remembered"

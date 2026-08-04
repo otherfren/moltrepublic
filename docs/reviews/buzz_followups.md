@@ -173,7 +173,31 @@ defence at that layer is the WHATWG parser gate, already in place after the two
 CRITICAL host-parser bugs. Worth a look when someone is next in `invite.rs`; not
 worth a package.
 
-## B4 — Relay probe (S7)
+## B4 — Relay probe (S7) — ✅ BUILT 2026-08-04
+
+**Deviation from "mandatory at add-time", deliberate:** the probe gates the
+**confirmation**, not the add. `relay_add`'s contract (ADR-0004) is "adding
+is safe — nothing is dialed", and a probe dials; the confirm is the moment
+dialing is consented to, so that is where the probe runs. The spec's goal
+survives intact: an unconfirmed entry is inert, so an unusable relay never
+becomes an ACTIVE one. A second deviation, found by the tests: the verdict
+is three-valued. **Unusable** (the relay ANSWERED and disqualified itself —
+no kind 445, no retention, tiny frame cap) never confirms; **Unreachable**
+(down right now, or onion while Tor is off) cannot be JUDGED, so the
+operator's consent stands — the entry confirms and the verdict says so
+honestly (`relay-unverified:`). Without the middle class a relay's downtime
+would veto the operator, and no onion relay could ever be confirmed before
+Tor is up. Landed: `molt_net::relay_runtime::probe_relay` (bounded phases,
+one reason — reachability, frame cap via NIP-11 best-effort, kind-445
+acceptance under an ephemeral key, NIP-42 READ auth satisfied with the same
+key, retention via fetch-back), the `relay_probe` tool on both surfaces,
+`NetRelayProbed` INTERNAL, and the verdict on the notice channel
+(`relay-ok:`/`relay-unverified:`/`relay-refused:`), toasted in the GUI.
+Pins: `the_probe_passes_a_well_behaved_relay`, `…_a_read_auth_relay`,
+`…_refuses_a_relay_that_blocks_kind_445`, `…_that_does_not_retain`,
+`…_calls_a_dead_relay_unreachable_within_its_bound`,
+`an_unusable_relay_is_never_confirmed`,
+`an_unreachable_relay_confirms_unverified_by_name`.
 
 **Why.** Today a relay is added blind and its unsuitability surfaces later as a
 failure. Four questions are answerable in seconds with the dialer and WS client

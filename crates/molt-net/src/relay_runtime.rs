@@ -878,6 +878,146 @@ async fn read_session(
     }
 }
 
+/// One probe phase's bound — a probe that hangs is worse than one that
+/// fails (B4).
+const PROBE_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The NIP-11 phase's own, SHORTER bound: it is best-effort metadata (an
+/// unanswered GET keeps the conservative default budget), and a relay that
+/// speaks only WS never answers the HTTP probe at all — every second here
+/// is paid on every single confirm.
+const PROBE_NIP11_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The relay probe's outcome (B4). `Unreachable` and `Unusable` are
+/// DIFFERENT verdicts on purpose: a relay that answered and is wrong (no
+/// kind 445, no retention, tiny frame cap) can never serve the group and is
+/// refused for good; one we cannot reach right now (down, or onion while
+/// Tor is off) simply cannot be JUDGED — the caller decides what an
+/// unverified relay may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    /// Answered every question correctly.
+    Usable,
+    /// Could not be reached at all — no judgement, with the dial reason.
+    Unreachable(String),
+    /// Answered, and disqualified itself — with the ONE reason.
+    Unusable(String),
+}
+
+/// B4 — the relay probe (`docs/reviews/buzz_followups.md`): the four
+/// questions a relay must answer before it may be trusted, ONE verdict,
+/// one reason. Every phase is bounded.
+///
+/// 0. **Reachability**: one bare WS connect. Failure ends the probe as
+///    [`ProbeVerdict::Unreachable`] — everything after this point is a
+///    judgement about a relay that provably answered.
+/// 1. **Frame cap** (best-effort NIP-11): a cap below
+///    [`DEFAULT_SIZE_BUDGET`] would truncate a checkpoint serve mid-ritual —
+///    refused by name. A relay without a NIP-11 answer keeps the
+///    conservative default, exactly like the production publish path.
+/// 2. **Accepts kind 445** — the group's entire traffic — probed with one
+///    tiny throwaway under an ephemeral key. The same key answers a NIP-42
+///    READ challenge on the fetch-back; publishing stays unauthenticated by
+///    design (mdk_eval §5), so a relay demanding WRITE auth is refused with
+///    its own reason.
+/// 3. **Retention**: the event must be fetchable back moments later — a
+///    relay that drops immediately could never carry a join ritual.
+pub async fn probe_relay(dialer: &Dialer, url: &str) -> ProbeVerdict {
+    match probe_relay_inner(dialer, url).await {
+        Ok(()) => ProbeVerdict::Usable,
+        Err(v) => v,
+    }
+}
+
+async fn probe_relay_inner(dialer: &Dialer, url: &str) -> Result<(), ProbeVerdict> {
+    // phase 0 — reachability: everything after this is a judgement
+    match tokio::time::timeout(PROBE_PHASE_TIMEOUT, crate::relay_ws::RelayWs::connect(dialer, url))
+        .await
+    {
+        Err(_) => {
+            return Err(ProbeVerdict::Unreachable("the connect timed out".to_string()));
+        }
+        Ok(Err(e)) => return Err(ProbeVerdict::Unreachable(e.to_string())),
+        Ok(Ok(_ws)) => {}
+    }
+    // phase 1 — the frame cap, best-effort (an Err keeps the default budget)
+    if let Ok(Ok(Some(cap))) =
+        tokio::time::timeout(PROBE_NIP11_TIMEOUT, probe_nip11_max_message(dialer, url)).await
+    {
+        if cap < DEFAULT_SIZE_BUDGET {
+            return Err(ProbeVerdict::Unusable(format!(
+                "frame cap {cap} B is below the {DEFAULT_SIZE_BUDGET} B the group needs"
+            )));
+        }
+    }
+    // phase 2 — one throwaway kind-445 under an ephemeral key
+    let keys = nostr::Keys::generate();
+    let h = format!("{:x}", md5ish(&keys));
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), "cHJvYmU")
+        .tag(nostr::Tag::parse(["h", h.as_str()]).map_err(|e| {
+            ProbeVerdict::Unusable(format!("building the probe tag: {e}"))
+        })?)
+        .sign_with_keys(&keys)
+        .map_err(|e| ProbeVerdict::Unusable(format!("signing the probe event: {e}")))?;
+    let runtime = RelayRuntime::new(dialer.clone(), vec![url.to_string()])
+        .with_auth_keys(Some(keys))
+        .with_backoff(Duration::from_millis(200), Duration::from_secs(1));
+    // phase 0 PROVED reachability, so a publish that comes back refused —
+    // whether as a report or as a total-failure error — is the relay's own
+    // JUDGEMENT about kind 445, not an outage
+    let report = tokio::time::timeout(PROBE_PHASE_TIMEOUT, runtime.publish(&event))
+        .await
+        .map_err(|_| ProbeVerdict::Unreachable("the publish probe timed out".to_string()))
+        .and_then(|r| {
+            r.map_err(|e| ProbeVerdict::Unusable(format!("does not accept kind 445: {e}")))
+        })?;
+    if report.accepted.is_empty() {
+        let reason = report
+            .failed
+            .first()
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| "refused the probe event".to_string());
+        return Err(ProbeVerdict::Unusable(format!("does not accept kind 445: {reason}")));
+    }
+    // phase 3 — retention: the event must come back
+    let mut sub = runtime
+        .subscribe(Filter::new().id(event.id))
+        .await
+        .map_err(|e| ProbeVerdict::Unreachable(format!("subscribe: {e}")))?;
+    let got = tokio::time::timeout(PROBE_PHASE_TIMEOUT, async {
+        loop {
+            match sub.recv(Duration::from_millis(500)).await {
+                Some(ev) if ev.id == event.id => break true,
+                Some(_) => continue,
+                None if sub.synced(Duration::from_millis(1)).await => {
+                    // EOSE without our event: ask once more after a beat —
+                    // some relays index asynchronously
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                None => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    if !got {
+        return Err(ProbeVerdict::Unusable(
+            "does not retain events - a join ritual could never complete on it".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// A cheap deterministic-per-key probe tag (NOT a hash function — just 32
+/// hex chars derived from the ephemeral pubkey so concurrent probes never
+/// share a tag).
+fn md5ish(keys: &nostr::Keys) -> u128 {
+    let pk = keys.public_key().to_bytes();
+    let mut v = [0u8; 16];
+    v.copy_from_slice(&pk[..16]);
+    u128::from_le_bytes(v)
+}
+
 /// Probe a relay's NIP-11 information document — one HTTP/1.1 GET with the
 /// `application/nostr+json` Accept header over the SAME fail-closed dial
 /// path the WS connection uses (never a second HTTP client stack; the

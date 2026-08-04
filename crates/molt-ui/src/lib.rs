@@ -2464,6 +2464,13 @@ fn apply_session(
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
+        } else if let Some(rest) = sv.notice.strip_prefix("relay-refused:") {
+            // B4: the probe's one-line verdict — the entry stays unconfirmed
+            ui.invoke_show_toast_error(rest.into());
+        } else if let Some(rest) = sv.notice.strip_prefix("relay-unverified:") {
+            // …and the honest middle class: confirmed on the operator's
+            // consent, but the relay could not be judged right now
+            ui.invoke_show_toast(rest.into());
         } else if let Some(err) = sv.notice.strip_prefix("genesis-undelivered:") {
             // The republic EXISTS here but its members were never told: the
             // genesis 445 reached no relay. Copy lives Rust-side (the

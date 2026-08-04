@@ -829,6 +829,19 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "relay_probe",
+            command: "relay_probe",
+            description: "Vet a Nostr relay before trusting it (B4): does it accept kind 445, can its auth demand be satisfied, does it retain events, does its frame cap fit the group? One verdict with ONE reason, on the notice channel (relay-ok:/relay-refused:). relay_confirm runs the same probe implicitly - an unusable relay never becomes a confirmed one.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "wss://relay.example.org - or ws://…onion for an onion service" }
+                },
+                "required": ["url"]
+            }),
+            build: |args| Ok(Command::RelayProbe { url: str_arg(args, "url")? }),
+        },
+        ToolDef {
             name: "relay_add",
             command: "relay_add",
             description: "Add a Nostr relay to this node's pool. NOTHING SHIPS PRE-TRUSTED: the node connects to no relay until one is added AND confirmed, so adding is safe — the entry lands unconfirmed, at the lowest priority, and nothing is dialed. The URL is validated and normalized (wss://…; ws://… only for a .onion or local/private host — plaintext to the clearnet is refused). Read the pool back from read_session.relays, which carries each entry's derived kind (onion|clearnet|local) and why it is or is not dialed.",
@@ -1317,7 +1330,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 49] = [
+        const INTERNAL: [&str; 50] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1363,6 +1376,9 @@ mod tests {
             "net_ritual_note",
             "net_join_note",
             "net_recover_note",
+            // the relay probe's verdict: an agent must not be able to forge
+            // one and thereby confirm a dead relay
+            "net_relay_probed",
             "net_join_sealed",
             "net_join_failed",
             "net_recover_sealed",
