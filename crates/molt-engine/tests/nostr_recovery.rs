@@ -452,14 +452,12 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
         molt_core::NetHealth::Ok,
         "a recovered Nostr seat with no group runtime is deaf: no 445s in, no outbox out"
     );
-    // NOT asserted: that the two renames above the anchor arrive. They
-    // usually do, and one real defect on that path was found and fixed by
-    // asserting it here (the rejoiner's claim sheet counted as no evidence
-    // at floor 0, so no rewind ever republished what its catch-up parked
-    // on — `a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero`).
-    // A race SURVIVES that fix: measured 4 red in 14 runs afterwards. A
-    // flaky keystone is worse than a named gap — the diagnosis and the next
-    // suspect are in `nostr_n4b_step6_design.md` §3.1a.
+    // …and the two renames above the anchor arrive over the ordinary
+    // catch-up (§3.1a).
+    wait_for(&c, "the renames above the anchor to arrive", |s| {
+        s.workspaces.iter().any(|w| w.name == "Chess Club Again")
+    })
+    .await;
 
     // …and walter sees the return, so the two ends agree the seat is back
     wait_for(&a, "walter to record petra's return", |s| {

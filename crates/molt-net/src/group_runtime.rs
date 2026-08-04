@@ -214,6 +214,14 @@ where
     let (stop, stop_rx) = watch::channel(false);
     let (log2, store2) = (log.clone(), store.clone());
     let (acks, acks_rx) = watch::channel(None);
+    // the ack-wake (§3.1a): an applied claim sheet can create the outbox's
+    // own-ackable tail out of thin air — a rejoiner's FIRST sheet latches
+    // evidence at floor 0 — and the log-append wakeup by definition never
+    // fires for it. `Notify` over a channel because it has no closed state
+    // (a deaf inbox must not stop the outbox), and `notify_one` over
+    // `notify_waiters` because it LATCHES: a sheet applied while the outbox
+    // is mid-pass must not be missed.
+    let ack_wake = std::sync::Arc::new(tokio::sync::Notify::new());
     // a THIRD task: an ack must not queue behind `publish_with_backoff`, whose
     // chain runs three attempts up to the retry cap. Head-of-line blocking the
     // guarantee's own feedback behind the traffic it is meant to prove is how
@@ -232,6 +240,7 @@ where
         store,
         sink.clone(),
         wakeup,
+        ack_wake.clone(),
         stop_rx.clone(),
     ));
     let inbox = tokio::spawn(inbox_loop(
@@ -242,6 +251,7 @@ where
         cfg.member.clone(),
         sink,
         health,
+        ack_wake,
         stop_rx,
     ));
     GroupHandle {
@@ -287,6 +297,14 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         .map_or(0, |c| c.acked_floor);
     let envs = log.read_from(old.saturating_add(1)).await;
     let floor = crate::supervisor::advance_acked_floor(me, &envs, window, old);
+    tracing::debug!(
+        me = %me,
+        %from,
+        old,
+        floor,
+        window_high = window.high,
+        "group ack applied"
+    );
     if floor > old {
         let cursor = state.outbound.entry(from.clone()).or_default();
         cursor.acked_floor = floor;
@@ -412,6 +430,7 @@ async fn outbox_loop<L, S, K>(
     store: S,
     sink: K,
     mut wakeup: watch::Receiver<u64>,
+    ack_wake: std::sync::Arc<tokio::sync::Notify>,
     mut stop: watch::Receiver<bool>,
 ) where
     L: OutboxLog,
@@ -540,6 +559,12 @@ async fn outbox_loop<L, S, K>(
             _ => false,
         };
         if !tail {
+            tracing::debug!(
+                me = %cfg.member,
+                ?floor,
+                cursor,
+                "outbox idle — no own-ackable tail; sleeping on wakeup"
+            );
             stalled_since = None;
             tokio::select! {
                 r = wakeup.changed() => {
@@ -547,10 +572,21 @@ async fn outbox_loop<L, S, K>(
                         return;
                     }
                 }
+                // an applied claim sheet can flip `tail` without any append —
+                // re-evaluate (§3.1a: the rejoiner's first sheet at floor 0)
+                () = ack_wake.notified() => {}
                 _ = stop.changed() => return,
             }
             continue;
         }
+        tracing::debug!(
+            me = %cfg.member,
+            ?floor,
+            cursor,
+            backoff_secs,
+            armed = stalled_since.is_some(),
+            "outbox tail unacked — stall clock running"
+        );
         // ANCHORED, not recomputed per iteration: traffic must not starve the
         // timer. The mesh calls this `stalled_since` and the distinction is
         // the whole point — a chatty republic would otherwise never resend.
@@ -563,6 +599,9 @@ async fn outbox_loop<L, S, K>(
                 }
                 false // new work first; the stall clock keeps running
             }
+            // a floor advance de-escalates at the loop top; the anchored
+            // clock is kept by `get_or_insert`, so a sheet can never starve it
+            () = ack_wake.notified() => false,
             _ = stop.changed() => return,
             () = tokio::time::sleep_until(deadline) => true,
         };
@@ -783,6 +822,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     me: MemberId,
     sink: K,
     health: watch::Sender<GroupHealth>,
+    ack_wake: std::sync::Arc<tokio::sync::Notify>,
     mut stop: watch::Receiver<bool>,
 ) {
     let mut sub = match channel.subscribe().await {
@@ -850,8 +890,11 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                                 let _ = health.send(state.clone());
                             }
                         }
+                        // a drained hold may have applied a sheet
+                        ack_wake.notify_one();
                     }
-                    Ingest::Delivered | Ingest::Acked | Ingest::Nothing => {}
+                    Ingest::Acked => ack_wake.notify_one(),
+                    Ingest::Delivered | Ingest::Nothing => {}
                 }
             }
             GroupRecv::Idle => {}
@@ -1317,6 +1360,148 @@ mod tests {
         // …which is what makes the rewind reach back and republish the span
         let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into()]);
         assert_eq!(group_floor(&state, &cfg), Some(0));
+    }
+
+    /// **…and the evidence must WAKE the outbox (§3.1a, the losing run).**
+    ///
+    /// The latch above is inert if nobody re-reads it: the outbox evaluates
+    /// its own-ackable tail and — at `floor=None` — goes to sleep on the
+    /// log-append wakeup. A rejoiner's FIRST claim sheet arrives moments
+    /// later, creates the tail evidence out of thin air, and by definition
+    /// never appends to the log. In a quiet republic nothing else does
+    /// either, so the stall clock never arms, no rewind republishes the span
+    /// the rejoiner's catch-up parked on, and the park sits until its 900 s
+    /// valve. This is the capstone's 1-in-4 losing interleaving, made
+    /// deterministic: the sheet is sent only after the outbox is provably
+    /// idle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_claim_sheet_wakes_the_idle_outbox() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                self.0.lock().expect("sink").push(env);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let petra = MlsMember::new(&key(2), "petra").expect("petra");
+        walter.create_group().expect("group");
+        let welcome = walter
+            .add_members(&[petra.key_package().expect("kp")])
+            .expect("add")
+            .expect("a welcome");
+        let mut petra = petra;
+        petra.join_from_welcome(&welcome).expect("petra joins");
+
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let chan = |u: &str| {
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![u.into()], seed)
+        };
+
+        // walter: two own events already in the log, nobody has ever acked
+        let log = crate::MemLog::default();
+        for seq in 1..=2u64 {
+            log.push(molt_core::EventEnvelope {
+                prev_seq: seq.saturating_sub(1),
+                seq,
+                ts: 1_751_000_000 + seq,
+                by: "walter".to_string(),
+                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
+                    "walter",
+                    "x",
+                    1_751_000_000,
+                )),
+            });
+        }
+        let (_wake_w, wake_w_rx) = watch::channel(0u64);
+        let (health_w, _hw) = watch::channel(GroupHealth::default());
+        let walter_handle = spawn_group(
+            chan(&url),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into()]),
+            log,
+            crate::MemStateStore::default(),
+            Sink::default(),
+            wake_w_rx,
+            health_w,
+        );
+
+        // petra: a receiving runtime (no engine, so nothing acks by itself);
+        // keep an MlsChannel clone to frame her claim sheet by hand
+        let petra_mls = MlsChannel::new(petra);
+        let sink = Sink::default();
+        let (_wake_p, wake_p_rx) = watch::channel(0u64);
+        let (health_p, _hp) = watch::channel(GroupHealth::default());
+        let petra_handle = spawn_group(
+            chan(&url),
+            petra_mls.clone(),
+            GroupNetConfig::fast("petra".into(), vec!["walter".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_p_rx,
+            health_p,
+        );
+
+        // both published events land on petra…
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while sink.0.lock().expect("sink").len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "walter's initial publishes never arrived"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // …and walter's outbox finishes its pass and goes idle (floor=None)
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // the rejoiner-shaped sheet: it speaks about walter, but proves only
+        // the NEWEST event — seq 1 stays own-ackable above floor 0
+        let mut window = molt_core::AcceptedWindow::default();
+        assert!(window.accept(2), "petra accepted only the newest");
+        let ack = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([("walter".to_string(), window)]),
+        );
+        let frame = petra_mls
+            .group_control_frame(&ack.to_frame())
+            .expect("ack frame");
+        chan(&url)
+            .publish_frame(&frame.exporter, &frame.ciphertext)
+            .await
+            .expect("publish the sheet");
+
+        // the sheet must wake the outbox, arm the stall clock, and re-offer
+        // the span within one RESEND_AFTER_SECS round — without any append
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(RESEND_AFTER_SECS + 8);
+        while sink.0.lock().expect("sink").len() < 4 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the claim sheet latched evidence but nothing woke the outbox — \
+                 the rewind never republished the span the rejoiner is missing"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        walter_handle.shutdown().await;
+        petra_handle.shutdown().await;
     }
 
     /// The counter-case the guard exists for, unchanged: a sheet that says

@@ -91,12 +91,38 @@ cannot `record()` a `ChainRequest` before it has a workspace. **After the
 encrypted at an epoch the returning member can read, which is the one the
 re-key just created for it.
 
-### 3.1a MOSTLY resolved (2026-08-04) — one race still loses the catch-up
+### 3.1a RESOLVED (2026-08-04) — the race was an ack-deaf outbox
 
-**Correction to an earlier claim in this section.** Five defects were found
-and fixed and the catch-up now runs — but it is not reliable: measured
-2026-08-04, roughly **one run in four** loses it, and the capstone therefore
-does NOT assert it (a flaky keystone is worse than a named gap).
+**The catch-up is reliable now and the capstone asserts it.** The sixth and
+final defect on this path: the outbox's idle sleep listened only to the
+log-append wakeup, and the signal that creates the resend tail after a
+recovery is not an append — it is the rejoiner's first CLAIM SHEET. In the
+losing interleaving the coordinator's outbox evaluated its tail before that
+sheet arrived (`group_floor` still `None` — the pre-recovery member died
+inside the 3 s ack debounce, so nobody had ever acked), went to sleep, and
+nothing ever woke it: the stall clock was never armed, no rewind
+republished the span, and the rejoiner's parked catch-up sat until the
+900 s valve. The fix is an ack-wake (`tokio::sync::Notify`, latching
+`notify_one`) from the inbox's applied-sheet path into both outbox sleep
+sites. Keystones: `a_claim_sheet_wakes_the_idle_outbox` (molt-net,
+deterministic red-without/green-with) and the capstone's re-armed
+catch-up assertion (20/20 green; previously 4 red in 14).
+
+Of the two suspects §3.1a named, the first was the mechanism (the stall
+clock never FIRED because it was never ARMED — the instrumented losing run
+shows the outbox idle at `floor=None` while the sheet applies 3 s later),
+and the `tail` guard was exonerated: once evidence is latched at floor 0,
+own-ackable events above 0 exist by construction on the coordinator. The
+mesh supervisor has the same sleep shape but is structurally protected —
+its recovery path tears down and rebuilds the supervisor, and every build
+rewinds proven-acking peers to their floor; the group runtime deliberately
+builds once (§ the five fixes, item 5), which is exactly why it needed the
+ack-wake.
+
+**History of the diagnosis (kept for the record).** Five defects were found
+and fixed before the race was isolated; measured 2026-08-04 pre-fix,
+roughly **one run in four** lost the catch-up, and the capstone briefly did
+NOT assert it (a flaky keystone is worse than a named gap).
 
 **The race, diagnosed from instrumented logs.** The rejoiner subscribes to
 445 only after its Welcome. Envelopes the coordinator published BEFORE that
@@ -122,18 +148,11 @@ pinned now from both sides
 (`a_fresh_incarnations_sheet_counts_as_evidence_at_floor_zero`,
 `a_sheet_that_is_silent_about_us_still_proves_nothing`).
 
-**The race survives that fix** — measured 4 red in 14 capstone runs
-afterwards. The remaining suspects, in order: the outbox's stall clock
-(`RESEND_AFTER_SECS`, anchored at `stalled_since`) may not fire inside the
-capstone's 30 s window; and the resend's own-ackable `tail` guard asks
-whether an own-ackable envelope sits above the floor, which is a question
-about the SENDER's log, not about what this particular peer is missing.
-Instrument those two next — do not guess a third fix.
-
-**Consequence today:** a recovered seat usually catches up within a second,
-and sometimes stays at its anchor until the park's valve releases. Honestly
-behind, never silently wrong — but not yet the guarantee the rest of the
-transport holds to.
+**The race survived that fix** — measured 4 red in 14 capstone runs
+afterwards — because the latch was necessary but not sufficient: the
+evidence it latches was never re-read by an outbox already asleep. That is
+the ack-deaf defect described at the top of this section, closed by the
+ack-wake.
 
 ### What the five fixes were
 
