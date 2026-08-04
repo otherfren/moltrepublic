@@ -455,6 +455,12 @@ async fn outbox_loop<L, S, K>(
                 // unpublished one would lose it permanently. What differs is
                 // only what the operator is told.
                 Err(stall) => {
+                    // a stop is a shutdown, not an outage — crying send_failed
+                    // here painted a red pill onto every clean close that
+                    // happened to catch a publish mid-backoff
+                    if matches!(stall, PublishStall::Stopped) {
+                        return;
+                    }
                     let reason = match stall {
                         // a wedge, not an outage: the node writes nothing more
                         // until this envelope can go out, across restarts.
