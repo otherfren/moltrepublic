@@ -117,6 +117,24 @@ pub(crate) fn working_anchors(
     anchors
 }
 
+/// The relay LEDGER folded from a verified chain in block order (R3b): each
+/// seat's DECLARED reachable pool — the last declaration wins, exactly like
+/// [`working_anchors`]. A member without an entry is covered by the ratified
+/// group pool.
+pub(crate) fn declared_relays(
+    blocks: &[ChainBlock],
+) -> std::collections::HashMap<molt_core::MemberId, Vec<String>> {
+    let mut ledger = std::collections::HashMap::new();
+    for block in blocks {
+        if let ChainChange::Membership { member, relays, .. } = &block.change {
+            if !relays.is_empty() {
+                ledger.insert(member.clone(), relays.clone());
+            }
+        }
+    }
+    ledger
+}
+
 /// Re-key a Nostr republic's group: replace `member`'s leaf, at a carrier
 /// stamp the caller pinned **before** the commit was made.
 ///
@@ -560,6 +578,7 @@ fn genesis_base(
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
         anchors: Vec::new(),
+        member_relays: Vec::new(),
         upto: 0,
     }
 }
@@ -598,6 +617,7 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             member,
             identity_pk,
             nostr_pk,
+            relays,
         } => {
             apply_membership(&mut state.roster, *op, member, identity_pk)?;
             // v5: the re-anchor rides BESIDE the roster, because
@@ -608,6 +628,14 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
                 match state.anchors.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
                     Ok(i) => state.anchors[i].1 = pk.clone(),
                     Err(i) => state.anchors.insert(i, (member.clone(), pk.clone())),
+                }
+            }
+            // v6: the relay ledger rides beside it, for the same
+            // survive-the-cut reason (R3b)
+            if !relays.is_empty() {
+                match state.member_relays.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
+                    Ok(i) => state.member_relays[i].1 = relays.clone(),
+                    Err(i) => state.member_relays.insert(i, (member.clone(), relays.clone())),
                 }
             }
         }
@@ -991,6 +1019,35 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// The relays `member` is on record as reaching (R3b, the ledger): its
+    /// declared pool if a `Membership` block carried one, else the ratified
+    /// GROUP pool — a founding member never declared anything because the
+    /// genesis pool it co-signed covers it. The split-detection input (R4).
+    // The production consumer is R4's split verdict; pinned by
+    // `the_ledger_reports_declared_relays_and_survives_a_cut` meanwhile.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn member_relays(&self, member: &str) -> Vec<String> {
+        if let Some(declared) = self.chain_member_relays.get(member) {
+            return declared.clone();
+        }
+        self.ratified_relays()
+    }
+
+    /// The ratified GROUP pool: the checkpoint summary's if this holder
+    /// pruned, else the genesis block's. Empty on a non-Nostr chain.
+    pub(crate) fn ratified_relays(&self) -> Vec<String> {
+        if let Some(blob) = &self.checkpoint_blob {
+            return blob.relays.clone();
+        }
+        self.chain
+            .first()
+            .and_then(|b| match &b.change {
+                ChainChange::Genesis { relays, .. } => Some(relays.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// Fold ONE freshly-appended block into the projection.
     ///
     /// [`State::apply_chain_to_state`] rebuilds from the whole chain, which is
@@ -1017,10 +1074,17 @@ impl State {
             // as the full rebuild's insert-only fold does
             ChainChange::Membership {
                 member,
-                nostr_pk: Some(pk),
+                nostr_pk,
+                relays,
                 ..
-            } if !pk.is_empty() => {
-                self.chain_anchors.insert(member.clone(), pk.clone());
+            } => {
+                if let Some(pk) = nostr_pk.as_ref().filter(|p| !p.is_empty()) {
+                    self.chain_anchors.insert(member.clone(), pk.clone());
+                }
+                // R3b: the relay ledger follows the same last-wins fold
+                if !relays.is_empty() {
+                    self.chain_member_relays.insert(member.clone(), relays.clone());
+                }
             }
             _ => {}
         }
@@ -1074,6 +1138,15 @@ impl State {
             .unwrap_or_default();
         anchors.extend(working_anchors(&self.chain));
         self.chain_anchors = anchors;
+        // …and the relay ledger, seeded from the blob for the same reason
+        // (the declaring blocks are gone after a cut — R3b/v6)
+        let mut ledger: std::collections::HashMap<molt_core::MemberId, Vec<String>> = self
+            .checkpoint_blob
+            .as_ref()
+            .map(|b| b.member_relays.iter().cloned().collect())
+            .unwrap_or_default();
+        ledger.extend(declared_relays(&self.chain));
+        self.chain_member_relays = ledger;
         // the verified head carries the roster after every membership block —
         // adopt it so the newcomers/rekeys show up in the roster + approvals
         if let Some(head) = &self.chain_head {
@@ -1132,6 +1205,7 @@ impl State {
         member: &str,
         identity_pk: &str,
         nostr_pk: Option<String>,
+        relays: Vec<String>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -1142,6 +1216,7 @@ impl State {
                 member: member.to_string(),
                 identity_pk: identity_pk.to_string(),
                 nostr_pk: nostr_pk.clone(),
+                relays: relays.clone(),
             },
         );
         // announce the proposal over the mesh so every member registers + signs
@@ -1155,6 +1230,7 @@ impl State {
                 member: member.to_string(),
                 identity_pk: identity_pk.to_string(),
                 nostr_pk: nostr_pk.clone(),
+                relays,
             },
         );
         self.record(env);
@@ -1173,6 +1249,7 @@ impl State {
         member: &str,
         identity_pk: &str,
         nostr_pk: Option<String>,
+        relays: Vec<String>,
     ) {
         self.next_id = self.next_id.max(id.saturating_add(1));
         let change = ChainChange::Membership {
@@ -1180,6 +1257,7 @@ impl State {
             member: member.to_string(),
             identity_pk: identity_pk.to_string(),
             nostr_pk,
+            relays,
         };
         // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
         // to `proposal_changes` first, so registering a Membership under an
@@ -1273,7 +1351,11 @@ impl State {
         } else {
             Some(new_nostr_pk.to_string())
         };
-        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor))
+        // R3b: the pool the rejoiner was welcomed over is its declared
+        // reachability until a re-join says otherwise (R5) — on the loopback
+        // path there is no pool and the declaration stays empty
+        let relays = if anchor.is_some() { self.ratified_relays() } else { Vec::new() };
+        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays))
     }
 
     /// Distinct collected approvals for a proposal (for the UI progress).
@@ -2601,6 +2683,11 @@ mod tests {
 
     impl Builder {
         fn new(members: &[&str], rule_m: u8) -> Builder {
+            Builder::new_on_relays(members, rule_m, Vec::new())
+        }
+
+        /// A founding whose genesis ratifies `relays` (R3b ledger tests).
+        fn new_on_relays(members: &[&str], rule_m: u8, relays: Vec<String>) -> Builder {
             let mut keys: Vec<(String, SigningKey)> = Vec::new();
             let mut identities: Vec<MemberIdentity> = Vec::new();
             for (i, m) in members.iter().enumerate() {
@@ -2622,7 +2709,7 @@ mod tests {
                 rule_n,
                 identities: identities.clone(),
                 agenda: "play chess".to_string(),
-                relays: Vec::new(),
+                relays,
             };
             let mut b = Builder {
                 republic_id: republic_id.clone(),
@@ -2701,6 +2788,7 @@ mod tests {
                 member: member.to_string(),
                 identity_pk: self.pk(member),
                 nostr_pk: Some(nostr_pk.to_string()),
+                relays: Vec::new(),
             };
             let block = self.seal(height, change, signers);
             self.push(block);
@@ -2818,6 +2906,7 @@ mod tests {
             member: "dora".to_string(),
             identity_pk: dora_pk,
             nostr_pk: None,
+            relays: Vec::new(),
         };
         let block = b.seal(height, join, &["petra", "walter"]);
         b.push(block);
@@ -2879,6 +2968,7 @@ mod tests {
                 member: "petra".to_string(),
                 identity_pk: b.pk("petra"),
                 nostr_pk: Some(fresh.clone()),
+                relays: Vec::new(),
             },
             &["petra", "walter"],
         );
@@ -2960,6 +3050,86 @@ mod tests {
             fresh,
             "after the cut the seat is addressable only at the key it no longer holds"
         );
+    }
+
+    /// R3b — the relay LEDGER: every member's chain answers "which relays is
+    /// this seat on record as reaching". A founding member is covered by the
+    /// ratified genesis pool; a restored seat's threshold-signed declaration
+    /// overrides it — for EVERY member reading the same chain; and a
+    /// compaction cut must not forget a declaration (checkpoint-v6), because
+    /// split detection (R4) runs on exactly this data.
+    #[test]
+    fn the_ledger_reports_declared_relays_and_survives_a_cut() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool.clone());
+        let rid = b.republic_id.clone();
+        let replica = move || {
+            Some(crate::ReplicaState {
+                name: "Chess Club".to_string(),
+                member: "walter".to_string(),
+                roster: vec!["petra".to_string(), "walter".to_string()],
+                rule_m: 2,
+                identities: Vec::new(),
+                agenda: "play chess".to_string(),
+                republic_id: rid.clone(),
+                founded_ts: 0,
+            })
+        };
+        let mut st = crate::tests::plain_state();
+        st.replica = replica();
+        st.adopt_chain(b.blocks.clone());
+        assert_eq!(
+            st.member_relays("walter"),
+            pool,
+            "a founding member is covered by the ratified pool"
+        );
+
+        // petra re-joins over a DIFFERENT relay and declares it in the block
+        let fresh = molt_net::nostr_identity(b"petra-recovered", "new-ticket").1;
+        let declared = vec!["wss://relay.two.example".to_string()];
+        let restored = b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: b.pk("petra"),
+                nostr_pk: Some(fresh),
+                relays: declared.clone(),
+            },
+            &["petra", "walter"],
+        );
+        b.push(restored);
+        st.adopt_chain(b.blocks.clone());
+        assert_eq!(
+            st.member_relays("petra"),
+            declared,
+            "every member's ledger reports the declared pool"
+        );
+        assert_eq!(st.member_relays("walter"), pool, "the others stay on the ratified pool");
+
+        // cut ABOVE the Restored block: the declaration must ride the summary
+        let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+        assert_eq!(
+            blob.member_relays,
+            vec![("petra".to_string(), declared.clone())],
+            "the summary carries the declarations the dropped blocks established"
+        );
+        let cut = b.seal(
+            2,
+            ChainChange::Checkpoint { upto: 1, state_hash: checkpoint_state_hash(&blob) },
+            &["petra", "walter"],
+        );
+        b.push(cut);
+        let mut pruned = crate::tests::plain_state();
+        pruned.replica = replica();
+        pruned.set_checkpoint_blob(Some(blob));
+        pruned.adopt_chain(b.blocks[2..].to_vec());
+        assert_eq!(
+            pruned.member_relays("petra"),
+            declared,
+            "a cut must not forget a declaration"
+        );
+        assert_eq!(pruned.member_relays("walter"), pool, "…nor the ratified fallback");
     }
 
     #[test]
@@ -3950,7 +4120,7 @@ mod tests {
         // honest surface proposal id 5, awaiting approvals
         walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}));
         // attacker gossips a membership change under the SAME id
-        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None);
+        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None, Vec::new());
         // the id still resolves to the SURFACE proposal — approving it can
         // never sign membership bytes
         assert!(matches!(
@@ -3959,7 +4129,7 @@ mod tests {
         ));
         // the reverse: a surface proposal cannot shadow a pending membership
         let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
-        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None);
+        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None, Vec::new());
         walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
         assert!(matches!(
             walter2.proposal_change(6),
@@ -4008,7 +4178,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
         // id already names a pending MEMBERSHIP change → refused, unsigned
-        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None);
+        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new());
         walter.receive_checkpoint_proposal(5, 1, &hash);
         assert!(
             !walter.pending_sigs.contains_key(&5),
@@ -4526,12 +4696,12 @@ mod tests {
             checkpoint_state_hash(&s2),
             "equal chains yield the identical checkpoint hash"
         );
-        // the canonical bytes carry the versioned tag (v5 since the working
-        // anchors joined; v4 was the summary rule, v3 the ratified pool —
-        // each a change in WHAT the same chain hashes to, which is exactly
-        // what the tag exists to announce)
+        // the canonical bytes carry the versioned tag (v6 since the relay
+        // ledger joined; v5 the working anchors, v4 the summary rule, v3 the
+        // ratified pool — each a change in WHAT the same chain hashes to,
+        // which is exactly what the tag exists to announce)
         let bytes = molt_core::checkpoint_canonical_bytes(&s1);
-        assert!(bytes.starts_with(b"molt-chain-checkpoint-v5\0"));
+        assert!(bytes.starts_with(b"molt-chain-checkpoint-v6\0"));
         // …and the pool is really covered: a summary whose relays were swapped
         // must not hash the same. Without this the tamper-evidence roster-v4
         // gives the genesis would vanish the moment a republic pruned.
@@ -4693,7 +4863,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
 
         // petra proposes re-admitting walter and co-signs (1 of 2 — pending)
-        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None);
+        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None, Vec::new());
         assert_eq!(
             petra.chain_head.as_ref().expect("head").height,
             0,
@@ -4701,7 +4871,7 @@ mod tests {
         );
 
         // walter learns the proposal + petra's signature, then co-signs
-        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None);
+        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None, Vec::new());
         let petra_sig = petra
             .pending_sigs
             .get(&id)
@@ -4796,6 +4966,7 @@ mod tests {
             member: "walter".to_string(),
             identity_pk: walter_pk,
             nostr_pk: None,
+            relays: Vec::new(),
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         coord.receive_block(block);
@@ -4826,6 +4997,7 @@ mod tests {
             member: "walter".to_string(),
             identity_pk: walter_pk.clone(),
             nostr_pk: None,
+            relays: Vec::new(),
         };
         // round 1: the first recovery attempt's Restored block commits …
         let block = b.seal(1, restored.clone(), &["petra", "walter"]);
@@ -4854,6 +5026,7 @@ mod tests {
             member: "walter".to_string(),
             identity_pk: other_pk,
             nostr_pk: None,
+            relays: Vec::new(),
         };
         let block = b.seal(3, hijack, &["petra", "walter"]);
         b.push(block);
@@ -5016,6 +5189,7 @@ mod tests {
             member: "walter".to_string(),
             identity_pk: walter_pk,
             nostr_pk: None,
+            relays: Vec::new(),
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         node.receive_block(block);

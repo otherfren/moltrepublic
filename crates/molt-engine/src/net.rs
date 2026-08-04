@@ -1388,8 +1388,9 @@ impl State {
                 nostr_pk,
                 member,
                 identity_pk,
+                relays,
             } if self.is_chain_governed() => {
-                self.receive_membership_proposal(id.0, op, &member, &identity_pk, nostr_pk);
+                self.receive_membership_proposal(id.0, op, &member, &identity_pk, nostr_pk, relays);
             }
             // WP4b: a peer proposed a compaction cut — recompute the state
             // hash from OUR chain and auto-co-sign only on a match

@@ -205,7 +205,7 @@ normalen positionsgebundenen Signaturen über
 Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
 sinngemäß).
 
-## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v5`)
+## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v6`)
 
 Deterministische Byte-Folge, längenpräfixierte Felder (dasselbe Framing
 wie `roster_canonical_bytes` — Geschwister-Layout, eigener
@@ -242,7 +242,11 @@ Versions-Tag). Inhalt in fester Reihenfolge:
    haben, fallen am Schnitt weg, und der Roster behält bauartbedingt den
    GRÜNDUNGS-Anker (ein `Restored` darf den Identity-Key eines Sitzes nicht
    bewegen, also reist der Anker NEBEN dem Roster). Siehe §B.6b.
-8. `upto`.
+8. **Relay-Ledger** (v6, R3b): `(member, relays)` je Sitz, dessen
+   `Membership`-Block eine Relay-Deklaration trug, nach Member sortiert —
+   der Split-Detection-Input (R4) überlebt den Schnitt aus demselben Grund
+   wie die Anker in 7.
+9. `upto`.
 
 Gleiche Chain ⇒ gleiche Bytes ⇒ gleicher Hash, auf jedem Node. Im Block
 steht NUR der Hash; der **Zustands-Blob reist außerhalb der Chain**

@@ -1085,6 +1085,7 @@ mod tests {
             applied: Vec::new(),
             consumed_ids: Vec::new(),
             anchors: Vec::new(),
+            member_relays: Vec::new(),
             upto: 7,
         };
         let sealed = sealed_roster_from_blob(&blob);
@@ -1474,6 +1475,7 @@ mod tests {
             member: "dave".to_string(),
             identity_pk: dave_pk.clone(),
             nostr_pk: None,
+            relays: Vec::new(),
         };
         let bytes = approval_bytes(&republic_id, 1, &change);
         let block1 = ChainBlock {

@@ -582,6 +582,12 @@ pub(crate) struct State {
     /// `identities[i].nostr_pk` addresses a key the member no longer holds,
     /// and does so silently.
     pub(crate) chain_anchors: HashMap<MemberId, String>,
+    /// The relay LEDGER (R3b): each seat's DECLARED reachable pool, folded
+    /// from `Membership` blocks exactly like [`State::chain_anchors`] (and
+    /// seeded from the checkpoint summary after a cut). Read through
+    /// [`State::member_relays`], which falls back to the ratified group pool
+    /// for seats that never declared. The split-detection input (R4).
+    pub(crate) chain_member_relays: HashMap<MemberId, Vec<String>>,
     /// Ephemeral per-proposal signature collection for chain governance
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
@@ -898,6 +904,7 @@ impl State {
             checkpoint_blob: None,
             chain_applied: HashMap::new(),
             chain_anchors: HashMap::new(),
+            chain_member_relays: HashMap::new(),
             pending_sigs: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
@@ -4468,6 +4475,7 @@ mod tests {
             member: "bob".to_string(),
             identity_pk: bob_pk,
             nostr_pk: Some(new_anchor),
+            relays: Vec::new(),
         };
         let bytes2 = molt_core::approval_bytes(&republic_id, 2, &change2);
         let block2 = ChainBlock {

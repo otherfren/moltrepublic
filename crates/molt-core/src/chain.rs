@@ -117,6 +117,14 @@ pub enum ChainChange {
         /// every block written before N4b.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nostr_pk: Option<String>,
+        /// The relays this seat declares it reaches (R3b, the ledger): the
+        /// pool a restored seat re-joined over. Threshold-signed with the
+        /// rest of the block, so nobody can move a member's declared
+        /// reachability after the fact. Empty = no declaration (every block
+        /// written before R3b, and `Joined` seats — the genesis pool covers
+        /// the founding roster).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        relays: Vec<String>,
     },
     /// WP4b: a threshold-signed compaction cut. m-of-n members signed the
     /// SHA-256 of the deterministically serialized republic state after
@@ -198,6 +206,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             member,
             identity_pk,
             nostr_pk,
+            relays,
         } => {
             let mut out = Vec::new();
             out.extend_from_slice(b"molt-chain-change-v2\0");
@@ -217,6 +226,19 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
                 Some(pk) => {
                     out.push(1);
                     put_bytes(&mut out, pk.as_bytes());
+                }
+            }
+            // R3b: the relay declaration, signed too. CONDITIONAL on purpose:
+            // an empty declaration appends NOTHING, so every pre-R3b block's
+            // preimage — and its recorded signatures — stay byte-identical
+            // under the same tag. Non-empty extends with a 1-marker + counted
+            // run, so "no declaration" and "declared nothing" cannot collide
+            // (the marker occupies a position no v2 preimage ever wrote).
+            if !relays.is_empty() {
+                out.push(1);
+                out.extend_from_slice(&u64::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+                for r in relays {
+                    put_bytes(&mut out, r.as_bytes());
                 }
             }
             out
@@ -288,6 +310,15 @@ pub struct CheckpointState {
     /// member addressable only at the key it no longer holds — silently.
     #[serde(default)]
     pub anchors: Vec<(MemberId, String)>,
+    /// The relay LEDGER at the cut (R3b): `(member, relays)` for every seat
+    /// whose `Membership` block declared the pool it re-joined over, sorted
+    /// by member. Carried for the same reason as [`Self::anchors`]: the
+    /// declaring blocks are dropped at the cut, and without the summary a
+    /// compaction silently forgets who said they can reach what — the
+    /// split-detection input (R4). Members without a declaration are covered
+    /// by [`Self::relays`], the ratified group pool.
+    #[serde(default)]
+    pub member_relays: Vec<(MemberId, Vec<String>)>,
     /// The last folded-in block height.
     pub upto: u64,
 }
@@ -329,7 +360,9 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v5` — v5
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v6` — v6
+/// carries the relay LEDGER, without which a cut forgets every declared
+/// reachability and split detection runs on stale data; v5
 /// carries the WORKING transport anchors, without which a cut strands every
 /// seat that had recovered; v4 is
 /// the SUMMARY rule ([`applied_lww_slot`]): item 5 carries the current state
@@ -346,7 +379,7 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v5\0");
+    out.extend_from_slice(b"molt-chain-checkpoint-v6\0");
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -390,6 +423,16 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     for (member, pk) in &s.anchors {
         put_bytes(&mut out, member.as_bytes());
         put_bytes(&mut out, pk.as_bytes());
+    }
+    // v6: the relay ledger. Without it a cut forgets every declared
+    // reachability (see the field's own doc).
+    out.extend_from_slice(&u64::try_from(s.member_relays.len()).unwrap_or(0).to_le_bytes());
+    for (member, relays) in &s.member_relays {
+        put_bytes(&mut out, member.as_bytes());
+        out.extend_from_slice(&u64::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+        for r in relays {
+            put_bytes(&mut out, r.as_bytes());
+        }
     }
     out.extend_from_slice(&s.upto.to_le_bytes());
     out
@@ -481,6 +524,10 @@ mod tests {
             )],
             consumed_ids: vec![3, 7],
             anchors: vec![("petra".to_string(), "ab".repeat(32))],
+            member_relays: vec![(
+                "petra".to_string(),
+                vec!["wss://other.example".to_string()],
+            )],
             upto: 9,
         }
     }
@@ -494,12 +541,12 @@ mod tests {
     /// If you meant to change the layout, bump the tag in the SAME commit
     /// and move this pin with it (the CLAUDE.md versioned-layout rule).
     #[test]
-    fn checkpoint_canonical_bytes_are_pinned_at_v5() {
+    fn checkpoint_canonical_bytes_are_pinned_at_v6() {
         let s = pinned_state();
 
         // the independent recomputation
         let mut want = Vec::new();
-        want.extend_from_slice(b"molt-chain-checkpoint-v5\0");
+        want.extend_from_slice(b"molt-chain-checkpoint-v6\0");
         let put = |out: &mut Vec<u8>, b: &[u8]| {
             out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
             out.extend_from_slice(b);
@@ -533,6 +580,10 @@ mod tests {
         want.extend_from_slice(&1u64.to_le_bytes());
         put(&mut want, b"petra");
         put(&mut want, "ab".repeat(32).as_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://other.example");
         want.extend_from_slice(&9u64.to_le_bytes());
 
         assert_eq!(
@@ -547,7 +598,59 @@ mod tests {
     #[test]
     fn the_checkpoint_layout_carries_its_version() {
         assert!(checkpoint_canonical_bytes(&pinned_state())
-            .starts_with(b"molt-chain-checkpoint-v5\0"));
+            .starts_with(b"molt-chain-checkpoint-v6\0"));
+    }
+
+    /// R3b's relay declaration is CONDITIONALLY signed: an empty declaration
+    /// appends nothing, so every pre-R3b `Membership` preimage — and the
+    /// signatures recorded over it — stays byte-identical under the v2 tag;
+    /// a non-empty one strictly extends it. Both directions pinned, because
+    /// either regression breaks chains silently.
+    #[test]
+    fn an_empty_relay_declaration_leaves_the_membership_preimage_untouched() {
+        let without = approval_bytes(
+            "f00",
+            3,
+            &ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: "aa".to_string(),
+                nostr_pk: Some("cc".repeat(32)),
+                relays: Vec::new(),
+            },
+        );
+        // the pre-R3b layout, recomputed independently
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-chain-change-v2\0");
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        put(&mut want, b"f00");
+        want.extend_from_slice(&3u64.to_le_bytes());
+        want.push(2);
+        want.push(1);
+        put(&mut want, b"petra");
+        put(&mut want, b"aa");
+        want.push(1);
+        put(&mut want, "cc".repeat(32).as_bytes());
+        assert_eq!(without, want, "an empty declaration must not move a signed byte");
+
+        let with = approval_bytes(
+            "f00",
+            3,
+            &ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "petra".to_string(),
+                identity_pk: "aa".to_string(),
+                nostr_pk: Some("cc".repeat(32)),
+                relays: vec!["wss://relay.example".to_string()],
+            },
+        );
+        want.push(1);
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://relay.example");
+        assert_eq!(with, want, "a declaration extends the preimage with a counted run");
     }
 
     /// **The summary rule, declared** (§B.6a). Organization's four state
@@ -634,6 +737,7 @@ mod tests {
             member: "dora".to_string(),
             identity_pk: "aa".repeat(32),
             nostr_pk: npk.map(str::to_string),
+            relays: Vec::new(),
         };
         let with = mk(Some(&"bb".repeat(32)));
         assert_ne!(
@@ -709,6 +813,7 @@ mod tests {
                 member: "dora".to_string(),
                 identity_pk: "cc".to_string(),
                 nostr_pk: None,
+                relays: Vec::new(),
             },
             sigs,
         };

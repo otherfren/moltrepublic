@@ -2110,6 +2110,10 @@ pub enum WorkspaceEvent {
         /// would sign different bytes and its approval would never count.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nostr_pk: Option<String>,
+        /// The seat's relay declaration (R3b) — travels for the same
+        /// sign-the-SAME-change reason as `nostr_pk`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        relays: Vec<String>,
     },
     /// WP4b: a checkpoint cut was put forward — the gossip that lets every
     /// member recompute and co-sign the SAME state hash. Transport-only,

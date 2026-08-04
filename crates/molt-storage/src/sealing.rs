@@ -554,6 +554,7 @@ mod tests {
             applied: Vec::new(),
             consumed_ids: Vec::new(),
             anchors: Vec::new(),
+            member_relays: Vec::new(),
             upto: 0,
             relays: Vec::new(),
         };

@@ -144,6 +144,7 @@ fn a_pruned_republics_anchor_carries_every_applied_payload() {
         )],
         consumed_ids: vec![1],
         anchors: Vec::new(),
+        member_relays: Vec::new(),
         upto: 1,
     };
 
