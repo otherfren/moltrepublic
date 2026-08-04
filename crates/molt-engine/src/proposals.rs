@@ -738,35 +738,18 @@ impl State {
 
 /// The retention read-filter boundary, a pure function of the message
 /// timestamp, `now` and the effective window (explicit `now` so tests pin
-/// it, like the `*_label_at` helpers): does the given chat sub-view admit
-/// a message of that age?
+/// it, like the `*_label_at` helpers).
 ///
-/// The window splits at its half: `"today"` (the General view) admits the
-/// younger half (age ≤ 50 % of the window, boundary inclusive), `"archive"`
-/// the older half still inside the window (50 % < age ≤ 100 %), `None` the
-/// whole window — today's unfiltered read, so older readers keep their
-/// behavior. Anything past 100 % stays hidden everywhere ("deleted"). A
-/// timestamp of 0 (legacy/unknown age) must never silently vanish: it
-/// files under the general view and the unfiltered read, never the archive.
-/// The whole-window arm delegates to [`State::aged_out_at`] — the same
-/// predicate the share-expiry point checks use — so the two can't drift.
-pub(crate) fn chat_view_admits(
-    view: Option<&str>,
-    ts: u64,
-    now: u64,
-    retention_days: u64,
-) -> bool {
-    let window = retention_days * 86_400;
-    let cutoff = now.saturating_sub(window);
-    let half = now.saturating_sub(window / 2);
-    match (view, ts) {
-        (Some("archive"), 0) => false,
-        (_, 0) => true,
-        (Some("archive"), ts) => ts >= cutoff && ts < half,
-        // any other validated key is the general ("today") view
-        (Some(_), ts) => ts >= half,
-        (None, ts) => !State::aged_out_at(cutoff, ts),
-    }
+/// ONE window, no sub-split: everything inside the retention window is
+/// visible, everything past it is gone ("deleted"), and a timestamp of 0
+/// (legacy/unknown age) is always kept. The window used to be halved into a
+/// General and an Archive view, which meant a conversation older than half a
+/// window — 3.5 days by default — silently left the chat the user was
+/// looking at. Delegates to [`State::aged_out_at`], the same predicate the
+/// share-expiry point checks, so the two cannot drift.
+pub(crate) fn chat_view_admits(ts: u64, now: u64, retention_days: u64) -> bool {
+    let cutoff = now.saturating_sub(retention_days * 86_400);
+    ts == 0 || !State::aged_out_at(cutoff, ts)
 }
 
 impl State {
@@ -781,23 +764,23 @@ impl State {
         self.chat_visible_in(None)
     }
 
-    /// [`State::chat_visible`] narrowed to one retention sub-view
-    /// ("today"/"archive", `None` = the whole window) — the read contract
+    /// [`State::chat_visible`] narrowed to one read slice — the contract
     /// behind `ReadState { view }`, shared by GUI and MCP (co-equality).
+    ///
+    /// The only slice is `"unread"` (`molt_core::CHAT_READ_SLICES`), and it
+    /// is POSITION-scoped rather than time-scoped: the whole retention
+    /// window, then only what sits after this channel's read cursor. Any
+    /// other value — including the nav view `"today"` — is the plain window.
     pub(crate) fn chat_visible_in<'a>(
         &'a self,
         view: Option<&'a str>,
     ) -> impl Iterator<Item = &'a molt_core::ChatMessage> + 'a {
         let now = crate::now_secs();
         let days = self.org_effective().retention_days;
-        // B2: the "unread" view is POSITION-scoped, not time-scoped — the
-        // whole retention window, then only what sits after each channel's
-        // read cursor (what an agent asks for to see "what is new")
         let unread = view == Some("unread");
-        let time_view = if unread { None } else { view };
         self.chat
             .iter()
-            .filter(move |m| chat_view_admits(time_view, m.ts, now, days))
+            .filter(move |m| chat_view_admits(m.ts, now, days))
             .filter(move |m| !unread || self.chat_msg_unread(m))
     }
 
@@ -927,15 +910,11 @@ impl State {
             } else {
                 Vec::new()
             },
-            // presence, not a materialization: one early-exit probe with the
-            // same predicates an "archive" read of THIS channel filters by,
-            // so a frontend can offer/hide the Archive view without a second
-            // full read — and never offer an archive the filtered pane
-            // would show empty
-            has_archive: surface == Surface::Chat
-                && self
-                    .chat_visible_in(Some("archive"))
-                    .any(|m| channel.as_ref().map_or(true, |c| &m.channel == c)),
+            // the chat is one window now — nothing is filed away, so there
+            // is no second view to offer or hide. Kept on the wire (always
+            // false) rather than removed, so an older reader that still asks
+            // is told "no archive" instead of failing to decode.
+            has_archive: false,
         }
     }
 

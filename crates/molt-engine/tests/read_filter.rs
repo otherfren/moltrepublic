@@ -55,10 +55,14 @@ async fn read_chat_snapshot(w: &WalletHandle, channel: Option<ChannelRef>) -> Su
     }
 }
 
-/// The retention time axis rides the same read: a just-sent message is
-/// younger than half the window, so it shows in the General ("today")
-/// view and not in the Archive; the two filters (channel + view) compose;
-/// and an unknown view key is an error, never a silent wrong window.
+/// The chat is ONE window: the General ("today") view and an unfiltered
+/// read return the same messages, the channel filter composes with it, the
+/// agent-facing "unread" slice is still accepted, and an unknown view key
+/// is an error rather than a silently wrong window.
+///
+/// It used to be a time AXIS — General held the young half of the retention
+/// window, Archive the old half — which is why a conversation older than
+/// 3.5 days looked deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn view_filter_rides_read_state() {
     let w = spawn_solo();
@@ -86,41 +90,44 @@ async fn view_filter_rides_read_state() {
         1,
         "a just-sent message is in the General view"
     );
-    assert!(
-        read(None, "archive").await.applied.is_empty(),
-        "…and not in the Archive"
+    assert_eq!(
+        read(None, "today").await.applied,
+        read_chat_snapshot(&w, None).await.applied,
+        "…and the General view IS the unfiltered window"
     );
     // channel and view compose
     assert_eq!(read(Some(ChannelRef::Group), "today").await.applied.len(), 1);
-    assert!(read(Some(ChannelRef::Group), "archive")
-        .await
-        .applied
-        .is_empty());
     // the enumeration stays unfiltered either way
     assert_eq!(
-        read(None, "archive").await.channels,
+        read(None, "today").await.channels,
         read_chat_snapshot(&w, None).await.channels
     );
-    // the archive-presence stamp rides every chat read (view-independent):
-    // a fresh log has nothing in the older retention half
-    assert!(
-        !read(None, "today").await.has_archive,
-        "a just-sent message must not flag an archive presence"
-    );
+    // nothing is filed away any more, so no archive is ever flagged
+    assert!(!read(None, "today").await.has_archive);
     assert!(!read_chat_snapshot(&w, None).await.has_archive);
-    // an unknown view key errors (shared `Surface::views` vocabulary)
-    let err = w
-        .execute(Command::ReadState {
-            surface: Surface::Chat,
-            channel: None,
-            view: Some("yesterday".to_string()),
-        })
-        .await
-        .expect_err("an unknown view key must be refused");
-    assert!(
-        format!("{err:?}").contains("yesterday"),
-        "the error names the bad key: {err:?}"
-    );
+    // the agent slice is a READ axis, not a nav view — still accepted
+    w.execute(Command::ReadState {
+        surface: Surface::Chat,
+        channel: None,
+        view: Some("unread".to_string()),
+    })
+    .await
+    .expect("the unread slice is a valid read");
+    // …but the retired Archive view is not a key any more
+    for bad in ["archive", "yesterday"] {
+        let err = w
+            .execute(Command::ReadState {
+                surface: Surface::Chat,
+                channel: None,
+                view: Some(bad.to_string()),
+            })
+            .await
+            .expect_err("an unknown view key must be refused");
+        assert!(
+            format!("{err:?}").contains(bad),
+            "the error names the bad key: {err:?}"
+        );
+    }
 }
 
 /// Parse one applied-log value back into the typed message (also proves

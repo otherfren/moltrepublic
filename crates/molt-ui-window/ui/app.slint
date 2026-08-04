@@ -1887,7 +1887,17 @@ export component AppWindow inherits Window {
                                         // without it they read as siblings of
                                         // Pending rather than its contents
                                         indent: 14px;
-                                        selected: root.selected-channel == "patch:\{p.id}";
+                                        // where this decision stands, quietly
+                                        quorum: "\{p.approvals}/\{p.threshold}";
+                                        // the channel filter OUTLIVES the
+                                        // chat surface, so matching it alone
+                                        // left a row lit (and bold) while the
+                                        // user was somewhere else entirely —
+                                        // the row is active only when its
+                                        // discussion is actually on screen
+                                        selected: root.selected-channel == "patch:\{p.id}"
+                                            && root.selected-surface == "chat"
+                                            && root.selected-view == "today";
                                         chosen => {
                                             root.mv-draft = "";
                                             root.select-view("chat", "today");
@@ -4490,27 +4500,19 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // the Archive sub-view pages its (long) history
-                            // at 20 rows — same pager as the outcome lists
-                            if root.selected-view == "archive" && s.applied-pages > 1: PagerRow {
-                                page: s.applied-page;
-                                pages: s.applied-pages;
-                                paged(delta) => {
-                                    root.page-list("chat", "archive", delta);
-                                }
-                            }
-
                             // compose: Enter sends; Alt+Enter breaks the line
                             // and the box grows to show the extra text.
-                            // Hidden (collapsed) in the Archive sub-view —
-                            // the archive is read-only history; a new message
-                            // would file under General anyway. (visible +
-                            // height instead of `if`: chat-in is focused from
-                            // outside this row, so it must always exist.)
+                            // (visible + height instead of `if`: chat-in is
+                            // focused from outside this row, so it must
+                            // always exist.)
                             HorizontalLayout {
-                                // …also collapsed when the selected channel
-                                // is a decided vote's read-only discussion
-                                visible: root.selected-view == "today" && !root.selected-channel-closed;
+                                // ONE reason to collapse: the selected
+                                // channel is a decided vote's read-only
+                                // discussion. It used to also require the
+                                // view to be "today", which silently took
+                                // the compose box away on any other chat
+                                // view - and made one of them unusable.
+                                visible: !root.selected-channel-closed;
                                 height: self.visible ? self.preferred-height : 0px;
                                 spacing: 8px;
                                 Rectangle {

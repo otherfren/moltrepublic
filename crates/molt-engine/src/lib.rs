@@ -1146,10 +1146,15 @@ impl State {
             Command::Decline { proposal } => self.cmd_decline(proposal),
             Command::ReadState { surface, channel, view } => {
                 // the view key is shared vocabulary (`Surface::views`, the
-                // same list `select_view` validates against); an unknown
-                // key must error, never silently read the wrong window
+                // same list `select_view` validates against) PLUS chat's
+                // read-only slices (`CHAT_READ_SLICES` — a read axis, not a
+                // nav view); an unknown key must error, never silently read
+                // the wrong window
                 if let Some(v) = &view {
-                    if !surface.views().iter().any(|(k, _)| k == v) {
+                    let nav = surface.views().iter().any(|(k, _)| k == v);
+                    let slice = surface == Surface::Chat
+                        && molt_core::CHAT_READ_SLICES.contains(&v.as_str());
+                    if !nav && !slice {
                         return Err(MoltError::UnknownView(surface, v.clone()));
                     }
                 }
@@ -3262,49 +3267,42 @@ mod tests {
         );
     }
 
-    /// The today/archive boundary is a pure function of the message
-    /// timestamp, "now" and the retention window (explicit `now`, like the
-    /// `*_label_at` helpers): "today" admits the younger half of the
-    /// window, "archive" the older half still inside it, `None` the whole
-    /// window — and a legacy ts of 0 (unknown age) files under the general
-    /// view, never the archive, and never vanishes.
+    /// The retention boundary is a pure function of the message timestamp,
+    /// "now" and the window (explicit `now`, like the `*_label_at`
+    /// helpers): ONE window, no sub-split. It used to halve the window into
+    /// a General and an Archive view, so a conversation older than half a
+    /// window - 3.5 days at the default retention - silently left the chat
+    /// the user was looking at. A legacy ts of 0 (unknown age) never
+    /// vanishes.
     #[test]
-    fn chat_view_boundary_splits_the_retention_window_at_half() {
+    fn chat_view_boundary_is_the_whole_retention_window() {
         use crate::proposals::chat_view_admits;
         let now = 1_700_000_000;
-        let days = 10; // window: 864 000 s, half: 432 000 s
+        let days = 10; // window: 864 000 s
         let at = |pct: u64| now - 864_000 * pct / 100;
-        // 10 % of the window old: today, not archive
-        assert!(chat_view_admits(Some("today"), at(10), now, days));
-        assert!(!chat_view_admits(Some("archive"), at(10), now, days));
-        assert!(chat_view_admits(None, at(10), now, days));
-        // exactly 50 %: still today (the boundary is inclusive young-side)
-        assert!(chat_view_admits(Some("today"), at(50), now, days));
-        assert!(!chat_view_admits(Some("archive"), at(50), now, days));
-        // 60 %: archive, not today
-        assert!(!chat_view_admits(Some("today"), at(60), now, days));
-        assert!(chat_view_admits(Some("archive"), at(60), now, days));
-        assert!(chat_view_admits(None, at(60), now, days));
-        // exactly 100 %: the window's oldest visible instant — archive
-        assert!(chat_view_admits(Some("archive"), at(100), now, days));
-        assert!(chat_view_admits(None, at(100), now, days));
-        // 110 %: aged out everywhere (deleted, exactly as today)
-        assert!(!chat_view_admits(Some("today"), at(110), now, days));
-        assert!(!chat_view_admits(Some("archive"), at(110), now, days));
-        assert!(!chat_view_admits(None, at(110), now, days));
-        // ts 0 = unknown age: general view + unfiltered, never archive
-        assert!(chat_view_admits(Some("today"), 0, now, days));
-        assert!(!chat_view_admits(Some("archive"), 0, now, days));
-        assert!(chat_view_admits(None, 0, now, days));
+        // the old half-window cliff sat here: 60 % of the window old is
+        // ordinary chat now, not something filed away
+        for pct in [10u64, 50, 60, 99] {
+            assert!(
+                chat_view_admits(at(pct), now, days),
+                "{pct} % of the window old must stay in the chat"
+            );
+        }
+        // exactly 100 %: the window's oldest visible instant
+        assert!(chat_view_admits(at(100), now, days));
+        // past it: gone, which is what "delete chat after N days" means
+        assert!(!chat_view_admits(at(110), now, days));
+        // ts 0 = unknown age: always kept
+        assert!(chat_view_admits(0, now, days));
     }
 
-    /// `ReadState { view }` splits the visible chat log on the retention
-    /// half-window: General ("today") shows only the young half, Archive
-    /// only the old half, no view the whole window — and the channel
-    /// enumeration stays unfiltered across all three reads (same posture
-    /// as the channel filter).
+    /// `ReadState { view }` on chat is ONE window: the General view and an
+    /// unfiltered read return the same messages, and the only thing a view
+    /// key still narrows is the agent-facing `"unread"` slice. The window
+    /// used to be halved (General = young half, Archive = old half), which
+    /// made a conversation vanish from the chat at 3.5 days by default.
     #[test]
-    fn archive_view_holds_the_older_half_of_the_retention_window() {
+    fn the_chat_view_is_the_whole_retention_window() {
         let mut st = plain_state();
         let now = now_secs();
         let window = 7 * 86_400; // the default 7-day retention window
@@ -3329,35 +3327,25 @@ mod tests {
         let today = st.snapshot(Surface::Chat, None, Some("today"));
         assert_eq!(
             today.applied.iter().map(body_of).collect::<Vec<_>>(),
-            vec!["young"],
-            "General holds only the messages younger than half the window"
-        );
-        let archive = st.snapshot(Surface::Chat, None, Some("archive"));
-        assert_eq!(
-            archive.applied.iter().map(body_of).collect::<Vec<_>>(),
-            vec!["old"],
-            "Archive holds only the older half (still inside the window)"
+            vec!["young", "old"],
+            "the General view holds everything inside the window - the 60 % \
+             message is ordinary chat, not something filed away"
         );
         let all = st.snapshot(Surface::Chat, None, None);
         assert_eq!(
             all.applied.iter().map(body_of).collect::<Vec<_>>(),
             vec!["young", "old"],
-            "no view = the whole retention window, exactly as before"
+            "…and an unfiltered read is the same window"
         );
+        assert!(!today.has_archive, "there is no second view to offer");
         // the enumeration is a whole-window concern, like with `channel`
         assert_eq!(today.channels, all.channels);
-        assert_eq!(archive.channels, all.channels);
-        // a legacy ts of 0 files under the general view, never the archive
+        // a legacy ts of 0 (unknown age) never vanishes
         st.apply(&msg(4, 0, "legacy"));
         assert_eq!(
             st.snapshot(Surface::Chat, None, Some("today")).applied.len(),
-            2,
-            "unknown age joins the general view"
-        );
-        assert_eq!(
-            st.snapshot(Surface::Chat, None, Some("archive")).applied.len(),
-            1,
-            "unknown age never files as archived"
+            3,
+            "unknown age stays visible"
         );
     }
 

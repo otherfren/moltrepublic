@@ -366,17 +366,19 @@ fn channel_arg(args: &Value) -> Result<Option<ChannelRef>, String> {
     Ok(Some(channel))
 }
 
-/// The optional `view` argument of `read_state` — the retention time axis
-/// ("today"/"archive", the [`Surface::views`] keys). Absent/`null` means
-/// "the whole window"; a PRESENT argument of the wrong type is an error,
+/// The optional `view` argument of `read_state`. Absent/`null` means the
+/// whole retention window, which is also what the nav view `"today"`
+/// returns; the one narrowing key is `"unread"` — the messages after this
+/// seat's read cursor. A PRESENT argument of the wrong type is an error,
 /// never ignored. The KEY itself is validated engine-side against the
-/// surface's view list, so MCP and GUI reads share one vocabulary.
+/// surface's view list plus [`molt_core::CHAT_READ_SLICES`], so MCP and GUI
+/// reads share one vocabulary.
 fn view_arg(args: &Value) -> Result<Option<String>, String> {
     match args.get("view") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(format!(
-            "argument `view` must be a string view key (e.g. \"today\" or \"archive\"), got {other}"
+            "argument `view` must be a string view key (e.g. \"today\" or \"unread\"), got {other}"
         )),
     }
 }
@@ -668,13 +670,13 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY — chat_send/share_file into it are refused — but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) for the retention time axis: \"today\" keeps the messages younger than half the effective retention window (the General view), \"archive\" the older half still inside the window; omitted = the whole window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) — the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel.",
+            description: "Read the projected state of one surface. Chat messages each carry their stable 32-char hex `id` — the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` — plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY — chat_send/share_file into it are refused — but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) — the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": surface_enum() },
                     "channel": channel_schema("optional, chat only: return just this channel's messages (the channel enumeration still lists every channel)"),
-                    "view": { "type": "string", "enum": ["today", "archive"], "description": "optional, chat only: the retention time axis — \"today\" = the younger half of the retention window, \"archive\" = the older half (still inside the window)" }
+                    "view": { "type": "string", "enum": ["today", "unread"], "description": "optional, chat only: \"today\" = the whole retention window (same as omitting it), \"unread\" = only the messages after this seat's read cursor" }
                 },
                 "required": ["surface"]
             }),
@@ -764,7 +766,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_view",
             command: "select_view",
-            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending/declined · chat: today/archive · memory: brain/proposals/accepted/denied/archive · quests: board/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
+            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending/declined · chat: today · memory: brain/proposals/accepted/denied/archive · quests: board/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1650,7 +1652,7 @@ mod tests {
         let schema = (tool_named("read_state").schema)();
         assert_eq!(
             schema["properties"]["view"]["enum"],
-            json!(["today", "archive"])
+            json!(["today", "unread"])
         );
 
         match build("read_state", &json!({ "surface": "chat" })).expect("no view builds") {
@@ -1663,10 +1665,10 @@ mod tests {
             Command::ReadState { view, .. } => assert_eq!(view, None),
             other => panic!("wrong command: {other:?}"),
         }
-        match build("read_state", &json!({ "surface": "chat", "view": "archive" }))
-            .expect("archive view builds")
+        match build("read_state", &json!({ "surface": "chat", "view": "unread" }))
+            .expect("unread slice builds")
         {
-            Command::ReadState { view, .. } => assert_eq!(view, Some("archive".to_string())),
+            Command::ReadState { view, .. } => assert_eq!(view, Some("unread".to_string())),
             other => panic!("wrong command: {other:?}"),
         }
         // both filters compose on the one command

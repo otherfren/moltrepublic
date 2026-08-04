@@ -2809,13 +2809,6 @@ struct SurfacesBundle {
     /// Language the labels were rendered for (0 = en, 1 = de) — the nav's
     /// sub-view names are localized when the bundle lands.
     lang: i32,
-    /// The chat surface is showing the Archive sub-view — its log pages
-    /// at 20 rows (an archive can hold a whole retention half-window).
-    chat_archive: bool,
-    /// The archive half holds at least one message in the SELECTED channel
-    /// right now — the sidebar only offers the chat Archive item then
-    /// (engine-stamped `has_archive` on the pane's own filtered read).
-    archive_exists: bool,
     /// Every committed chain block, newest first (the Chain-History panel).
     chain_rows: Vec<molt_core::ChainBlockView>,
     member: String,
@@ -3282,25 +3275,20 @@ async fn push_surfaces(
     // a workspace switch drops the previous selection/unread/first-seen
     // (the language rides along — a SetLanguage emits a Full session
     // change, which re-runs this push, so the nav labels stay live)
-    // the chat surface's sub-view ("today"/"archive") rides the shared
-    // session; the time filter itself is engine-side (`ReadState { view }`,
-    // co-equality) — when another surface is selected the chat read stays
-    // on the default General view
-    let (active_ws, lang, chat_view, mark_read_active) = match wallet.execute(Command::ReadSession).await {
+    // The chat is ONE window (`Surface::Chat` has a single view), so the GUI
+    // never narrows the read: `ReadState { view: None }` IS the General
+    // pane. The engine's `view` axis survives for the agent-facing "unread"
+    // slice, which is deliberately not somewhere a human navigates.
+    let (active_ws, lang, mark_read_active) = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(s)) => (
             s.active_workspace.clone(),
             i32::from(s.language == "de"),
-            if s.surface == Surface::Chat {
-                s.view.clone()
-            } else {
-                Surface::Chat.default_view().to_string()
-            },
             // only auto-confirm reads when the chat surface is on screen AND
             // this node's read receipts are enabled (off = reveal nothing, so
             // do not even issue the no-op'd command)
             s.surface == Surface::Chat && s.settings.read_receipts,
         ),
-        _ => (String::new(), 0, Surface::Chat.default_view().to_string(), false),
+        _ => (String::new(), 0, false),
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
@@ -3395,7 +3383,7 @@ async fn push_surfaces(
         // the displayed chat log follows the selected sub-view: General
         // shows the younger half of the retention window, Archive the
         // older half — filtered engine-side, same as the channel
-        let view = (sf == Surface::Chat).then(|| chat_view.clone());
+        let view: Option<String> = None;
         if let Ok(Reply::State(snap)) = wallet
             .execute(Command::ReadState { surface: sf, channel, view })
             .await
@@ -3427,14 +3415,6 @@ async fn push_surfaces(
             }
         }
     }
-    // the sidebar's Archive gate rides the SAME channel-filtered chat read
-    // the archive pane renders from: the engine stamps `has_archive` on
-    // every chat snapshot (an early-exit presence probe, no extra read),
-    // so the item never promises messages the filtered pane wouldn't show
-    let archive_exists = snaps
-        .iter()
-        .find(|(sf, _)| *sf == Surface::Chat)
-        .is_some_and(|(_, s)| s.has_archive);
     // proposal state across ALL surfaces feeds the patch channels: lazy
     // titles for the sidebar and the system lines (P8)
     let all_pending: Vec<ProposalView> = snaps
@@ -3514,15 +3494,7 @@ async fn push_surfaces(
         let mut list_pages: HashMap<String, usize> = HashMap::new();
         for (sf, s) in &snaps {
             if *sf == Surface::Chat {
-                // the Archive sub-view pages like the outcome lists — the
-                // General pane stays the full scrollback
-                if chat_view == "archive" {
-                    list_pages.insert(
-                        "chat:archive".to_string(),
-                        st.clamp_list_page("chat", "archive", s.applied.len()),
-                    );
-                }
-                continue;
+                continue; // the chat log IS the pane — full scrollback, never paged
             }
             let key = sf.as_str();
             list_pages.insert(
@@ -3600,8 +3572,6 @@ async fn push_surfaces(
     let bundle = SurfacesBundle {
         lang,
         chain_rows,
-        chat_archive: chat_view == "archive",
-        archive_exists,
         member,
         threshold_badge,
         surfaces,
@@ -3669,13 +3639,6 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             let a_page = page_of(&b.list_pages, &s.key, "applied");
             let (a_start, a_end, a_page, a_pages) = if s.gated {
                 page_slice(s.log.len(), a_page, LIST_PAGE_SIZE)
-            } else if s.key == "chat" && b.chat_archive {
-                // the Archive sub-view pages at 20 (a half-window of
-                // retention can be long); quotes pointing outside the
-                // current page degrade to teaser-only — acceptable in a
-                // read-only archive
-                let page = page_of(&b.list_pages, "chat", "archive");
-                page_slice(s.log.len(), page, LIST_PAGE_SIZE)
             } else {
                 (0, s.log.len(), 0, 1)
             };
@@ -3743,9 +3706,6 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 .map(|sf| {
                     sf.views()
                         .iter()
-                        .filter(|(key, _)| {
-                            view_visible(&s.key, key, b.archive_exists, b.chat_archive)
-                        })
                         .map(|(key, label)| ViewItem {
                             key: (*key).into(),
                             name: view_label(b.lang, key, label).into(),
@@ -3932,7 +3892,6 @@ fn view_icon(key: &str) -> &'static str {
         "declined" => "🚫",
         "today" => "💬",
         "archive" => "🗄️",
-        "unread" => "🔔",
         "brain" => "🧠",
         "proposals" => "🗳️",
         "accepted" => "✅",
@@ -4952,7 +4911,6 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "pending" => "Ausstehend",
         "declined" => "Abgelehnt",
         "today" => "Allgemein",
-        "unread" => "Ungelesen",
         "archive" => "Archiv",
         "proposals" => "Vorschläge",
         "accepted" => "Angenommen",
@@ -4971,16 +4929,6 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         _ => en,
     }
     .to_string()
-}
-
-/// Sidebar sub-view visibility: the CHAT Archive item earns its place only
-/// while the archive half actually holds messages — or while the user is
-/// standing in it (never hide the ground under the active selection; it
-/// vanishes once they leave). Every other sub-view is always offered —
-/// including the "archive" views of OTHER surfaces (Memory, Quests), whose
-/// state has nothing to do with the chat retention window.
-fn view_visible(surface: &str, key: &str, archive_has_rows: bool, viewing_archive: bool) -> bool {
-    surface != "chat" || key != "archive" || archive_has_rows || viewing_archive
 }
 
 /// The default transition op the GUI uses when proposing on a surface.
@@ -6869,19 +6817,23 @@ mod tests {
         assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
     }
 
+    /// The chat offers exactly ONE view, and it is writable. The nav used
+    /// to carry two more: an Archive (the older half of the retention
+    /// window - an invisible cliff a conversation fell over at 3.5 days)
+    /// and the agent-facing "unread" slice, which broke the pane outright:
+    /// the GUI marks the on-screen channel read on every refresh, so it
+    /// emptied itself on sight, and the compose row is gated on the general
+    /// view, so there was nothing to write into either.
     #[test]
-    fn archive_item_only_shows_while_the_archive_holds_messages() {
-        assert!(!view_visible("chat", "archive", false, false), "empty archive: hidden");
-        assert!(view_visible("chat", "archive", true, false), "archived messages exist: offered");
-        assert!(
-            view_visible("chat", "archive", false, true),
-            "the view the user stands in never vanishes under them"
+    fn the_chat_offers_one_writable_view() {
+        assert_eq!(
+            Surface::Chat.views().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            ["today"],
+            "a second chat view is a place a user can get stranded in"
         );
-        assert!(view_visible("chat", "today", false, false), "other sub-views are always offered");
-        assert!(
-            view_visible("memory", "archive", false, false),
-            "another surface's archive view has nothing to do with the chat retention window"
-        );
+        assert_eq!(Surface::Chat.default_view(), "today");
+        // …and the read slice stays available to an agent, off the nav
+        assert!(molt_core::CHAT_READ_SLICES.contains(&"unread"));
     }
 
     #[test]

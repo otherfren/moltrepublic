@@ -119,13 +119,13 @@ impl Surface {
             // "today" is the general view: everything within the chat
             // retention window (the key predates the renames and stays —
             // it is select_view's wire vocabulary)
-            Surface::Chat => &[
-                ("today", "General"),
-                ("archive", "Archive"),
-                // B2: only the messages after the seat's read cursor — what
-                // an agent asks for to see "what is new"
-                ("unread", "Unread"),
-            ],
+            // ONE view: the group chat, as far back as the retention window
+            // reaches. It used to be split in half by age ("today" = the
+            // younger half, "archive" = the older) — an invisible cliff that
+            // read as "my chat disappeared" the moment a conversation was
+            // older than half a window (default: 3.5 days). The key stays
+            // `today`: it is select_view's wire vocabulary.
+            Surface::Chat => &[("today", "General")],
             Surface::Memory => &[
                 ("brain", "Multisig-Wiki"),
                 ("proposals", "Proposals"),
@@ -163,6 +163,18 @@ impl Surface {
         self.views().first().map(|v| v.0).unwrap_or("")
     }
 }
+
+/// Chat READ slices for `ReadState { view }` — a different axis from the
+/// NAV views ([`Surface::views`]), and deliberately so.
+///
+/// `unread` is agent-facing: exactly the messages after this seat's read
+/// cursor (B2). It was briefly a nav row too, and that broke the chat for a
+/// human — the GUI marks the on-screen channel read on every refresh, so the
+/// pane emptied itself the moment it was looked at, and the compose row
+/// (gated on the general view) stayed collapsed. A slice that is empty by
+/// construction is something an agent ASKS for, never somewhere a person
+/// navigates to.
+pub const CHAT_READ_SLICES: &[&str] = &["unread"];
 
 /// The top-level screen the GUI is showing. This is **shared session state**:
 /// it lives in the engine, not the GUI, so an MCP agent can navigate the node

@@ -223,6 +223,10 @@ export component ViewRow inherits Rectangle {
     // extra indent for a row nested one level deeper (the pending decisions
     // under Organization → Pending); 0 = a normal view row
     in property <length> indent: 0px;
+    // a decision row's standing, right-aligned and quiet ("1/3" = one of
+    // three needed approvals). Deliberately NOT the warn badge: that one
+    // means "something is waiting for you", and a tally is just a fact.
+    in property <string> quorum: "";
     callback chosen();
     height: 30px;
     border-radius: Theme.win95 ? 0px : 6px;
@@ -257,6 +261,13 @@ export component ViewRow inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
+        }
+        if root.quorum != "": Text {
+            text: root.quorum;
+            color: Theme.faint;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
         }
         if root.alert > 0: Text {
             text: "⚠️";
@@ -1051,6 +1062,17 @@ export component ProposalCard inherits Rectangle {
     drop-shadow-blur: Theme.win95 ? 0px : 12px;
     drop-shadow-offset-y: Theme.win95 ? 0px : 2px;
     drop-shadow-color: #00000026;
+    // the whole card opens its discussion — the same thing the 💬 button
+    // does. FIRST child on purpose: everything below renders on top of it,
+    // so the approve/decline buttons, the image controls and the vote strip
+    // keep their own clicks. A compact card is already the header OF that
+    // discussion, so it stays inert.
+    if !root.compact: TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.discuss();
+        }
+    }
     VerticalLayout {
         padding: 14px;
         spacing: 10px;
