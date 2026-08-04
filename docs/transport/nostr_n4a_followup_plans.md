@@ -132,12 +132,14 @@ can start; but a wrong guess is expensive in exactly these five places.
 | E | `GroupSub::recv` failure handling | ✅ (this session) |
 | F | Honesty gaps | ✅ — the deferred elapsed-wait line landed 2026-08-02 |
 | G | NIP-42 inert on ritual subscriptions | ✅ (this session) |
-| H | Unpinned security checks | ✅ H2 (was semi-inert) + H4 + the unsigned-`roster` finding (`1defd69`); H1/H3 need a hostile-peer harness |
+| H | Unpinned security checks | ✅ all four — H2 (was semi-inert) + H4 + the unsigned-`roster` finding (`1defd69`), H1/H3 pinned 2026-08-04 by `nostr_ritual_adversarial.rs` |
 | I | Invite relay cap | ✅ `28456f7` |
 
 **All nine clusters are closed** (2026-08-01), plus the adversarial swoop
-over the whole change-set and its survivors. Remaining coverage debt: H1/H3 need a
-hostile-peer harness. F's elapsed-wait line is **done** (2026-08-02): the
+over the whole change-set and its survivors. The last coverage debt — H1/H3's
+hostile-peer harness — landed 2026-08-04 as
+`crates/molt-engine/tests/nostr_ritual_adversarial.rs`; both tests are
+verified red with their gate deleted. F's elapsed-wait line is **done** (2026-08-02): the
 member's genesis wait now reports how long it has been waiting, on a widening
 ladder, so silence and progress stop looking identical.
 

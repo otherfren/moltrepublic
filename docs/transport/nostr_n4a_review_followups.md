@@ -352,18 +352,29 @@ red**, where before it stayed green.
 **✅ H4 — the window-roll resubscribe** is pinned by cluster E's
 `nostr_window_roll.rs` in both crates (that work needed the same test seam).
 
-**OPEN — H1 and H3.** The proof-of-possession gate on the founder's ingest and
-the joiner's founder-identity guards on the 1059 inbox are still pinned by no
-test. Both need the same missing harness: a hand-written HOSTILE peer
-(`RitualNet` + `MlsMember` + `GroupChannel` over one relay) that can send a
-gift-wrapped JoinRequest under a key it does not hold, and a 1059 frame from
-somebody other than the link's founder. The existing state-level ingest test
-runs `nostr: None`, so the `if is_nostr` PoP branch never executes in it — a
-state-level pin would be inert for exactly the reason this cluster exists.
+**✅ H1 and H3 — DONE (2026-08-04).** The harness this cluster was waiting on
+is `crates/molt-engine/tests/nostr_ritual_adversarial.rs`: a hostile
+counterparty built only from public API (a `RitualNet` under a key of the
+test's choosing) against a REAL engine driven through the Command surface.
 
-That harness is worth building on its own (it is also what a hostile-relay
-suite would reuse), which is why it is recorded here rather than faked with a
-test that cannot reach the branch.
+- **H1** — `a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused`.
+  The attacker mints a genuine v2 MAC over the VICTIM's anchor (the ticket is
+  printed in the link, so the MAC proves nothing about possession) and seals
+  the wrap under its own key. Asserts the refusal line, the unanchored seat
+  and `!can_propose`, then a CONTROL request with its own anchor to prove the
+  refusal did not spend the ticket. Verified red with the `if is_nostr` block
+  deleted: the impersonation anchors the seat and `can_propose` flips true.
+- **H3** — `a_1059_frame_from_anyone_but_the_link_founder_cannot_kill_a_join`.
+  An unrelated key gift-wraps `LinkSpent` and a `WelcomePayload` carrying the
+  invite's exact relay list with unusable MLS bytes, continuously from BEFORE
+  the founder accepts. Verified red with either guard pair deleted.
+
+**A timing finding worth keeping.** The first version of H3 shot only after
+the genuine acceptance and stayed GREEN with the Welcome guards deleted — the
+honest Welcome had already been consumed, so the garbage never raced anything.
+Shooting from before the acceptance is what makes both pairs load-bearing.
+Same inert-keystone class as H2, found the same way: by running the deletion
+experiment instead of trusting a green test.
 
 ## I. Leftovers — ✅ DONE
 
