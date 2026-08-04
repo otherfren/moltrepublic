@@ -211,7 +211,7 @@ pub fn run_app(
     // dirty draft.
     let last_settings: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
 
-    // Chat-bus UI state (selected channel, unread ledger, proposal
+    // Chat-bus UI state (selected channel, proposal
     // first-seen times) — UI-local by design, see [`ChatUiState`].
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
@@ -2960,17 +2960,6 @@ struct QuoteSrc {
     deleted: bool,
 }
 
-/// Per-channel unread bookkeeping (P9 — in-memory only for this iteration;
-/// persisting into `WorkspacePrefs` is the B5 stretch package).
-#[derive(Default)]
-struct UnreadLedger {
-    /// Channel key → message count up to which the channel counts as read.
-    last_seen: HashMap<String, usize>,
-    /// The very first observation seeds `last_seen` (opening a workspace
-    /// must not present its whole history as one unread wall).
-    seeded: bool,
-}
-
 /// UI-local chat-bus state shared between the Slint callbacks and the
 /// mirror task. The SELECTED channel deliberately lives here (UI-local,
 /// like `nav-collapsed`) and NOT in the shared `SessionView`: the filter
@@ -2992,8 +2981,6 @@ struct ChatUiState {
     workspace: String,
     /// The channel the chat pane shows; compose files new messages here.
     selected: ChannelRef,
-    /// Per-channel unread counts (reset on selection).
-    ledger: UnreadLedger,
     /// Proposal id → unix time this UI first saw it. Proposals carry no
     /// timestamp, so the patch-channel system lines interleave at this
     /// first-seen approximation (documented in `patch_system_lines`).
@@ -3007,7 +2994,7 @@ struct ChatUiState {
     /// last-write-wins on the Slint event loop; every selection change and
     /// every push start bumps this, and a push whose captured generation
     /// is no longer current must neither apply its bundle nor touch the
-    /// unread ledger (see [`ChatUiState::begin_push`]).
+    /// bundle apply (see [`ChatUiState::begin_push`]).
     generation: u64,
     /// Organization → Members sort: active column ("" = roster order).
     /// Like the channel selection this is UI-LOCAL presentation state —
@@ -3039,7 +3026,7 @@ impl ChatUiState {
     /// Bind the state to the active workspace. On a SWITCH (different id,
     /// including to/from "no workspace") everything resets: a stale
     /// Patch/Topic selection from the previous workspace must not filter
-    /// the new one's log, the ledger must re-seed on the new history and
+    /// the new one's log, and
     /// the first-seen stamps + proposal cache belong to the old
     /// proposals. Same id → no-op.
     fn enter_workspace(&mut self, active: &str) {
@@ -3074,7 +3061,7 @@ impl ChatUiState {
     }
 
     /// Whether the push stamped `gen` is still the newest observer; a
-    /// stale push skips its ledger bookkeeping and its apply closure.
+    /// stale push skips its apply closure.
     fn is_current(&self, gen: u64) -> bool {
         self.generation == gen
     }
@@ -3317,7 +3304,7 @@ async fn push_surfaces(
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
-    // neither touch the ledger nor land its bundle (concurrent pushes
+    // not land its bundle (concurrent pushes
     // otherwise race last-write-wins and can revert a fresh selection)
     let Some((my_gen, selected)) = chat_ui
         .lock()
@@ -3478,11 +3465,27 @@ async fn push_surfaces(
         .map(|s| s.channels.clone())
         .unwrap_or_default();
     let quotes = quote_sources(&full_msgs);
-    let counts: Vec<(String, usize)> = infos
-        .iter()
-        .map(|i| (channel_key(&i.channel), i.count))
-        .collect();
     let selected_key = channel_key(&selected);
+    // B2: unread comes from the ENGINE's per-channel cursor now (the same
+    // count an MCP agent reads) — the on-screen channel renders 0 and its
+    // cursor is advanced below, because being on screen IS being read
+    let engine_unread: HashMap<String, usize> = infos
+        .iter()
+        .map(|i| {
+            let key = channel_key(&i.channel);
+            let u = if key == selected_key { 0 } else { i.unread };
+            (key, u)
+        })
+        .collect();
+    if full_chat.is_some()
+        && infos
+            .iter()
+            .any(|i| channel_key(&i.channel) == selected_key && i.unread > 0)
+    {
+        let _ = wallet
+            .execute(Command::MarkChannelRead { channel: selected.clone(), up_to: String::new() })
+            .await;
+    }
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
     // the Chain-History settings panel: every committed block, newest
     // first (co-equal read — the MCP read_chain tool serves the same)
@@ -3536,7 +3539,7 @@ async fn push_surfaces(
             st.clamp_list_page("chain", "history", chain_len),
         );
         (
-            st.ledger.observe(&counts, &selected_key),
+            engine_unread,
             st.first_seen.clone(),
             st.proposals.clone(),
             (
@@ -3929,6 +3932,7 @@ fn view_icon(key: &str) -> &'static str {
         "declined" => "🚫",
         "today" => "💬",
         "archive" => "🗄️",
+        "unread" => "🔔",
         "brain" => "🧠",
         "proposals" => "🗳️",
         "accepted" => "✅",
@@ -4853,34 +4857,6 @@ fn merge_by_time(
     out
 }
 
-impl UnreadLedger {
-    /// Fold one fresh per-channel count set into the ledger and return the
-    /// unread count per channel key. The selected channel is always marked
-    /// read ("reset on channel selection", and messages arriving while a
-    /// channel is on screen are being read); the first observation seeds
-    /// the ledger so an opened workspace starts caught-up.
-    fn observe(&mut self, counts: &[(String, usize)], selected: &str) -> HashMap<String, usize> {
-        if !self.seeded {
-            self.last_seen = counts.iter().cloned().collect();
-            self.seeded = true;
-        }
-        let selected_count = counts
-            .iter()
-            .find(|(k, _)| k == selected)
-            .map(|(_, c)| *c)
-            .unwrap_or(0);
-        self.last_seen.insert(selected.to_string(), selected_count);
-        counts
-            .iter()
-            .map(|(k, c)| {
-                (
-                    k.clone(),
-                    c.saturating_sub(self.last_seen.get(k).copied().unwrap_or(0)),
-                )
-            })
-            .collect()
-    }
-}
 
 /// A short human label for a surface transition payload: the human title
 /// alone — the op code stays wire-side (nobody proposes "set_image", they
@@ -4976,6 +4952,7 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "pending" => "Ausstehend",
         "declined" => "Abgelehnt",
         "today" => "Allgemein",
+        "unread" => "Ungelesen",
         "archive" => "Archiv",
         "proposals" => "Vorschläge",
         "accepted" => "Angenommen",
@@ -6275,30 +6252,35 @@ mod tests {
                 count: 4,
                 last_ts: 40,
                 state: None,
+                unread: 0,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(7) },
                 count: 1,
                 last_ts: 30,
                 state: None,
+                unread: 0,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(5) },
                 count: 2,
                 last_ts: 20,
                 state: Some(ProposalState::Applied),
+                unread: 0,
             },
             ChannelInfo {
                 channel: ChannelRef::Patch { id: ProposalId(3) },
                 count: 5,
                 last_ts: 10,
                 state: Some(ProposalState::Proposed),
+                unread: 0,
             },
             ChannelInfo {
                 channel: ChannelRef::Group,
                 count: 9,
                 last_ts: 50,
                 state: None,
+                unread: 0,
             },
         ];
         let known = HashMap::from([
@@ -6523,6 +6505,7 @@ mod tests {
             count: 1,
             last_ts: 10,
             state: None,
+            unread: 0,
         }];
         let rows = derive_channels(0, &infos, &known, &HashMap::new());
         assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
@@ -6623,6 +6606,7 @@ mod tests {
             count: 2,
             last_ts: 20,
             state: Some(ProposalState::Rejected),
+            unread: 0,
         }];
         assert!(
             derive_channels(0, &infos, &known, &HashMap::new()).is_empty(),
@@ -6685,6 +6669,7 @@ mod tests {
             count: 1,
             last_ts: 10,
             state,
+            unread: 0,
         };
         let patch = |id: u64| ChannelRef::Patch { id: ProposalId(id) };
         let known = HashMap::from([
@@ -6757,37 +6742,13 @@ mod tests {
         assert!(!st.is_current(g2));
     }
 
-    #[test]
-    fn unread_counts_reset_on_channel_selection() {
-        let mut ledger = UnreadLedger::default();
-        let counts = vec![("group".to_string(), 3usize), ("topic:t".to_string(), 2)];
-        // the first sight of a workspace counts as read — no unread wall
-        let unread = ledger.observe(&counts, "group");
-        assert!(unread.values().all(|u| *u == 0), "{unread:?}");
-        // new traffic shows up everywhere but the channel on screen
-        let counts = vec![("group".to_string(), 5), ("topic:t".to_string(), 4)];
-        let unread = ledger.observe(&counts, "group");
-        assert_eq!(unread["group"], 0);
-        assert_eq!(unread["topic:t"], 2);
-        // selecting the topic resets its count …
-        let unread = ledger.observe(&counts, "topic:t");
-        assert_eq!(unread["topic:t"], 0);
-        assert_eq!(unread["group"], 0, "group stays read up to its last viewing");
-        // … and a channel arriving after the seed starts fully unread
-        let counts = vec![
-            ("group".to_string(), 5),
-            ("topic:t".to_string(), 4),
-            ("topic:new".to_string(), 3),
-        ];
-        let unread = ledger.observe(&counts, "topic:t");
-        assert_eq!(unread["topic:new"], 3);
-    }
 
     /// A workspace switch must not leak the previous workspace's channel
     /// state into the next one: a stale Patch/Topic selection would filter
-    /// the new workspace's log until manually cleared, the ledger would
-    /// misread its counts and the first-seen stamps would misplace system
-    /// lines. Same workspace → everything is kept.
+    /// the new workspace's log until manually cleared, and the first-seen
+    /// stamps would misplace system lines. Same workspace → everything is
+    /// kept. (Unread counts live engine-side since B2 and reset with the
+    /// workspace there.)
     #[test]
     fn chat_ui_state_resets_on_workspace_switch() {
         let mut st = ChatUiState::default();
@@ -6796,10 +6757,8 @@ mod tests {
             name: "budget".to_string(),
         };
         st.first_seen.insert(4, 100);
-        let counts = vec![("group".to_string(), 3usize)];
-        let _ = st.ledger.observe(&counts, "topic:budget");
 
-        // the same workspace: selection, ledger and stamps survive
+        // the same workspace: selection and stamps survive
         st.enter_workspace("ws-1");
         assert_eq!(
             st.selected,
@@ -6809,14 +6768,10 @@ mod tests {
         );
         assert_eq!(st.first_seen.get(&4), Some(&100));
 
-        // a switch: back to Group, fresh ledger (the next observation
-        // seeds — no unread wall from the new workspace's history),
-        // stamps gone, and the new identity sticks
+        // a switch: back to Group, stamps gone, and the new identity sticks
         st.enter_workspace("ws-2");
         assert_eq!(st.selected, ChannelRef::Group);
         assert!(st.first_seen.is_empty());
-        let unread = st.ledger.observe(&[("group".to_string(), 9usize)], "topic:x");
-        assert_eq!(unread["group"], 0, "the fresh ledger re-seeds");
         st.selected = ChannelRef::Group;
         st.enter_workspace("ws-2");
         assert!(st.first_seen.is_empty(), "no reset without a switch");

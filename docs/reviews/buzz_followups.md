@@ -54,7 +54,22 @@ work packages allocating in parallel is precisely how a collision arrives.
 have four kinds, three of them fixed by the Marmot spec — bands would be
 ceremony without a payload.
 
-## B2 — Read state engine-side (S2)
+## B2 — Read state engine-side (S2) — ✅ BUILT 2026-08-04
+
+Landed as specified: one cursor per channel, `MessageId`-addressed, held by
+the engine and persisted in `prefs.toml` (`WorkspacePrefs.read_cursors`,
+local-only). `Command::MarkChannelRead` (a tool on both surfaces —
+`MarkRead` stayed the shared read-RECEIPTS verb) advances it, only ever
+forward; `ReadState`'s channel enumeration carries per-channel `unread`,
+and the chat surface gained the `view: "unread"` slice — exactly the
+messages after the cursor, in order, by id. Seeding survived the move
+engine-side: the first observation of a cursor-less workspace marks
+everything read. The GUI derives its badges from the engine counts, marks
+the on-screen channel read, and `UnreadLedger` is deleted. Step 7
+(mark-unread) deliberately not built, as the step itself argues. Pins:
+`a_read_cursor_survives_a_restart`,
+`marking_a_channel_read_counts_and_slices_by_id`,
+`a_read_cursor_survives_compaction_by_id` (the id-versus-index decision).
 
 **Why.** `UnreadLedger` lives in `crates/molt-ui/src/lib.rs` and is in-memory;
 its own comment names persistence as "the B5 stretch package". The word *unread*

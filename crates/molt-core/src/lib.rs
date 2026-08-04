@@ -119,7 +119,13 @@ impl Surface {
             // "today" is the general view: everything within the chat
             // retention window (the key predates the renames and stays —
             // it is select_view's wire vocabulary)
-            Surface::Chat => &[("today", "General"), ("archive", "Archive")],
+            Surface::Chat => &[
+                ("today", "General"),
+                ("archive", "Archive"),
+                // B2: only the messages after the seat's read cursor — what
+                // an agent asks for to see "what is new"
+                ("unread", "Unread"),
+            ],
             Surface::Memory => &[
                 ("brain", "Multisig-Wiki"),
                 ("proposals", "Proposals"),
@@ -1029,6 +1035,19 @@ pub enum ChannelRef {
 pub const TOPIC_NAME_MAX_CHARS: usize = 64;
 
 impl ChannelRef {
+    /// The channel's stable string key (`"group"` / `"patch:<id>"` /
+    /// `"topic:<name>"`) — what the B2 read cursors are stored under, and
+    /// the same encoding the GUI sidebar rows carry. Injective: topic
+    /// names cannot contain `:`-prefixed collisions with the fixed forms
+    /// because the prefix alone decides the variant.
+    pub fn storage_key(&self) -> String {
+        match self {
+            ChannelRef::Group => "group".to_string(),
+            ChannelRef::Patch { id } => format!("patch:{}", id.0),
+            ChannelRef::Topic { name } => format!("topic:{name}"),
+        }
+    }
+
     /// Whether this is the all-hands [`ChannelRef::Group`] channel (the
     /// `skip_serializing_if` guard that keeps a legacy-shaped message
     /// byte-identical on the wire).
@@ -1343,6 +1362,14 @@ pub struct WorkspacePrefs {
     /// history (the paths would leak the local filesystem layout).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shared_files: std::collections::BTreeMap<String, String>,
+    /// B2 — the seat's own read state: channel key
+    /// ([`ChannelRef::storage_key`]) → the [`MessageId`] (hex) this seat
+    /// has read THROUGH. Id-addressed, never a position: positions shift
+    /// under WP4a compaction, ids do not. Local convenience like the rest
+    /// of the prefs — never history, never on the wire; the shared read
+    /// RECEIPTS are a different thing and stay in the log.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub read_cursors: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for WorkspacePrefs {
@@ -1354,6 +1381,7 @@ impl Default for WorkspacePrefs {
             last_backup: None,
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
+            read_cursors: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -3044,6 +3072,20 @@ pub enum Command {
         /// The share message's stable id.
         id: MessageId,
     },
+    /// B2 — advance the seat's OWN read cursor for one channel. Private to
+    /// the seat (persisted in `prefs.toml`, never on the wire) — the shared
+    /// read RECEIPTS ([`Command::MarkRead`]) are a different mechanism and
+    /// stay as they are. A tool on both surfaces: the agent driving this
+    /// seat reads too.
+    MarkChannelRead {
+        /// The channel whose cursor advances.
+        #[serde(default, skip_serializing_if = "ChannelRef::is_group")]
+        channel: ChannelRef,
+        /// Read THROUGH this message id (hex). Empty = through the
+        /// channel's newest visible message.
+        #[serde(default)]
+        up_to: String,
+    },
     /// Read the projected state of one surface.
     ReadState {
         /// Which surface to read.
@@ -4275,6 +4317,12 @@ pub struct ChannelInfo {
     /// Additive (`#[serde(default)]`), so older snapshots read as `None`.
     #[serde(default)]
     pub state: Option<ProposalState>,
+    /// B2: messages in this channel AFTER the seat's read cursor. A channel
+    /// without a cursor counts fully unread — a cursor whose message was
+    /// compacted away means the seat has not read the channel since before
+    /// the retention horizon, so that is honest too. Additive.
+    #[serde(default)]
+    pub unread: usize,
 }
 
 /// A projected snapshot of one surface.

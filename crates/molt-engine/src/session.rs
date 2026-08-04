@@ -1085,6 +1085,9 @@ impl State {
         } else {
             String::new()
         };
+        // B2: the chat is materialized — load (and, first time, seed) the
+        // seat's read cursors
+        self.adopt_read_cursors();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

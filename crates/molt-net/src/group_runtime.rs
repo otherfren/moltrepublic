@@ -778,8 +778,12 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     mut stop: watch::Receiver<bool>,
 ) {
     let mut sub = match channel.subscribe().await {
-        Ok(s) => s,
+        Ok(s) => {
+            tracing::debug!(me = %me, "group inbox subscribed");
+            s
+        }
         Err(e) => {
+            tracing::warn!(me = %me, error = %e, "group inbox subscribe failed - the runtime is deaf");
             let _ = health.send(GroupHealth {
                 subscribed: false,
                 deaf: Some(e.to_string()),
@@ -845,6 +849,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
             GroupRecv::Idle => {}
             GroupRecv::Deaf(why) => {
                 if state.deaf.as_deref() != Some(why.as_str()) {
+                    tracing::warn!(me = %me, why = %why, "group inbox went deaf");
                     state.deaf = Some(why);
                     let _ = health.send(state.clone());
                 }

@@ -249,6 +249,9 @@ impl State {
                 }
             };
         }
+        // B2: a fresh materialization seeds the seat's read cursors (a
+        // founding/join has little history; a restore may carry plenty)
+        self.adopt_read_cursors();
         Ok(id)
     }
 

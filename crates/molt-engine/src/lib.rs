@@ -466,6 +466,10 @@ pub(crate) struct State {
     /// synthesized at the ingest choke points (P4), so no message in state
     /// ever carries a nil id.
     pub(crate) chat_pos: HashMap<MessageId, usize>,
+    /// B2 — the seat's own per-channel read cursors (channel storage key →
+    /// message id hex), the WORKING copy of `prefs.read_cursors`: loaded at
+    /// open (`adopt_read_cursors`), written through on every `MarkRead`.
+    pub(crate) read_cursors: std::collections::BTreeMap<String, String>,
     /// This workspace has physically dropped expired chat (WP4a compaction),
     /// so chat POSITIONS are no longer meaningful and a legacy index-addressed
     /// op must be ignored instead of mis-applied ([`State::chat_target`]).
@@ -882,6 +886,7 @@ impl State {
             cmd_tx: cmd_tx.downgrade(),
             chat: Vec::new(),
             chat_pos: HashMap::new(),
+            read_cursors: std::collections::BTreeMap::new(),
             chat_pruned: false,
             chat_pruned_counts: std::collections::BTreeMap::new(),
             compacted_at: 0,
@@ -1070,6 +1075,9 @@ impl State {
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
+            Command::MarkChannelRead { channel, up_to } => {
+                self.cmd_mark_channel_read(channel, up_to)
+            }
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {
                 name,
@@ -4765,6 +4773,85 @@ mod tests {
             new_pk,
             "the sealed secret must be the private half of the anchor the Restored \
              block put in the chain"
+        );
+    }
+
+    /// B2 step 1 — the read cursor is the seat's own and PERSISTED: mark a
+    /// channel read, close the workspace, reopen it from the same storage —
+    /// the cursor is still where it was, and only what arrived after it
+    /// counts unread. (In-memory ledgers presented the whole history as
+    /// unread on every restart; an MCP agent could not see "what is new"
+    /// at all.)
+    #[test]
+    fn a_read_cursor_survives_a_restart() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let (chain, republic_id) = recovered_chain_with(&phrase, Vec::new(), None);
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            Some(1),
+        )
+        .expect("materialize");
+        let id = st.session.active_workspace.clone();
+        let a = st
+            .post_message("bob".to_string(), "first".to_string(), None, molt_core::ChannelRef::Group)
+            .expect("post a");
+        st.post_message("bob".to_string(), "second".to_string(), None, molt_core::ChannelRef::Group)
+            .expect("post b");
+        st.cmd_mark_channel_read(molt_core::ChannelRef::Group, hex::encode(a.0))
+            .expect("mark a read");
+        drop(st); // close: the writer flushes prefs + log and releases LOCK
+
+        // a FRESH engine over the same storage
+        let (ev_tx, _keep) = broadcast::channel::<Event>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
+        let mut st2 = State::new(
+            GroupConfig::demo(),
+            SessionView {
+                workspaces: molt_storage::scan_workspaces(tmp.path())
+                    .iter()
+                    .map(molt_storage::ScanEntry::info)
+                    .collect(),
+                settings: molt_core::SessionSettings {
+                    workspace_dir: tmp.path().display().to_string(),
+                    ..molt_core::SessionSettings::default()
+                },
+                ..SessionView::default()
+            },
+            ev_tx,
+            cmd_tx,
+            None,
+            true,
+            None,
+        );
+        // the reopen may race the closing writer's LOCK release
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match st2.cmd_open_workspace(id.clone()) {
+                Ok(_) => break,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("reopening: {e:?}"),
+            }
+        }
+        assert!(
+            !st2.read_cursors.is_empty(),
+            "the cursor came back from prefs.toml, not from RAM"
+        );
+        let unread: Vec<String> =
+            st2.chat_visible_in(Some("unread")).map(|m| m.body.clone()).collect();
+        assert_eq!(
+            unread,
+            vec!["second"],
+            "the restart kept 'read through first' - not an unread wall, \
+             and not silently all-read either"
         );
     }
 

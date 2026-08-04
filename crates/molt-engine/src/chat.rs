@@ -123,6 +123,121 @@ impl State {
         Ok(id)
     }
 
+    // ---- B2: the seat's own read cursors (buzz_followups.md) ------------
+    //
+    // One cursor per channel, addressed by MessageId (positions shift under
+    // WP4a compaction, ids do not), held by the engine and persisted in
+    // prefs.toml — so a restart keeps what was read, and an MCP agent
+    // driving the same seat sees the same "what is new" the GUI counts.
+
+    /// Load the persisted cursors for the freshly opened workspace, and
+    /// SEED a cursor-less one: the first observation marks everything read
+    /// — opening a workspace must not present its whole history as one
+    /// unread wall (the old GUI ledger's rule, now engine-side).
+    pub(crate) fn adopt_read_cursors(&mut self) {
+        self.read_cursors = self
+            .active
+            .as_ref()
+            .map(|a| a.prefs.read_cursors.clone())
+            .unwrap_or_default();
+        if !self.read_cursors.is_empty() {
+            return;
+        }
+        let newest: Vec<(String, MessageId)> = {
+            let mut per: std::collections::HashMap<String, MessageId> =
+                std::collections::HashMap::new();
+            // log order — the LAST message per channel wins, i.e. the newest
+            for m in self.chat_visible() {
+                per.insert(m.channel.storage_key(), m.id);
+            }
+            per.into_iter().collect()
+        };
+        if newest.is_empty() {
+            return;
+        }
+        for (k, id) in newest {
+            self.read_cursors.insert(k, hex::encode(id.0));
+        }
+        self.persist_read_cursors();
+    }
+
+    /// Write the working cursors through to `prefs.toml` (a session-only
+    /// workspace keeps them for the session).
+    fn persist_read_cursors(&mut self) {
+        if let Some(a) = &mut self.active {
+            a.prefs.read_cursors = self.read_cursors.clone();
+            a.handle.set_prefs(a.prefs.clone());
+        }
+    }
+
+    /// The channel's read cursor as a LOG position. `None` = no cursor, or
+    /// one whose message no longer exists — the seat has not read the
+    /// channel since before the retention horizon, so everything visible
+    /// counts unread (honest, and exactly what id-addressing buys: a
+    /// pruned-away cursor never silently re-points at a shifted position).
+    pub(crate) fn read_cursor_pos(&self, channel: &ChannelRef) -> Option<usize> {
+        let hexid = self.read_cursors.get(&channel.storage_key())?;
+        let raw = hex::decode(hexid).ok()?;
+        let arr: [u8; 16] = raw.try_into().ok()?;
+        self.chat_pos.get(&MessageId(arr)).copied()
+    }
+
+    /// B2: does `m` sit after its channel's read cursor?
+    pub(crate) fn chat_msg_unread(&self, m: &molt_core::ChatMessage) -> bool {
+        match self.read_cursor_pos(&m.channel) {
+            None => true,
+            Some(c) => self.chat_pos.get(&m.id).map_or(true, |p| *p > c),
+        }
+    }
+
+    /// B2 — the seat marks a channel read ([`Command::MarkChannelRead`], a
+    /// tool on both surfaces). `up_to` empty = through the channel's newest
+    /// visible message. The cursor only ever advances — mark-unread is
+    /// deliberately not built (B2 step 7: one machine per seat).
+    pub(crate) fn cmd_mark_channel_read(
+        &mut self,
+        channel: ChannelRef,
+        up_to: String,
+    ) -> Result<Reply, MoltError> {
+        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        let id = if up_to.trim().is_empty() {
+            match self.chat_visible().filter(|m| m.channel == channel).last().map(|m| m.id) {
+                // an empty channel has nothing to read
+                None => return Ok(Reply::Ack),
+                Some(id) => id,
+            }
+        } else {
+            let raw = hex::decode(up_to.trim())
+                .ok()
+                .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                .ok_or_else(|| {
+                    MoltError::BadPayload("up_to must be a 32-hex message id".into())
+                })?;
+            let id = MessageId(raw);
+            // the id must BE a message of this channel — a foreign cursor
+            // would silently read as "everything unread" forever
+            let pos = self
+                .chat_pos
+                .get(&id)
+                .copied()
+                .ok_or_else(|| MoltError::BadPayload("up_to names no known message".into()))?;
+            if self.chat.get(pos).map(|m| &m.channel) != Some(&channel) {
+                return Err(MoltError::BadPayload(
+                    "up_to is not a message of this channel".into(),
+                ));
+            }
+            if let Some(cur) = self.read_cursor_pos(&channel) {
+                if pos <= cur {
+                    return Ok(Reply::Ack);
+                }
+            }
+            id
+        };
+        self.read_cursors.insert(channel.storage_key(), hex::encode(id.0));
+        self.persist_read_cursors();
+        Ok(Reply::Ack)
+    }
+
     /// Share a local file into the chat: kick the off-actor hash task —
     /// the share message posts (via [`State::cmd_net_file_shared`]) once
     /// the real metadata + sha256 exist. Only metadata enters the chat;
@@ -774,6 +889,89 @@ mod tests {
         assert_eq!(st.chat[2].body, "B", "order is the sender's, not arrival");
         assert!(st.accepted["peer-2"].is_accepted(10) && st.accepted["peer-2"].is_accepted(12));
         assert!(st.ordered_park.is_empty(), "the park drained");
+    }
+
+    /// A fresh, VISIBLE chat message (recent ts — `land_chat`'s epoch-old
+    /// stamps age out of the retention window and the read contract).
+    fn land_fresh(st: &mut crate::State, seq: u64, id: u8, body: &str) -> MessageId {
+        let ts = crate::now_secs() - 60 + seq;
+        let mid = MessageId([id; 16]);
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts,
+            by: "peer-1".to_string(),
+            body: WorkspaceEvent::Chat(ChatMessage::text(mid, "peer-1", body, ts)),
+        });
+        mid
+    }
+
+    /// B2 — the engine-side read cursor: marking a channel read moves the
+    /// per-channel unread count and the `"unread"` view slices exactly the
+    /// messages AFTER the cursor, in order, by id; and the cursor only ever
+    /// advances (mark-unread is deliberately not built).
+    #[test]
+    fn marking_a_channel_read_counts_and_slices_by_id() {
+        let mut st = plain_state();
+        let a = land_fresh(&mut st, 1, 1, "a");
+        let b = land_fresh(&mut st, 2, 2, "b");
+        let c = land_fresh(&mut st, 3, 3, "c");
+        let group = molt_core::ChannelRef::Group;
+        let unread_bodies = |st: &crate::State| -> Vec<String> {
+            st.chat_visible_in(Some("unread")).map(|m| m.body.clone()).collect()
+        };
+        assert_eq!(unread_bodies(&st), vec!["a", "b", "c"], "no cursor - everything is new");
+
+        st.cmd_mark_channel_read(group.clone(), hex::encode(a.0)).expect("mark a");
+        assert_eq!(unread_bodies(&st), vec!["b", "c"], "exactly the messages after the cursor");
+        let channels = st.snapshot(molt_core::Surface::Chat, None, None).channels;
+        assert_eq!(channels[0].unread, 2, "the channel count agrees with the slice");
+
+        // the cursor only advances: re-marking an OLDER message is a no-op
+        st.cmd_mark_channel_read(group.clone(), hex::encode(b.0)).expect("mark b");
+        st.cmd_mark_channel_read(group.clone(), hex::encode(a.0)).expect("older is a no-op");
+        assert_eq!(unread_bodies(&st), vec!["c"]);
+
+        // empty up_to = through the newest visible message
+        st.cmd_mark_channel_read(group.clone(), String::new()).expect("mark all");
+        assert!(unread_bodies(&st).is_empty());
+        let channels = st.snapshot(molt_core::Surface::Chat, None, None).channels;
+        assert_eq!(channels[0].unread, 0);
+        let _ = c;
+    }
+
+    /// B2 step 3 — the pin that decides id-versus-index: prune BELOW the
+    /// cursor and the cursor still resolves to the same logical position.
+    /// A positional ledger would shift here (and count wrong in either
+    /// direction); the id-addressed cursor does not.
+    #[test]
+    fn a_read_cursor_survives_compaction_by_id() {
+        let mut st = plain_state();
+        let _a = land_fresh(&mut st, 1, 1, "a");
+        let b = land_fresh(&mut st, 2, 2, "b");
+        let _c = land_fresh(&mut st, 3, 3, "c");
+        st.cmd_mark_channel_read(molt_core::ChannelRef::Group, hex::encode(b.0))
+            .expect("mark b");
+
+        // the WP4a shape: prune below the cursor, rebuild from the dump
+        let mut snap = st.dump();
+        let cut = st.chat[0].ts + 1; // drops exactly "a"
+        assert_eq!(snap.prune_chat_before(cut), 1, "the oldest goes");
+        let cursors = st.read_cursors.clone();
+        let mut st = plain_state();
+        st.restore_dump(snap);
+        // the reopen path loads the cursors from prefs (adopt_read_cursors);
+        // the dump carries no prefs, so hand them over as the reopen would
+        st.read_cursors = cursors;
+
+        let unread: Vec<String> =
+            st.chat_visible_in(Some("unread")).map(|m| m.body.clone()).collect();
+        assert_eq!(
+            unread,
+            vec!["c"],
+            "after the prune the cursor still means 'read through b' - \
+             a positional cursor would have shifted"
+        );
     }
 
     /// §10.7 (DECIDED — OFF in V1): the file data plane is queue pairs, and

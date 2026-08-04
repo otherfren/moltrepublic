@@ -214,6 +214,7 @@ async fn channels_enumerates_distinct_refs_with_counts_and_group_is_always_prese
             count: 0,
             last_ts: 0,
             state: None,
+            unread: 0,
         }],
         "Group is present (and empty) before any message"
     );

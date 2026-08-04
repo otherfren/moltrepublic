@@ -790,9 +790,15 @@ impl State {
     ) -> impl Iterator<Item = &'a molt_core::ChatMessage> + 'a {
         let now = crate::now_secs();
         let days = self.org_effective().retention_days;
+        // B2: the "unread" view is POSITION-scoped, not time-scoped — the
+        // whole retention window, then only what sits after each channel's
+        // read cursor (what an agent asks for to see "what is new")
+        let unread = view == Some("unread");
+        let time_view = if unread { None } else { view };
         self.chat
             .iter()
-            .filter(move |m| chat_view_admits(view, m.ts, now, days))
+            .filter(move |m| chat_view_admits(time_view, m.ts, now, days))
+            .filter(move |m| !unread || self.chat_msg_unread(m))
     }
 
     /// Applied log of one surface, as wire values. Chat serializes its typed
@@ -841,6 +847,7 @@ impl State {
             count: 0,
             last_ts: 0,
             state: None,
+            unread: 0,
         }];
         let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
         for m in self.chat_visible() {
@@ -850,11 +857,16 @@ impl State {
                     count: 0,
                     last_ts: 0,
                     state: None,
+                    unread: 0,
                 });
                 infos.len() - 1
             });
             infos[at].count += 1;
             infos[at].last_ts = infos[at].last_ts.max(m.ts);
+            // B2: the engine-side unread count, so GUI and MCP agree
+            if self.chat_msg_unread(m) {
+                infos[at].unread += 1;
+            }
         }
         // annotate each patch channel with its vote's lifecycle state —
         // the read-side twin of the write guard (`ensure_channel_writable`):

@@ -91,7 +91,37 @@ cannot `record()` a `ChainRequest` before it has a workspace. **After the
 encrypted at an epoch the returning member can read, which is the one the
 re-key just created for it.
 
-### 3.1a RESOLVED (2026-08-04): the catch-up above the anchor runs
+### 3.1a MOSTLY resolved (2026-08-04) — one race still loses the catch-up
+
+**Correction to an earlier claim in this section.** Five defects were found
+and fixed and the catch-up now runs — but it is not reliable: measured
+2026-08-04, roughly **one run in four** loses it, and the capstone therefore
+does NOT assert it (a flaky keystone is worse than a named gap).
+
+**The race, diagnosed from instrumented logs.** The rejoiner subscribes to
+445 only after its Welcome. Envelopes the coordinator published BEFORE that
+moment are gone for it — the relay does not replay them into the new
+subscription's window. Its first arriving envelope becomes the
+fresh-incarnation ORDERING BASELINE (the rule §9 of
+`delivery_guarantee.md` describes), and that baseline is whatever happened
+to arrive first — in the losing runs the coordinator's seq 9, not its
+current seq 12. The served catch-up blocks then arrive as seqs 13/14/15
+with `prev_seq` 12/13/14, so 13 parks on a predecessor that can never
+arrive, and 14/15 park behind it. The park's pathology valve is 900 s.
+
+The delivery guarantee's own repair — the rejoiner ACKs, the coordinator
+rewinds its broadcast cursor to the proven floor and republishes the span —
+is the mechanism that SHOULD close this, and it left no trace within the
+30 s window. That is the next thing to instrument: whether the fresh
+incarnation's ack sheet reaches the coordinator at all, and whether
+`group_floor` counts it.
+
+**Consequence today:** a recovered seat usually catches up within a second,
+and sometimes stays at its anchor until the park's valve releases. Honestly
+behind, never silently wrong — but not yet the guarantee the rest of the
+transport holds to.
+
+### What the five fixes were
 
 **Verified 2026-08-03 by the capstone, with a republic whose head is three
 blocks above its anchor.** §3.1 above says "everything above the anchor

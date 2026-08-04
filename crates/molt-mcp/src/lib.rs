@@ -507,6 +507,26 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "mark_channel_read",
+            command: "mark_channel_read",
+            description: "Advance this seat's OWN read cursor for one channel (B2): what read_state's per-channel `unread` counts and the chat `view:\"unread\"` slice are measured against. Private to the seat (persisted locally, never on the wire) - the shared read receipts are a different mechanism. Omit `up_to` to mark the channel read through its newest visible message; pass a message id (32-char hex, from read_state) to stop at that message. The cursor only ever advances.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "channel": channel_schema("the channel to mark read (omit for the all-hands group)"),
+                    "up_to": { "type": "string", "description": "optional: read THROUGH this message id (32-char lowercase hex)" }
+                }
+            }),
+            build: |args| Ok(Command::MarkChannelRead {
+                channel: channel_arg(args)?.unwrap_or_default(),
+                up_to: args
+                    .get("up_to")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+        },
+        ToolDef {
             name: "react_chat",
             command: "react_chat",
             description: "Toggle this member's emoji reaction on a chat message, addressed by its stable id (the 32-char lowercase hex `id` every message carries in read_state). Reacting with the emoji you already picked un-reacts; picking another switches — one reaction per member per message.",
