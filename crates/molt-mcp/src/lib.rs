@@ -1317,7 +1317,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 48] = [
+        const INTERNAL: [&str; 49] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1362,6 +1362,7 @@ mod tests {
             // founding or join log
             "net_ritual_note",
             "net_join_note",
+            "net_recover_note",
             "net_join_sealed",
             "net_join_failed",
             "net_recover_sealed",

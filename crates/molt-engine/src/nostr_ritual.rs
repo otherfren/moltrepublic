@@ -882,7 +882,20 @@ async fn recovery_rejoin(
     .await
     .map_err(|e| format!("recovery request: {e}"))?;
 
+    // the rejoiner is not silent while it waits (NetRecoverNote): the wait
+    // spans the coordinator's HUMAN approval, so the status line is the
+    // difference between "working" and "looks dead until the deadline"
+    let _ = send_cmd(
+        tx,
+        Command::NetRecoverNote {
+            note: "request sent - waiting for the coordinator's Welcome".to_string(),
+            generation,
+        },
+    )
+    .await;
     // the Welcome, from the COORDINATOR's anchor and nobody else's
+    let started = tokio::time::Instant::now();
+    let mut last_note = started;
     let payload = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -892,11 +905,33 @@ async fn recovery_rejoin(
                     .to_string(),
             );
         }
+        // the widening ladder (the join task's cluster-F pattern): a tick a
+        // minute, so a long approval wait visibly keeps being a wait
+        if now.duration_since(last_note).as_secs() >= 60 {
+            last_note = now;
+            let mins = now.duration_since(started).as_secs() / 60;
+            let _ = send_cmd(
+                tx,
+                Command::NetRecoverNote {
+                    note: format!("waiting for the coordinator's Welcome ({mins} min)"),
+                    generation,
+                },
+            )
+            .await;
+        }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
             Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
             _ => continue,
         }
     };
+    let _ = send_cmd(
+        tx,
+        Command::NetRecoverNote {
+            note: "welcomed back - fetching the chain anchor".to_string(),
+            generation,
+        },
+    )
+    .await;
     mls.join_from_welcome(&payload.welcome)
         .map_err(|e| format!("mls welcome: {e}"))?;
     let group = Arc::new(Mutex::new(mls));

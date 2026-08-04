@@ -1412,6 +1412,9 @@ impl State {
                 self.cmd_net_ritual_note(note, generation)
             }
             Command::NetJoinNote { note, generation } => self.cmd_net_join_note(note, generation),
+            Command::NetRecoverNote { note, generation } => {
+                self.cmd_net_recover_note(note, generation)
+            }
             Command::NetRitualPublished {
                 what,
                 accepted,
@@ -4743,6 +4746,30 @@ mod tests {
             new_pk,
             "the sealed secret must be the private half of the anchor the Restored \
              block put in the chain"
+        );
+    }
+
+    /// The rejoiner's status line (`NetRecoverNote`): a live incarnation's
+    /// note reaches the notice channel; a stale one says nothing (a
+    /// restarted recovery must not have the old task talking over it).
+    #[test]
+    fn a_recover_note_speaks_only_for_the_live_incarnation() {
+        let mut st = tests::plain_state();
+        st.recover_generation = 3;
+        st.cmd_net_recover_note("waiting".to_string(), Some(2)).expect("ack");
+        assert!(
+            !st.session.notice.starts_with("recover-note:"),
+            "a stale incarnation says nothing: {:?}",
+            st.session.notice
+        );
+        st.cmd_net_recover_note(
+            "waiting for the coordinator's Welcome (2 min)".to_string(),
+            Some(3),
+        )
+        .expect("ack");
+        assert_eq!(
+            st.session.notice,
+            "recover-note:waiting for the coordinator's Welcome (2 min)"
         );
     }
 

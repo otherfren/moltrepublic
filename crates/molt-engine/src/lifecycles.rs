@@ -1931,6 +1931,25 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The rejoiner's status line ([`Command::NetRecoverNote`]): where the
+    /// bounded recovery wait stands. Notice-borne (`recover-note:`), so the
+    /// recover pane shows it live; a stale incarnation's note is dropped.
+    pub(crate) fn cmd_net_recover_note(
+        &mut self,
+        note: String,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.recover_generation) {
+            return Ok(Reply::Ack);
+        }
+        let notice = format!("recover-note:{note}");
+        if self.session.notice != notice {
+            self.session.notice = notice;
+            self.emit_session(SessionScope::Full);
+        }
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
         self.invalidate_join();
         self.session.screen = Screen::Choice;

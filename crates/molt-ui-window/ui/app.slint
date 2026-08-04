@@ -1213,6 +1213,9 @@ export component AppWindow inherits Window {
     in-out property <bool> rv-running: false;
     in-out property <string> rv-member;
     in-out property <string> rv-error;
+    // the recovery task's live status line (NetRecoverNote) — a bounded
+    // wait must not look dead
+    in-out property <string> rv-note;
 
     property <string> rw-seed;
     // restore: chosen backup file + picker modal (continues gate themselves
@@ -3774,6 +3777,12 @@ export component AppWindow inherits Window {
                         Text {
                             text: Strings.rv-running-note;
                             color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                        if root.rv-note != "": Text {
+                            text: root.rv-note;
+                            color: Theme.faint;
                             font-size: Theme.fs-cap;
                             wrap: word-wrap;
                         }

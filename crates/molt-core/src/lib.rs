@@ -3758,6 +3758,18 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The REJOINER's twin of [`Command::NetJoinNote`]: the recovery task
+    /// reporting where its bounded wait stands (the join task surfaces a
+    /// deaf relay live; recovery is the one flow whose user has already
+    /// lost their device, so it must not be silent until the absolute
+    /// deadline). Never a tool, same reason.
+    NetRecoverNote {
+        /// The status line (compact, one fact).
+        note: String,
+        /// Recovery incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// A ritual publish task reporting its REAL per-relay outcome
     /// (engine-internal). Sent for every outcome — clean, partial and total
     /// failure — so "landed on 1 of 5 relays" and "landed nowhere" stop being

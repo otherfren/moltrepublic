@@ -2099,6 +2099,9 @@ fn sort_members(rows: &mut [MemberRowData], column: &str, ascending: bool) {
 enum RecoverNotice {
     /// Not a recovery notice (every other notice, e.g. "saved").
     None,
+    /// Rejoiner: the recovery task's live status line (a bounded wait must
+    /// not look dead — `NetRecoverNote`).
+    Note(String),
     /// Coordinator: a link mint started for this member — the dialog opens in
     /// its calm pending state until the outcome notice replaces it.
     LinkPending(String),
@@ -2131,6 +2134,8 @@ fn parse_recover_notice(notice: &str) -> RecoverNotice {
         RecoverNotice::Link(link.to_string())
     } else if let Some(member) = notice.strip_prefix("recover-started:") {
         RecoverNotice::Started(member.to_string())
+    } else if let Some(line) = notice.strip_prefix("recover-note:") {
+        RecoverNotice::Note(line.to_string())
     } else if let Some(error) = notice.strip_prefix("recover-failed:") {
         RecoverNotice::Failed(error.to_string())
     } else if let Some(member) = notice.strip_prefix("recovered:") {
@@ -2430,16 +2435,22 @@ fn apply_session(
                 ui.set_rv_member(member.into());
                 ui.set_rv_running(true);
                 ui.set_rv_error("".into());
+                ui.set_rv_note("".into());
             }
             RecoverNotice::Failed(error) => {
                 ui.set_rv_running(false);
                 ui.set_rv_error(error.into());
+                ui.set_rv_note("".into());
+            }
+            RecoverNotice::Note(line) => {
+                ui.set_rv_note(line.into());
             }
             RecoverNotice::Done(_) => {
                 // the engine flips to Main itself — just clear the peer-way
                 // state so a later return to the Restore screen starts clean
                 ui.set_rv_running(false);
                 ui.set_rv_error("".into());
+                ui.set_rv_note("".into());
             }
             RecoverNotice::None => {}
         }
