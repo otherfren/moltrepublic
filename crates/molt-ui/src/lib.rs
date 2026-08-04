@@ -5719,14 +5719,13 @@ lexicon! {
     rw_paste: "Paste", "Einfügen";
     rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
     rw_continue: "Continue", "Weiter";
-    rw_seed_not_needed: "Not needed for an invite - joining mints a new phrase for you.", "Für eine Einladung nicht nötig - beim Beitreten wird eine neue Phrase für dich erzeugt.";
+    rw_seed_not_needed: "Not needed for an invite.", "Bei einer Einladung nicht nötig.";
     rw_via_link: "With a link", "Mit einem Link";
-    rw_link_hint: "Paste the invite or recovery link you were given.", "Füge den Einladungs- oder Recovery-Link ein, den du bekommen hast.";
+    rw_link_hint: "The invite or recovery link you were given.", "Der Einladungs- oder Recovery-Link, den du bekommen hast.";
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
-    rw_link_name_ph: "Your name in the republic…", "Dein Name in der Republik…";
-    rw_via_peer: "Social peer-restore", "Social Peer-Restore";
+    rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";

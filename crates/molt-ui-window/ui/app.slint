@@ -2103,7 +2103,7 @@ export component AppWindow inherits Window {
                             font-size: Theme.fs-h1;
                             font-weight: 800;
                         }
-                        Rectangle { height: 4px; }
+                        Rectangle { height: 8px; }
                         // Three ways in, and no subtitle telling the reader
                         // to choose one of them. Open and Create are the two
                         // "I know what I want" doors; Restore is the one for
@@ -3744,7 +3744,7 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     title: Strings.rw-via-link;
                     hint: Strings.rw-link-hint;
-                    icon: @image-url("assets/users.svg");
+                    icon: @image-url("assets/link.svg");
                     HorizontalLayout {
                         spacing: 8px;
                         AppField {
@@ -3780,15 +3780,11 @@ export component AppWindow inherits Window {
                     }
                     // an INVITE needs a name (nobody knows who is joining);
                     // a recovery link brought its seat with it
-                    if root.rv-kind.kind == 1: HorizontalLayout {
-                        spacing: 8px;
-                        AppField {
-                            text <=> root.jw-member;
-                            placeholder: Strings.rw-link-name-ph;
-                            horizontal-stretch: 1;
-                            accepted => {
-                                root.link-continue();
-                            }
+                    if root.rv-kind.kind == 1: AppField {
+                        text <=> root.jw-member;
+                        placeholder: Strings.rw-link-name-ph;
+                        accepted => {
+                            root.link-continue();
                         }
                     }
                     HorizontalLayout {
@@ -3928,9 +3924,11 @@ export component AppWindow inherits Window {
                 // live log, outcome-gated Back/Finish)
                 if root.rw-step == 1: RunView {
                     vertical-stretch: 1;
-                    title: root.rw-way == "peer" ? Strings.rw-via-peer : (root.rw-way == "s3" ? Strings.rw-via-s3 : Strings.rw-via-file);
+                    // `RestoreStart.way` is "s3" | "file" and nothing else -
+                    // a recovery is not a restore and runs its own state
+                    title: root.rw-way == "s3" ? Strings.rw-via-s3 : Strings.rw-via-file;
                     hint: root.rw-target;
-                    icon: root.rw-way == "peer" ? @image-url("assets/users.svg") : (root.rw-way == "s3" ? @image-url("assets/cloud.svg") : @image-url("assets/floppy.svg"));
+                    icon: root.rw-way == "s3" ? @image-url("assets/cloud.svg") : @image-url("assets/floppy.svg");
                     progress: root.rw-progress;
                     outcome: root.rw-outcome;
                     ph1: Strings.rw-ph1;

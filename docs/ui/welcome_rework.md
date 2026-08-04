@@ -1,9 +1,8 @@
 # The Welcome screen, and the one way back in
 
-**Status: BUILT (2026-08-05), steps 1-5.** Product decision by the user;
+**Status: BUILT (2026-08-05), all six steps.** Product decision by the user;
 this document was the execution order and is now the record of what shipped.
-Step 6 (the visual polish pass over both screens) is deliberately last and
-still open.
+The polish pass ran last, as asked.
 
 ## Why
 
@@ -102,7 +101,7 @@ iteration and ONE `cargo build -p molt-ui-window -p molt-ui` per change-set
    single letters (localized), matching the card titles.
 5. ✅ **Docs + MCP note**, then the full suites (`molt-core`, `molt-engine`,
    `molt-mcp`, `molt-ui`), clippy at zero, and the authoritative GUI build.
-6. ⬜ **Polish last** — the user asked for it in that order: get the behaviour
+6. ✅ **Polish last** — the user asked for it in that order: get the behaviour
    right and tested, then the spacing/typography pass over both screens.
 
 ## What this does not change
@@ -117,9 +116,15 @@ same three flows, reached through one fewer decision.
   it any more), and with it `rw-file`, `rw-file-draft` and
   `restore-file-modal-open`. `rw-file-pick` stayed: the settings folder picker
   uses the same "Select" label.
-- `rw-via-file` and `rw-via-peer` stayed as **RunView titles**. An
-  MCP-started file restore still reports its progress in the GUI, and a run
-  that cannot name itself is worse than an unused string.
+- `rw-via-file` stayed as a **RunView title**: an MCP-started file restore
+  still reports its progress in the GUI, and a run that cannot name itself is
+  worse than an unused string. `rw-via-peer` did NOT — the polish pass found
+  its RunView branch was already dead (`RestoreStart.way` is `"s3" | "file"`,
+  never `"peer"`), so the ternary's first arm could not fire.
+- Polish: the panel took the **link** icon rather than the peer panel's
+  `users.svg`, the title gained room now that no subtitle sits under it, and
+  the three new hint strings were cut to one line each (the `RestoreWay` hint
+  elides rather than wrapping, so a long one is simply lost).
 - The phrase panel **dims** (opacity, plus a hint that says why) for an
   invite link rather than vanishing.
 - The S3 branch inherited `last: true` — the tree rail's L now closes there.
