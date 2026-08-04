@@ -180,15 +180,30 @@ The keystone (`a_frame_ahead_of_its_commit_is_held_until_the_commit_lands`)
 publishes the message BEFORE its commit — the other order passes with the
 whole mechanism absent — and each half was verified to fail on its own.
 
-### N5.4 — epoch-ring honesty (G4)
+### N5.4 — epoch-ring honesty (G4) — ✅ BUILT (2026-08-04)
 A frame older than the exporter ring is undecryptable **by construction**.
 Report it loudly rather than dropping it quietly.
 - **Red:** a laggard past the ring gets a named failure, not silence.
+- Landed as a two-link chain, each pinned: the runtime counts a frame that
+  is still opaque after an epoch advance (`opaque_frames`,
+  `a_frame_still_opaque_after_the_advance_is_counted_as_lost`), and the
+  engine folds the count into `net_health` as a named `Degraded` — "N
+  frames past the key ring" — on the presence beat
+  (`group_channel_health_names_relays_and_ring_losses`).
 
-### N5.5 — presence + net_health
+### N5.5 — presence + net_health — ✅ BUILT (2026-08-04)
 Traffic-derived presence (§6.5); `net_health` becomes relay status. This is
 where the "N5 pending" `Down` state finally goes green honestly.
 - **Red:** an idle republic does not report its members offline.
+- Landed: on a Nostr workspace a stamped member ages to STALE and stays
+  there (silence is not absence — only never-heard shows dark), in both the
+  shared derivation (`presence_of`) and the pushed pills
+  (`a_quiet_nostr_republic_shows_last_seen_not_offline`); `net_health` is
+  the group channel's verdict — relays, not members: deaf → `Degraded`
+  naming the relay trouble, dead subscription → `Down`, stuck broadcast
+  outbox joins the reason (`apply_group_health`, read from the health watch
+  on the presence beat). Remaining §6.5 GUI copy (the explicit
+  "presence is coarse over relays" hint) stays budgeted with N6's GUI work.
 
 ### N5.6 — N4b step 6 falls out
 The rejoiner gets a chain **ANCHOR** in the Welcome and catches up over the

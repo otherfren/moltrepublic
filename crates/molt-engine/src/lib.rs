@@ -416,8 +416,8 @@ pub(crate) struct GroupNet {
     /// sender generations (which are replay-rejected and silently lost).
     pub(crate) mls: std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
     pub(crate) wakeup: tokio::sync::watch::Sender<u64>,
-    /// What the runtime reports about the channel.
-    #[allow(dead_code)] // read by N5.5, where net_health becomes relay status
+    /// What the runtime reports about the channel — folded into
+    /// `session.net_health` on the presence beat (`apply_group_health`).
     pub(crate) health: tokio::sync::watch::Receiver<molt_net::group_runtime::GroupHealth>,
 }
 
@@ -988,7 +988,16 @@ impl State {
         } else if self.net_unreachable.contains(member) {
             2
         } else {
-            molt_core::presence_state(now, last_seen)
+            let s = molt_core::presence_state(now, last_seen);
+            // §6.5 (N5.5): presence over relays is traffic-derived and
+            // COARSE — silence is not absence (no keepalives by design), so
+            // a stamped member ages to stale and stays there; only
+            // never-heard shows dark
+            if s == 2 && self.nostr.is_some() && last_seen != molt_core::MemberInfo::NEVER {
+                1
+            } else {
+                s
+            }
         }
     }
 

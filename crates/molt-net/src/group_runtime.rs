@@ -1075,6 +1075,119 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// **G4 (N5.4): a frame still opaque after an epoch advance is COUNTED,
+    /// not silently dropped.** "Older than the exporter ring" and "newer
+    /// than us" arrive as the same answer on 445 — an unopenable outer
+    /// layer — and the retry after the next commit merges is what tells
+    /// them apart: what the advance did not open is opaque for good. That
+    /// permanent loss must reach the health surface (`opaque_frames`),
+    /// because the engine's net_health fold is downstream of exactly this
+    /// counter and silence here would read as delivery.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_frame_still_opaque_after_the_advance_is_counted_as_lost() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                self.0.lock().expect("sink").push(env);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("a welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
+        let (commit, _w) = alice
+            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .expect("re-key");
+        drop(cara);
+
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let alice_chan = crate::ritual_net::GroupChannel::new(
+            crate::dial::Dialer::Direct,
+            vec![url.clone()],
+            seed,
+        );
+        let alice_mls = MlsChannel::new(alice);
+        let commit_frame = alice_mls
+            .group_frame(&molt_core::EventEnvelope {
+                prev_seq: 0,
+                seq: 1,
+                ts: 1_751_000_000,
+                by: "alice".to_string(),
+                body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) },
+            })
+            .expect("commit frame");
+
+        let sink = Sink::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
+        let bob_chan =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let handle = spawn_group(
+            bob_chan,
+            MlsChannel::new(bob),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink,
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // a frame under an exporter NO group epoch ever derives: unopenable
+        // now, unopenable after any advance — the laggard-past-the-ring shape
+        alice_chan
+            .publish_frame(&[9u8; 32], &[0x5au8; 64])
+            .await
+            .expect("publish the alien frame");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        // …then the commit that advances bob's epoch and triggers the retry
+        alice_chan
+            .publish_frame(&commit_frame.exporter, &commit_frame.ciphertext)
+            .await
+            .expect("publish the commit");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if health_rx.borrow_and_update().opaque_frames >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the permanently opaque frame was never counted as lost"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        handle.shutdown().await;
+    }
+
     /// **A stop sent before the tasks first poll must still stop them.**
     ///
     /// The stop rode a `Notify`, and `notify_waiters` wakes only tasks parked

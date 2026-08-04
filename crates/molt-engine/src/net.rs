@@ -2395,6 +2395,12 @@ impl State {
     /// the watchdog reported down, or an outbox whose sends keep failing. Only
     /// an honest all-clear is `Ok`. Emits only on an actual change.
     pub(crate) fn recompute_net_health(&mut self) {
+        // a Nostr workspace: the group channel's verdict, nothing else —
+        // link/send maps are per-peer mesh concepts it never feeds
+        if let Some(h) = self.group_net.as_ref().map(|g| g.health.borrow().clone()) {
+            self.apply_group_health(h);
+            return;
+        }
         if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
             return;
         }
@@ -2409,6 +2415,45 @@ impl State {
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
+            }
+        };
+        if self.session.net_health != health {
+            self.session.net_health = health;
+            self.emit_session(SessionScope::Full);
+        }
+    }
+
+    /// N5.4/N5.5: fold the GROUP CHANNEL's health into `session.net_health`
+    /// — on a relay transport the verdict is about relays, not members
+    /// (there are no per-peer legs to be deaf; §6.5).
+    ///
+    /// Unlike the mesh fold this RECOMPUTES fully, `Down` included: a live
+    /// group runtime is itself the proof that the open path's fail-closed
+    /// config verdict passed (a refused dialer never builds one), and the
+    /// one `Down` this fold owns — a dead subscription — really is terminal
+    /// (the inbox loop returned; nothing re-subscribes until reopen).
+    pub(crate) fn apply_group_health(&mut self, h: molt_net::group_runtime::GroupHealth) {
+        let health = if !h.subscribed {
+            molt_core::NetHealth::Down {
+                reason: h.deaf.unwrap_or_else(|| "no 445 subscription".to_string()),
+            }
+        } else {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(why) = h.deaf {
+                parts.push(format!("relays: {why}"));
+            }
+            if h.opaque_frames > 0 {
+                // G4 (N5.4): older than the exporter ring is unreadable BY
+                // CONSTRUCTION — a permanent, named loss, never silence
+                parts.push(format!("{} frames past the key ring", h.opaque_frames));
+            }
+            // a stuck broadcast outbox names no peer — the channel is the
+            // trouble, so its reason joins the channel verdict
+            parts.extend(self.net_send_stuck.values().cloned());
+            if parts.is_empty() {
+                molt_core::NetHealth::Ok
+            } else {
+                molt_core::NetHealth::Degraded { reason: parts.join("; ") }
             }
         };
         if self.session.net_health != health {
@@ -2593,6 +2638,9 @@ impl State {
         let me = self.member();
         let active = self.session.active_workspace.clone();
         let unreachable = &self.net_unreachable;
+        // §6.5 (N5.5): the open workspace's transport decides how silence
+        // ages — see `presence_of`, the shared derivation this mirrors
+        let coarse = self.nostr.is_some();
         let mut changed = false;
         for entry in &mut self.session.workspaces {
             let is_active = entry.id == active;
@@ -2602,7 +2650,16 @@ impl State {
                 } else if is_active && unreachable.contains(&m.name) {
                     2
                 } else {
-                    molt_core::presence_state(now, m.last_seen)
+                    let s = molt_core::presence_state(now, m.last_seen);
+                    if s == 2
+                        && is_active
+                        && coarse
+                        && m.last_seen != molt_core::MemberInfo::NEVER
+                    {
+                        1
+                    } else {
+                        s
+                    }
                 };
                 if m.state != state {
                     m.state = state;
@@ -3054,6 +3111,99 @@ mod tests {
         // heal the second: honest Ok again
         st.cmd_net_send_ok("cid".to_string(), None).expect("ack");
         assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+    }
+
+    /// §6.5 (N5.5): presence over relays is traffic-derived and COARSE —
+    /// silence is not absence. On a Nostr workspace a stamped member ages
+    /// to stale and STAYS there; only never-heard shows dark. The mesh
+    /// keeps its keepalive-backed aging (a silent mesh member really is
+    /// unreachable — its keepalives stopped).
+    #[test]
+    fn a_quiet_nostr_republic_shows_last_seen_not_offline() {
+        let mut st = presence_fixture();
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("stamp bob");
+        // a quiet weekend later, on a MESH workspace: bob is honestly offline
+        st.clock_override = Some(T + 3 * 86_400);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 2, "mesh aging is unchanged");
+        // the same silence on a NOSTR workspace: coarse, not dark
+        st.nostr = Some(crate::NostrTransport {
+            sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            relays: vec!["ws://relay.example".to_string()],
+            rotation_seed: [0u8; 32],
+        });
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 1, "a stamped member is stale, never dark");
+        assert_eq!(
+            st.presence_of("bob", T, st.presence_now()),
+            1,
+            "the shared derivation agrees (co-equality)"
+        );
+        // …but a member NEVER heard from is honestly dark
+        assert_eq!(pill(&st, "cid").state, 2, "never-heard stays dark");
+    }
+
+    /// N5.4 (G4 epoch-ring honesty) + N5.5: on a Nostr workspace the health
+    /// verdict is the GROUP CHANNEL's — relays, not members. A deaf channel
+    /// degrades with the relay reason; frames past the exporter ring are a
+    /// PERMANENT, named loss; a dead subscription is Down; a healthy
+    /// channel is an honest Ok again.
+    #[test]
+    fn group_channel_health_names_relays_and_ring_losses() {
+        let mut st = presence_fixture();
+        let h = |subscribed: bool, deaf: Option<&str>, opaque: u64| {
+            molt_net::group_runtime::GroupHealth {
+                subscribed,
+                deaf: deaf.map(|s| s.to_string()),
+                opaque_frames: opaque,
+            }
+        };
+        st.apply_group_health(h(true, Some("relay ws://r refused the sub"), 0));
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("relay"), "names the relay trouble: {reason}");
+            }
+            other => panic!("deaf must degrade, got {other:?}"),
+        }
+        // the deafness heals — honest Ok again
+        st.apply_group_health(h(true, None, 0));
+        assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+        // G4: a frame older than the exporter ring is unreadable BY
+        // CONSTRUCTION — a named permanent loss, never silence
+        st.apply_group_health(h(true, None, 3));
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains('3') && reason.contains("key ring"), "{reason}");
+            }
+            other => panic!("ring losses must be loud, got {other:?}"),
+        }
+        // a dead subscription cannot heal itself — Down, not Degraded
+        st.apply_group_health(h(false, Some("subscribe: connection refused"), 0));
+        assert!(
+            matches!(st.session.net_health, molt_core::NetHealth::Down { .. }),
+            "a dead inbox is Down: {:?}",
+            st.session.net_health
+        );
+    }
+
+    /// The group verdict also carries a stuck outbox (send_failed on
+    /// broadcast names no peer — the trouble is the channel).
+    #[test]
+    fn a_stuck_group_outbox_joins_the_channel_verdict() {
+        let mut st = presence_fixture();
+        st.net_send_stuck
+            .insert("ada".to_string(), "no relay accepted the frame".to_string());
+        st.apply_group_health(molt_net::group_runtime::GroupHealth {
+            subscribed: true,
+            deaf: None,
+            opaque_frames: 0,
+        });
+        match &st.session.net_health {
+            molt_core::NetHealth::Degraded { reason } => {
+                assert!(reason.contains("no relay accepted"), "{reason}");
+            }
+            other => panic!("a stuck outbox must surface, got {other:?}"),
+        }
     }
 
     /// `Down` is the open/config path's verdict (fail-closed dialer,
