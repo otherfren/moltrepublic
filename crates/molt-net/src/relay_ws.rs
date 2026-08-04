@@ -28,6 +28,40 @@ const TLS_TIMEOUT: Duration = Duration::from_secs(10);
 /// multi-megabyte allocation per connection.
 const MAX_WS_MESSAGE: usize = 1024 * 1024;
 
+/// Why [`RelayWs::recv`] produced no message.
+///
+/// The distinction is load-bearing, and collapsing it into one error is a
+/// hot-spin bug rather than a cosmetic one: a caller that answers "the read
+/// timed out" with a keepalive ping will answer "the connection is gone" the
+/// same way, and a ping on a dead stream still returns `Ok` (the bytes go
+/// into the OS buffer). It then reads again, fails again, pings again — a
+/// tight loop that never reconnects. Found 2026-08-04 by the frame-cap
+/// keystone: one over-cap message from a hostile relay put the subscription
+/// exactly there, which is worse than the allocation the cap prevents.
+#[derive(Debug)]
+pub enum RecvFail {
+    /// No frame inside the caller's window. The connection may be perfectly
+    /// healthy — a quiet subscription looks like this.
+    TimedOut,
+    /// The connection is GONE (closed, protocol error, capacity refusal).
+    /// Reading it again can only fail again: reconnect or give up.
+    Dead(NetError),
+    /// A frame arrived and is not valid NIP-01. The connection is fine —
+    /// skip it.
+    Framing(NetError),
+}
+
+impl RecvFail {
+    /// The error to report to a caller that has no reconnect of its own.
+    #[must_use]
+    pub fn into_error(self) -> NetError {
+        match self {
+            RecvFail::TimedOut => NetError::Unreachable("ws recv: timed out".into()),
+            RecvFail::Dead(e) | RecvFail::Framing(e) => e,
+        }
+    }
+}
+
 /// A dialed stream, plain (`ws://` — loopback/LAN per §10.14, or onion where
 /// the Tor circuit already encrypts) or wrapped in the crate's ONE TLS
 /// posture (`wss://` — rustls-rustcrypto over the same dialed stream, so
@@ -198,25 +232,36 @@ impl RelayWs {
     }
 
     /// Receive the next TYPED relay message, skipping transport frames
-    /// (ping/pong — tungstenite queues the pong reply itself). `Err` on
-    /// timeout, close, or a frame that is not valid NIP-01.
-    pub async fn recv(&mut self, timeout: Duration) -> Result<RelayMessage<'static>, NetError> {
+    /// (ping/pong — tungstenite queues the pong reply itself).
+    ///
+    /// The three failure kinds are SEPARATE on purpose — see [`RecvFail`].
+    pub async fn recv(&mut self, timeout: Duration) -> Result<RelayMessage<'static>, RecvFail> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let frame = tokio::time::timeout_at(deadline, self.ws.next())
-                .await
-                .map_err(|_| NetError::Unreachable("ws recv: timed out".into()))?
-                .ok_or_else(|| NetError::Unreachable("ws recv: connection closed".into()))?
-                .map_err(|e| NetError::Unreachable(format!("ws recv: {e}")))?;
+            let frame = match tokio::time::timeout_at(deadline, self.ws.next()).await {
+                Err(_) => return Err(RecvFail::TimedOut),
+                Ok(None) => {
+                    return Err(RecvFail::Dead(NetError::Unreachable(
+                        "ws recv: connection closed".into(),
+                    )))
+                }
+                Ok(Some(Err(e))) => {
+                    return Err(RecvFail::Dead(NetError::Unreachable(format!("ws recv: {e}"))))
+                }
+                Ok(Some(Ok(frame))) => frame,
+            };
             match frame {
                 Message::Text(text) => {
                     // RelayMessage's Deserialize is lifetime-unconstrained
                     // (owned Cows), so 'static types directly
-                    return RelayMessage::from_json(text.as_str())
-                        .map_err(|e| NetError::Framing(format!("relay frame: {e}")));
+                    return RelayMessage::from_json(text.as_str()).map_err(|e| {
+                        RecvFail::Framing(NetError::Framing(format!("relay frame: {e}")))
+                    });
                 }
                 Message::Close(_) => {
-                    return Err(NetError::Unreachable("ws recv: relay closed".into()))
+                    return Err(RecvFail::Dead(NetError::Unreachable(
+                        "ws recv: relay closed".into(),
+                    )))
                 }
                 // binary frames are not NIP-01; pings/pongs are transport
                 Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}

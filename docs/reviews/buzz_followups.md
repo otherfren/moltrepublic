@@ -162,8 +162,18 @@ size it is evidence, not tuning.
 
 **Steps.**
 
-1. ~~Red: a relay double sends a frame past the cap~~ — already bounded; write
-   the test to PIN it rather than to add it.
+1. ✅ **DONE 2026-08-04.** The frame cap is pinned by
+   `molt-net/tests/relay_hostile_bounds.rs`
+   (`a_message_past_the_frame_cap_kills_the_session`, plus the control
+   `junk_under_the_frame_cap_leaves_the_session_alive` — without it the test
+   would pass on a client that dies on ANY unparseable frame). Writing the
+   pin found a REAL defect: after the cap refuses a message the connection is
+   gone, but `read_session` could not tell "closed" from "timed out" and
+   answered both with a keepalive ping — which still returns `Ok` on a dead
+   stream. The subscription then span in a tight read-fail-ping loop and never
+   reconnected, which is worse than the allocation the cap prevents. Fixed by
+   typing the failure (`relay_ws::RecvFail` — `TimedOut` / `Dead` /
+   `Framing`), so the compiler forces the three cases apart.
 2. ✅ **DONE 2026-08-02.** `MAX_STORED_EVENTS_PER_REQ = 5_000`, counted
    pre-EOSE only, with `RelayRuntime::with_history_bound` so a test does not
    have to publish five thousand events to reach it. Keystone:
@@ -173,8 +183,15 @@ size it is evidence, not tuning.
    molt-net suite including the N5.1 catch-up stays green, which is the
    interaction this bound was specified around. No hostile relay double was
    needed after all: a real relay holding hostile events IS the double.
-3. Red: a relay double accepts the connection then dribbles; assert we time out
-   instead of pinning the connection.
+3. ✅ **DONE 2026-08-04.** Two doubles, because the two timeouts catch
+   different shapes: a relay that completes the handshake and then answers
+   only pings (`a_relay_that_answers_nothing_cannot_pin_a_publish` — the
+   inner `PUBLISH_TIMEOUT`, whose deadline is computed once so skipped
+   transport frames cannot extend it), and one that accepts TCP and never
+   finishes the WebSocket upgrade
+   (`a_relay_that_never_finishes_the_handshake_cannot_pin_a_publish` — only
+   the OUTER timeout around `publish_one` ends that one; verified red by
+   deleting it, the test then hangs).
 4. Implement the bounds in `relay_ws.rs` as named constants with a comment on
    where each number came from.
 5. Diagnostics stay structured and one line — `relay=… bound=… got=…` — matching

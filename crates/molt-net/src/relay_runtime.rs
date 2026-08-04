@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::dial::Dialer;
-use crate::relay_ws::{dial_maybe_tls, RelayWs};
+use crate::relay_ws::{dial_maybe_tls, RecvFail, RelayWs};
 use crate::NetError;
 
 /// Per-relay deadline for one publish attempt (dial + upgrade + OK).
@@ -862,10 +862,23 @@ async fn read_session(
             }
             // OK for other events / NOTICE etc. — not subscription traffic
             Ok(_) => {}
-            // a closed stream is session death; a timeout is just the
-            // keepalive window elapsing — ping and keep reading, unless the
-            // connection has been silent past the idle bound
-            Err(_) => {
+            // a frame that is not NIP-01 says nothing about the connection —
+            // skip it, and do NOT re-arm the keepalive clock with it (a relay
+            // dribbling junk would otherwise hold the idle bound open forever)
+            Err(RecvFail::Framing(e)) => {
+                tracing::debug!(relay = %url, error = %e, "relay frame skipped");
+            }
+            // the connection is GONE: reading it again can only fail again,
+            // and a ping on a dead stream still returns Ok (the bytes go into
+            // the OS buffer), so pinging here is a hot loop that never
+            // reconnects. End the session and let the supervisor redial.
+            Err(RecvFail::Dead(e)) => {
+                tracing::warn!(relay = %url, error = %e, "relay connection died");
+                return std::ops::ControlFlow::Continue(());
+            }
+            // a timeout is just the keepalive window elapsing — ping and keep
+            // reading, unless the connection has been silent past the idle bound
+            Err(RecvFail::TimedOut) => {
                 if last_ping.elapsed() >= SUB_IDLE_TIMEOUT {
                     return std::ops::ControlFlow::Continue(());
                 }
@@ -1099,7 +1112,7 @@ async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), Ne
     let mut ws = RelayWs::connect(dialer, url).await?;
     ws.send(ClientMessage::event(event.clone())).await?;
     let verdict = loop {
-        match ws.recv(PUBLISH_TIMEOUT).await? {
+        match ws.recv(PUBLISH_TIMEOUT).await.map_err(RecvFail::into_error)? {
             RelayMessage::Ok { event_id, status, message } if event_id == event.id => {
                 break if counts_as_published(status, &message) {
                     Ok(())
