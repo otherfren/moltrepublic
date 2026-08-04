@@ -4748,6 +4748,7 @@ dependencies = [
  "molt-config",
  "molt-core",
  "molt-engine",
+ "molt-net",
  "molt-storage",
  "molt-ui-window",
  "paste",

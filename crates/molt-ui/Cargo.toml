@@ -38,3 +38,9 @@ paste.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# TEST-ONLY, and deliberately not a runtime dep: the link-dispatch tests
+# render their fixtures through the real invite/recovery handover types
+# instead of hand-writing link strings a format change would silently
+# invalidate. Layering-legal (net sits below engine, which molt-ui already
+# depends on); the shipped GUI still talks to the engine only.
+molt-net.workspace = true

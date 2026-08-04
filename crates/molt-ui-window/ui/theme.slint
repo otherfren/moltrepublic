@@ -209,6 +209,19 @@ export struct InvitePreview {
     missing-relays: int,
 }
 
+// What the Restore wizard's ONE link field is holding. Filled by Rust via
+// the pure `classify-link` callback (`molt_ui::link_kind`), which asks the
+// engine's own two parsers - so the panel and the flow it starts can never
+// disagree about what the link is.
+export struct LinkPreview {
+    // 0 = nothing usable (empty, junk, or a preview link with no transport
+    // handover), 1 = a founding invite (join), 2 = a recovery link
+    kind: int,
+    republic: string,
+    // invite: who minted it · recovery: the seat coming back
+    who: string,
+}
+
 // One sub-view of a surface (nav entry), from molt-core's shared view list.
 // `icon` is a Twemoji glyph (colorful emoji font), picked in Rust per key.
 export struct ViewItem {
@@ -383,18 +396,13 @@ export global Theme {
 export global Strings {
     // brand + choice
     in property <string> choice-title;
-    in property <string> choice-subtitle;
     in property <string> choice-mock-note;
-    in property <string> choice-group-republic;
     in property <string> choice-create-key;
     in property <string> choice-create-rest;
     in property <string> choice-create-sub;
     in property <string> choice-open-key;
     in property <string> choice-open-rest;
     in property <string> choice-open-sub;
-    in property <string> choice-join-key;
-    in property <string> choice-join-rest;
-    in property <string> choice-join-sub;
     in property <string> choice-restore-key;
     in property <string> choice-restore-rest;
     in property <string> choice-restore-sub;
@@ -643,8 +651,15 @@ export global Strings {
     in property <string> rw-paste;
     in property <string> rw-seed-hint;
     in property <string> rw-continue;
+    // the merged way in: one link field, an invite or a recovery link
+    in property <string> rw-seed-not-needed;
+    in property <string> rw-via-link;
+    in property <string> rw-link-hint;
+    in property <string> rw-link-join;
+    in property <string> rw-link-recover;
+    in property <string> rw-link-unknown;
+    in property <string> rw-link-name-ph;
     in property <string> rw-via-peer;
-    in property <string> rw-peer-hint;
     in property <string> rw-via-s3;
     in property <string> rw-s3-hint;
     in property <string> rw-s3-none;
@@ -652,11 +667,6 @@ export global Strings {
     in property <string> rw-s3-untested;
     in property <string> rw-s3-target-ph;
     in property <string> rw-via-file;
-    in property <string> rw-file-hint;
-    in property <string> rw-choose;
-    in property <string> rw-no-file;
-    in property <string> rw-file-title;
-    in property <string> rw-file-body;
     in property <string> rw-file-pick;
     in property <string> rw-log-title;
     in property <string> rw-finish;

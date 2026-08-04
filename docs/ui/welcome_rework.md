@@ -1,7 +1,9 @@
 # The Welcome screen, and the one way back in
 
-**Status: PLAN (2026-08-04), not yet built.** Product decision by the user in
-the same session; this document is the execution order.
+**Status: BUILT (2026-08-05), steps 1-5.** Product decision by the user;
+this document was the execution order and is now the record of what shipped.
+Step 6 (the visual polish pass over both screens) is deliberately last and
+still open.
 
 ## Why
 
@@ -77,30 +79,30 @@ The one thing worth adding is a note in `restore_start`'s description that
 `way: "file"` has no GUI panel any more, so an agent knows it is the only
 surface offering it.
 
-## Order of work
+## Order of work — done except the polish
 
 Each step ends green; the GUI is validated by `scripts/dev-ui.sh build` per
 iteration and ONE `cargo build -p molt-ui-window -p molt-ui` per change-set
 (never next to another window-scale build).
 
-1. **The pure function first, with tests.** `molt-ui`: `link_kind(&str) ->
+1. ✅ **The pure function first, with tests.** `molt-ui`: `link_kind(&str) ->
    LinkKind` (`Invite { republic, inviter }` / `Recovery { republic, member }`
    / `Unrecognized`). Unit tests: both real shapes (rendered by the engine's
    own `render()`, never hand-written strings), a preview-only invite link
    with no handover, a recovery link with a damaged handover, empty, and plain
    junk. This is the whole decision, and it is testable without a window.
-2. **Welcome.** Three cards, no subtitle, no group rail; `choice-go` and the
+2. ✅ **Welcome.** Three cards, no subtitle, no group rail; `choice-go` and the
    hotkey/arrow handling collapse from 4 to 3. Retire the `choice_join_*` and
    `choice_group_republic` strings, and `choice_subtitle`.
-3. **Restore step 1.** Replace the peer panel with the Link panel; delete the
+3. ✅ **Restore step 1.** Replace the peer panel with the Link panel; delete the
    file panel; wire the two Continue paths through `link_kind`. The phrase
    panel gains its armed/dimmed state.
-4. **Keyboard.** Enter in the link field continues when the panel is armed;
+4. ✅ **Keyboard.** Enter in the link field continues when the panel is armed;
    the name field only takes focus when it is required. Welcome keys stay
    single letters (localized), matching the card titles.
-5. **Docs + MCP note**, then the full suites (`molt-core`, `molt-engine`,
+5. ✅ **Docs + MCP note**, then the full suites (`molt-core`, `molt-engine`,
    `molt-mcp`, `molt-ui`), clippy at zero, and the authoritative GUI build.
-6. **Polish last** — the user asked for it in that order: get the behaviour
+6. ⬜ **Polish last** — the user asked for it in that order: get the behaviour
    right and tested, then the spacing/typography pass over both screens.
 
 ## What this does not change
@@ -108,3 +110,21 @@ iteration and ONE `cargo build -p molt-ui-window -p molt-ui` per change-set
 The recovery ritual, the founding ritual, the restore verification ladder, and
 every string a human reads about them. This is a routing and layout change: the
 same three flows, reached through one fewer decision.
+
+## What shipped, beyond the plan
+
+- The **orphaned file-picker modal** went with the panel (nothing could open
+  it any more), and with it `rw-file`, `rw-file-draft` and
+  `restore-file-modal-open`. `rw-file-pick` stayed: the settings folder picker
+  uses the same "Select" label.
+- `rw-via-file` and `rw-via-peer` stayed as **RunView titles**. An
+  MCP-started file restore still reports its progress in the GUI, and a run
+  that cannot name itself is worse than an unused string.
+- The phrase panel **dims** (opacity, plus a hint that says why) for an
+  invite link rather than vanishing.
+- The S3 branch inherited `last: true` — the tree rail's L now closes there.
+- The recovery link's seat is named by the panel's **verdict line**
+  ("Recovery for <republic> · <member>") rather than by an inert, disabled
+  name field. Same information, one control fewer: a greyed-out field the
+  user cannot act on is chrome, and the line has to be there anyway to say
+  which of the two shapes the link turned out to be.

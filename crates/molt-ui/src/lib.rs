@@ -200,6 +200,22 @@ pub fn run_app(
             }
             None => InvitePreview::default(),
         });
+        // the Restore wizard's one link field: which of the two flows is
+        // this link for? Pure, like parse_invite, so the panel re-reads it
+        // on every keystroke without any state to keep in sync.
+        ui.on_classify_link(|s| match link_kind(&s) {
+            LinkKind::Invite { republic, inviter } => LinkPreview {
+                kind: 1,
+                republic: republic.into(),
+                who: inviter.into(),
+            },
+            LinkKind::Recovery { republic, member } => LinkPreview {
+                kind: 2,
+                republic: republic.into(),
+                who: member.into(),
+            },
+            LinkKind::Unrecognized => LinkPreview::default(),
+        });
     }
 
     // NOTE: the old duplicate-name check is gone by design — display names
@@ -2759,6 +2775,63 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
     ui.set_jw_log_tone(log_tones(&sv.join.run.log));
     ui.set_jw_headline(sv.join.run.headline.clone().into());
+}
+
+/// What a `molt://…` link in the Restore wizard's one link field turns out
+/// to be — the whole of the Join/Restore merge (`docs/ui/welcome_rework.md`).
+///
+/// The two shapes are unambiguous by prefix and both already have a parser in
+/// `molt-engine`; the panel just asks which one it is holding, because that
+/// decides which FIELD is required and which existing command a click issues.
+/// No new engine surface: `join_start` and `recover_start` stay exactly the
+/// co-equal tools they were.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A founding invite (`molt://invite/…`) — needs a NAME, mints its own
+    /// recovery phrase, runs `Command::JoinStart`.
+    Invite {
+        /// The republic's display name, for the panel's confirmation line.
+        republic: String,
+        /// Who minted the link.
+        inviter: String,
+    },
+    /// A recovery link (`molt://recover/…`) — names its own seat, needs the
+    /// PHRASE, runs `Command::RecoverStart`.
+    Recovery {
+        /// The republic's display name.
+        republic: String,
+        /// The seat coming back; the name field shows this read-only.
+        member: String,
+    },
+    /// Empty, malformed, or actionable-looking but missing its transport
+    /// handover (a preview-only link nothing can be done with).
+    Unrecognized,
+}
+
+/// Classify a pasted link. Empty input is [`LinkKind::Unrecognized`] like any
+/// other unusable value — the panel simply stays unarmed rather than
+/// complaining at someone who has not typed anything yet.
+#[must_use]
+pub fn link_kind(link: &str) -> LinkKind {
+    let trimmed = link.trim();
+    if trimmed.is_empty() {
+        return LinkKind::Unrecognized;
+    }
+    // both parsers reject a link whose handover is missing or damaged, which
+    // is what keeps a preview-only link from arming a flow that cannot run
+    if let Ok(inv) = molt_engine::FoundingInvite::parse(trimmed) {
+        return LinkKind::Invite {
+            republic: inv.info.republic,
+            inviter: inv.info.inviter,
+        };
+    }
+    if let Some(rec) = molt_engine::RecoveryInvite::parse(trimmed) {
+        return LinkKind::Recovery {
+            republic: rec.republic,
+            member: rec.member,
+        };
+    }
+    LinkKind::Unrecognized
 }
 
 /// The invite's relays this node does not hold yet.
@@ -5399,9 +5472,7 @@ macro_rules! lexicon {
 
 lexicon! {
     choice_title: "Welcome", "Willkommen";
-    choice_subtitle: "Choose how to begin.", "Wähle, wie du beginnen möchtest.";
     choice_mock_note: "Workspaces are stored encrypted in the workspace folder (see Settings).", "Workspaces werden verschlüsselt im Workspace-Ordner gespeichert (siehe Einstellungen).";
-    choice_group_republic: "New republic", "Neue Republik";
     // card titles split as hotkey letter + rest: the letter renders
     // underlined and typing it activates the card
     choice_create_key: "C", "G";
@@ -5410,9 +5481,6 @@ lexicon! {
     choice_open_key: "O", "Ö";
     choice_open_rest: "pen", "ffnen";
     choice_open_sub: "Open a local workspace", "Lokalen Workspace öffnen";
-    choice_join_key: "J", "B";
-    choice_join_rest: "oin", "eitreten";
-    choice_join_sub: "Via an invite link", "Einem Workspace per Einladungslink beitreten";
     choice_restore_key: "R", "W";
     choice_restore_rest: "estore", "iederherstellen";
     choice_restore_sub: "With your phrase - from a backup or after device loss", "Mit deiner Phrase - aus Backup oder nach Geräteverlust";
@@ -5651,8 +5719,14 @@ lexicon! {
     rw_paste: "Paste", "Einfügen";
     rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
     rw_continue: "Continue", "Weiter";
+    rw_seed_not_needed: "Not needed for an invite - joining mints a new phrase for you.", "Für eine Einladung nicht nötig - beim Beitreten wird eine neue Phrase für dich erzeugt.";
+    rw_via_link: "With a link", "Mit einem Link";
+    rw_link_hint: "Paste the invite or recovery link you were given.", "Füge den Einladungs- oder Recovery-Link ein, den du bekommen hast.";
+    rw_link_join: "Invite to", "Einladung zu";
+    rw_link_recover: "Recovery for", "Wiederherstellung für";
+    rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
+    rw_link_name_ph: "Your name in the republic…", "Dein Name in der Republik…";
     rw_via_peer: "Social peer-restore", "Social Peer-Restore";
-    rw_peer_hint: "Rejoins via another member - paste the recovery link a member minted for you.", "Tritt über ein anderes Mitglied wieder bei - füge den Recovery-Link ein, den ein Mitglied für dich erstellt hat.";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";
     rw_s3_none: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
@@ -5662,11 +5736,6 @@ lexicon! {
     rw_s3_untested: "not tested - use Test in the backup settings", "ungetestet - Test in den Backup-Einstellungen";
     rw_s3_target_ph: "workspace id from the backup table · or molt/<id>/<ts>.molt.enc", "Workspace-ID aus der Backup-Tabelle · oder molt/<id>/<ts>.molt.enc";
     rw_via_file: "Manual restore", "Manuelles Restore";
-    rw_file_hint: "Restores from an encrypted .molt.enc file backup.", "Stellt aus einem verschlüsselten .molt.enc-Datei-Backup wieder her.";
-    rw_choose: "Choose file…", "Datei wählen…";
-    rw_no_file: "No backup file chosen.", "Keine Backup-Datei gewählt.";
-    rw_file_title: "Choose encrypted backup", "Verschlüsseltes Backup wählen";
-    rw_file_body: "Path of the encrypted workspace blob (.molt.enc). It is read, decrypted with your secret, and its chain is verified before anything is created.", "Pfad des verschlüsselten Workspace-Blobs (.molt.enc). Er wird gelesen, mit deinem Geheimnis entschlüsselt, und die Chain wird vor dem Anlegen verifiziert.";
     rw_file_pick: "Select", "Auswählen";
     rw_log_title: "Live details", "Live-Details";
     rw_finish: "Finish", "Fertigstellen";
@@ -6815,6 +6884,107 @@ mod tests {
         assert_eq!(log[3].quote_indent, 2, "a neighboring different target alternates");
         assert_eq!(log[4].quote_indent, 0, "plain rows sit flush and end the run");
         assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
+    }
+
+    // ---- the Restore wizard's one link field (welcome_rework.md) -------
+
+    /// The two link shapes are rendered by the ENGINE's own `render()`,
+    /// never hand-written here: a hand-built string pins the test's idea of
+    /// the format, and the day the real one changes the test keeps passing
+    /// while the panel stops recognizing anything.
+    /// A real x-only anchor - the handover encoders validate the key, so a
+    /// made-up hex string cannot stand in for one.
+    fn anchor(seed: u8) -> String {
+        molt_net::nostr_identity(&[seed; 32], "fixture").1
+    }
+
+    fn invite_link() -> String {
+        molt_engine::FoundingInvite {
+            info: molt_core::InviteInfo {
+                republic: "Chess Club".to_string(),
+                threshold: 2,
+                members: 3,
+                inviter: "walter".to_string(),
+                ticket: "a".repeat(64),
+            },
+            handover: molt_net::invite::InviteHandoverV2 {
+                seat: 1,
+                ticket: "a".repeat(64),
+                npub: anchor(1),
+                relays: vec!["ws://127.0.0.1:7777".to_string()],
+            },
+        }
+        .render()
+        .expect("the engine renders its own link")
+    }
+
+    fn recovery_link() -> String {
+        molt_engine::RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "petra".to_string(),
+            ticket: "c".repeat(64),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            republic_id: "d".repeat(64),
+            handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                ticket: "c".repeat(64),
+                npub: anchor(2),
+                relays: vec!["ws://127.0.0.1:7777".to_string()],
+                republic_id: "d".repeat(64),
+            }),
+        }
+        .render()
+    }
+
+    /// One field, two flows: an invite link asks for a NAME and joins, a
+    /// recovery link brings its own seat and needs the PHRASE. Getting this
+    /// wrong sends someone through the founding ritual to recover a seat
+    /// they already hold, so it is pinned rather than eyeballed.
+    #[test]
+    fn one_link_field_tells_a_join_from_a_recovery() {
+        assert_eq!(
+            link_kind(&invite_link()),
+            LinkKind::Invite {
+                republic: "Chess Club".to_string(),
+                inviter: "walter".to_string(),
+            },
+            "a founding invite routes to the join"
+        );
+        assert_eq!(
+            link_kind(&recovery_link()),
+            LinkKind::Recovery {
+                republic: "Chess Club".to_string(),
+                member: "petra".to_string(),
+            },
+            "a recovery link routes to the ritual, and names its own seat"
+        );
+        // whitespace is what a paste actually carries
+        assert_eq!(link_kind(&format!("  {}\n", invite_link())), link_kind(&invite_link()));
+    }
+
+    /// Everything else arms nothing. A PREVIEW-only invite link is the
+    /// interesting case: it parses as a human-readable invite and carries no
+    /// transport handover at all, so a panel that armed on "looks like an
+    /// invite" would start a join that cannot reach anybody.
+    #[test]
+    fn a_link_that_cannot_act_arms_nothing() {
+        let full = invite_link();
+        let preview = full.rsplit_once('/').expect("the handover is the last segment").0;
+        assert_eq!(
+            link_kind(preview),
+            LinkKind::Unrecognized,
+            "a preview link has no transport handover - nothing can be done with it"
+        );
+        let damaged = format!("{}zz", recovery_link());
+        assert_eq!(
+            link_kind(&damaged),
+            LinkKind::Unrecognized,
+            "a damaged recovery handover is not an actionable link"
+        );
+        for junk in ["", "   ", "hello", "molt://", "molt://invite/", "https://example.com"] {
+            assert_eq!(link_kind(junk), LinkKind::Unrecognized, "junk: {junk:?}");
+        }
     }
 
     /// The chat offers exactly ONE view, and it is writable. The nav used
