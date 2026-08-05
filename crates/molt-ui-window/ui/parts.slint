@@ -12,6 +12,8 @@ import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
 // activates the card when it is typed) and the rest; `marked` mirrors the
 // hover look for the arrow-key selection.
 export component ChoiceCard inherits Rectangle {
+    // text before the hotkey letter, unmarked (empty on the plain cards)
+    in property <string> lead: "";
     in property <string> key;
     in property <string> rest;
     in property <string> sub;
@@ -52,6 +54,15 @@ export component ChoiceCard inherits Rectangle {
         HorizontalLayout {
             alignment: start;
             spacing: 0;
+            // an optional prefix that is NOT the hotkey: a title like
+            // "(Re)Join / Recovery" has its hotkey letter in the middle, and
+            // underlining the bracket instead would be a lie about the key
+            if root.lead != "": Text {
+                text: root.lead;
+                color: Theme.text;
+                font-size: Theme.fs-h2;
+                font-weight: 700;
+            }
             Rectangle {
                 width: keyt.preferred-width;
                 height: keyt.preferred-height;

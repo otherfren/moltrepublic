@@ -1025,6 +1025,10 @@ export component AppWindow inherits Window {
             root.navigate(AppScreen.create);
         } else if (i == 2) {
             root.rw-seed = "";
+            // a fresh visit always starts at the way in, never on the
+            // phrase step a previous visit walked to
+            root.rw-phase = 0;
+            root.rw-pending = "";
             // the join half of this wizard starts clean too - the name is
             // only asked for once a link turns out to be an invite
             root.jw-member = "";
@@ -1062,6 +1066,9 @@ export component AppWindow inherits Window {
     // the selected channel is a patch channel (a vote's discussion) — set
     // by Rust alongside selected-channel; gates the banner's vote jump
     in property <bool> selected-channel-votable: false;
+    // whether the selected channel has a row of its own in the list below —
+    // the Gruppe row only stands in for filters that do NOT
+    in property <bool> selected-channel-listed: false;
     // the selected channel is a DECIDED vote's discussion: read-only —
     // the compose row collapses and the banner says so (computed in Rust
     // from the engine's channel annotation, instant on selection)
@@ -1202,19 +1209,31 @@ export component AppWindow inherits Window {
     property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
     pure function link-armed() -> bool {
         return !root.rv-running
-            && (root.rv-kind.kind == 1
-                ? root.jw-member != ""
-                : (root.rv-kind.kind == 2 && root.rw-seed != ""));
+            && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2);
     }
     function link-continue() {
         if (!root.link-armed()) {
             return;
         }
         if (root.rv-kind.kind == 1) {
+            // a JOIN needs no phrase at all - the ritual mints one and shows
+            // it once, which is why this leg never reaches the phrase step
             root.jw-invite = root.rv-link;
             root.join-start(root.rv-link, root.jw-member);
         } else {
+            root.rw-pending = "recover";
+            root.rw-phase = 1;
+        }
+    }
+    // the phrase step's own button: it starts whichever leg sent us here
+    function phrase-continue() {
+        if (root.rw-seed == "") {
+            return;
+        }
+        if (root.rw-pending == "recover") {
             root.recover-start(root.rv-link, root.rw-seed);
+        } else if (root.rw-pending == "s3") {
+            root.restore-start("s3", root.rw-s3-target, root.rw-seed);
         }
     }
     // the last notice the recovery flow handled (edge-trigger mirror so a
@@ -1250,6 +1269,19 @@ export component AppWindow inherits Window {
     // the progress and the live log; the GUI only renders and sends verbs):
     // step 0 = pick a way in, 1 = run view; outcome 0 = running, 1 = ok, 2 = failed
     in property <int> rw-step: 0;
+    // The (Re)Join/Recovery wizard's own step, GUI-local: `rw-step` above is
+    // the ENGINE's restore RUN state and cannot carry a step the engine
+    // knows nothing about. 0 = which way in, 1 = the recovery phrase.
+    //
+    // The phrase is asked HERE and not before, because a founding invite
+    // needs none: joining mints one and shows it once. Asking for it on the
+    // first screen made the join look impossible to anyone who did not have
+    // a phrase yet - which is everyone a founding invite is meant for.
+    property <int> rw-phase: 0;
+    // what the phrase step will start: "recover" | "s3"
+    property <string> rw-pending: "";
+    // which dot is lit: the way in, the phrase, then the run
+    property <int> rw-dot: root.rw-step == 1 ? 2 : root.rw-phase;
     in property <string> rw-way;
     in property <string> rw-target;
     in property <float> rw-progress: 0.0;
@@ -1630,6 +1662,9 @@ export component AppWindow inherits Window {
         } else if (root.screen == AppScreen.restore && !root.restore-running) {
             if (root.rw-step == 1) {
                 root.restore-cancel();
+            } else if (root.rw-phase == 1) {
+                // back to the way in, not out of the wizard
+                root.rw-phase = 0;
             } else {
                 root.navigate(AppScreen.choice);
             }
@@ -1859,9 +1894,18 @@ export component AppWindow inherits Window {
                                     // discussion (the sections lists open
                                     // votes only) — keeps the Gruppe row lit;
                                     // the compose banner names the filter.
+                                    // exactly ONE active sub-item per surface.
+                                    // On chat the Gruppe row is the stand-in
+                                    // for every filter WITHOUT a row of its
+                                    // own; a filter that has one (a topic, an
+                                    // open vote's discussion) owns the
+                                    // highlight itself. Standing in for a
+                                    // listed channel is how a topic could be
+                                    // on screen while the nav said "Gruppe".
                                     selected: v.key == root.selected-view
                                         && (s.key != "chat" || v.key != "today"
-                                            || !root.selected-channel-votable || root.selected-channel-closed);
+                                            || root.selected-channel == "group"
+                                            || !root.selected-channel-listed);
                                     pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
                                         : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
@@ -2132,6 +2176,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         ChoiceCard {
+                            lead: Strings.choice-restore-lead;
                             key: Strings.choice-restore-key;
                             rest: Strings.choice-restore-rest;
                             sub: Strings.choice-restore-sub;
@@ -3677,6 +3722,8 @@ export component AppWindow inherits Window {
                         clicked => {
                             if (root.rw-step == 1) {
                                 root.restore-cancel();
+                            } else if (root.rw-phase == 1) {
+                                root.rw-phase = 0;
                             } else {
                                 root.navigate(AppScreen.choice);
                             }
@@ -3684,50 +3731,120 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // step dots: 1 = pick a way in, 2 = restore progress
+                // step dots: the way in · the phrase (when needed) · the run
                 HorizontalLayout {
                     alignment: center;
                     spacing: 7px;
-                    for i in 2: Rectangle {
+                    for i in 3: Rectangle {
                         width: 9px;
                         height: 9px;
                         border-radius: 4.5px;
-                        background: i == root.rw-step ? Theme.accent : Theme.line;
+                        background: i == root.rw-dot ? Theme.accent : Theme.line;
                     }
                 }
 
-                if root.rw-step == 0: VerticalLayout {
-                spacing: 12px;
-
-                // the recovery phrase feeds every restore path
-                RestoreWay {
-                    title: Strings.rw-seed;
-                    // an INVITE link is the one way in that needs no phrase:
-                    // a join mints its own and shows it once. The panel dims
-                    // rather than disappearing - a field that vanishes as
-                    // you type reads as a bug, not as an answer.
-                    opacity: root.rv-kind.kind == 1 ? 0.45 : 1.0;
-                    hint: root.rv-kind.kind == 1 ? Strings.rw-seed-not-needed : Strings.rw-seed-hint;
-                    icon: @image-url("assets/key.svg");
-                    HorizontalLayout {
-                        spacing: 8px;
-                        AppField {
-                            text <=> root.rw-seed;
-                            placeholder: Strings.ph-seed;
-                            horizontal-stretch: 1;
+                // STEP 2 - the recovery phrase, asked only once we know a
+                // way in that needs it. A join never lands here.
+                if root.rw-step == 0 && root.rw-phase == 1: VerticalLayout {
+                    spacing: 12px;
+                    RestoreWay {
+                        title: Strings.rw-seed;
+                        hint: root.rw-pending == "s3" ? Strings.rw-seed-hint-s3 : Strings.rw-seed-hint;
+                        icon: @image-url("assets/key.svg");
+                        HorizontalLayout {
+                            spacing: 8px;
+                            AppField {
+                                text <=> root.rw-seed;
+                                placeholder: Strings.ph-seed;
+                                horizontal-stretch: 1;
+                                accepted => {
+                                    root.phrase-continue();
+                                }
+                            }
+                            AppButton {
+                                height: 38px;
+                                pad: 10px;
+                                icon: @image-url("assets/paste.svg");
+                                icon-set: true;
+                                label: Strings.rw-paste;
+                                clicked => {
+                                    root.rw-seed = root.paste-clipboard();
+                                }
+                            }
                         }
-                        AppButton {
-                            height: 38px;
-                            pad: 10px;
-                            icon: @image-url("assets/paste.svg");
-                            icon-set: true;
-                            label: Strings.rw-paste;
-                            clicked => {
-                                root.rw-seed = root.paste-clipboard();
+                        // what this phrase is about to unlock, so the step
+                        // never stands there without a subject
+                        DotLabel {
+                            tone: Theme.good;
+                            label: root.rw-pending == "s3"
+                                ? root.rw-s3-target
+                                : "\{Strings.rw-link-recover} \{root.rv-kind.republic} · \{root.rv-kind.who}";
+                            label-color: Theme.text;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            AppButton {
+                                height: 38px;
+                                label: Strings.rw-back;
+                                clicked => {
+                                    root.rw-phase = 0;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            AppButton {
+                                height: 38px;
+                                primary: true;
+                                enabled: !root.rv-running && root.rw-seed != "";
+                                label: Strings.rw-continue;
+                                clicked => {
+                                    root.phrase-continue();
+                                }
+                            }
+                        }
+                        // a recovery runs from HERE: its wait spans the
+                        // survivors' human approval, so it reports in place
+                        if root.rv-running: VerticalLayout {
+                            spacing: 4px;
+                            DotLabel {
+                                tone: Theme.warn;
+                                label: root.rv-member;
+                                label-color: Theme.text;
+                            }
+                            Text {
+                                text: Strings.rv-running-note;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            if root.rv-note != "": Text {
+                                text: root.rv-note;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.rv-error != "": VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: root.rv-error;
+                                color: Theme.bad;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: Strings.rv-failed-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
                     }
+                    Rectangle { vertical-stretch: 1; }
                 }
+
+                // STEP 1 - which way in
+                if root.rw-step == 0 && root.rw-phase == 0: VerticalLayout {
+                spacing: 12px;
 
                 // The one way in that starts from a link somebody sent you.
                 // BOTH shapes land here (welcome_rework.md): a founding
@@ -3737,9 +3854,10 @@ export component AppWindow inherits Window {
                 // engine notices drive the running / failed states; on
                 // success the engine flips the screen by itself.
                 WayBranch {
-                    // a link arms this way on its own: an invite needs no
-                    // phrase (the join mints one), a recovery link does
-                    armed: root.rv-kind.kind == 1 || root.rw-seed != "";
+                    // armed by the LINK alone: what it needs beyond that -
+                    // a name for an invite, the phrase for a recovery - is
+                    // asked where it belongs, not up front
+                    armed: root.rv-link != "";
                     RestoreWay {
                     horizontal-stretch: 1;
                     title: Strings.rw-via-link;
@@ -3800,43 +3918,6 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    // in flight: the wait spans the survivors' human approval
-                    if root.rv-running: VerticalLayout {
-                        spacing: 4px;
-                        DotLabel {
-                            tone: Theme.warn;
-                            label: root.rv-member;
-                            label-color: Theme.text;
-                        }
-                        Text {
-                            text: Strings.rv-running-note;
-                            color: Theme.dim;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                        if root.rv-note != "": Text {
-                            text: root.rv-note;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                    }
-                    // failed: the raw engine reason + the retry hint (fresh link)
-                    if root.rv-error != "": VerticalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: root.rv-error;
-                            color: Theme.bad;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                        Text {
-                            text: Strings.rv-failed-hint;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                    }
                 }
 
                 }
@@ -3845,7 +3926,7 @@ export component AppWindow inherits Window {
                 // configured S3 bucket. Last branch, so the tree rail's L
                 // closes here.
                 WayBranch {
-                    armed: root.rw-seed != "";
+                    armed: root.rw-s3-target != "";
                     last: true;
                     RestoreWay {
                     horizontal-stretch: 1;
@@ -3906,10 +3987,11 @@ export component AppWindow inherits Window {
                         AppButton {
                             height: 38px;
                             primary: true;
-                            enabled: root.rw-seed != "" && root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
+                            enabled: root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
                             label: Strings.rw-continue;
                             clicked => {
-                                root.restore-start("s3", root.rw-s3-target, root.rw-seed);
+                                root.rw-pending = "s3";
+                                root.rw-phase = 1;
                             }
                         }
                     }
@@ -3953,7 +4035,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.rw-step == 0: Rectangle {
+                if root.rw-step == 0 && root.rw-phase == 0: Rectangle {
                     vertical-stretch: 1;
                 }
             }

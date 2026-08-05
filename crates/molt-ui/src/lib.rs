@@ -3823,7 +3823,14 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             unread: c.unread,
         })
         .collect();
+    // does the CURRENT filter have a row of its own? The Gruppe nav row
+    // stands in for every filter that does not (the group itself, a decided
+    // vote's read-only discussion), and it must NOT stand in for one that
+    // does - a lit Gruppe row while the pane shows a topic tells the user
+    // they are somewhere they are not.
+    let selected_listed = b.channels.iter().any(|c| c.key == b.selected_key);
     sync_rows(&ui.get_chat_channels(), channels, |m| ui.set_chat_channels(m));
+    ui.set_selected_channel_listed(selected_listed);
     ui.set_selected_channel(b.selected_key.as_str().into());
     ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
@@ -4554,6 +4561,33 @@ fn derive_channels(
 ) -> Vec<ChannelRowData> {
     let unread_of =
         |key: &str| i32::try_from(unread.get(key).copied().unwrap_or(0)).unwrap_or(i32::MAX);
+    // TOPICS first, by name: a human named them, they do not come and go
+    // with a vote's lifecycle, and `chat_bus.md` §Phase-4 lists them ("Topic
+    // channels as they occur"). They were dropped from this list once and it
+    // made the New-topic button a trapdoor - the channel existed, held
+    // messages, and had nowhere to be clicked back to.
+    let mut topics: Vec<&str> = infos
+        .iter()
+        .filter_map(|i| match &i.channel {
+            ChannelRef::Topic { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    topics.sort_unstable();
+    topics.dedup();
+    let mut rows: Vec<ChannelRowData> = topics
+        .into_iter()
+        .map(|name| {
+            let key = format!("topic:{name}");
+            ChannelRowData {
+                unread: unread_of(&key),
+                key,
+                label: name.to_string(),
+                icon: "🏷️".to_string(),
+            }
+        })
+        .collect();
+    // …then the discussions of OPEN votes, by id
     let mut patches: Vec<u64> = Vec::new();
     for i in infos {
         if let ChannelRef::Patch { id } = &i.channel {
@@ -4562,22 +4596,20 @@ fn derive_channels(
     }
     patches.sort_unstable();
     patches.dedup();
-    patches
-        .into_iter()
-        .filter_map(|id| {
-            let k = known.get(&id)?;
-            if k.fate != KnownFate::Pending {
-                return None;
-            }
-            let key = format!("patch:{id}");
-            Some(ChannelRowData {
-                unread: unread_of(&key),
-                key,
-                label: display_title(lang, &k.payload),
-                icon: "🗳️".to_string(),
-            })
+    rows.extend(patches.into_iter().filter_map(|id| {
+        let k = known.get(&id)?;
+        if k.fate != KnownFate::Pending {
+            return None;
+        }
+        let key = format!("patch:{id}");
+        Some(ChannelRowData {
+            unread: unread_of(&key),
+            key,
+            label: display_title(lang, &k.payload),
+            icon: "🗳️".to_string(),
         })
-        .collect()
+    }));
+    rows
 }
 
 /// The command the patch-channel banner's "back to the vote" button
@@ -5481,9 +5513,10 @@ lexicon! {
     choice_open_key: "O", "Ö";
     choice_open_rest: "pen", "ffnen";
     choice_open_sub: "Open a local workspace", "Lokalen Workspace öffnen";
-    choice_restore_key: "R", "W";
-    choice_restore_rest: "estore", "iederherstellen";
-    choice_restore_sub: "With your phrase - from a backup or after device loss", "Mit deiner Phrase - aus Backup oder nach Geräteverlust";
+    choice_restore_lead: "(", "(";
+    choice_restore_key: "R", "R";
+    choice_restore_rest: "e)Join / Recovery", "e)Join / Recovery";
+    choice_restore_sub: "Join with an invite, or come back to a seat you hold", "Mit einer Einladung beitreten, oder auf deinen Sitz zurück";
     nav_back: "Back", "Zurück";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
@@ -5714,12 +5747,13 @@ lexicon! {
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while - it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern - Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
-    rw_title: "Restore", "Wiederherstellen";
+    rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
-    rw_seed_hint: "Peer restore and S3 backups unlock with the recovery phrase; a manual .molt.enc file export takes its export passphrase here instead.", "Peer-Restore und S3-Backups entsperrt die Recovery-Phrase; ein manueller .molt.enc-Datei-Export nimmt hier stattdessen seine Export-Passphrase.";
+    rw_seed_hint: "The phrase of the seat you are coming back to.", "Die Phrase des Sitzes, auf den du zurückkommst.";
+    rw_seed_hint_s3: "The phrase the backup was sealed with.", "Die Phrase, mit der das Backup versiegelt wurde.";
+    rw_back: "Back", "Zurück";
     rw_continue: "Continue", "Weiter";
-    rw_seed_not_needed: "Not needed for an invite.", "Bei einer Einladung nicht nötig.";
     rw_via_link: "With a link", "Mit einem Link";
     rw_link_hint: "The invite or recovery link you were given.", "Der Einladungs- oder Recovery-Link, den du bekommen hast.";
     rw_link_join: "Invite to", "Einladung zu";
@@ -6305,16 +6339,22 @@ mod tests {
         ]);
         let unread = HashMap::from([("patch:3".to_string(), 2usize), ("group".to_string(), 1)]);
         let rows = derive_channels(0, &infos, &known, &unread);
-        // a discussion is vote-bound: only OPEN votes (something can still
-        // be voted on) appear — no group row (the Gruppe view covers it),
-        // no sealed/closed votes, no unknown proposals, no free topics
+        // topics first (a human named them), then the discussions of OPEN
+        // votes. No group row - the Gruppe nav view covers it - and no
+        // sealed/closed votes or unknown proposals: a discussion is
+        // vote-bound and dies with its vote.
+        //
+        // The TOPIC row is the one this list lost once, and losing it made
+        // the New-topic button a trapdoor: the channel existed and held
+        // messages with nowhere to click back to.
         assert_eq!(
             rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
-            ["patch:3"],
-            "only the open vote's discussion survives"
+            ["topic:zeta", "patch:3"],
+            "the topic keeps its row; only the open vote's discussion survives"
         );
-        assert_eq!(rows[0].label, "raise budget", "patch title from proposal state");
-        assert_eq!(rows[0].unread, 2);
+        assert_eq!(rows[0].label, "zeta", "a topic is labelled by its name");
+        assert_eq!(rows[1].label, "raise budget", "patch title from proposal state");
+        assert_eq!(rows[1].unread, 2);
         // nothing open → no rows (the sidebar hides the whole section)
         let rows = derive_channels(0, &[], &HashMap::new(), &HashMap::new());
         assert!(rows.is_empty());

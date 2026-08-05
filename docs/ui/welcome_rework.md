@@ -26,23 +26,35 @@ for something the user can do with their file manager.
 |---|---|---|
 | Open | `O` / `Ö` | `AppScreen.open` — the local workspace table |
 | Create | `C` / `G` | `AppScreen.create` — found a new republic |
-| Restore | `R` / `W` | `AppScreen.restore` — the way back in, below |
+| (Re)Join / Recovery | `R` | `AppScreen.restore` — the way back in, below |
 
 Create sits directly under Open (both are "I already know what I want"); the
 "New republic" group header and its indent rail go away with the grouping. No
 subtitle. `choice-focus` wraps over 3, not 4.
 
-**Restore step 1: two panels, not three, plus the phrase.**
+**Step 1 — which way in. Two panels.**
 
-1. **Recovery phrase** — unchanged, but no longer unconditionally required
-   (see the dispatch rule below).
-2. **Link** — ONE field for a `molt://…` link, plus a name field. This is the
+1. **Link** — ONE field for a `molt://…` link, plus a name field. This is the
    panel that merges Join and social peer-restore.
-3. **Online restore via S3** — unchanged.
-4. ~~Manual restore (file)~~ — the GUI panel goes. The COMMAND stays
+2. **Online restore via S3** — the endpoint and which backup.
+3. ~~Manual restore (file)~~ — the GUI panel goes. The COMMAND stays
    (`RestoreStart { way: "file" }`) and so does its MCP tool: dropping a
    capability is not what was asked for, and a `.molt.enc` blob is not
    something a file manager can install — only the button goes.
+
+**Step 2 — the recovery phrase, and only when it is needed.**
+
+The phrase was on the FIRST screen, above everything, and that was wrong in
+a way that made the whole wizard look impossible: **a founding invite needs
+no phrase — joining is where you GET one.** Someone holding an invite met a
+required-looking phrase field for a phrase that does not exist yet.
+
+So the phrase is its own step now, reached only by the two ways that need
+it (a recovery link, an S3 backup). The join leg never passes through it:
+step 1's continue starts the ritual directly. The step also carries what the
+phrase is about to unlock, and a recovery reports its progress here — that
+wait spans the survivors' human approval, so it must have somewhere to
+stand.
 
 ## The dispatch rule (the whole design)
 
@@ -56,12 +68,10 @@ The two link shapes are already unambiguous and already parsed in `molt-engine`:
 So the panel is dynamic in exactly one way: **what the link is decides which
 field is required.**
 
-- A recovery link names its own seat — the name field is inert (it shows the
-  seat the link carries, read-only) and the phrase is required.
-- An invite link cannot know who the person is — the name is required and the
-  phrase is NOT: a join mints its own recovery phrase and shows it once. The
-  phrase panel dims for an invite link rather than disappearing (a field that
-  vanishes as you type reads as a bug).
+- A recovery link names its own seat — no name is asked, and the phrase is
+  asked in step 2.
+- An invite link cannot know who the person is — the name is required, and no
+  phrase is asked at all: a join mints its own and shows it once.
 - Junk, or a preview-only link with no handover, arms nothing and says which
   of the two shapes it expected.
 

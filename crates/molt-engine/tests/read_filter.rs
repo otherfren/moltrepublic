@@ -417,3 +417,48 @@ async fn status_counts_are_unchanged_by_filtering() {
         "the pending proposal is unaffected by chat reads"
     );
 }
+
+/// **The reported sequence, engine-side** (2026-08-05): open a workspace,
+/// speak in the group, open a topic, speak in it — and then read the way the
+/// GUI reads. Every one of those reads must still hold its messages.
+///
+/// Written because a user saw the chat pane go blank after exactly this, and
+/// the first job is to say whether the engine or the window lost them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_topic_opened_mid_conversation_loses_nothing() {
+    let w = spawn_solo();
+    chat(&w, "in the group", ChannelRef::Group).await;
+    let topic = ChannelRef::Topic { name: "budget".to_string() };
+    chat(&w, "in the topic", topic.clone()).await;
+
+    let body_of = |s: &SurfaceSnapshot| {
+        s.applied
+            .iter()
+            .map(|v| v["body"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    // …the way the GUI reads it: the whole window, then each filter
+    assert_eq!(
+        body_of(&read_chat_snapshot(&w, None).await),
+        ["in the group", "in the topic"],
+        "the unfiltered read holds both"
+    );
+    assert_eq!(
+        body_of(&read_chat_snapshot(&w, Some(ChannelRef::Group)).await),
+        ["in the group"],
+        "the group keeps its own message when a topic exists beside it"
+    );
+    assert_eq!(
+        body_of(&read_chat_snapshot(&w, Some(topic.clone())).await),
+        ["in the topic"],
+        "…and the topic holds what was written into it"
+    );
+    // the enumeration must OFFER the topic - a channel a client cannot see
+    // is a channel the user cannot get back to
+    let channels = read_chat_snapshot(&w, None).await.channels;
+    assert!(
+        channels.iter().any(|c| c.channel == topic),
+        "the topic must appear in the channel enumeration: {channels:?}"
+    );
+    assert!(channels.iter().any(|c| c.channel == ChannelRef::Group));
+}
