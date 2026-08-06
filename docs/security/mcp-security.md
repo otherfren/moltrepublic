@@ -162,6 +162,17 @@ their start / cancel / finish verbs). Reading is co-equal too: what the GUI
 live-mirrors, an agent reads via `read_session`, `read_state`,
 `list_proposals` and `status`.
 
+**Two settings verbs, deliberately.** `save_settings` REPLACES every field
+and requires every field; `patch_settings` changes only what it names and
+merges against the running settings inside the engine. The split is a
+security boundary, not ergonomics: a partial payload used to be filled from
+`SessionSettings::default()`, and those defaults are not neutral —
+`anonymity` defaults to `"none"` and `mcp_token` to empty, so an agent
+adjusting a backup interval could take a Tor node onto clearnet and switch
+this authentication off in the same call, and be told "ack". The merge has
+to happen where the current values are, which is the engine; the frontend
+cannot tell "omitted" from "set to the default" (H5, fixed 2026-08-07).
+
 **Deliberate exceptions** — GUI affordances with no MCP tool, and why:
 
 * **Quit** (the window's quit confirm). Ends the local *process*, not shared

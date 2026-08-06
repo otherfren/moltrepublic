@@ -427,57 +427,66 @@ fn screen_arg(args: &Value) -> Result<Screen, String> {
 /// The relay pool is deliberately NOT one of those fields: it has its own
 /// validated, gated commands (`relay_add`/`relay_confirm`/…), and the engine
 /// ignores whatever pool a `save_settings` payload carries.
-fn settings_arg(args: &Value) -> SessionSettings {
+/// The FULL settings payload of `save_settings`.
+///
+/// Every field is required, and that is the fix for a real hazard: it used
+/// to fall back to `SessionSettings::default()` per missing key, so a caller
+/// sending three fields silently reset the rest — `anonymity` to `"none"`
+/// (a Tor node onto clearnet) and `mcp_token` to empty (authentication off).
+/// A partial update is `patch_settings`, which merges against the running
+/// settings inside the engine, where the current values actually are.
+fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
     let d = SessionSettings::default();
-    let port = |key: &str, fallback: u16| {
+    let missing = |key: &str| format!("`{key}` is required — to change one setting use patch_settings");
+    let port = |key: &str| -> Result<u16, String> {
         args.get(key)
             .and_then(Value::as_u64)
             .and_then(|p| u16::try_from(p).ok())
-            .unwrap_or(fallback)
+            .ok_or_else(|| missing(key))
     };
-    let text = |key: &str, fallback: String| {
+    let text = |key: &str| -> Result<String, String> {
         args.get(key)
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or(fallback)
+            .ok_or_else(|| missing(key))
     };
-    SessionSettings {
-        headless: args
-            .get("headless")
-            .and_then(Value::as_bool)
-            .unwrap_or(d.headless),
+    let flag = |key: &str| -> Result<bool, String> {
+        args.get(key).and_then(Value::as_bool).ok_or_else(|| missing(key))
+    };
+    Ok(SessionSettings {
+        headless: flag("headless")?,
         // NOT settable through save_settings — the relay pool and the
         // clearnet decision have exactly one door each (the Relay* tools),
         // so an agent cannot grant itself non-onion dialing here. Carried
         // through unchanged; the engine re-merges the stored value.
         clearnet_relays_enabled: d.clearnet_relays_enabled,
-        workspace_dir: text("workspace_dir", d.workspace_dir),
-        download_dir: text("download_dir", d.download_dir),
-        s3_backup: args
-            .get("s3_backup")
-            .and_then(Value::as_bool)
-            .unwrap_or(d.s3_backup),
-        s3_endpoint: text("s3_endpoint", d.s3_endpoint),
-        s3_access_key: text("s3_access_key", d.s3_access_key),
-        s3_secret_key: text("s3_secret_key", d.s3_secret_key),
-        s3_bucket: text("s3_bucket", d.s3_bucket),
-        s3_interval_min: port("s3_interval_min", d.s3_interval_min),
-        s3_keep_copies: port("s3_keep_copies", d.s3_keep_copies),
-        sound_message: text("sound_message", d.sound_message),
-        sound_vote: text("sound_vote", d.sound_vote),
-        read_receipts: args
-            .get("read_receipts")
-            .and_then(Value::as_bool)
-            .unwrap_or(d.read_receipts),
-        mcp_port: port("mcp_port", d.mcp_port),
-        mcp_allow: text("mcp_allow", d.mcp_allow),
-        mcp_token: text("mcp_token", d.mcp_token),
-        anonymity: text("anonymity", d.anonymity),
-        tor_mode: text("tor_mode", d.tor_mode),
-        tor_port: port("tor_port", d.tor_port),
+        workspace_dir: text("workspace_dir")?,
+        // the one optional field, and only because it postdates the tool's
+        // schema: an agent that never set it keeps the default rather than
+        // being refused for a key it has never heard of
+        download_dir: args
+            .get("download_dir")
+            .and_then(Value::as_str)
+            .map_or(d.download_dir, str::to_string),
+        s3_backup: flag("s3_backup")?,
+        s3_endpoint: text("s3_endpoint")?,
+        s3_access_key: text("s3_access_key")?,
+        s3_secret_key: text("s3_secret_key")?,
+        s3_bucket: text("s3_bucket")?,
+        s3_interval_min: port("s3_interval_min")?,
+        s3_keep_copies: port("s3_keep_copies")?,
+        sound_message: text("sound_message")?,
+        sound_vote: text("sound_vote")?,
+        read_receipts: flag("read_receipts")?,
+        mcp_port: port("mcp_port")?,
+        mcp_allow: text("mcp_allow")?,
+        mcp_token: text("mcp_token")?,
+        anonymity: text("anonymity")?,
+        tor_mode: text("tor_mode")?,
+        tor_port: port("tor_port")?,
         // never taken from the payload — the engine keeps the live pool
         relays: Vec::new(),
-    }
+    })
 }
 
 fn surface_enum() -> Value {
@@ -873,14 +882,52 @@ pub fn tools() -> Vec<ToolDef> {
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string", "description": "client IP allowlist: \"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
                     "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },
-                    "anonymity": { "type": "string", "enum": ["tor", "nym", "none"] },
+                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
+                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
+                    "tor_port": { "type": "integer" }
+                },
+                "required": [
+                    "headless", "workspace_dir", "s3_backup", "s3_endpoint",
+                    "s3_access_key", "s3_secret_key", "s3_bucket",
+                    "s3_interval_min", "s3_keep_copies", "sound_message",
+                    "sound_vote", "read_receipts", "mcp_port", "mcp_allow",
+                    "mcp_token", "anonymity", "tor_mode", "tor_port"
+                ]
+            }),
+            build: |args| Ok(Command::SaveSettings {
+                settings: settings_arg(args)?,
+            }),
+        },
+        ToolDef {
+            name: "patch_settings",
+            command: "patch_settings",
+            description: "Change SOME settings, keeping every field you do not mention. This is the tool for adjusting one thing: save_settings REPLACES everything, and its defaults are not neutral - anonymity defaults to \"none\" (a Tor node onto clearnet) and mcp_token to empty (authentication off), so a partial save_settings would silently reset them. Unknown keys are refused rather than ignored, and the relay pool keeps its own door (the relay_* tools).",
+            schema: || json!({
+                "type": "object",
+                "description": "the settings to change, keyed as in read_session.settings",
+                "properties": {
+                    "headless": { "type": "boolean" },
+                    "workspace_dir": { "type": "string" },
+                    "s3_backup": { "type": "boolean" },
+                    "s3_endpoint": { "type": "string" },
+                    "s3_access_key": { "type": "string" },
+                    "s3_secret_key": { "type": "string" },
+                    "s3_bucket": { "type": "string" },
+                    "s3_interval_min": { "type": "integer" },
+                    "s3_keep_copies": { "type": "integer" },
+                    "download_dir": { "type": "string" },
+                    "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "read_receipts": { "type": "boolean" },
+                    "mcp_port": { "type": "integer" },
+                    "mcp_allow": { "type": "string" },
+                    "mcp_token": { "type": "string" },
+                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
                     "tor_port": { "type": "integer" }
                 }
             }),
-            build: |args| Ok(Command::SaveSettings {
-                settings: settings_arg(args),
-            }),
+            build: |args| Ok(Command::PatchSettings { patch: args.clone() }),
         },
         ToolDef {
             name: "relay_probe",
@@ -1928,6 +1975,36 @@ mod tests {
         );
         // …and nothing past the bound was ever parsed as a request
         assert_eq!(answer.lines().count(), 1, "one refusal, then silence: {answer}");
+    }
+
+    /// **A partial settings call cannot reset what it does not mention.**
+    ///
+    /// `save_settings` used to fill every missing key from
+    /// `SessionSettings::default()`, and those defaults are not neutral:
+    /// `anonymity` defaults to `"none"` and `mcp_token` to empty. An agent
+    /// adjusting a backup interval could take a Tor node onto clearnet and
+    /// switch MCP authentication off in the same call, and the reply said
+    /// "ack".
+    ///
+    /// Now the full-replace verb REFUSES a partial payload by name, and
+    /// there is a partial verb that merges in the engine, where the current
+    /// values are.
+    #[test]
+    fn a_partial_settings_payload_is_refused_not_defaulted() {
+        let partial = json!({ "s3_interval_min": 15 });
+        let err = build("save_settings", &partial)
+            .expect_err("a partial full-replace must not be accepted");
+        assert!(
+            err.contains("required") && err.contains("patch_settings"),
+            "the refusal names the missing field AND the right tool: {err}"
+        );
+        // …and the partial verb takes exactly that payload, untouched
+        match build("patch_settings", &partial).expect("patch builds") {
+            Command::PatchSettings { patch } => {
+                assert_eq!(patch, partial, "the patch travels verbatim - the engine merges");
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
     }
 
     #[tokio::test]

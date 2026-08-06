@@ -1235,6 +1235,7 @@ impl State {
             Command::SetTheme { theme } => self.cmd_set_theme(theme),
             Command::SetReadReceipts { enabled } => self.cmd_set_read_receipts(enabled),
             Command::SaveSettings { settings } => self.cmd_save_settings(settings),
+            Command::PatchSettings { patch } => self.cmd_patch_settings(patch),
             Command::ReloadSettings {
                 settings,
                 language,

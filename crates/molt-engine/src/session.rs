@@ -354,6 +354,49 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Change only the settings the payload names ([`Command::PatchSettings`]).
+    ///
+    /// Merging happens HERE and not at the frontend for one reason: the
+    /// frontend does not hold the live settings, so it cannot tell "omitted"
+    /// from "set to the default" — which is how a partial `save_settings`
+    /// could take a Tor node onto clearnet. The merge base is the running
+    /// session; the result then goes through the ordinary save, so it gets
+    /// the same validation and the same relay-pool re-merge.
+    pub(crate) fn cmd_patch_settings(
+        &mut self,
+        patch: serde_json::Value,
+    ) -> Result<Reply, MoltError> {
+        let serde_json::Value::Object(fields) = patch else {
+            return Err(MoltError::Settings("the patch must be a JSON object".to_string()));
+        };
+        if fields.is_empty() {
+            return Err(MoltError::Settings("the patch names no setting".to_string()));
+        }
+        let mut base = serde_json::to_value(&self.session.settings)
+            .map_err(|e| MoltError::Settings(format!("reading the current settings: {e}")))?;
+        let serde_json::Value::Object(base_map) = &mut base else {
+            return Err(MoltError::Settings("settings are not an object".to_string()));
+        };
+        for (k, v) in fields {
+            // the relay pool keeps its one door (the Relay* commands), and
+            // an unknown key is a typo the caller has to hear about — a
+            // silently ignored `anonimity` reads exactly like a setting
+            // that did not take
+            if k == "relays" || k == "clearnet_relays_enabled" {
+                return Err(MoltError::Settings(format!(
+                    "`{k}` is set by the relay commands, not here"
+                )));
+            }
+            if !base_map.contains_key(&k) {
+                return Err(MoltError::Settings(format!("unknown setting `{k}`")));
+            }
+            base_map.insert(k, v);
+        }
+        let merged: SessionSettings = serde_json::from_value(base)
+            .map_err(|e| MoltError::Settings(format!("the patch does not fit the settings: {e}")))?;
+        self.cmd_save_settings(merged)
+    }
+
     pub(crate) fn cmd_save_settings(
         &mut self,
         settings: SessionSettings,
@@ -1886,4 +1929,80 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use molt_core::{Command, GroupConfig, Reply, SessionView};
+
+    fn node() -> crate::WalletHandle {
+        crate::spawn(GroupConfig::demo(), SessionView::default())
+    }
+
+    async fn settings(w: &crate::WalletHandle) -> molt_core::SessionSettings {
+        match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => s.settings,
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// **A patch changes what it names and NOTHING else.**
+    ///
+    /// The hazard it exists for: a full-replace payload defaults every
+    /// omitted field, and the defaults are not neutral - `anonymity` to
+    /// `"none"` (a Tor node onto clearnet) and `mcp_token` to empty
+    /// (authentication off). So the interesting assertion here is not that
+    /// the named field changed; it is that those two did not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_patch_leaves_every_field_it_does_not_name() {
+        let w = node();
+        let base = molt_core::SessionSettings {
+            anonymity: "tor".to_string(),
+            mcp_token: "s3cret".to_string(),
+            s3_interval_min: 60,
+            ..molt_core::SessionSettings::default()
+        };
+        w.execute(Command::SaveSettings { settings: base })
+            .await
+            .expect("save");
+
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "s3_interval_min": 15 }),
+        })
+        .await
+        .expect("patch");
+
+        let s = settings(&w).await;
+        assert_eq!(s.s3_interval_min, 15, "the named field changed");
+        assert_eq!(s.anonymity, "tor", "…and Tor stayed on");
+        assert_eq!(s.mcp_token, "s3cret", "…and the token stayed in place");
+    }
+
+    /// A typo must not read as "that setting did not take": an ignored key
+    /// is indistinguishable from a value the node refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_patch_naming_nothing_or_naming_junk_is_refused() {
+        let w = node();
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({ "anonimity": "tor" }),
+            serde_json::json!("not an object"),
+        ] {
+            let err = w
+                .execute(Command::PatchSettings { patch: bad.clone() })
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(err, molt_core::MoltError::Settings(_)),
+                "{bad:?} -> {err:?}"
+            );
+        }
+        let err = w
+            .execute(Command::PatchSettings {
+                patch: serde_json::json!({ "clearnet_relays_enabled": true }),
+            })
+            .await
+            .expect_err("the clearnet switch is not a setting patch");
+        assert!(format!("{err:?}").contains("relay"), "{err:?}");
+    }
 }

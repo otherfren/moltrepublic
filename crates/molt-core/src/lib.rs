@@ -3257,10 +3257,37 @@ pub enum Command {
         /// `true` = allow dialing confirmed clearnet relays until shutdown.
         unlock: bool,
     },
+    /// Change SOME settings, keeping every field the payload does not
+    /// mention.
+    ///
+    /// The reason this exists as its own verb: [`Command::SaveSettings`]
+    /// takes a whole [`SessionSettings`], so a caller sending three fields
+    /// necessarily sends defaults for the rest — and the defaults are not
+    /// neutral. `anonymity` defaults to `"none"`, so adjusting a backup
+    /// interval could take a Tor node onto clearnet; `mcp_token` defaults to
+    /// empty, which disables authentication. A partial update has to be a
+    /// different verb from a full replace, or every partial update is a
+    /// silent reset.
+    ///
+    /// Unknown keys are refused rather than ignored: a typo'd `anonimity`
+    /// that quietly changed nothing would be indistinguishable from a
+    /// setting that did not take.
+    PatchSettings {
+        /// A JSON object of the settings to change, keyed exactly as
+        /// [`SessionSettings`] serializes. `relays` and
+        /// `clearnet_relays_enabled` are refused here for the same reason
+        /// `SaveSettings` re-merges them: the relay pool has one door.
+        patch: serde_json::Value,
+    },
     /// Store the settings into the session and persist them to the node's
     /// `config.toml` (format-preserving, atomic). The reply does not wait for
     /// the disk; the write outcome lands in the session notice ("saved" /
     /// "save-failed: …") via [`Command::ConfigNotice`].
+    ///
+    /// This REPLACES every field. To change one, use
+    /// [`Command::PatchSettings`] — a partial payload here would default the
+    /// rest, which once meant an agent could turn Tor off by adjusting a
+    /// backup interval.
     SaveSettings {
         /// The settings to store.
         settings: SessionSettings,

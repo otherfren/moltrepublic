@@ -83,18 +83,33 @@ governance-regierten Workspace (Fork).
 danach *über*beschreibt nur (altes Binary verweigert einen noch-vollständigen
 Workspace: Verfügbarkeitsverlust, kein Fork).
 
-### H5 — MCP `save_settings` überschreibt weggelassene Felder mit Defaults 📋 DOKUMENTIERT
+### H5 — MCP `save_settings` überschreibt weggelassene Felder mit Defaults ✅ GEFIXT (2026-08-07)
 `crates/molt-mcp/src/lib.rs` `settings_arg`/`cmd_save_settings`. Ein
 Teilaufruf `{"headless":true}` füllt den Rest aus `SessionSettings::default()`:
 `mcp_token=""` (TCP-Auth aus), `anonymity="none"` (ein Tor-Node fällt still auf
 Clearnet — Deanonymisierung), `mcp_allow` zurückgesetzt, S3-Creds/`smp_url`
 gelöscht — und `persist_settings` macht es **dauerhaft** in `config.toml`.
-**Zurückgestellt**, weil der Fix den Handler die AKTUELLE Session als Merge-Basis
-statt `default()` nehmen lassen muss (der Handler baut heute aus `args` mit
-`d=default()`). Machbar, aber ein Verhaltenswechsel der MCP-Semantik, den ich mit
-dem User abstimmen würde. **Richtung:** `settings_arg` bekommt die laufenden
-`SessionSettings` als Default-Basis; ein weggelassenes Feld behält den
-Ist-Wert.
+**Gefixt, mit ZWEI Verben statt einer Merge-Basis.** Die vorgeschlagene
+Richtung geht nicht dort, wo sie vorgeschlagen war: der Tool-Builder ist
+`fn(&Value) -> Result<Command, String>` und hält die laufende Session gar
+nicht — er kann „weggelassen" nicht von „auf den Default gesetzt"
+unterscheiden. Also:
+
+- `save_settings` ist ein ehrliches VOLLSTÄNDIGES Ersetzen — jedes Feld ist
+  `required`, und ein Teilaufruf wird mit Namen abgelehnt („`anonymity` is
+  required — to change one setting use patch_settings"). Ein stiller Reset
+  ist nicht mehr möglich.
+- `patch_settings` → `Command::PatchSettings { patch }` ist der Teil-Weg; die
+  Zusammenführung passiert in der ENGINE gegen die laufenden Settings, dort
+  wo die Ist-Werte liegen. Unbekannte Schlüssel werden abgelehnt (ein still
+  ignoriertes `anonimity` liest sich wie „die Einstellung hat nicht
+  gegriffen"), und `relays`/`clearnet_relays_enabled` behalten ihre eigene
+  Tür.
+
+Gepinnt: `a_partial_settings_payload_is_refused_not_defaulted` (MCP),
+`a_patch_leaves_every_field_it_does_not_name` +
+`a_patch_naming_nothing_or_naming_junk_is_refused` (Engine — die
+interessante Zusicherung ist, dass Tor und Token NICHT angefasst werden).
 
 ### H6 — GUI-Sound-Alerts: Zombie-Prozesse + Spawn-Storm + UI-Thread-Blocking ✅ GEFIXT
 `crates/molt-ui/src/lib.rs` `play_alert`. Pro Alert ein `spawn()` ohne `wait()`
