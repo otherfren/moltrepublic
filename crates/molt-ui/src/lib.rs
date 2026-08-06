@@ -5513,6 +5513,9 @@ lexicon! {
     choice_open_key: "O", "Ö";
     choice_open_rest: "pen", "ffnen";
     choice_open_sub: "Open a local workspace", "Lokalen Workspace öffnen";
+    choice_backup_key: "B", "B";
+    choice_backup_rest: "ackup restore", "ackup wiederherstellen";
+    choice_backup_sub: "From your S3 backup, with the phrase it was sealed with", "Aus deinem S3-Backup, mit der Phrase, die es versiegelt hat";
     choice_restore_lead: "(", "(";
     choice_restore_key: "R", "R";
     choice_restore_rest: "e)Join / Recovery", "e)Join / Recovery";
@@ -5748,6 +5751,7 @@ lexicon! {
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while - it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern - Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
+    rw_title_s3: "Backup restore", "Backup wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
     rw_seed_hint: "The phrase of the seat you are coming back to.", "Die Phrase des Sitzes, auf den du zurückkommst.";
@@ -5755,6 +5759,11 @@ lexicon! {
     rw_back: "Back", "Zurück";
     rw_continue: "Continue", "Weiter";
     rw_via_link: "With a link", "Mit einem Link";
+    rw_link_ph: "Paste your molt:// link here", "molt://-Link hier einfügen";
+    rw_join_running: "A join is already running.", "Ein Beitritt läuft bereits.";
+    rw_founding_running: "A founding is already running.", "Eine Gründung läuft bereits.";
+    rw_join_awaits: "A join is waiting for your confirmation.", "Ein Beitritt wartet auf deine Bestätigung.";
+    rw_join_goto: "Go to it", "Dorthin";
     rw_link_hint: "The invite or recovery link you were given.", "Der Einladungs- oder Recovery-Link, den du bekommen hast.";
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";

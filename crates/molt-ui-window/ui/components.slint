@@ -142,14 +142,20 @@ export component AppField inherits Rectangle {
     in property <bool> invalid: false;
     // When true the input renders as password dots (secrets).
     in property <bool> secret: false;
+    // The one field a screen is ABOUT: taller, accent-outlined, and its
+    // placeholder readable rather than whispered. A form whose primary
+    // input looks like every other grey box makes the user hunt for where
+    // to start.
+    in property <bool> hero: false;
     callback accepted();
     callback edited();
 
-    height: 38px;
-    background: Theme.panel;
+    height: root.hero ? 48px : 38px;
+    background: root.hero && root.text == "" ? Theme.accent-soft : Theme.panel;
     border-radius: Theme.radius;
-    border-width: Theme.border-w;
-    border-color: root.invalid ? Theme.bad : (input.has-focus ? Theme.accent : Theme.line);
+    border-width: root.hero ? max(2px, Theme.border-w) : Theme.border-w;
+    border-color: root.invalid ? Theme.bad
+        : (input.has-focus || root.hero ? Theme.accent : Theme.line);
     clip: true;
 
     Rectangle {
@@ -161,8 +167,9 @@ export component AppField inherits Rectangle {
             width: 100%;
             height: 100%;
             text: root.placeholder;
-            color: Theme.faint;
+            color: root.hero ? Theme.dim : Theme.faint;
             font-size: Theme.fs-body;
+            font-weight: root.hero ? 600 : 400;
             vertical-alignment: center;
         }
         input := TextInput {

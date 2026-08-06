@@ -1023,12 +1023,13 @@ export component AppWindow inherits Window {
         } else if (i == 1) {
             root.reset-create();
             root.navigate(AppScreen.create);
-        } else if (i == 2) {
+        } else if (i == 2 || i == 3) {
             root.rw-seed = "";
             // a fresh visit always starts at the way in, never on the
             // phrase step a previous visit walked to
             root.rw-phase = 0;
             root.rw-pending = "";
+            root.rw-mode = i == 2 ? "link" : "s3";
             // the join half of this wizard starts clean too - the name is
             // only asked for once a link turns out to be an invite
             root.jw-member = "";
@@ -1208,7 +1209,9 @@ export component AppWindow inherits Window {
     // which of them a click issues.
     property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
     pure function link-armed() -> bool {
-        return !root.rv-running
+        // a run in flight owns the screen: a second start can only be
+        // refused, and a button that can only fail reads as a broken UI
+        return !root.run-active
             && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2);
     }
     function link-continue() {
@@ -1278,6 +1281,32 @@ export component AppWindow inherits Window {
     // first screen made the join look impossible to anyone who did not have
     // a phrase yet - which is everyone a founding invite is meant for.
     property <int> rw-phase: 0;
+    // WHICH wizard this screen is running: "link" = (Re)Join / Recovery,
+    // "s3" = restore from a backup. One screen, two errands, chosen at the
+    // door - they share the phrase step and nothing else, and mixing them
+    // on one page made the user pick before they knew there was a choice.
+    property <string> rw-mode: "link";
+    // A run in flight owns every start button on these screens. Naming it -
+    // and offering the way to it - is what keeps a disabled button from
+    // reading as a dead one. A JOIN awaiting the charter is the case that
+    // has no busy modal to stand behind: that step needs the operator's
+    // decision, so blocking the screen would hang it.
+    pure function run-banner() -> string {
+        if (root.jw-running) {
+            return root.jw-awaiting-ratify ? Strings.rw-join-awaits : Strings.rw-join-running;
+        }
+        if (root.cw-running) {
+            return Strings.rw-founding-running;
+        }
+        return "";
+    }
+    function run-goto() {
+        if (root.jw-running) {
+            root.navigate(AppScreen.join);
+        } else if (root.cw-running) {
+            root.navigate(AppScreen.create);
+        }
+    }
     // what the phrase step will start: "recover" | "s3"
     property <string> rw-pending: "";
     // which dot is lit: the way in, the phrase, then the run
@@ -1720,11 +1749,11 @@ export component AppWindow inherits Window {
             // fires it directly
             if (root.screen == AppScreen.choice && !root.confirm-quit-open) {
                 if (event.text == Key.DownArrow) {
-                    root.choice-focus = root.choice-focus < 0 ? 0 : Math.mod(root.choice-focus + 1, 3);
+                    root.choice-focus = root.choice-focus < 0 ? 0 : Math.mod(root.choice-focus + 1, 4);
                     return accept;
                 }
                 if (event.text == Key.UpArrow) {
-                    root.choice-focus = root.choice-focus < 0 ? 2 : Math.mod(root.choice-focus + 2, 3);
+                    root.choice-focus = root.choice-focus < 0 ? 3 : Math.mod(root.choice-focus + 3, 4);
                     return accept;
                 }
                 if (root.choice-focus >= 0
@@ -1742,6 +1771,10 @@ export component AppWindow inherits Window {
                 }
                 if (event.text.to-lowercase() == Strings.choice-restore-key.to-lowercase()) {
                     root.choice-go(2);
+                    return accept;
+                }
+                if (event.text.to-lowercase() == Strings.choice-backup-key.to-lowercase()) {
+                    root.choice-go(3);
                     return accept;
                 }
             }
@@ -2148,6 +2181,41 @@ export component AppWindow inherits Window {
                             font-weight: 800;
                         }
                         Rectangle { height: 8px; }
+                        // A run in flight is the FIRST thing this screen has
+                        // to say - especially a join awaiting the charter,
+                        // which is a human decision with no busy modal to
+                        // stand behind. Without this the user starts again,
+                        // is told "already running", and sees nothing that
+                        // explains where "already" is.
+                        if root.run-banner() != "": Rectangle {
+                            height: 52px;
+                            border-radius: Theme.radius;
+                            background: Theme.accent-soft;
+                            border-width: max(2px, Theme.border-w);
+                            border-color: Theme.accent;
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 10px;
+                                spacing: 10px;
+                                Text {
+                                    text: root.run-banner();
+                                    color: Theme.text;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                AppButton {
+                                    height: 34px;
+                                    primary: true;
+                                    label: Strings.rw-join-goto;
+                                    clicked => {
+                                        root.run-goto();
+                                    }
+                                }
+                            }
+                        }
                         // Three ways in, and no subtitle telling the reader
                         // to choose one of them. Open and Create are the two
                         // "I know what I want" doors; Restore is the one for
@@ -2180,10 +2248,20 @@ export component AppWindow inherits Window {
                             key: Strings.choice-restore-key;
                             rest: Strings.choice-restore-rest;
                             sub: Strings.choice-restore-sub;
-                            icon: @image-url("assets/restore.svg");
+                            icon: @image-url("assets/join.svg");
                             marked: root.choice-focus == 2;
                             chosen => {
                                 root.choice-go(2);
+                            }
+                        }
+                        ChoiceCard {
+                            key: Strings.choice-backup-key;
+                            rest: Strings.choice-backup-rest;
+                            sub: Strings.choice-backup-sub;
+                            icon: @image-url("assets/restore.svg");
+                            marked: root.choice-focus == 3;
+                            chosen => {
+                                root.choice-go(3);
                             }
                         }
                         Rectangle { height: 4px; }
@@ -3707,7 +3785,7 @@ export component AppWindow inherits Window {
 
                 HorizontalLayout {
                     Text {
-                        text: Strings.rw-title;
+                        text: root.rw-mode == "s3" ? Strings.rw-title-s3 : Strings.rw-title;
                         color: Theme.text;
                         font-size: Theme.fs-h1;
                         font-weight: 700;
@@ -3794,7 +3872,9 @@ export component AppWindow inherits Window {
                             AppButton {
                                 height: 38px;
                                 primary: true;
-                                enabled: !root.rv-running && root.rw-seed != "";
+                                // any run in flight owns the screen (a
+                                // second start can only be refused)
+                                enabled: !root.run-active && root.rw-seed != "";
                                 label: Strings.rw-continue;
                                 clicked => {
                                     root.phrase-continue();
@@ -3853,29 +3933,36 @@ export component AppWindow inherits Window {
                 // the link's business to say - not the user's to know. The
                 // engine notices drive the running / failed states; on
                 // success the engine flips the screen by itself.
-                WayBranch {
+                if root.rw-mode == "link": WayBranch {
                     // armed by the LINK alone: what it needs beyond that -
                     // a name for an invite, the phrase for a recovery - is
                     // asked where it belongs, not up front
                     armed: root.rv-link != "";
+                    last: true;
                     RestoreWay {
                     horizontal-stretch: 1;
                     title: Strings.rw-via-link;
                     hint: Strings.rw-link-hint;
                     icon: @image-url("assets/link.svg");
+                    // THE field this screen is about - hero-sized, accented
+                    // and with a readable placeholder. It used to look like
+                    // every other grey box on the screen, which left the user
+                    // hunting for where to begin.
                     HorizontalLayout {
                         spacing: 8px;
                         AppField {
+                            hero: true;
                             text <=> root.rv-link;
-                            placeholder: "molt://…";
+                            placeholder: Strings.rw-link-ph;
                             horizontal-stretch: 1;
                             accepted => {
                                 root.link-continue();
                             }
                         }
                         AppButton {
-                            height: 38px;
-                            pad: 10px;
+                            height: 48px;
+                            pad: 12px;
+                            primary: root.rv-link == "";
                             icon: @image-url("assets/paste.svg");
                             icon-set: true;
                             label: Strings.rw-paste;
@@ -3905,7 +3992,28 @@ export component AppWindow inherits Window {
                             root.link-continue();
                         }
                     }
-                    HorizontalLayout {
+                    // A run already in flight owns this screen: offering a
+                    // Continue that can only answer "already running" is how
+                    // the UI reads as broken. Say what is running and lead
+                    // there instead.
+                    if root.run-banner() != "": HorizontalLayout {
+                        spacing: 8px;
+                        DotLabel {
+                            tone: Theme.warn;
+                            label: root.run-banner();
+                            label-color: Theme.text;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            label: Strings.rw-join-goto;
+                            clicked => {
+                                root.run-goto();
+                            }
+                        }
+                    }
+                    if root.run-banner() == "": HorizontalLayout {
                         spacing: 8px;
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
@@ -3922,10 +4030,10 @@ export component AppWindow inherits Window {
 
                 }
 
-                // the other way in: pull the encrypted backup from the
-                // configured S3 bucket. Last branch, so the tree rail's L
-                // closes here.
-                WayBranch {
+                // the OTHER wizard: pull the encrypted backup from the
+                // configured S3 bucket. Its own door on the Welcome screen,
+                // so it never competes with a link for attention.
+                if root.rw-mode == "s3": WayBranch {
                     armed: root.rw-s3-target != "";
                     last: true;
                     RestoreWay {
@@ -3987,7 +4095,8 @@ export component AppWindow inherits Window {
                         AppButton {
                             height: 38px;
                             primary: true;
-                            enabled: root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
+                            enabled: !root.run-active && root.cfg-s3-endpoint != ""
+                                && root.rw-s3-target != "";
                             label: Strings.rw-continue;
                             clicked => {
                                 root.rw-pending = "s3";

@@ -26,17 +26,25 @@ for something the user can do with their file manager.
 |---|---|---|
 | Open | `O` / `Ö` | `AppScreen.open` — the local workspace table |
 | Create | `C` / `G` | `AppScreen.create` — found a new republic |
-| (Re)Join / Recovery | `R` | `AppScreen.restore` — the way back in, below |
+| (Re)Join / Recovery | `R` | the link wizard (`rw-mode: "link"`) |
+| Backup restore | `B` | the S3 wizard (`rw-mode: "s3"`) |
+
+The last two share `AppScreen.restore` and the phrase step, and nothing else:
+`rw-mode` is chosen at the door. They were one screen with two panels and an
+OR between them for a day, which asked the user to pick before they knew
+there was a choice; the choice belongs on the Welcome screen, where every
+other way in already lives.
 
 Create sits directly under Open (both are "I already know what I want"); the
 "New republic" group header and its indent rail go away with the grouping. No
 subtitle. `choice-focus` wraps over 3, not 4.
 
-**Step 1 — which way in. Two panels.**
+**Step 1 — one panel, whichever wizard you are in.**
 
-1. **Link** — ONE field for a `molt://…` link, plus a name field. This is the
-   panel that merges Join and social peer-restore.
-2. **Online restore via S3** — the endpoint and which backup.
+1. **Link** (`rw-mode: "link"`) — ONE field for a `molt://…` link, plus a
+   name field. This is the panel that merges Join and social peer-restore,
+   and the field is `hero`-sized: it is what the screen is about.
+2. **Backup restore** (`rw-mode: "s3"`) — the endpoint and which backup.
 3. ~~Manual restore (file)~~ — the GUI panel goes. The COMMAND stays
    (`RestoreStart { way: "file" }`) and so does its MCP tool: dropping a
    capability is not what was asked for, and a `.molt.enc` blob is not
@@ -143,3 +151,19 @@ same three flows, reached through one fewer decision.
   name field. Same information, one control fewer: a greyed-out field the
   user cannot act on is chrome, and the line has to be there anyway to say
   which of the two shapes the link turned out to be.
+
+## Two more things the first build got wrong
+
+- **A run in flight was invisible.** Starting a second join answered
+  "already running" from a toast, with nothing anywhere saying where
+  "already" was — and a join AWAITING THE CHARTER shows no busy modal by
+  design (that step needs the operator's decision, so blocking the screen
+  would hang it). Both the Welcome screen and the link panel now name a
+  running join and offer a button into it, and every start is disabled while
+  `run-active`. A button that can only fail is how a UI comes to read as
+  broken. The banner covers a running FOUNDING too, for the same reason:
+  `run-active` disables the starts either way, and a disabled button with no
+  explanation is a dead one.
+- **The link field looked like every other grey box.** `AppField` gained
+  `hero`: taller, accent-outlined, with a readable placeholder that says
+  what to do ("Paste your molt:// link here").
