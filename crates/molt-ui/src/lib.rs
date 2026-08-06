@@ -5762,6 +5762,7 @@ lexicon! {
     rw_link_ph: "Paste your molt:// link here", "molt://-Link hier einfügen";
     rw_join_running: "A join is already running.", "Ein Beitritt läuft bereits.";
     rw_founding_running: "A founding is already running.", "Eine Gründung läuft bereits.";
+    rw_recovery_running: "A recovery is already running.", "Eine Wiederherstellung läuft bereits.";
     rw_join_awaits: "A join is waiting for your confirmation.", "Ein Beitritt wartet auf deine Bestätigung.";
     rw_join_goto: "Go to it", "Dorthin";
     rw_link_hint: "The invite or recovery link you were given.", "Der Einladungs- oder Recovery-Link, den du bekommen hast.";

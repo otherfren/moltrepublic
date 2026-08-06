@@ -1027,8 +1027,10 @@ export component AppWindow inherits Window {
             root.rw-seed = "";
             // a fresh visit always starts at the way in, never on the
             // phrase step a previous visit walked to
-            root.rw-phase = 0;
-            root.rw-pending = "";
+            // …unless a recovery is in flight: it reports on the phrase
+            // step, and dropping the user on step 1 would hide it
+            root.rw-phase = root.rv-running && i == 2 ? 1 : 0;
+            root.rw-pending = root.rv-running && i == 2 ? "recover" : "";
             root.rw-mode = i == 2 ? "link" : "s3";
             // the join half of this wizard starts clean too - the name is
             // only asked for once a link turns out to be an invite
@@ -1211,7 +1213,7 @@ export component AppWindow inherits Window {
     pure function link-armed() -> bool {
         // a run in flight owns the screen: a second start can only be
         // refused, and a button that can only fail reads as a broken UI
-        return !root.run-active
+        return !root.run-active && !root.rv-running
             && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2);
     }
     function link-continue() {
@@ -1298,6 +1300,14 @@ export component AppWindow inherits Window {
         if (root.cw-running) {
             return Strings.rw-founding-running;
         }
+        // a recovery is NOT part of `run-active` (that one is the three
+        // RunCore lifecycles), and the engine has no re-entrancy guard on
+        // RecoverStart at all - a second start would raise a second task
+        // holding its own relay subscriptions. Not offering it is the fix
+        // this layer can make honestly.
+        if (root.rv-running) {
+            return Strings.rw-recovery-running;
+        }
         return "";
     }
     function run-goto() {
@@ -1305,6 +1315,10 @@ export component AppWindow inherits Window {
             root.navigate(AppScreen.join);
         } else if (root.cw-running) {
             root.navigate(AppScreen.create);
+        } else if (root.rv-running) {
+            root.rw-mode = "link";
+            root.rw-phase = 1; // where a running recovery reports
+            root.navigate(AppScreen.restore);
         }
     }
     // what the phrase step will start: "recover" | "s3"
@@ -3774,9 +3788,12 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- restore: the recovery phrase on top, then three ways in,
-            // each with its own continue button (peer-recovery + the real
-            // blob restore: fetch, decrypt, chain-verify, materialize) ----
+            // ---- the two wizards that share this screen (`rw-mode`):
+            // (Re)Join / Recovery from a link, and Backup restore from S3.
+            // Step 1 asks the way in, step 2 the recovery phrase - and ONLY
+            // when the way in needs one, which a founding invite does not
+            // (joining is where a phrase comes from). Step 3 is the run.
+            // See docs/ui/welcome_rework.md. ----
             if root.screen == AppScreen.restore: VerticalLayout {
                 padding: 24px;
                 padding-left: 16px;
@@ -3874,7 +3891,7 @@ export component AppWindow inherits Window {
                                 primary: true;
                                 // any run in flight owns the screen (a
                                 // second start can only be refused)
-                                enabled: !root.run-active && root.rw-seed != "";
+                                enabled: !root.run-active && !root.rv-running && root.rw-seed != "";
                                 label: Strings.rw-continue;
                                 clicked => {
                                     root.phrase-continue();
@@ -4095,8 +4112,8 @@ export component AppWindow inherits Window {
                         AppButton {
                             height: 38px;
                             primary: true;
-                            enabled: !root.run-active && root.cfg-s3-endpoint != ""
-                                && root.rw-s3-target != "";
+                            enabled: !root.run-active && !root.rv-running
+                                && root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
                             label: Strings.rw-continue;
                             clicked => {
                                 root.rw-pending = "s3";
