@@ -685,6 +685,40 @@ struct RawFrame<'a> {
 /// Split a segment buffer into structurally valid frames. Returns the frames
 /// and, when the buffer does not end on a frame boundary, the offset of the
 /// first invalid byte (the torn tail begins there).
+/// Does a structurally valid frame begin anywhere after `from`?
+///
+/// The discriminator between a torn write and in-place corruption (M6). The
+/// writer only appends, so a torn append can have nothing behind its partial
+/// frame: the file ends there. Anything valid behind the damage means the
+/// file was whole, and the maximal-valid-prefix truncation would be
+/// destroying acknowledged history rather than recovering a tail.
+///
+/// The CRC is only computed once a length has passed its sanity check, so
+/// random bytes are rejected in a few instructions each; this runs once, on
+/// a segment already known to be damaged.
+fn has_valid_frame_after(data: &[u8], from: usize) -> bool {
+    let mut pos = from.saturating_add(1);
+    while pos + FRAME_HEADER_LEN + NONCE_LEN <= data.len() {
+        let rest = &data[pos..];
+        let len_bytes: [u8; 4] = rest[0..4].try_into().unwrap_or([0; 4]);
+        let crc_bytes: [u8; 4] = rest[4..8].try_into().unwrap_or([0; 4]);
+        let len = u32::from_le_bytes(len_bytes);
+        if len != 0 && len <= FRAME_MAX_LEN {
+            if let Ok(len_usize) = usize::try_from(len) {
+                let total = FRAME_HEADER_LEN + NONCE_LEN + len_usize;
+                if rest.len() >= total {
+                    let ciphertext = &rest[FRAME_HEADER_LEN + NONCE_LEN..total];
+                    if crc32c::crc32c(ciphertext) == u32::from_le_bytes(crc_bytes) {
+                        return true;
+                    }
+                }
+            }
+        }
+        pos += 1;
+    }
+    false
+}
+
 fn split_frames(data: &[u8]) -> (Vec<RawFrame<'_>>, Option<usize>) {
     let mut frames = Vec::new();
     let mut pos = 0usize;
@@ -1765,6 +1799,20 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         let data = fs::read(path)?;
         let (frames, torn_at) = split_frames(&data);
         if let Some(pos) = torn_at {
+            // A torn APPEND leaves a partial frame at the end of the file
+            // and nothing behind it — the writer only ever appends, so
+            // there is no later content to survive. A valid frame BEHIND
+            // the damage therefore means the file was complete and
+            // something corrupted it in place, and truncating there would
+            // throw away history this node already acknowledged. That is
+            // the same situation the middle segments refuse to guess about.
+            if idx == last_idx && has_valid_frame_after(&data, pos) {
+                return Err(StorageError::Corrupt(format!(
+                    "segment {seg_no} is damaged at byte {pos} but valid frames \
+                     follow it (bitrot, not a torn write) — refusing to truncate \
+                     history away"
+                )));
+            }
             if idx == last_idx {
                 tracing::warn!(
                     segment = seg_no,
@@ -3642,6 +3690,53 @@ mod tests {
             assert_eq!(after.len(), boundaries[..want].last().copied().unwrap_or(0));
             fs::write(&seg, &full).expect("restore");
         }
+    }
+
+    /// **M6: damage with VALID frames behind it is not a torn tail, and
+    /// truncating it destroys already-acked history.**
+    ///
+    /// The recovery treated the last segment's first invalid byte as the
+    /// start of a torn write and cut the file there — so one flipped bit
+    /// early in an 8 MiB segment silently discarded every good frame after
+    /// it, and `open_workspace` then "succeeded" on the shortened history.
+    ///
+    /// The two cases are distinguishable, and cheaply: the writer only ever
+    /// APPENDS, so a torn append leaves a partial frame at the END of the
+    /// file with nothing behind it. Anything valid behind the damage means
+    /// the file was complete and something corrupted it in place — the same
+    /// situation the middle segments already refuse to guess about.
+    #[test]
+    fn bitrot_with_good_frames_behind_it_is_refused_not_truncated() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let dir = make_ws(&root, 2); // 3 frames in one segment
+        let seg = dir.join("log").join(segment_name(1));
+        let full = fs::read(&seg).expect("read");
+        let (frames, torn) = split_frames(&full);
+        assert_eq!(frames.len(), 3);
+        assert!(torn.is_none());
+
+        // flip a bit INSIDE the first frame's ciphertext: its CRC now fails,
+        // and frames 2 and 3 are still perfectly good behind it
+        let mut rotted = full.clone();
+        let victim = FRAME_HEADER_LEN + NONCE_LEN + 1;
+        rotted[victim] ^= 0b0000_1000;
+        fs::write(&seg, &rotted).expect("rot");
+
+        match open_workspace(&dir) {
+            Err(StorageError::Corrupt(_)) => {}
+            other => panic!(
+                "damage with history behind it must be refused, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+        // …and above all: the good frames are STILL THERE
+        let after = fs::read(&seg).expect("reread");
+        assert_eq!(
+            after.len(),
+            rotted.len(),
+            "the refusal must not have truncated anything away"
+        );
     }
 
     #[test]

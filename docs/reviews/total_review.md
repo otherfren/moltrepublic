@@ -176,14 +176,22 @@ reparierbaren Workspace sonst einen unöffenbaren machen würde. Gepinnt:
 `a_newer_transport_state_refuses_the_open` (prüft auch, dass die Datei nach
 der Verweigerung UNVERÄNDERT auf der Platte liegt).
 
-### M6 — Torn-Tail-Recovery truncatet beim ERSTEN kaputten Frame ⇒ Datenverlust 📋 DOKUMENTIERT
+### M6 — Torn-Tail-Recovery truncatet beim ERSTEN kaputten Frame ⇒ Datenverlust ✅ GEFIXT (2026-08-07)
 `crates/molt-storage/src/lib.rs` (~Z.1257). Ein einzelner Bitflip früh im letzten
 (bis 8 MiB) Segment löscht alle validen, bereits geackten Frames dahinter — im
 Extremfall den ganzen Log inkl. Genesis, und `open_workspace` „gelingt" mit
 leerer Historie. Mittlere Segmente bekommen den konservativen Hard-Error, das
 letzte nie.
-**Zurückgestellt** — braucht eine „folgt ein valider Frame nach dem Schaden?"-
-Prüfung (Torn-Tail vs. Bitrot unterscheiden) vor der destruktiven Truncation.
+**Gefixt** genau so — `has_valid_frame_after` vor der Truncation. Das
+Unterscheidungskriterium ist sauber, nicht heuristisch: der Writer hängt
+NUR AN, also kann hinter einem abgerissenen Append nichts stehen (die Datei
+endet dort). Ein valider Frame hinter dem Schaden heißt also: die Datei war
+vollständig und wurde in-place korrumpiert — derselbe Fall, den die
+mittleren Segmente längst verweigern. Gepinnt:
+`bitrot_with_good_frames_behind_it_is_refused_not_truncated` (prüft auch,
+dass die Datei nach der Verweigerung ihre volle Länge behält);
+`truncate_anywhere_recovers_the_maximal_valid_prefix` beweist weiterhin,
+dass jeder ECHTE Torn-Tail an jeder Schnittstelle repariert wird.
 
 ### M7 — MCP `serve_conn`: unbegrenztes `read_line` vor Auth (Pre-Auth-DoS) ✅ GEFIXT (2026-08-07)
 `crates/molt-mcp/src/lib.rs` (~Z.95). Auf einem `0.0.0.0`-Allow-Node streamt ein
