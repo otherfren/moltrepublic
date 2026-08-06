@@ -462,3 +462,46 @@ async fn a_topic_opened_mid_conversation_loses_nothing() {
     );
     assert!(channels.iter().any(|c| c.channel == ChannelRef::Group));
 }
+
+/// **A seat's OWN message is not unread to itself** (B2).
+///
+/// Two things went wrong while it was: the channel badge counted the
+/// message the operator had just written, and the agent-facing `"unread"`
+/// slice handed an agent its own output back as "what is new". It also kept
+/// the GUI's read-marking permanently armed - every render of a channel the
+/// seat had spoken in issued a `MarkChannelRead`, whose engine event started
+/// another render.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seats_own_message_is_not_unread_to_itself() {
+    let w = spawn_solo();
+    chat(&w, "mine", ChannelRef::Group).await;
+    let topic = ChannelRef::Topic { name: "budget".to_string() };
+    chat(&w, "mine too", topic.clone()).await;
+
+    let snap = read_chat_snapshot(&w, None).await;
+    for info in &snap.channels {
+        assert_eq!(
+            info.unread, 0,
+            "a seat cannot have unread its own words: {:?}",
+            info.channel
+        );
+    }
+    // …and the agent slice says the same: nothing new here
+    let unread = match w
+        .execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+            view: Some("unread".to_string()),
+        })
+        .await
+        .expect("read state")
+    {
+        Reply::State(s) => s,
+        other => panic!("unexpected reply: {other:?}"),
+    };
+    assert!(
+        unread.applied.is_empty(),
+        "the unread slice must not hand an agent its own output back: {:?}",
+        unread.applied
+    );
+}

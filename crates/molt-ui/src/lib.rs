@@ -3099,22 +3099,32 @@ impl ChatUiState {
         if self.workspace != active {
             *self = ChatUiState {
                 workspace: active.to_string(),
-                // the push generation survives the reset: an in-flight
-                // push from the previous workspace must never match a
-                // freshly zeroed counter
-                generation: self.generation,
+                // the epoch MOVES with the switch: a push read against the
+                // previous workspace's log must not land on this one
+                generation: self.generation + 1,
                 ..ChatUiState::default()
             };
         }
     }
 
-    /// Start one `push_surfaces` pass: bind to the active workspace, then
-    /// stamp this push's generation. The bump makes every earlier
-    /// in-flight push stale, so concurrent pushes resolve newest-wins
-    /// instead of last-write-wins.
+    /// Start one `push_surfaces` pass: bind to the active workspace and take
+    /// the current SELECTION EPOCH.
+    ///
+    /// It deliberately does NOT bump. It used to, so that concurrent pushes
+    /// resolved newest-wins — and that starved the chat pane: `push_surfaces`
+    /// issues `MarkChannelRead` when the channel on screen has unread
+    /// messages, the engine event that causes starts the next push, and the
+    /// push already reading then threw its finished bundle away. Opening a
+    /// chat with anything unread hit that every time: the pane stayed empty
+    /// until some later burst of events happened to leave one push
+    /// unoverlapped.
+    ///
+    /// Two pushes for the SAME selection read the same engine state and
+    /// build the same bundle, so letting both land costs nothing. What must
+    /// never land is a bundle read for a selection (or workspace) the user
+    /// has since left — and that is exactly what the epoch tracks.
     fn begin_push(&mut self, active: &str) -> u64 {
         self.enter_workspace(active);
-        self.generation += 1;
         self.generation
     }
 
@@ -3126,8 +3136,8 @@ impl ChatUiState {
         self.generation += 1;
     }
 
-    /// Whether the push stamped `gen` is still the newest observer; a
-    /// stale push skips its apply closure.
+    /// Whether the push stamped `gen` still describes the selection on
+    /// screen; a stale push skips its apply closure.
     fn is_current(&self, gen: u64) -> bool {
         self.generation == gen
     }
@@ -6776,32 +6786,31 @@ mod tests {
         assert!(!selected_channel_closed(&patch(99), &infos, &known));
     }
 
-    /// Review finding: concurrent pushes raced last-write-wins — a stale
-    /// bundle could land after a fresh selection and revert the visible
-    /// pane (mis-marking unread on the way). Every selection change and
-    /// every newer push start must invalidate the in-flight pushes.
+    /// The epoch invalidates a bundle read for a selection the user has
+    /// LEFT — that is the whole job. It used to invalidate on every newer
+    /// push start as well, which starved the pane (see
+    /// `an_overlapping_push_does_not_starve_the_one_it_overlaps`): a stale
+    /// bundle landing is a cosmetic revert one push later, an empty pane is
+    /// the user losing their chat.
     #[test]
     fn push_generation_guard_invalidates_stale_pushes() {
         let mut st = ChatUiState::default();
         let g1 = st.begin_push("ws-1");
-        assert!(st.is_current(g1), "the newest push is current");
-        // a newer push start supersedes the older one
-        let g2 = st.begin_push("ws-1");
-        assert!(!st.is_current(g1));
-        assert!(st.is_current(g2));
+        assert!(st.is_current(g1), "a push for the current selection lands");
         // a selection change invalidates every in-flight push …
         st.select(ChannelRef::Topic {
             name: "budget".into(),
         });
-        assert!(!st.is_current(g2));
+        assert!(!st.is_current(g1));
         assert_eq!(
             st.selected,
             ChannelRef::Topic {
                 name: "budget".into()
             }
         );
-        // … and the counter survives the workspace-switch reset, so an old
-        // push can never match a freshly reset state
+        // … and the counter moves across the workspace-switch reset, so an
+        // old push can never match a freshly reset state
+        let g2 = st.begin_push("ws-1");
         let g3 = st.begin_push("ws-2");
         assert!(g3 > g2, "monotonic across enter_workspace resets");
         assert!(st.is_current(g3));
@@ -6933,6 +6942,52 @@ mod tests {
         assert_eq!(log[3].quote_indent, 2, "a neighboring different target alternates");
         assert_eq!(log[4].quote_indent, 0, "plain rows sit flush and end the run");
         assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
+    }
+
+    // ---- the chat pane's push epoch -----------------------------------
+
+    /// **Two overlapping pushes must BOTH be able to land.**
+    ///
+    /// `push_surfaces` issues `MarkChannelRead` whenever the channel on
+    /// screen has unread messages; the engine event that causes starts the
+    /// next push while the current one is still reading. While `begin_push`
+    /// bumped the epoch, that made the reading push stale and it threw its
+    /// finished bundle away — so opening a chat with anything unread left
+    /// the pane EMPTY until some later burst happened to leave one push
+    /// unoverlapped. That is the bug this pins, and it is invisible to any
+    /// test that pushes one at a time.
+    #[test]
+    fn an_overlapping_push_does_not_starve_the_one_it_overlaps() {
+        let mut st = ChatUiState::default();
+        let a = st.begin_push("ws-1");
+        let b = st.begin_push("ws-1"); // the MarkChannelRead echo
+        assert!(st.is_current(b), "the newer push lands");
+        assert!(
+            st.is_current(a),
+            "…and so does the one it overlapped: both read the same selection, \
+             so dropping either renders nothing at all"
+        );
+    }
+
+    /// The epoch exists for ONE thing: a bundle read for a selection the
+    /// user has left must never land on the one they are looking at (it
+    /// would also mark the wrong channel read).
+    #[test]
+    fn a_push_read_for_another_selection_never_lands() {
+        let mut st = ChatUiState::default();
+        let in_flight = st.begin_push("ws-1");
+        st.select(ChannelRef::Topic { name: "budget".into() });
+        assert!(
+            !st.is_current(in_flight),
+            "a bundle read for the previous channel must not land"
+        );
+        // …and a workspace switch is the same rule one level up
+        let in_flight = st.begin_push("ws-1");
+        st.begin_push("ws-2");
+        assert!(
+            !st.is_current(in_flight),
+            "a bundle read against another workspace's log must not land"
+        );
     }
 
     // ---- the Restore wizard's one link field (welcome_rework.md) -------

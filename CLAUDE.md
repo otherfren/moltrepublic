@@ -372,6 +372,18 @@ both verified red-without/green-with).
   authoritative pre-commit check remains one normal
   `cargo build -p molt-ui-window -p molt-ui` (once per change-set, not per
   iteration).
+- **Driving a REAL node by hand goes over MCP, and needs a relay.** Founding
+  refuses without one ("cannot found: no relay configured"), and the suite's
+  `MockRelay` lives inside the test process — so there is
+  `cargo run -p molt-net --example dev_relay`, which prints a
+  `ws://127.0.0.1:<port>` URL and stays up. Then: `moltd --generate-config
+  <path>`, set `node.headless = true` plus a scratch `workspace_dir`, start
+  it with stdin held open (`tail -f /dev/null | moltd --config <path>` — it
+  serves MCP on stdio AND on `[mcp].port`, and exits when stdio closes), and
+  talk newline-delimited JSON-RPC to the TCP port with the config's token in
+  `initialize`. Two configs on two ports found and join a real republic in
+  under a minute; it is the only way to exercise the command surface end to
+  end without a window.
 - Tests that need a real network are `#[ignore]`d — the Nostr real-relay PoC
   twin (`crates/molt-net/tests/nostr_relay_poc.rs`), the live-S3 probe, and the
   embedded-tor bootstrap; the founding+join+MLS flow is proven fast over

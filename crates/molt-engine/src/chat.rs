@@ -182,8 +182,19 @@ impl State {
         self.chat_pos.get(&MessageId(arr)).copied()
     }
 
-    /// B2: does `m` sit after its channel's read cursor?
+    /// B2: does `m` sit after its channel's read cursor — and is it even
+    /// something this seat could have left unread?
+    ///
+    /// **A seat's OWN message is never unread to itself.** It is read by
+    /// definition: the operator wrote it. Counting it put the author's own
+    /// words in the channel badge, handed an agent asking "what is new" its
+    /// own output back, and kept the GUI's read-marking permanently armed —
+    /// every render of a channel this seat had spoken in issued a
+    /// `MarkChannelRead`, whose engine event started another render.
     pub(crate) fn chat_msg_unread(&self, m: &molt_core::ChatMessage) -> bool {
+        if m.from == self.member() {
+            return false;
+        }
         match self.read_cursor_pos(&m.channel) {
             None => true,
             Some(c) => self.chat_pos.get(&m.id).map_or(true, |p| *p > c),

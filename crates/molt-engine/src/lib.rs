@@ -4787,10 +4787,14 @@ mod tests {
         )
         .expect("materialize");
         let id = st.session.active_workspace.clone();
+        // from a PEER, deliberately: unread means "what somebody else said
+        // while I was away". This seat's own words are read by definition
+        // (`chat_msg_unread`), so posting as "bob" here would prove nothing
+        // about the cursor - both would be read whatever it pointed at.
         let a = st
-            .post_message("bob".to_string(), "first".to_string(), None, molt_core::ChannelRef::Group)
+            .post_message("alice".to_string(), "first".to_string(), None, molt_core::ChannelRef::Group)
             .expect("post a");
-        st.post_message("bob".to_string(), "second".to_string(), None, molt_core::ChannelRef::Group)
+        st.post_message("alice".to_string(), "second".to_string(), None, molt_core::ChannelRef::Group)
             .expect("post b");
         st.cmd_mark_channel_read(molt_core::ChannelRef::Group, hex::encode(a.0))
             .expect("mark a read");
