@@ -1422,6 +1422,43 @@ impl OpenedWorkspace {
 /// only harmless for the resendable state (cursors, ratchets, creds), not
 /// for that identity. Honesty is the whole fix here: the fallback behavior
 /// is unchanged, the silence is not.
+/// Refuse to open a workspace whose `transport.state` this build would
+/// downgrade — the twin of [`openable_gate`]'s manifest check (M5).
+///
+/// Only the NEWER case errors. Missing, unreadable, unauthenticated or
+/// undecodable all stay silent here: the read path treats those as "start
+/// fresh", which is the honest answer for a ratchet, and turning them into
+/// a refusal would make a recoverable workspace unopenable.
+fn ensure_transport_state_not_newer(
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<(), StorageError> {
+    let path = dir.join("transport.state");
+    let Ok(data) = fs::read(&path) else { return Ok(()) };
+    let (frames, torn) = split_frames(&data);
+    if frames.len() != 1 || torn.is_some() {
+        return Ok(());
+    }
+    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
+    let Ok(plaintext) = decrypt_frame(
+        &transport_key,
+        id,
+        TRANSPORT_SEGMENT,
+        0,
+        frames[0].nonce,
+        frames[0].ciphertext,
+    ) else {
+        return Ok(());
+    };
+    match serde_json::from_slice::<TransportState>(&plaintext) {
+        Ok(st) if st.version > TRANSPORT_STATE_VERSION => {
+            Err(StorageError::NewerVersion(st.version))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> TransportState {
     let path = dir.join("transport.state");
     let lost = "an existing transport.state is unreadable — starting fresh; if this \
@@ -1682,6 +1719,14 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         Err(e) => return Err(e.into()),
     };
     let key = unseal_workspace_key(&device_key, &id, &sealed)?;
+    // …and the same refusal for `transport.state` that the manifest gets.
+    // The read below falls back to a default on damage — right for a
+    // ratchet, which re-establishes — but a file written by a NEWER node is
+    // not damage: the first save would rewrite it under this build's
+    // version, and with it go the MLS ratchet and the transport identity's
+    // non-re-derivable secret. An older reader meeting something unknown
+    // must not WRITE (the additive-only rule), so it does not open at all.
+    ensure_transport_state_not_newer(ws_dir, &key, &id)?;
     let prefs = read_prefs(ws_dir);
 
     // The per-segment key table (WP4a). Absent = never compacted: every
@@ -3333,6 +3378,42 @@ mod tests {
             matches!(open_workspace(&dir), Err(StorageError::NewerVersion(_))),
             "a too-new key table stops the open"
         );
+    }
+
+    /// **M5: a `transport.state` from a newer build stops the open, instead
+    /// of being silently rewritten at this build's version.**
+    ///
+    /// The read path answers "start fresh" for anything it cannot use — the
+    /// right call for a ratchet, which re-establishes. But a NEWER file is
+    /// not damage: the first save rewrote it under the old version, taking
+    /// the MLS ratchet and the transport identity's non-re-derivable secret
+    /// with it. The additive-only rule says an older reader meeting
+    /// something unknown must not WRITE; here that means it must not open.
+    #[test]
+    fn a_newer_transport_state_refuses_the_open() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let (key, id) = (ws.key, ws.id);
+        // …written the way a future build would write it
+        let st = TransportState {
+            version: TRANSPORT_STATE_VERSION + 1,
+            ..TransportState::default()
+        };
+        let plaintext = serde_json::to_vec(&st).expect("encode");
+        let tkey = hkdf32(&key, "molt-transport-state", &id);
+        let frame = encode_frame(&tkey, &id, TRANSPORT_SEGMENT, 0, &plaintext).expect("frame");
+        drop(ws);
+        write_atomic(&dir, "transport.state", &frame, true).expect("write");
+
+        assert!(
+            matches!(open_workspace(&dir), Err(StorageError::NewerVersion(v)) if v == TRANSPORT_STATE_VERSION + 1),
+            "a too-new transport.state stops the open"
+        );
+        // …and the file is still there, untouched, for the build that wrote it
+        let after = fs::read(dir.join("transport.state")).expect("still there");
+        assert_eq!(after, frame, "the refusal must not have rewritten it");
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest

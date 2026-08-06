@@ -161,17 +161,20 @@ ersatzlos entfernt — `crates/molt-net/src/smp/` existiert nicht mehr. Die
 Ack-Disziplin der Nostr-Zustellgarantie ist eine andere Konstruktion
 (`docs/transport/delivery_guarantee.md`).
 
-### M5 — Alte transport.state/log werden von neueren Versionen still geklobbert 📋 DOKUMENTIERT
+### M5 — Alte transport.state/log werden von neueren Versionen still geklobbert ✅ GEFIXT (2026-08-07)
 `crates/molt-storage/src/lib.rs` `read_transport_state` (Z.930): Version >
 `TRANSPORT_STATE_VERSION` ⇒ `default()`, und der `SaveTransport`-RMW schreibt die
 neuere Datei mit der alten Version zurück — MLS-Snapshot + SMP-Queue-Creds weg,
 Mesh-Resume dauerhaft kaputt (SMP verbietet Subscribe auf fremd-erzeugte
 Queues). Verletzt die Additive-Only-Regel „ein älterer Leser darf bei Unbekanntem
 nicht schreiben".
-**Zurückgestellt** — die saubere Lösung (bei neuerer Version das Öffnen
-verweigern statt Default zu schreiben) ist dieselbe Klasse wie H4, aber für
-transport.state; braucht dieselbe „refuse newer"-Semantik konsistent über alle
-State-Dateien.
+**Gefixt** genau so: `ensure_transport_state_not_newer` in `open_workspace`,
+das Gegenstück zu `openable_gate` für das Manifest. NUR der Neuer-Fall
+verweigert — fehlend/unlesbar/nicht-authentisch/undekodierbar bleiben
+„starte frisch", was für eine Ratchet die ehrliche Antwort ist und aus einem
+reparierbaren Workspace sonst einen unöffenbaren machen würde. Gepinnt:
+`a_newer_transport_state_refuses_the_open` (prüft auch, dass die Datei nach
+der Verweigerung UNVERÄNDERT auf der Platte liegt).
 
 ### M6 — Torn-Tail-Recovery truncatet beim ERSTEN kaputten Frame ⇒ Datenverlust 📋 DOKUMENTIERT
 `crates/molt-storage/src/lib.rs` (~Z.1257). Ein einzelner Bitflip früh im letzten
@@ -202,12 +205,15 @@ der Node akzeptiert dann jede MCP-Verbindung ohne Token.
 zu melden), die GUI-Rotation lässt das ALTE Token stehen und sagt es.
 Gepinnt: `a_minted_token_is_full_length_hex_and_never_repeats`.
 
-### M9 — MCP-Token wird zur Laufzeit nicht neu geladen 📋 DOKUMENTIERT
+### M9 — MCP-Token wird zur Laufzeit nicht neu geladen ✅ GEFIXT (2026-08-07)
 `crates/molt-mcp/src/lib.rs` (~Z.67). `serve_tcp` fängt das Token beim Start ein;
 eine Rotation wirkt erst nach Neustart — entgegen mcp-security.md „takes effect
 immediately". Ein geleaktes Token bleibt gültig, das neue nicht.
-**Zurückgestellt** — braucht ein geteiltes, live-lesbares Token-Handle im
-Accept-Loop.
+**Gefixt** ohne zweites Handle: der Accept-Loop liest das Token pro
+Verbindung aus der LAUFENDEN Session (`live_token`) — die eine Quelle der
+Wahrheit, in der eine Rotation über beide Oberflächen sofort steht. Ein
+fehlgeschlagener Lesevorgang fällt auf das Boot-Token zurück, nie auf
+„keines". Gepinnt: `the_accept_loop_reads_the_token_that_is_current_now`.
 
 ### M10 — Chat-Archiv-Pager: Clamp nutzt `applied.len()`, Slice nutzt `log.len()` ⬜ GEGENSTANDSLOS (2026-08-07)
 `crates/molt-ui/src/lib.rs` (~Z.2678). Der Clamp begrenzt die gespeicherte Seite

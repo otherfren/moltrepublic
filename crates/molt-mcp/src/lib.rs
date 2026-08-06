@@ -22,7 +22,7 @@
 use std::net::IpAddr;
 
 use molt_core::{
-    ChannelRef, Command, MessageId, ProposalId, Screen, SessionSettings, Surface,
+    ChannelRef, Command, MessageId, ProposalId, Reply, Screen, SessionSettings, Surface,
     TOPIC_NAME_MAX_CHARS,
 };
 use molt_engine::WalletHandle;
@@ -64,13 +64,31 @@ pub async fn serve_tcp(
         }
         tracing::info!(%peer, "MCP client connected");
         let h = handle.clone();
-        let tok = token.clone();
+        // the LIVE token, per connection. `mcp-security.md` promises a
+        // rotation "takes effect immediately"; a copy captured at startup
+        // kept the leaked value working until the next restart and refused
+        // the new one. The running session is the one source of truth, so
+        // rotating through either surface applies at once. A failed read
+        // falls back to the boot token — never to none.
+        let tok = live_token(&handle).await.unwrap_or_else(|| token.clone());
         tokio::spawn(async move {
             let (r, w) = sock.into_split();
             if let Err(e) = serve_conn(h, BufReader::new(r), w, Some(tok)).await {
                 tracing::warn!(%peer, error = %e, "MCP connection ended");
             }
         });
+    }
+}
+
+/// The MCP token as the RUNNING session holds it.
+///
+/// `None` only when the engine cannot be reached; the caller then keeps the
+/// value it booted with, because the alternative (an empty token) would
+/// disable authentication exactly when something is already wrong.
+async fn live_token(handle: &WalletHandle) -> Option<String> {
+    match handle.execute(Command::ReadSession).await {
+        Ok(Reply::Session(s)) => Some(s.settings.mcp_token.clone()),
+        _ => None,
     }
 }
 
@@ -2005,6 +2023,37 @@ mod tests {
             }
             other => panic!("wrong command: {other:?}"),
         }
+    }
+
+    /// **A rotated token applies to the next connection, not the next
+    /// restart.** `mcp-security.md` promises rotation "takes effect
+    /// immediately"; `serve_tcp` captured its copy at startup, so a leaked
+    /// token kept working until the process was restarted and the new one
+    /// was refused — the exact inverse of what an operator rotating under
+    /// suspicion needs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_accept_loop_reads_the_token_that_is_current_now() {
+        let h = wallet();
+        let with_token = |t: &str| molt_core::SessionSettings {
+            mcp_token: t.to_string(),
+            ..molt_core::SessionSettings::default()
+        };
+        h.execute(Command::SaveSettings { settings: with_token("first") })
+            .await
+            .expect("save");
+        assert_eq!(live_token(&h).await.as_deref(), Some("first"));
+
+        // …rotate, exactly as the GUI button and save_settings.mcp_token do
+        h.execute(Command::PatchSettings {
+            patch: json!({ "mcp_token": "second" }),
+        })
+        .await
+        .expect("rotate");
+        assert_eq!(
+            live_token(&h).await.as_deref(),
+            Some("second"),
+            "the next connection is gated on the NEW value"
+        );
     }
 
     #[tokio::test]
