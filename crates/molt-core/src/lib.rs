@@ -268,7 +268,8 @@ pub struct SessionSettings {
     pub mcp_allow: String,
     /// MCP API token clients must present.
     pub mcp_token: String,
-    /// Anonymity network: `"tor" | "nym" | "none"`.
+    /// Anonymity network: `"tor" | "none"`. (`"nym"` was retired — the
+    /// mixnet was never implemented and the dialer refuses it.)
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
     pub tor_mode: String,
@@ -5119,9 +5120,12 @@ mod tests {
     }
 
     /// The single source of truth for the "which network am I on" display
-    /// label: only a configured "tor" reads as tor; "none", the legacy
+    /// label: only a configured "tor" reads as tor; "none", the retired
     /// "nym", and any unknown value read as "none" (they never dial — an
-    /// unknown network fails the dialer resolution closed).
+    /// unknown network fails the dialer resolution closed). The retired
+    /// value cannot reach a running node any more, but the LABEL keeps
+    /// answering for it: a display that panics on old data is worse than
+    /// one that tells the truth about it.
     #[test]
     fn effective_net_label_maps_only_tor_to_tor() {
         assert_eq!(effective_net_label("tor"), "tor");

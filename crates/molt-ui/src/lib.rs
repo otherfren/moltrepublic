@@ -295,7 +295,13 @@ pub fn run_app(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            ui.set_cfg_mcp_token(molt_config::random_token().into());
+            // a failed mint leaves the OLD token in place: overwriting it
+            // with "" would silently disable MCP authentication on save
+            let Ok(token) = molt_config::random_token() else {
+                ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
+                return;
+            };
+            ui.set_cfg_mcp_token(token.into());
             let settings = read_settings_draft(&ui);
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
         });
@@ -5760,6 +5766,7 @@ lexicon! {
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while - it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern - Timeout nach ~15 Minuten.";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
+    set_token_failed: "Could not mint a token - the old one still applies.", "Konnte kein Token erzeugen - das alte gilt weiter.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
     rw_title_s3: "Backup restore", "Backup wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";

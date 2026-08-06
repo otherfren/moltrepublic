@@ -5138,7 +5138,7 @@ mod tests {
 
             // A mock save records the values and raises the "saved" notice.
             let settings = SessionSettings {
-                anonymity: "nym".to_string(),
+                anonymity: "tor".to_string(),
                 ..SessionSettings::default()
             };
             w.execute(Command::SaveSettings {
@@ -5150,7 +5150,7 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read2") {
                 Reply::Session(s) => {
                     assert_eq!(s.screen, Screen::Settings);
-                    assert_eq!(s.settings.anonymity, "nym");
+                    assert_eq!(s.settings.anonymity, "tor");
                     assert_eq!(s.notice, "saved");
                 }
                 other => panic!("unexpected: {other:?}"),

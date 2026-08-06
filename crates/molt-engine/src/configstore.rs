@@ -628,7 +628,7 @@ mod tests {
 
             let settings = SessionSettings {
                 mcp_port: 5555,
-                anonymity: "nym".to_string(),
+                anonymity: "tor".to_string(),
                 ..SessionSettings::default()
             };
             wallet
@@ -642,7 +642,7 @@ mod tests {
             let cfg = molt_config::parse(&text).expect("saved file parses strictly");
             let s = Settings::from(&cfg);
             assert_eq!(s.mcp_port, 5555);
-            assert_eq!(s.anonymity, "nym");
+            assert_eq!(s.anonymity, "tor");
 
             // the async write outcome lands in the notice…
             wait_for_notice(&wallet, "saved").await;

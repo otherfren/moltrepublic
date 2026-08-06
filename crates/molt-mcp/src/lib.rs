@@ -27,7 +27,7 @@ use molt_core::{
 };
 use molt_engine::WalletHandle;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 /// MCP protocol version this server advertises.
@@ -92,9 +92,35 @@ where
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
+        // BOUNDED, and it has to be bounded BEFORE the request is
+        // understood: on a node whose `[mcp].allow` opens the port beyond
+        // loopback, anyone past the IP filter could stream gigabytes with no
+        // newline in them and `read_line` would grow the buffer to match —
+        // an out-of-memory kill from a peer that never authenticated. A
+        // frame this large is not a request anybody makes; the connection
+        // that sent it is done.
+        let n = (&mut reader)
+            .take(u64::try_from(MAX_RPC_LINE).unwrap_or(u64::MAX))
+            .read_line(&mut line)
+            .await?;
         if n == 0 {
             return Ok(()); // EOF
+        }
+        if n >= MAX_RPC_LINE && !line.ends_with('\n') {
+            // …and it is NOT skipped: the rest of that line would parse as
+            // a request of its own, so the only sound answer is to stop
+            // reading this connection.
+            tracing::warn!(bytes = n, "MCP request line past the bound — connection dropped");
+            let mut out = serde_json::to_string(&error_response(
+                Value::Null,
+                -32600,
+                "request line too large",
+            ))
+            .unwrap_or_else(|_| "{}".to_string());
+            out.push('\n');
+            let _ = writer.write_all(out.as_bytes()).await;
+            let _ = writer.flush().await;
+            return Ok(());
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -116,6 +142,12 @@ where
         }
     }
 }
+
+/// Largest single JSON-RPC line this server will read. Generous next to any
+/// real request (the biggest is a chat message under the transport's 128 KiB
+/// publish budget) and small next to the memory a hostile peer could
+/// otherwise make the process allocate before it has authenticated at all.
+const MAX_RPC_LINE: usize = 1024 * 1024;
 
 /// Dispatch one JSON-RPC message. Returns `None` for notifications (no reply).
 /// `auth` is the required token (or `None` for stdio); `authed` tracks whether
@@ -1870,6 +1902,32 @@ mod tests {
             .await
             .expect("tools/list replies");
         assert!(resp["result"]["tools"].is_array());
+    }
+
+    /// **A peer that never authenticates cannot make us allocate without
+    /// bound.** On a node whose `[mcp].allow` opens the port past loopback,
+    /// anyone through the IP filter used to be able to stream gigabytes with
+    /// no newline in them: `read_line` grew the buffer to match, and the
+    /// process died of it before a token was ever checked.
+    ///
+    /// The connection ENDS on such a line rather than skipping it — the tail
+    /// of an over-long line would otherwise parse as a request of its own.
+    #[tokio::test]
+    async fn a_giant_pre_auth_line_ends_the_connection_instead_of_growing() {
+        let h = wallet();
+        // no newline, comfortably past the bound
+        let flood = vec![b'x'; MAX_RPC_LINE + 4096];
+        let mut out: Vec<u8> = Vec::new();
+        serve_conn(h, BufReader::new(&flood[..]), &mut out, Some("secret".to_string()))
+            .await
+            .expect("the server ends the connection, it does not error out");
+        let answer = String::from_utf8_lossy(&out);
+        assert!(
+            answer.contains("too large"),
+            "the peer is told why the connection ended: {answer}"
+        );
+        // …and nothing past the bound was ever parsed as a request
+        assert_eq!(answer.lines().count(), 1, "one refusal, then silence: {answer}");
     }
 
     #[tokio::test]

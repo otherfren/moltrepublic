@@ -134,16 +134,17 @@ der falsche Kommentar zeigt jetzt auf diesen Test.
 **Fix:** ehrlicher Toast „S3-Backup ist noch nicht angebunden — es wurde nichts
 getestet." (das S3-Backend selbst bleibt die bekannte deferred-Arbeit).
 
-### M4 — SMP ackt eager, während der Supervisor auf Redelivery gehaltener Acks baut 📋 DOKUMENTIERT
+### M4 — SMP ackt eager, während der Supervisor auf Redelivery gehaltener Acks baut ⬜ GEGENSTANDSLOS (2026-08-07)
 `crates/molt-net/src/smp/conn.rs`/`transport.rs`. `recv_next` ackt Nachricht N zum
 Server, sobald N+1 geholt wird — bevor der Supervisor entscheidet zu puffern.
 Eine im Epoch-/Reorder-Puffer gehaltene Nachricht (Re-Key-Storm → shed) oder ein
 Block zwischen Server-Ack und Engine-fsync ist bei Crash **permanent verloren**
 (der Server liefert Geacktes nicht neu). Loopback fängt es nicht (nur unacked
 Redelivery). Die „loopback kann's nicht fangen"-Klasse aus CLAUDE.md.
-**Zurückgestellt** — tiefes Transport-Design (die Ack-Disziplin müsste erst beim
-tatsächlichen Buffer/Accept greifen, nicht beim Prefetch). Braucht eigene
-Session + einen SMP-Integrationstest.
+**Gegenstandslos:** der SMP-Transport wurde in Etappe N-demo (2026-07-30)
+ersatzlos entfernt — `crates/molt-net/src/smp/` existiert nicht mehr. Die
+Ack-Disziplin der Nostr-Zustellgarantie ist eine andere Konstruktion
+(`docs/transport/delivery_guarantee.md`).
 
 ### M5 — Alte transport.state/log werden von neueren Versionen still geklobbert 📋 DOKUMENTIERT
 `crates/molt-storage/src/lib.rs` `read_transport_state` (Z.930): Version >
@@ -166,20 +167,25 @@ letzte nie.
 **Zurückgestellt** — braucht eine „folgt ein valider Frame nach dem Schaden?"-
 Prüfung (Torn-Tail vs. Bitrot unterscheiden) vor der destruktiven Truncation.
 
-### M7 — MCP `serve_conn`: unbegrenztes `read_line` vor Auth (Pre-Auth-DoS) 📋 DOKUMENTIERT
+### M7 — MCP `serve_conn`: unbegrenztes `read_line` vor Auth (Pre-Auth-DoS) ✅ GEFIXT (2026-08-07)
 `crates/molt-mcp/src/lib.rs` (~Z.95). Auf einem `0.0.0.0`-Allow-Node streamt ein
 Client, der nur den IP-Filter passiert, GB ohne Newline; `read_line` wächst
 unbegrenzt → OOM.
-**Zurückgestellt** (billiger Fix möglich): begrenzter Reader (`take(MAX)` je
-Zeile) vor dem Parse. Nicht im Security-kritischen Governance-Kern, daher hier
-notiert.
+**Gefixt:** `MAX_RPC_LINE` (1 MiB) über `take()` VOR dem Parse; eine
+überlange Zeile beendet die Verbindung mit einer JSON-RPC-Fehlerantwort,
+statt sie zu überspringen — der Rest würde sonst als eigener Request
+parsen. Gepinnt:
+`a_giant_pre_auth_line_ends_the_connection_instead_of_growing`.
 
-### M8 — `random_token()` liefert still `""` bei RNG-Fehler/Non-Unix 📋 DOKUMENTIERT
+### M8 — `random_token()` liefert still `""` bei RNG-Fehler/Non-Unix ✅ GEFIXT (2026-08-07)
 `crates/molt-config/src/lib.rs` (~Z.341). `--generate-config` in einer Sandbox
 ohne `/dev/urandom` (oder Non-Linux) schreibt `token = ""` und meldet Erfolg —
 der Node akzeptiert dann jede MCP-Verbindung ohne Token.
-**Zurückgestellt** (billiger Fix): `getrandom` statt Pfad-Open, harter Abbruch
-statt leerem Token.
+**Gefixt:** `getrandom` statt Pfad-Open, und die Signatur ist jetzt
+`Result<String, TokenError>` — der Typ zwingt beide Aufrufer zur Antwort:
+`--generate-config` bricht ab (statt eine Config mit leerem Token als Erfolg
+zu melden), die GUI-Rotation lässt das ALTE Token stehen und sagt es.
+Gepinnt: `a_minted_token_is_full_length_hex_and_never_repeats`.
 
 ### M9 — MCP-Token wird zur Laufzeit nicht neu geladen 📋 DOKUMENTIERT
 `crates/molt-mcp/src/lib.rs` (~Z.67). `serve_tcp` fängt das Token beim Start ein;
@@ -188,25 +194,32 @@ immediately". Ein geleaktes Token bleibt gültig, das neue nicht.
 **Zurückgestellt** — braucht ein geteiltes, live-lesbares Token-Handle im
 Accept-Loop.
 
-### M10 — Chat-Archiv-Pager: Clamp nutzt `applied.len()`, Slice nutzt `log.len()` 📋 DOKUMENTIERT
+### M10 — Chat-Archiv-Pager: Clamp nutzt `applied.len()`, Slice nutzt `log.len()` ⬜ GEGENSTANDSLOS (2026-08-07)
 `crates/molt-ui/src/lib.rs` (~Z.2678). Der Clamp begrenzt die gespeicherte Seite
 mit der rohen Applied-Zahl, der Pager/Slice paginiert aber über die projizierte
 Log-Länge (inkl. gemergter System-Zeilen in Patch-Kanälen). In einem
 Patch-Kanal-Archiv mit System-Zeilen ist die letzte Seite unerreichbar
 („›" springt zurück).
-**Zurückgestellt** — der saubere Fix verlangt die projizierte `log.len()` am
-Clamp-Punkt, der aber VOR der Projektion in der State-Closure liegt (Closure/
-apply_surfaces-Split). Enger Randfall; präzise notiert statt fragil geflickt.
+**Gegenstandslos:** die Chat-Archiv-Ansicht gibt es nicht mehr — der Chat
+ist EIN Aufbewahrungsfenster (Produktentscheidung 2026-08-04), und mit der
+Ansicht fiel ihr Pager weg.
 
-### M11 — Legacy-`anonymity="nym"` erzeugt Phantom-„ungespeichert" im Settings-Screen 📋 DOKUMENTIERT
+### M11 — Legacy-`anonymity="nym"` erzeugt Phantom-„ungespeichert" im Settings-Screen ✅ GEFIXT (2026-08-07)
 `crates/molt-ui/src/lib.rs` (~Z.4166). Nach dem nym-Entfernen lädt eine
 Alt-Config `anonymity="nym"` als Dropdown-Index „none", `read_settings_draft`
 gibt „none" zurück, der Ist-Wert bleibt aber „nym" ⇒ Draft ≠ Stored für immer:
 die Unsaved-Modal erscheint bei jedem Verlassen, externe Settings-Änderungen
 werden nicht mehr gespiegelt, ein Save schreibt still „nym"→„none".
-**Zurückgestellt** — sauber wäre eine Normalisierung „nym"→„none" an EINER
-Stelle (molt-config-Parse), damit „nym" nie in den State kommt; Cross-Layer,
-daher notiert.
+**Gefixt, aber ANDERSHERUM als hier vorgeschlagen.** Die Normalisierung
+„nym"→„none" wäre der eine Ausgang, der schlimmer ist als der Befund: der
+Dialer schlägt bei „nym" fail-closed fehl, „none" wählt. Aus „anonymisiere
+mich" still „tu es nicht" zu machen, ist genau die Deklassierung, vor der
+H5 warnt. Stattdessen ist der Wert RETIRED: `AnonymityNetwork::Nym` ist
+weg, `validate_settings` nimmt ihn nicht mehr an, und `load_config` weigert
+sich beim Namen zu starten (`selects_retired_nym`) statt still umzudeuten —
+ein Knoten in diesem Zustand startete bisher fröhlich und scheiterte dann
+an jedem Dial. Gepinnt:
+`the_retired_nym_is_named_and_refused_not_normalized`.
 
 ### M12 — Optimistische Erfolgs-Toasts vor dem Engine-Effekt 📋 DOKUMENTIERT
 `crates/molt-ui-window/ui/app.slint` (org-propose-Sites, file-remove, copy).

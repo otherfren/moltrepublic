@@ -442,6 +442,19 @@ fn discovery_candidates() -> Vec<PathBuf> {
 fn load_config(path: &Path) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
+    // The retired mixnet, refused BY NAME rather than healed: normalizing it
+    // to "none" would turn the operator's "anonymize me" into clearnet
+    // behind their back, and leaving it would start a node whose every dial
+    // fails with "nym not implemented" — silently, at the first connection.
+    if molt_config::selects_retired_nym(&text) {
+        anyhow::bail!(
+            "config {}: transport.anonymity.network = \"nym\" was removed \
+             (the mixnet was never implemented and every dial refuses). Set \
+             it to \"tor\" or \"none\" - not changed for you, because the \
+             two mean opposite things for your privacy.",
+            path.display()
+        );
+    }
     match parse(&text) {
         Ok(config) => Ok(config),
         Err(err) => {
@@ -497,9 +510,13 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
         );
     }
     ensure_parent_dir(path)?;
-    // Mint a fresh MCP API token and write it into the config.
+    // Mint a fresh MCP API token and write it into the config. A failing
+    // CSPRNG ABORTS: an empty token disables MCP authentication, and a
+    // config written with one would report success while handing out an
+    // unauthenticated node.
     let settings = Settings {
-        mcp_token: molt_config::random_token(),
+        mcp_token: molt_config::random_token()
+            .with_context(|| "cannot mint an MCP token, so no config is written")?,
         ..Settings::default()
     };
     std::fs::write(path, render(&settings))

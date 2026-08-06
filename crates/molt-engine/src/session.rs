@@ -1855,9 +1855,14 @@ fn clamp_for_display(value: &str, max: usize) -> String {
 }
 
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
-    if !matches!(s.anonymity.as_str(), "tor" | "nym" | "none") {
+    // "nym" is gone from the vocabulary on purpose: the mixnet was never
+    // implemented, the dialer refuses every connection under it, and the
+    // config loader now names it rather than quietly re-labelling it. An
+    // operator (or agent) must not be able to put a node back into that
+    // state through the settings surface either.
+    if !matches!(s.anonymity.as_str(), "tor" | "none") {
         return Err(MoltError::Settings(format!(
-            "anonymity network must be tor | nym | none, not `{}`",
+            "anonymity network must be tor | none, not `{}`",
             s.anonymity
         )));
     }

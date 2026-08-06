@@ -195,8 +195,6 @@ pub enum AnonymityNetwork {
     /// Route over Tor. Explicit opt-in — a fail-closed dialer refuses every
     /// direct dial once this is selected (transport concept §6).
     Tor,
-    /// Route over the Nym mixnet.
-    Nym,
     /// No anonymity network (clearnet) — the shipped default; the user opts
     /// into Tor.
     #[default]
@@ -339,14 +337,31 @@ pub fn default_theme() -> String {
 }
 
 /// A fresh random MCP API token: 24 bytes from the OS CSPRNG, hex-encoded.
-pub fn random_token() -> String {
-    use std::io::Read;
+///
+/// `Err` rather than a fallback, and that is the whole point of the
+/// signature: it used to open `/dev/urandom` by path and return `""` when
+/// that failed — in a sandbox without the device node, or on any non-Unix
+/// target, `--generate-config` then wrote `token = ""` and reported success.
+/// An empty token disables MCP authentication (the check is a string
+/// compare), so the quiet failure handed out an unauthenticated node.
+pub fn random_token() -> Result<String, TokenError> {
     let mut buf = [0u8; 24];
-    match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)) {
-        Ok(()) => buf.iter().map(|b| format!("{b:02x}")).collect(),
-        Err(_) => String::new(),
+    getrandom::getrandom(&mut buf).map_err(|e| TokenError(e.to_string()))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The OS CSPRNG was unavailable. There is no safe fallback for a token that
+/// gates a network surface, so this is reported rather than papered over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenError(String);
+
+impl std::fmt::Display for TokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the OS random source is unavailable: {}", self.0)
     }
 }
+
+impl std::error::Error for TokenError {}
 
 // ---------------------------------------------------------------------------
 // Flat settings: the single source of defaults, used to render and salvage.
@@ -383,7 +398,7 @@ pub struct Settings {
     pub sound_vote: String,
     /// Send (and show) per-message chat read receipts (local privacy switch).
     pub read_receipts: bool,
-    /// Anonymity network: `"tor" | "nym" | "none"`.
+    /// Anonymity network: `"tor" | "none"`.
     pub anonymity: String,
     /// Tor mode: `"local" | "embedded" | "whonix"`.
     pub tor_mode: String,
@@ -437,11 +452,10 @@ impl Default for Settings {
 }
 
 impl AnonymityNetwork {
-    /// The lowercase wire/config name (`"tor" | "nym" | "none"`).
+    /// The lowercase wire/config name (`"tor" | "none"`).
     pub fn as_str(self) -> &'static str {
         match self {
             AnonymityNetwork::Tor => "tor",
-            AnonymityNetwork::Nym => "nym",
             AnonymityNetwork::None => "none",
         }
     }
@@ -541,7 +555,7 @@ allow = {mcp_allow}
 token = {mcp_token}
 
 [transport.anonymity]
-# network = "tor" | "nym" | "none" (default "none" = clearnet). "tor" routes
+# network = "tor" | "none" (default "none" = clearnet). "tor" routes
 # every network dial through Tor, fail-closed (no silent clearnet fallback).
 network = {anonymity}
 
@@ -681,7 +695,7 @@ pub fn salvage(text: &str) -> Settings {
     }
     if let Some(anonymity) = value.get("transport").and_then(|t| t.get("anonymity")) {
         if let Some(net) = anonymity.get("network").and_then(toml::Value::as_str) {
-            if matches!(net, "tor" | "nym" | "none") {
+            if matches!(net, "tor" | "none") {
                 s.anonymity = net.to_string();
             }
         }
@@ -774,6 +788,31 @@ pub fn salvage(text: &str) -> Settings {
 /// Callers wrap the error with their own file-path context.
 pub fn parse(text: &str) -> Result<Config, toml::de::Error> {
     toml::from_str(text)
+}
+
+/// The retired `network = "nym"`, if this text still selects it.
+///
+/// The mixnet was never implemented: `Dialer::resolve` answers "nym not
+/// implemented" and refuses every dial, so a node configured this way starts
+/// fine and then fails silently at its first connection. Worse, the GUI had
+/// no dropdown entry for it — the settings panel read it back as "none",
+/// which made the draft differ from the stored value forever (an
+/// unsaved-changes modal on every exit) and would have written the
+/// difference out as a silent downgrade to CLEARNET.
+///
+/// So it is refused at load, by name, rather than normalized: turning an
+/// operator's "anonymize me" into "no anonymity" behind their back is the
+/// one outcome worse than refusing to start.
+#[must_use]
+pub fn selects_retired_nym(text: &str) -> bool {
+    text.parse::<toml::Value>()
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("transport"))
+        .and_then(|t| t.get("anonymity"))
+        .and_then(|a| a.get("network"))
+        .and_then(toml::Value::as_str)
+        == Some("nym")
 }
 
 /// Whether `text` is syntactically valid TOML (ignores schema validity).
@@ -1131,7 +1170,7 @@ mod tests {
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
             read_receipts: false,
-            anonymity: "nym".to_string(),
+            anonymity: "tor".to_string(),
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
             download_dir: "/srv/molt/downloads".to_string(),
@@ -1425,5 +1464,68 @@ network = \"none\"
         // defaults that render/salvage produce.
         let config = parse(&render(&Settings::default())).expect("parse default");
         assert_eq!(Settings::from(&config), Settings::default());
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    /// **A token is never empty, and never predictable.**
+    ///
+    /// It used to come from opening `/dev/urandom` by path, with `""` as the
+    /// failure value — so a sandbox without the device node, or any non-Unix
+    /// target, produced a config that reported success and disabled MCP
+    /// authentication (the check is a string compare against the token).
+    /// `Err` is the only honest answer when the CSPRNG is unavailable, and
+    /// the type is what forces both callers to say so.
+    #[test]
+    fn a_minted_token_is_full_length_hex_and_never_repeats() {
+        let a = random_token().expect("the OS CSPRNG is available here");
+        let b = random_token().expect("…twice");
+        assert_eq!(a.len(), 48, "24 bytes, hex-encoded");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only: {a}"
+        );
+        assert_ne!(a, b, "two mints must not collide");
+        assert!(!a.is_empty(), "an empty token would disable authentication");
+    }
+}
+
+#[cfg(test)]
+mod nym_tests {
+    use super::*;
+
+    /// **The retired mixnet is refused, never quietly re-labelled.**
+    ///
+    /// `network = "nym"` was never implemented: the dialer answers "nym not
+    /// implemented" and refuses every connection, so such a node starts
+    /// happily and then fails at its first dial. The GUI, meanwhile, had no
+    /// entry for it and read it back as "none" — a draft that differed from
+    /// the stored value forever, and a save that would have written the
+    /// difference out as CLEARNET.
+    ///
+    /// Both halves are pinned here, because the tempting fix (normalize it
+    /// to "none") is the one outcome worse than refusing: it turns
+    /// "anonymize me" into "do not" without telling anybody.
+    #[test]
+    fn the_retired_nym_is_named_and_refused_not_normalized() {
+        let cfg = "[transport.anonymity]\nnetwork = \"nym\"\n";
+        assert!(selects_retired_nym(cfg), "the loader can name it");
+        assert!(parse(cfg).is_err(), "…and the strict parse refuses it");
+        // the two live values are unaffected
+        for good in ["tor", "none"] {
+            let cfg = format!("[transport.anonymity]\nnetwork = \"{good}\"\n");
+            assert!(!selects_retired_nym(&cfg));
+            assert!(parse(&cfg).is_ok(), "{good} still parses");
+        }
+        // …and salvage does not carry it forward into a Settings the GUI
+        // would then render back out as a live setting
+        assert_eq!(
+            salvage("[transport.anonymity]\nnetwork = \"nym\"\n").anonymity,
+            "none",
+            "salvage falls back to the default rather than keeping a dead value"
+        );
     }
 }
