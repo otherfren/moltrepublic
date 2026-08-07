@@ -8,6 +8,21 @@ Schweregrad sortiert**. Jeder Eintrag ist als **✅ GEFIXT** (in diesem Review),
 später festgehalten) oder **ℹ️ AKZEPTIERT** (kein echter Defekt / durch eine
 höhere Schicht abgedeckt) markiert.
 
+**Nachtrag 2026-08-07 — die zurückgestellte Liste ist abgearbeitet.** Beide
+HIGH (H3, H5), alle offenen MEDIUM (M5, M6, M7, M8, M9, M11, M12, M13) und
+die drei sicherheitsnahen LOW (L5, L6, L11) sind gefixt oder als
+gegenstandslos nachgewiesen; jeder Eintrag unten trägt das Ergebnis. Zwei
+Dinge blieben bewusst offen und stehen dort benannt: die zweite Hälfte von
+H3 (der Governance-Broadcast wartet noch nicht auf die bestätigte
+Persistenz — eine Änderung am Zustandsmodell, nicht an der Storage-API) und
+die restlichen LOW-Punkte L1-L3, L7, L8, L10, L12-L15.
+
+Zwei Befunde wurden ABSICHTLICH anders gelöst als hier vorgeschlagen, weil
+die vorgeschlagene Richtung schadet: M11 (Normalisierung „nym"→„none" wäre
+eine stille Deklassierung auf Clearnet — der Wert ist stattdessen retired)
+und H5 (die Merge-Basis kann nicht im Tool-Builder liegen — es gibt jetzt
+zwei Verben). Die Begründung steht jeweils beim Eintrag.
+
 Stand nach den Fixes dieses Reviews: alle Tests grün (Core/Net/Storage/Engine/
 MCP: 305; molt-ui: 37), Clippy 0, Slint-Build sauber. Neue Security-Tests:
 `a_membership_proposal_cannot_hijack_a_colliding_surface_id`,
