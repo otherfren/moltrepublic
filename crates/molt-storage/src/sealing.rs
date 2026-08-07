@@ -559,7 +559,7 @@ mod tests {
             relays: Vec::new(),
         };
         let handle = crate::start_writer(ws);
-        handle.persist_chain_blocking(Some(blob), Vec::new());
+        assert!(handle.persist_chain_blocking(Some(blob), Vec::new()), "durable");
         handle.close(None);
         assert_eq!(read_manifest(&dir).expect("m").version, STORAGE_VERSION_PRUNED);
 

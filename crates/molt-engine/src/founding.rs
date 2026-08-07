@@ -2123,11 +2123,13 @@ mod ritual_ops {
                 // queue creds into transport.state (a LIVE merge: the writer
                 // owns the file, and plain cursor saves carry only the cursor
                 // maps)
-                active.handle.persist_mesh_crypto_blocking(
+                if !active.handle.persist_mesh_crypto_blocking(
                     Some(mls_snapshot.clone()),
                     creds,
                     mesh.clone(),
-                );
+                ) {
+                    tracing::error!("the group ratchet did not reach the disk");
+                }
             }
             // stand the runtime supervisor up over the direct mesh, reusing the
             // ritual transport (it owns the mesh queues' receive credentials), so

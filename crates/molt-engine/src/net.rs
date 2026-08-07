@@ -605,7 +605,9 @@ impl State {
             // in-flight publish and exits on its own
             drop(group);
             if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
-                active.handle.persist_crypto_blocking(Some(snap), None);
+                if !active.handle.persist_crypto_blocking(Some(snap), None) {
+                    tracing::error!("the group ratchet did not reach the disk on close");
+                }
             }
         }
         let Some(net) = self.net.take() else {
@@ -614,7 +616,9 @@ impl State {
         let crypto = net.crypto_for_close();
         drop(net); // stop the supervisor before the durable merge
         if let (Some(active), Some((mls, creds))) = (self.active.as_ref(), crypto) {
-            active.handle.persist_crypto_blocking(mls, creds);
+            if !active.handle.persist_crypto_blocking(mls, creds) {
+                tracing::error!("the group ratchet did not reach the disk on close");
+            }
         }
     }
 
@@ -2184,7 +2188,9 @@ impl State {
             let crypto = new_net.crypto_for_close();
             self.net = Some(new_net);
             if let (Some(active), Some((mls, creds))) = (self.active.as_ref(), crypto) {
-                active.handle.persist_mesh_crypto_blocking(mls, creds, mesh);
+                if !active.handle.persist_mesh_crypto_blocking(mls, creds, mesh) {
+                    tracing::error!("the grown mesh did not reach the disk");
+                }
             }
             self.session.notice = format!("mesh-extended:{member}");
             self.emit_session(SessionScope::Full);

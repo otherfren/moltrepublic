@@ -1427,9 +1427,12 @@ impl State {
                     self.active.as_ref(),
                     molt_net::Transport::export_creds(&transport),
                 ) {
-                    active
+                    if !active
                         .handle
-                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone());
+                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone())
+                    {
+                        tracing::error!("the mesh handover did not reach the disk");
+                    }
                 }
                 if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
                     self.teardown_net();
@@ -1798,9 +1801,12 @@ impl State {
                     self.active.as_ref(),
                     molt_net::Transport::export_creds(&transport),
                 ) {
-                    active
+                    if !active
                         .handle
-                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone());
+                        .persist_mesh_crypto_blocking(None, Some(creds), mesh.clone())
+                    {
+                        tracing::error!("the mesh handover did not reach the disk");
+                    }
                 }
                 if let Some(net) = self.build_real_net(transport, &mesh, &blob) {
                     self.teardown_net();

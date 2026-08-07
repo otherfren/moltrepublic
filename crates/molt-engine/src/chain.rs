@@ -1638,9 +1638,18 @@ impl State {
         let Some(active) = &self.active else {
             return;
         };
-        active
+        if !active
             .handle
-            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone());
+            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone())
+        {
+            // The writer also raises its `failed` flag, which the next
+            // `record` turns into the operator's "storage-failed" notice.
+            // Named here as well because THIS is the write whose loss
+            // matters most: the chain is the republic's agreed history, and
+            // a block that never reached the disk is one this node will ask
+            // for again after a crash.
+            tracing::error!("the chain did not reach the disk — it is only in memory");
+        }
     }
 
     /// Verify a block as the extension of our chain, append it, and re-project

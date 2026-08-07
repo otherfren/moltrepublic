@@ -2241,7 +2241,7 @@ enum WriterMsg {
         /// mid-session merge (mesh extension) — the running supervisor keeps
         /// saving cursors afterwards.
         seal: bool,
-        ack: mpsc::SyncSender<()>,
+        ack: mpsc::SyncSender<bool>,
     },
     /// Load `transport.state` (defaults when absent/damaged).
     LoadTransport(tokio::sync::oneshot::Sender<TransportState>),
@@ -2261,14 +2261,14 @@ enum WriterMsg {
     /// group-commit means a just-appended event can still be in the buffer;
     /// anything that COPIES the directory (backup, export) has to force it
     /// out first or the copy silently misses the newest frames.
-    Flush(mpsc::SyncSender<()>),
+    Flush(mpsc::SyncSender<bool>),
     /// Persist the whole persistent commit-block chain (`chain.state`), acking
     /// when durable — a governance commit must not be lost, so it uses the same
     /// blocking-ack shape as `MergeCrypto`.
     PersistChain {
         blob: Option<molt_core::CheckpointState>,
         blocks: Vec<molt_core::ChainBlock>,
-        ack: mpsc::SyncSender<()>,
+        ack: mpsc::SyncSender<bool>,
     },
     Close(mpsc::SyncSender<()>),
 }
@@ -2322,11 +2322,14 @@ impl StorageHandle {
     /// Force everything queued so far to disk and wait for it. Call before
     /// copying the workspace directory (backup/export): without it the copy
     /// can miss events the caller already considers written.
-    pub fn flush_blocking(&self) {
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn flush_blocking(&self) -> bool {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
+        if self.tx.send(WriterMsg::Flush(ack_tx)).is_err() {
+            return false; // the writer is gone: nothing reached the disk
         }
+        ack_rx.recv().unwrap_or(false)
     }
 
     /// Enqueue a snapshot write.
@@ -2413,9 +2416,14 @@ impl StorageHandle {
     /// Merge the runtime crypto (MLS snapshot + queue creds) into the current
     /// `transport.state`, preserving the delivery cursors, and BLOCK until it is
     /// durable (fsync'd). The clean-close persist that lets a reopened node
-    /// resume the mesh. A gone writer is a silent no-op (nothing to resume into).
-    pub fn persist_crypto_blocking(&self, mls: Option<Vec<u8>>, smp_queues: Option<Vec<u8>>) {
-        self.merge_crypto_blocking(mls, smp_queues, None, true);
+    /// resume the mesh.
+    ///
+    /// Returns whether it really is durable. It used to ack unconditionally,
+    /// so a failed write reported success and the node closed believing its
+    /// ratchet snapshot was on disk.
+    #[must_use]
+    pub fn persist_crypto_blocking(&self, mls: Option<Vec<u8>>, smp_queues: Option<Vec<u8>>) -> bool {
+        self.merge_crypto_blocking(mls, smp_queues, None, true)
     }
 
     /// A **live** (mid-session) variant of [`Self::persist_crypto_blocking`]
@@ -2423,13 +2431,17 @@ impl StorageHandle {
     /// membership grows/re-keys the mesh at runtime, and a reopen must resume
     /// the grown mesh, not the founded one. Does NOT seal `transport.state`:
     /// the (rebuilt) supervisor keeps saving its cursors afterwards.
+    ///
+    /// Returns whether it really is durable — see
+    /// [`Self::persist_crypto_blocking`].
+    #[must_use]
     pub fn persist_mesh_crypto_blocking(
         &self,
         mls: Option<Vec<u8>>,
         smp_queues: Option<Vec<u8>>,
         mesh: Vec<molt_core::MeshLink>,
-    ) {
-        self.merge_crypto_blocking(mls, smp_queues, Some(mesh), false);
+    ) -> bool {
+        self.merge_crypto_blocking(mls, smp_queues, Some(mesh), false)
     }
 
     /// Fire-and-forget MLS-snapshot merge (delivery guarantee §4.6 / E6, the
@@ -2463,9 +2475,9 @@ impl StorageHandle {
         smp_queues: Option<Vec<u8>>,
         mesh: Option<Vec<molt_core::MeshLink>>,
         seal: bool,
-    ) {
+    ) -> bool {
         if mls.is_none() && smp_queues.is_none() && mesh.is_none() {
-            return;
+            return true; // nothing asked for, nothing owed
         }
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         if self
@@ -2477,20 +2489,26 @@ impl StorageHandle {
                 seal,
                 ack: ack_tx,
             })
-            .is_ok()
+            .is_err()
         {
-            let _ = ack_rx.recv();
+            return false; // the writer is gone: nothing reached the disk
         }
+        ack_rx.recv().unwrap_or(false)
     }
 
     /// Persist the whole persistent commit-block chain and BLOCK until it is
     /// durable (fsync'd) — a governance commit must survive a crash the instant
-    /// it is broadcast. A gone writer is a silent no-op.
+    /// it is broadcast.
+    ///
+    /// Returns whether it really is durable. It used to ack unconditionally,
+    /// so a failed write let the engine broadcast a threshold-signed block
+    /// while nothing was on the disk.
+    #[must_use]
     pub fn persist_chain_blocking(
         &self,
         blob: Option<molt_core::CheckpointState>,
         blocks: Vec<molt_core::ChainBlock>,
-    ) {
+    ) -> bool {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         if self
             .tx
@@ -2499,10 +2517,11 @@ impl StorageHandle {
                 blocks,
                 ack: ack_tx,
             })
-            .is_ok()
+            .is_err()
         {
-            let _ = ack_rx.recv();
+            return false; // the writer is gone: nothing reached the disk
         }
+        ack_rx.recv().unwrap_or(false)
     }
 
     /// Load `transport.state` (defaults when absent, damaged, or the
@@ -2728,25 +2747,33 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         if let Some(mesh) = mesh {
                             ts.mesh = mesh;
                         }
-                        if let Err(e) = ws.write_transport_state(&ts).and_then(|()| ws.sync()) {
-                            fail(&failed_flag, "crypto merge write", &e);
-                        }
+                        let ok = match ws.write_transport_state(&ts).and_then(|()| ws.sync()) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                fail(&failed_flag, "crypto merge write", &e);
+                                false
+                            }
+                        };
                         // only the CLEAN-CLOSE merge seals — a live mesh-extension
                         // merge is followed by a rebuilt supervisor that keeps
                         // saving its cursors
                         if seal {
                             crypto_sealed = true;
                         }
-                        let _ = ack.send(());
+                        let _ = ack.send(ok);
                     }
                     Ok(WriterMsg::LoadTransport(reply)) => {
                         let _ = reply.send(ws.read_transport_state());
                     }
                     Ok(WriterMsg::Flush(ack)) => {
-                        if let Err(e) = ws.sync() {
-                            fail(&failed_flag, "flush", &e);
-                        }
-                        let _ = ack.send(());
+                        let ok = match ws.sync() {
+                            Ok(()) => true,
+                            Err(e) => {
+                                fail(&failed_flag, "flush", &e);
+                                false
+                            }
+                        };
+                        let _ = ack.send(ok);
                     }
                     Ok(WriterMsg::Compact { snapshot, holding_peers, ack }) => {
                         let outcome = match compact_once(&mut ws, &snapshot, &holding_peers) {
@@ -2770,17 +2797,20 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         // left a window where a pruned chain.state sat under
                         // the old version, and an old binary would run
                         // chainless on it (a governance fork).
+                        let mut ok = true;
                         if blob.is_some() {
                             if let Err(e) = ws.bump_pruned_version() {
                                 fail(&failed_flag, "manifest version bump", &e);
+                                ok = false;
                             }
                         }
                         if let Err(e) =
                             ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync())
                         {
                             fail(&failed_flag, "chain.state write", &e);
+                            ok = false;
                         }
-                        let _ = ack.send(());
+                        let _ = ack.send(ok);
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
                         if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {
@@ -3428,6 +3458,42 @@ mod tests {
         );
     }
 
+    /// **H3: "blocks until durable" now answers whether it IS durable.**
+    ///
+    /// The blocking persists acked unconditionally — a failed write, or a
+    /// writer that was already gone, both reported success. The engine then
+    /// broadcast a threshold-signed block, or closed believing its ratchet
+    /// snapshot was on disk, with nothing written. The ack carries the
+    /// outcome now, and `#[must_use]` is what makes every call site say what
+    /// it does with it.
+    ///
+    /// A gone writer is the case a test can produce without breaking a
+    /// filesystem, and it is the honest one to pin: nothing was written, so
+    /// nothing may be claimed.
+    #[test]
+    fn a_gone_writer_reports_failure_instead_of_durability() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(tmp.path(), &seed, &founded(7)).expect("create");
+        let handle = start_writer(created);
+        assert!(handle.flush_blocking(), "a live writer really does flush");
+        handle.clone().close(None);
+
+        assert!(
+            !handle.flush_blocking(),
+            "a flush that reached no writer is not a flush"
+        );
+        assert!(
+            !handle.persist_chain_blocking(None, Vec::new()),
+            "a chain that reached no writer is not persisted - the caller \
+             must not broadcast on the strength of it"
+        );
+        assert!(
+            !handle.persist_crypto_blocking(Some(b"mls".to_vec()), None),
+            "…and neither is a ratchet snapshot"
+        );
+    }
+
     /// **M5: a `transport.state` from a newer build stops the open, instead
     /// of being silently rewritten at this build's version.**
     ///
@@ -3496,7 +3562,7 @@ mod tests {
             upto: 0,
             relays: Vec::new(),
         };
-        handle.persist_chain_blocking(Some(blob), Vec::new());
+        assert!(handle.persist_chain_blocking(Some(blob), Vec::new()), "durable");
         handle.close(None);
         let on_disk = read_manifest(&dir).expect("manifest reads");
         assert_eq!(on_disk.version, molt_core::STORAGE_VERSION_PRUNED);
@@ -3998,7 +4064,10 @@ mod tests {
         });
 
         // a clean close merges the advanced MLS + queue creds — cursors survive
-        handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"queue-creds".to_vec()));
+        assert!(
+            handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"queue-creds".to_vec())),
+            "durable"
+        );
 
         // a supervisor task winding down enqueues one last stale save (its
         // in-memory state still has the load-time MLS = None and no creds). The
@@ -4064,7 +4133,10 @@ mod tests {
         assert!(win.accept(44));
         accepted.insert("bob".to_string(), win);
         handle.save_accepted(accepted);
-        handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"creds".to_vec()));
+        assert!(
+            handle.persist_crypto_blocking(Some(b"mls-blob".to_vec()), Some(b"creds".to_vec())),
+            "durable"
+        );
         // a straggler after the seal is ignored
         handle.save_accepted(std::collections::BTreeMap::new());
         handle.close(None);
@@ -4111,10 +4183,13 @@ mod tests {
             snd_extra: Vec::new(),
             rcv_extra: Vec::new(),
         }];
-        handle.persist_mesh_crypto_blocking(
-            Some(b"fresh-mls".to_vec()),
-            Some(b"fresh-creds".to_vec()),
-            grown.clone(),
+        assert!(
+            handle.persist_mesh_crypto_blocking(
+                Some(b"fresh-mls".to_vec()),
+                Some(b"fresh-creds".to_vec()),
+                grown.clone(),
+            ),
+            "durable"
         );
 
         // the rebuilt supervisor saves a cursor advance from its PRE-merge

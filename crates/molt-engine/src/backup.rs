@@ -264,7 +264,11 @@ impl State {
             let build_dir = dir.clone();
             let build = tokio::task::spawn_blocking(move || {
                 if let Some(handle) = flush {
-                    handle.flush_blocking();
+                    if !handle.flush_blocking() {
+                        // the backup would capture a log the disk does not
+                        // hold yet — say so rather than shipping it quietly
+                        tracing::error!("flush before backup failed — the copy may lag the log");
+                    }
                 }
                 let mut blob = Vec::new();
                 molt_storage::export::export_dir(

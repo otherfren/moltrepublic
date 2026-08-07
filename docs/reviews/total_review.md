@@ -59,18 +59,29 @@ blob.upto = u64::MAX}`) crasht den Empfänger.
 **Fix:** `checked_sub`/`checked_add`, height-0-Anker/-Checkpoints explizit
 abgelehnt, `h += 1` bricht bei Overflow ab. Gepinnt durch Test.
 
-### H3 — Storage ackt „durable" auch nach fehlgeschlagenem Write 📋 DOKUMENTIERT
+### H3 — Storage ackt „durable" auch nach fehlgeschlagenem Write ✅ GEFIXT (2026-08-07, mit einer benannten Resthälfte)
 `crates/molt-storage/src/lib.rs` `PersistChain`/`MergeCrypto`-Arme (~Z.1916).
 Bei Schreibfehler wird nur das `failed`-Flag gesetzt, aber `ack.send(())`
 trotzdem gefeuert. `persist_chain_blocking` verspricht „blockt bis durable" —
 die Engine broadcastet also einen threshold-signierten Block (oder schließt
 clean im Glauben, die MLS-Ratchet-Snapshot sei persistiert), während nichts auf
 der Platte liegt.
-**Zurückgestellt**, weil der saubere Fix die Ack-Kanal-Signatur (`SyncSender<()>`
-→ Erfolg tragen) und alle Aufrufer betrifft — ein Ripple, den ich nicht im
-Review-Rahmen risikofrei mache. **Richtung:** Ack ein `Result`/`bool` tragen
-lassen, `persist_chain_blocking`/`merge_crypto_blocking` den Fehler
-zurückgeben, der Governance-Broadcast erst nach bestätigter Persistenz.
+**Gefixt** wie beschrieben: die Ack-Kanäle (`PersistChain`, `MergeCrypto`,
+`Flush`) tragen jetzt `bool`, und `persist_chain_blocking` /
+`persist_crypto_blocking` / `persist_mesh_crypto_blocking` /
+`flush_blocking` geben zurück, ob es wirklich durable ist. `#[must_use]`
+erzwingt an JEDER Aufrufstelle eine Antwort — es gibt keine mehr, die den
+Fehlschlag stillschweigend verschluckt; ein toter Writer meldet jetzt
+`false` statt „no-op = alles gut". Gepinnt:
+`a_gone_writer_reports_failure_instead_of_durability`.
+
+**Offen bleibt die zweite Hälfte**, absichtlich: der Governance-Broadcast
+läuft weiterhin unabhängig vom Persist-Ergebnis. Das umzuhängen heißt, die
+Reihenfolge von Append → Persist → Broadcast in `chain.rs` anzufassen, und
+das ist eine Änderung am Zustandsmodell, keine an der Storage-API — sie
+gehört in eine eigene Session mit dem Chain-Design daneben. Die Aufrufstelle
+schreibt den Fehlschlag jetzt laut ins Log, und die `failed`-Flagge des
+Writers macht daraus beim nächsten `record` die „storage-failed"-Notiz.
 
 ### H4 — Manifest-Version-Bump lag HINTER dem pruned Chain-Write ✅ GEFIXT
 `crates/molt-storage/src/lib.rs` `PersistChain`-Arm. Der WP4b-Bump lief nach dem

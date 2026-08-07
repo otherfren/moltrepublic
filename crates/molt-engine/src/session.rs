@@ -1642,7 +1642,12 @@ impl State {
         tokio::spawn(async move {
             let res = tokio::task::spawn_blocking(move || {
                 if let Some(handle) = flush {
-                    handle.flush_blocking();
+                    if !handle.flush_blocking() {
+                        // the export would capture a log the disk does not
+                        // hold yet; the copy is still made (it is better
+                        // than none) but the miss is not swallowed
+                        tracing::error!("flush before export failed — the copy may lag the log");
+                    }
                 }
                 export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
             })
