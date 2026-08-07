@@ -2319,7 +2319,11 @@ async fn push_session(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let before = st.workspace.clone();
         st.enter_workspace(&sv.active_workspace);
+        if before != st.workspace {
+            tracing::debug!(from = %before, to = %st.workspace, gen = st.generation, "ui: workspace switch");
+        }
     }
     let (changed, prev) = {
         // POISON-TOLERANT, like every other lock site here. A panic in some
@@ -3768,6 +3772,17 @@ async fn gather_surfaces(
         org_stats,
         group_unread,
     };
+    tracing::debug!(
+        ws = %active_ws,
+        gen = my_gen,
+        channel = %bundle.selected_key,
+        chat_rows = bundle
+            .surfaces
+            .iter()
+            .find(|s| s.key == "chat")
+            .map_or(0, |s| s.log.len()),
+        "ui: bundle gathered"
+    );
     Some((my_gen, bundle))
 }
 
@@ -3792,10 +3807,20 @@ async fn push_surfaces(
         // closure running on the UI thread — a stale bundle must not land
         // (it would revert the visible pane until the next engine event)
         if !chat_ui.lock().map(|st| st.is_current(my_gen)).unwrap_or(false) {
+            tracing::debug!(gen = my_gen, "ui: bundle DROPPED as stale");
             return;
         }
         if let Some(ui) = weak.upgrade() {
             apply_surfaces(&ui, &bundle);
+            tracing::debug!(
+                gen = my_gen,
+                chat_rows = ui
+                    .get_surfaces()
+                    .iter()
+                    .find(|s| s.key == "chat")
+                    .map_or(0, |s| s.log.row_count()),
+                "ui: bundle applied"
+            );
         }
     });
 }
