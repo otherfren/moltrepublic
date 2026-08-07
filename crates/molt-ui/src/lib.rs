@@ -2305,6 +2305,22 @@ async fn push_session(
         });
         return;
     }
+    // THE workspace switch, and the only place it happens. It used to ride
+    // `begin_push`, keyed on whatever session copy that push had read — so a
+    // push that read the session BEFORE an open could re-enter the state as
+    // "no workspace" AFTER the open, bump the epoch past the good push, and
+    // land its own empty bundle. That is what showed an empty chat on the
+    // first open, until switching surfaces forced a fresh one.
+    //
+    // Here it is ordered by the event stream instead: the session mirror
+    // runs on every SessionChanged, before the surfaces do.
+    {
+        let mut st = match chat_ui.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        st.enter_workspace(&sv.active_workspace);
+    }
     let (changed, prev) = {
         // POISON-TOLERANT, like every other lock site here. A panic in some
         // other callback must not stop the live mirror for the rest of the
@@ -3164,8 +3180,16 @@ impl ChatUiState {
         }
     }
 
-    /// Start one `push_surfaces` pass: bind to the active workspace and take
-    /// the current SELECTION EPOCH.
+    /// Start one `push_surfaces` pass: take the current SELECTION EPOCH, or
+    /// `None` when this push is reading for a workspace that is no longer the
+    /// active one.
+    ///
+    /// It does NOT switch workspaces — [`ChatUiState::enter_workspace`] does,
+    /// from the session mirror, which is ordered by the event stream. Letting
+    /// each push switch on its own session copy meant a push that read the
+    /// session before an open could re-enter the state as "no workspace"
+    /// after it, discard the good push's bundle and land its own empty one:
+    /// the empty chat on a first open.
     ///
     /// It deliberately does NOT bump. It used to, so that concurrent pushes
     /// resolved newest-wins — and that starved the chat pane: `push_surfaces`
@@ -3180,9 +3204,8 @@ impl ChatUiState {
     /// build the same bundle, so letting both land costs nothing. What must
     /// never land is a bundle read for a selection (or workspace) the user
     /// has since left — and that is exactly what the epoch tracks.
-    fn begin_push(&mut self, active: &str) -> u64 {
-        self.enter_workspace(active);
-        self.generation
+    fn begin_push(&self, active: &str) -> Option<u64> {
+        (self.workspace == active).then_some(self.generation)
     }
 
     /// Select a channel. The bump invalidates every in-flight push: a
@@ -3437,8 +3460,10 @@ async fn push_surfaces(
     let Some((my_gen, selected)) = chat_ui
         .lock()
         .ok()
-        .map(|mut s| (s.begin_push(&active_ws), s.selected.clone()))
+        .and_then(|s| Some((s.begin_push(&active_ws)?, s.selected.clone())))
     else {
+        // this push read the session for a workspace that is no longer the
+        // active one — its bundle would describe the wrong log
         return;
     };
     let full_chat = match wallet
@@ -6859,7 +6884,8 @@ mod tests {
     #[test]
     fn push_generation_guard_invalidates_stale_pushes() {
         let mut st = ChatUiState::default();
-        let g1 = st.begin_push("ws-1");
+        st.enter_workspace("ws-1");
+        let g1 = st.begin_push("ws-1").expect("current");
         assert!(st.is_current(g1), "a push for the current selection lands");
         // a selection change invalidates every in-flight push …
         st.select(ChannelRef::Topic {
@@ -6874,8 +6900,9 @@ mod tests {
         );
         // … and the counter moves across the workspace-switch reset, so an
         // old push can never match a freshly reset state
-        let g2 = st.begin_push("ws-1");
-        let g3 = st.begin_push("ws-2");
+        let g2 = st.begin_push("ws-1").expect("current");
+        st.enter_workspace("ws-2");
+        let g3 = st.begin_push("ws-2").expect("current");
         assert!(g3 > g2, "monotonic across enter_workspace resets");
         assert!(st.is_current(g3));
         assert!(!st.is_current(g2));
@@ -7023,8 +7050,9 @@ mod tests {
     #[test]
     fn an_overlapping_push_does_not_starve_the_one_it_overlaps() {
         let mut st = ChatUiState::default();
-        let a = st.begin_push("ws-1");
-        let b = st.begin_push("ws-1"); // the MarkChannelRead echo
+        st.enter_workspace("ws-1");
+        let a = st.begin_push("ws-1").expect("the active workspace");
+        let b = st.begin_push("ws-1").expect("the MarkChannelRead echo");
         assert!(st.is_current(b), "the newer push lands");
         assert!(
             st.is_current(a),
@@ -7033,21 +7061,52 @@ mod tests {
         );
     }
 
+    /// **A push reading for a workspace that is no longer open must not
+    /// land, and must not drag the state back to it.**
+    ///
+    /// This is the empty chat on a first open. The workspace switch used to
+    /// ride `begin_push`, keyed on whatever session copy that push had read
+    /// — so a push that read the session BEFORE the open re-entered the
+    /// state as "no workspace" AFTER it, bumped the epoch past the good
+    /// push (whose bundle was then discarded) and landed its own empty one.
+    /// Switching surfaces forced a fresh push, which is why it looked like
+    /// the chat needed a nudge.
+    #[test]
+    fn a_push_that_read_the_session_before_an_open_cannot_land_after_it() {
+        let mut st = ChatUiState::default();
+        // …a push that read the session while nothing was open
+        let stale = st.begin_push("").expect("nothing open is a state too");
+        // …then the open lands, through the SESSION mirror
+        st.enter_workspace("ws-1");
+        let fresh = st.begin_push("ws-1").expect("the open workspace");
+
+        assert!(st.is_current(fresh), "the push that read the open workspace lands");
+        assert!(!st.is_current(stale), "…and the one from before it does not");
+        // the decisive part: the stale push cannot re-enter the old state
+        assert_eq!(
+            st.begin_push(""),
+            None,
+            "a push for a workspace that is not open renders nothing at all"
+        );
+        assert_eq!(st.workspace, "ws-1", "…and it did not drag the state back");
+    }
+
     /// The epoch exists for ONE thing: a bundle read for a selection the
     /// user has left must never land on the one they are looking at (it
     /// would also mark the wrong channel read).
     #[test]
     fn a_push_read_for_another_selection_never_lands() {
         let mut st = ChatUiState::default();
-        let in_flight = st.begin_push("ws-1");
+        st.enter_workspace("ws-1");
+        let in_flight = st.begin_push("ws-1").expect("current");
         st.select(ChannelRef::Topic { name: "budget".into() });
         assert!(
             !st.is_current(in_flight),
             "a bundle read for the previous channel must not land"
         );
         // …and a workspace switch is the same rule one level up
-        let in_flight = st.begin_push("ws-1");
-        st.begin_push("ws-2");
+        let in_flight = st.begin_push("ws-1").expect("current");
+        st.enter_workspace("ws-2");
         assert!(
             !st.is_current(in_flight),
             "a bundle read against another workspace's log must not land"
