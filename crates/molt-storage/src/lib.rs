@@ -2138,7 +2138,21 @@ pub fn workspace_size_kib(dir: &Path) -> u64 {
 }
 
 fn dir_size(dir: &Path) -> u64 {
+    dir_size_to(dir, 0)
+}
+
+/// How deep [`dir_size`] recurses. A workspace is three levels at most
+/// (`log/`, `tmp/`, `.trash/`); anything past this is not a workspace and
+/// must not be able to walk the open path into a stack overflow. Symlinks
+/// are already not followed, so this is only about honest depth.
+const DIR_SIZE_MAX_DEPTH: u32 = 16;
+
+fn dir_size_to(dir: &Path, depth: u32) -> u64 {
     let mut total = 0u64;
+    if depth > DIR_SIZE_MAX_DEPTH {
+        tracing::warn!(dir = %dir.display(), "directory nesting past the scan depth — size not counted below");
+        return total;
+    }
     let Ok(rd) = fs::read_dir(dir) else {
         return total;
     };
@@ -2149,7 +2163,7 @@ fn dir_size(dir: &Path) -> u64 {
             continue;
         };
         if ft.is_dir() {
-            total += dir_size(&entry.path());
+            total += dir_size_to(&entry.path(), depth + 1);
         } else if ft.is_file() {
             if let Ok(md) = entry.metadata() {
                 total += md.len();

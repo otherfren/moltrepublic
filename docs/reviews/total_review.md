@@ -279,7 +279,7 @@ eine lokale Operation ohne Engine-Runde — ein Toast beim Klick beschreibt
 dort genau das, was passiert ist, und ein Callback-Umbau würde nur Zeremonie
 hinzufügen.
 
-### M13 — `roster_canonical_bytes` schreibt `ws_id` ungeframt (nicht-injektiv) 📋 DOKUMENTIERT
+### M13 — `roster_canonical_bytes` schreibt `ws_id` ungeframt (nicht-injektiv) ✅ ERLEDIGT (verifiziert 2026-08-07)
 `crates/molt-core/src/lib.rs` (~Z.1309). Anders als `approval_bytes` (das
 `republic_id` längenpräfixiert) schreibt `roster_canonical_bytes` die `ws_id`
 ohne Längenpräfix — zwei verschiedene Roster-Tabellen können durch Verschieben
@@ -287,8 +287,11 @@ der `ws_id`/`rule_m`-Grenze identische signierte Bytes ergeben.
 **ℹ️ Heute abgesichert** durch die höhere Invariante (Verifier rekomputieren die
 fixe-Länge content-derived `republic_id`), also keine aktive Lücke — aber die
 Funktion liefert die in ihrem Vertrag behauptete Injektivität nicht.
-**Zurückgestellt** — der Fix (ws_id framen) bräuchte einen `molt-roster-v3`-Tag
-an allen Recompute-Sites gleichzeitig.
+**Erledigt im Vorbeigehen**, verifiziert 2026-08-07: der `molt-roster-v4`-Bump
+(Relay-Pool + Member-Count) hat die `ws_id` mitgeframt — sie ist heute
+`u32`-längenpräfixiert wie jedes andere Feld. Gepinnt durch den
+unabhängig gerechneten Byte-Fixture
+`roster_canonical_bytes_v4_binds_anchor_pool_and_id_byte_exactly`.
 
 ---
 
@@ -309,31 +312,37 @@ an allen Recompute-Sites gleichzeitig.
   Cap — ein Insider kann langsam OOMen. Richtung: gedeckelte Puffer mit Eviction
   (Vorsicht: Liveness). Die Underflow/Freeze-Vektoren (C1/H1/H2) sind gefixt; die
   reine Speichergrenze bleibt offen.
-- **L4 — Ed448-Verify nicht strikt kanonisch (S-Malleability).**
-  `smp/ed448.rs`: prüft nur `S`-Top-Byte, nicht `S < L`. Benign für den
-  Cert-Pin-Zweck (Malleability gibt kein MITM), aber Abweichung von RFC 8032.
-- **L5 — `parse_mcp_allow` bindet `0.0.0.0` bei unparsbarem Allow-String.**
-  `molt-app/main.rs`: ein Tippfehler wie `allow="localhost"` öffnet den Socket
-  auf allen Interfaces (Verbindungen werden fail-closed abgelehnt, aber der Port
-  ist offen). Richtung: Fallback auf Loopback statt `0.0.0.0`.
-- **L6 — `dir_size` folgt Symlinks ohne Zyklus-/Tiefen-Schutz.**
-  `molt-storage`: eine Symlink-Schleife im Workspace-Dir crasht den Open-Scan
-  per Stack-Overflow.
+- **L4 — Ed448-Verify nicht strikt kanonisch (S-Malleability).** ⬜
+  GEGENSTANDSLOS (2026-08-07): `crates/molt-net/src/smp/` wurde mit dem
+  SMP-Transport in Etappe N-demo gelöscht.
+- **L5 — `parse_mcp_allow` bindet `0.0.0.0` bei unparsbarem Allow-String.** ✅
+  GEFIXT (2026-08-07): eine Liste, die keine benutzbare Adresse nennt, bindet
+  Loopback und sagt es auf stderr — ein Tippfehler ist keine Zustimmung, den
+  Knoten zu exponieren. Die absichtlich weiten Binds (`0.0.0.0`, eine echte
+  LAN-IP) sind unverändert. Gepinnt:
+  `an_unreadable_allowlist_binds_loopback`.
+- **L6 — `dir_size` folgt Symlinks ohne Zyklus-/Tiefen-Schutz.** ✅ ERLEDIGT
+  (verifiziert + ergänzt 2026-08-07): der Symlink-Teil war schon gefixt —
+  `entry.file_type()` folgt (anders als `metadata()`) keinen Symlinks, ein
+  Zyklus kann also nicht rekursieren. Ergänzt wurde die fehlende
+  TIEFEN-Grenze (`DIR_SIZE_MAX_DEPTH`) gegen dieselbe Klasse.
 - **L7 — `read_chain` verwechselt beschädigt mit abwesend.**
   Beide ⇒ `(None, vec![])`; ein Aufrufer kann „unlesbare Historie" nicht von
   „keine Chain" unterscheiden (Additive-Only-Guard nicht durchsetzbar).
 - **L8 — Ganze Dateien werden ungedeckelt `fs::read`.** `open_workspace` u. a.
   slurpen die ganze Datei vor jeder Validierung — eine multi-GiB-korrupte
   Segment-/State-Datei OOMt den Open-Pfad.
-- **L9 — Diverse UI-Erfolgs-Toasts ohne Erfolgsprüfung** (copy_text ignoriert
-  Clipboard-Fehler, file-remove/retention analog) — siehe M12.
+- **L9 — Diverse UI-Erfolgs-Toasts ohne Erfolgsprüfung** — der
+  Command-gestützte Teil ist mit M12 gefixt; die reinen Clipboard-Sites
+  bleiben bewusst wie sie sind (lokale Operation, kein Engine-Umlauf).
 - **L10 — `set_chat_retention`-Value bakt englisches „N days" in die Payload.**
   Die Ist/Soll-Zeile zeigt in DE „7 days → 30 days". Der Titel ist
   sprachneutral (op-Platzhalter), der Value nicht. Richtung: den Wert als reine
   Zahl tragen, die Einheit beim Rendern lokalisieren.
-- **L11 — Poisoned-Mutex-`.expect()` im Live-Mirror-Task** kann nach einem
-  Callback-Panic alle GUI-Updates still stoppen (andere Lock-Sites behandeln
-  Poison bereits tolerant).
+- **L11 — Poisoned-Mutex-`.expect()` im Live-Mirror-Task** ✅ GEFIXT
+  (2026-08-07): beide Sites (`last_settings`, `chat_ui`) nehmen jetzt
+  `into_inner()` wie die übrigen. Ein Panic in irgendeinem Callback darf nicht
+  den Task killen, der überhaupt noch etwas zeichnet.
 - **L12 — `pub mod mockrand` in der RNG-freien `molt-core`** — heute rein
   deterministische Demo-Helfer, aber die Platzierung lädt zu Fehlnutzung ein
   (Historie: `mock_ticket` leitete daraus mal Tickets ab).

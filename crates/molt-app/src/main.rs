@@ -601,11 +601,25 @@ fn parse_mcp_allow(allow: &str) -> (String, bool, Vec<IpAddr>) {
         .iter()
         .filter_map(|e| e.parse::<IpAddr>().ok())
         .collect();
-    let only_loopback = !allow_all && ips.len() == 1 && ips[0].is_loopback();
-    let bind_ip = if only_loopback {
-        "127.0.0.1".to_string()
-    } else {
+    // A LIST WE COULD NOT READ binds loopback, never the world. `allow`
+    // used to reach the wide bind by falling through: an entry like
+    // "localhost" parses as no IP at all, so `only_loopback` was false and
+    // the socket opened on every interface. Connections were still refused
+    // (the allowlist was empty), but the port was there to find — a typo is
+    // not consent to expose the node.
+    let understood = allow_all || !ips.is_empty();
+    if !understood && !entries.is_empty() {
+        eprintln!(
+            "config: [mcp].allow = {allow:?} names no usable address \
+             (an entry must be an IP literal, or 0.0.0.0 for any) — \
+             binding loopback only"
+        );
+    }
+    let wide = allow_all || (understood && !(ips.len() == 1 && ips[0].is_loopback()));
+    let bind_ip = if wide {
         "0.0.0.0".to_string()
+    } else {
+        "127.0.0.1".to_string()
     };
     (bind_ip, allow_all, ips)
 }
@@ -723,5 +737,27 @@ mod tests {
         let (_, all, list) = parse_mcp_allow(" , not-an-ip, 192.168.0.2 ,");
         assert!(!all);
         assert_eq!(list, vec![ip("192.168.0.2")]);
+    }
+
+    /// **L5: a list we cannot read binds loopback, not the world.**
+    ///
+    /// `allow = "localhost"` is the obvious way to write the intended
+    /// setting and parses as no IP at all. That fell through to the wide
+    /// bind: connections were refused (the allowlist was empty) but the
+    /// port stood open on every interface. A typo is not consent to expose
+    /// the node.
+    #[test]
+    fn an_unreadable_allowlist_binds_loopback() {
+        for typo in ["localhost", "loopback", "any", "::1 or so", "0.0.0.0.0"] {
+            let (bind, all, list) = parse_mcp_allow(typo);
+            assert_eq!(bind, "127.0.0.1", "{typo:?} must not open every interface");
+            assert!(!all, "{typo:?} is not an explicit any");
+            assert!(list.is_empty(), "{typo:?} names no peer");
+        }
+        // an empty setting is the shipped default's shape, and stays loopback
+        assert_eq!(parse_mcp_allow("").0, "127.0.0.1");
+        // …while the deliberate wide binds are untouched
+        assert_eq!(parse_mcp_allow("0.0.0.0").0, "0.0.0.0");
+        assert_eq!(parse_mcp_allow("192.168.1.10").0, "0.0.0.0");
     }
 }

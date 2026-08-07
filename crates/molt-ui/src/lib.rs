@@ -2306,7 +2306,15 @@ async fn push_session(
         return;
     }
     let (changed, prev) = {
-        let mut last = last_settings.lock().expect("settings cache poisoned");
+        // POISON-TOLERANT, like every other lock site here. A panic in some
+        // other callback must not stop the live mirror for the rest of the
+        // session: this cache only decides whether the settings FORM is
+        // refreshed, and reading a possibly-stale copy is a redraw, while
+        // panicking here ends the task that redraws anything at all.
+        let mut last = match last_settings.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let prev = last.clone();
         let changed = prev.as_ref() != Some(&sv.settings);
         if changed {
@@ -3608,7 +3616,13 @@ async fn push_surfaces(
     };
     let chain_len = chain_rows.len();
     let (unread, first_seen, known, org_view, list_pages) = {
-        let mut st = chat_ui.lock().expect("chat ui state poisoned");
+        // …and here for the same reason: this is the chat pane's own
+        // bookkeeping, and losing the mirror is worse than working from a
+        // state some other panic left mid-update
+        let mut st = match chat_ui.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
             // mis-mark the fresh channel read, and the bundle is stale
