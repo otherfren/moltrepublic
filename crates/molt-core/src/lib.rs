@@ -4365,6 +4365,85 @@ pub struct ChannelInfo {
     pub unread: usize,
 }
 
+/// **What the GUI window is showing right now** (`docs/ui/gui_over_mcp.md`).
+///
+/// Published by the GUI at the end of every live-mirror pass — the same
+/// place it applies a bundle, so this describes what was RENDERED, not what
+/// the engine holds. That difference is the whole point: three chat bugs in
+/// a row were the pane disagreeing with the engine, and nothing could see
+/// it.
+///
+/// Row counts and a few strings, deliberately. A widget tree would make
+/// every test brittle against layout; what a test needs to ask is "does the
+/// pane hold what the engine holds".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiState {
+    /// Whether a GUI is attached at all. `false` on a headless node — and
+    /// then every field below is meaningless rather than merely empty.
+    #[serde(default)]
+    pub attached: bool,
+    /// Unix seconds of the publish, so a reader can tell a live snapshot
+    /// from one left behind by a window that stopped updating.
+    #[serde(default)]
+    pub at: u64,
+    /// The screen the window is on (`molt_core::Screen::as_str`).
+    #[serde(default)]
+    pub screen: String,
+    /// The selected surface key and sub-view key.
+    #[serde(default)]
+    pub surface: String,
+    /// The sub-view key.
+    #[serde(default)]
+    pub view: String,
+    /// The chat pane, as rendered.
+    #[serde(default)]
+    pub chat: UiChat,
+    /// Per-surface row counts the nav and panes show.
+    #[serde(default)]
+    pub surfaces: Vec<UiSurface>,
+    /// The toast currently up ("" = none).
+    #[serde(default)]
+    pub toast: String,
+}
+
+/// The chat pane as the window renders it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiChat {
+    /// The channel key the pane is filtered to (`group`, `topic:…`, `patch:…`).
+    #[serde(default)]
+    pub channel: String,
+    /// How many message rows the pane holds.
+    #[serde(default)]
+    pub rows: usize,
+    /// The last few bodies, newest last — enough to tell "the right log"
+    /// from "a log".
+    #[serde(default)]
+    pub tail: Vec<String>,
+    /// Whether the compose row is on screen (a read-only discussion hides it).
+    #[serde(default)]
+    pub can_write: bool,
+    /// The channel rows the sidebar offers, by key.
+    #[serde(default)]
+    pub channels: Vec<String>,
+}
+
+/// One surface as the window renders it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSurface {
+    /// The surface key.
+    #[serde(default)]
+    pub key: String,
+    /// Rows in its applied/log pane.
+    #[serde(default)]
+    pub log_rows: usize,
+    /// Pending decisions it shows.
+    #[serde(default)]
+    pub pending: usize,
+    /// The sub-view keys its nav offers.
+    #[serde(default)]
+    pub views: Vec<String>,
+}
+
 /// A projected snapshot of one surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceSnapshot {

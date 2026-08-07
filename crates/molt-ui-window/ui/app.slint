@@ -4448,13 +4448,28 @@ export component AppWindow inherits Window {
                                     height: 100%;
                                     viewport-width: self.width;
                                     viewport-height: chlist.preferred-height + 8px;
-                                    // pinned to the newest message. The binding
+                                    // Pinned to the newest message. The binding
                                     // alone dies on the first manual drag, so
                                     // every content growth re-pins imperatively:
                                     // a new message (own or incoming) always
                                     // scrolls the box to the bottom.
                                     viewport-y: min(0px, self.height - self.viewport-height);
                                     changed viewport-height => {
+                                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                                    }
+                                    // …and on the BOX's height too, which is
+                                    // what made a freshly opened workspace
+                                    // show an empty chat: the content arrives
+                                    // while this Flickable is still 0 high, the
+                                    // re-pin above computes 0 - content and
+                                    // scrolls the whole log out of sight — and
+                                    // an imperative write has by then replaced
+                                    // the binding, so nothing corrects it when
+                                    // the real height arrives. Leaving the
+                                    // surface and coming back rebuilt the box
+                                    // with its height already known, which is
+                                    // why it looked like the data was missing.
+                                    changed height => {
                                         self.viewport-y = min(0px, self.height - self.viewport-height);
                                     }
                                     chlist := VerticalLayout {
