@@ -3263,21 +3263,31 @@ impl ChatUiState {
 
     /// Refresh the offered set from the session's dialable pool, dropping any
     /// exclusion for a relay that is no longer offered.
+    ///
+    /// **No epoch bump**, and that is the fix for the empty chat on a first
+    /// open. The epoch is the SELECTION epoch: it stales a surfaces bundle
+    /// that was read for a channel or workspace the user has since left.
+    /// The create wizard's relay picker is not in that bundle — the session
+    /// mirror applies it directly — but it used to bump anyway, and opening
+    /// a workspace changes the dialable pool. So the open's own bundle, nine
+    /// chat rows and all, died between being gathered and being applied.
+    /// Only on the FIRST open, because the pool only changes once, which is
+    /// exactly how the user described it.
     fn set_create_relays(&mut self, dialable: Vec<String>) {
         if self.create_relays == dialable {
             return;
         }
         self.create_relays_off.retain(|u| dialable.contains(u));
         self.create_relays = dialable;
-        self.generation += 1;
     }
 
-    /// Flip one relay's pick in the create wizard.
+    /// Flip one relay's pick in the create wizard. No epoch bump either, for
+    /// the same reason: the picker is applied by the session mirror, not
+    /// carried by a surfaces bundle.
     fn toggle_create_relay(&mut self, url: String) {
         if !self.create_relays_off.remove(&url) {
             self.create_relays_off.insert(url);
         }
-        self.generation += 1;
     }
 
     /// Set the uploads filter needle (typed, or pre-filled by the Members
@@ -7105,6 +7115,48 @@ mod tests {
             st.is_current(a),
             "…and so does the one it overlapped: both read the same selection, \
              so dropping either renders nothing at all"
+        );
+    }
+
+    /// **THE first-open bug, from the user's own log.**
+    ///
+    /// ```text
+    /// ui: workspace switch from= to=752… gen=2
+    /// ui: bundle gathered ws=752… gen=2 channel=group chat_rows=9
+    /// ui: bundle DROPPED as stale gen=2
+    /// ```
+    ///
+    /// The bundle was RIGHT — nine rows — and was thrown away 38 ms later
+    /// because the epoch had moved. What moved it was the session mirror
+    /// refreshing the CREATE WIZARD's relay picker: opening a workspace
+    /// changes the dialable pool, `set_create_relays` bumped, and the
+    /// surfaces bundle in flight died of it. Only on the first open,
+    /// because the pool only changes once — which is exactly the reported
+    /// symptom.
+    ///
+    /// The epoch is the SELECTION epoch. It exists so a bundle read for a
+    /// channel or workspace the user has left cannot land. A relay picker
+    /// the bundle does not even carry must not be able to invalidate it.
+    #[test]
+    fn unrelated_ui_state_cannot_stale_a_surfaces_bundle() {
+        let mut st = ChatUiState::default();
+        st.enter_workspace("ws-1");
+        let in_flight = st.begin_push("ws-1").expect("current");
+
+        // the session mirror refreshes the create wizard's relay picker —
+        // which the surfaces bundle does not carry at all
+        st.set_create_relays(vec!["wss://relay.example".to_string()]);
+        assert!(
+            st.is_current(in_flight),
+            "the relay picker is not part of the bundle - it must not stale it"
+        );
+
+        // …and the things the bundle DOES carry still do
+        let in_flight = st.begin_push("ws-1").expect("current");
+        st.sort_members_by("name");
+        assert!(
+            !st.is_current(in_flight),
+            "the members order IS in the bundle - a stale one would revert it"
         );
     }
 
