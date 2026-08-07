@@ -1291,7 +1291,11 @@ pub fn run_app(
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::RemoveFile { id });
+            let msg = weak
+                .upgrade()
+                .map(|ui| ui.global::<Strings>().get_toast_file_removed().to_string())
+                .unwrap_or_default();
+            issue_then_toast(&rt, &w, &weak, Command::RemoveFile { id }, msg);
         });
     }
     {
@@ -1399,20 +1403,27 @@ pub fn run_app(
                             return;
                         }
                     };
-                    if let Err(e) = w
+                    // the confirmation belongs to the OUTCOME: this path
+                    // can still fail on the engine's own decode sniff or
+                    // the payload cap, and a "Proposed" toast on the click
+                    // followed by an error described a proposal that never
+                    // existed
+                    let outcome = w
                         .execute(Command::Propose {
                             surface: Surface::Organization,
                             payload,
                         })
-                        .await
-                    {
-                        let msg = format!("\u{26a0} {e}");
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.invoke_show_toast_error(msg.into());
+                        .await;
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        match outcome {
+                            Ok(_) => {
+                                let msg = ui.global::<Strings>().get_toast_proposed();
+                                ui.invoke_show_toast(msg);
                             }
-                        });
-                    }
+                            Err(e) => ui.invoke_show_toast_error(format!("\u{26a0} {e}").into()),
+                        }
+                    });
                 });
                 return;
             }
@@ -1420,7 +1431,11 @@ pub fn run_app(
                 "op": op.as_str(),
                 "value": value.as_str(),
             });
-            issue(
+            let msg = weak
+                .upgrade()
+                .map(|ui| ui.global::<Strings>().get_toast_proposed().to_string())
+                .unwrap_or_default();
+            issue_then_toast(
                 &rt,
                 &w,
                 &weak,
@@ -1428,6 +1443,7 @@ pub fn run_app(
                     surface: Surface::Organization,
                     payload,
                 },
+                msg,
             );
         });
     }
@@ -2217,6 +2233,33 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         // save regardless of what a draft carries.
         relays: Vec::new(),
     }
+}
+
+/// [`issue`], plus a success toast that only fires if the command SUCCEEDED.
+///
+/// The click sites used to toast on the way in: "Proposed" appeared the
+/// moment the button was pressed, and a command that then failed showed the
+/// user success followed by an error, for a proposal that never existed.
+/// The confirmation belongs to the outcome, not to the intent.
+fn issue_then_toast(
+    rt: &Handle,
+    wallet: &WalletHandle,
+    weak: &slint::Weak<AppWindow>,
+    cmd: Command,
+    toast: String,
+) {
+    let w = wallet.clone();
+    let weak = weak.clone();
+    rt.spawn(async move {
+        let outcome = w.execute(cmd).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match outcome {
+                Ok(_) => ui.invoke_show_toast(toast.into()),
+                Err(e) => ui.invoke_show_toast_error(format!("⚠ {e}").into()),
+            }
+        });
+    });
 }
 
 /// Fire a command on the shared handle; the resulting event drives the

@@ -4529,8 +4529,11 @@ export component AppWindow inherits Window {
                                                 }
                                                 file-remove-requested => {
                                                     if (l.id != "") {
+                                                        // the confirmation
+                                                        // rides the OUTCOME
+                                                        // (molt-ui), never
+                                                        // the click
                                                         root.remove-file(l.id);
-                                                        root.show-toast(Strings.toast-file-removed);
                                                     }
                                                 }
                                                 bring-into-view => {
@@ -7473,13 +7476,14 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-logo-modal-open = false;
+            // the "Proposed" confirmation rides the OUTCOME (molt-ui's
+            // on_org_propose), because set_image can still fail on the
+            // decode or the payload cap after this click
             root.org-propose("set_image", root.org-logo-draft);
-            root.show-toast(Strings.toast-proposed);
         }
         alted => {
             root.org-logo-modal-open = false;
             root.org-propose("remove_image", "");
-            root.show-toast(Strings.toast-proposed);
         }
         VerticalLayout {
             spacing: 12px;
@@ -7640,7 +7644,6 @@ export component AppWindow inherits Window {
         confirmed => {
             root.org-name-modal-open = false;
             root.org-propose("set_name", root.org-name-draft);
-            root.show-toast(Strings.toast-proposed);
         }
         AppField {
             text <=> root.org-name-draft;
@@ -7671,7 +7674,6 @@ export component AppWindow inherits Window {
         confirmed => {
             root.org-charter-modal-open = false;
             root.org-propose("set_charter", root.org-charter-draft);
-            root.show-toast(Strings.toast-proposed);
         }
         // the whole charter stays readable while editing: a big, scrolling
         // multi-line editor instead of a one-line field
@@ -7747,7 +7749,6 @@ export component AppWindow inherits Window {
         confirmed => {
             root.org-relays-modal-open = false;
             root.org-propose("set_relays", root.org-relays-draft);
-            root.show-toast(Strings.toast-proposed);
         }
         AppField {
             text <=> root.org-relays-draft;
@@ -7767,7 +7768,6 @@ export component AppWindow inherits Window {
         confirmed => {
             root.org-retention-modal-open = false;
             root.org-propose("set_chat_retention", "\{root.org-retention-draft} days");
-            root.show-toast(Strings.toast-proposed);
         }
         HorizontalLayout {
             spacing: 8px;

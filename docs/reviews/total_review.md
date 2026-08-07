@@ -261,16 +261,23 @@ ein Knoten in diesem Zustand startete bisher fröhlich und scheiterte dann
 an jedem Dial. Gepinnt:
 `the_retired_nym_is_named_and_refused_not_normalized`.
 
-### M12 — Optimistische Erfolgs-Toasts vor dem Engine-Effekt 📋 DOKUMENTIERT
+### M12 — Optimistische Erfolgs-Toasts vor dem Engine-Effekt ✅ GEFIXT für die Command-Sites (2026-08-07)
 `crates/molt-ui-window/ui/app.slint` (org-propose-Sites, file-remove, copy).
 Mehrere Buttons toasten „Vorgeschlagen"/„Gelöscht"/„Kopiert" beim Klick, bevor
 das Command läuft — der `set_image`-Pfad kann danach noch am Decode/Cap
 scheitern, der User sieht Erfolg dann Fehler für eine Proposal, die nie
 existierte.
-**Zurückgestellt** — ein breites UI-Muster (viele Sites); der saubere Umbau
-(Toast erst im Erfolgs-Callback) ist ein eigener GUI-Sweep. Der schädlichste
-Fall (`set_image`) hat bereits den Pre-Decode-Check aus WP3, der die meisten
-Fehlschläge vor dem Toast abfängt.
+**Gefixt für die Sites, an denen ein Command dahinterhängt** — dort, wo der
+Toast lügen KANN: alle sechs `org-propose`-Aufrufe und das Entfernen einer
+Datei bestätigen jetzt über `issue_then_toast`, also erst wenn die Engine
+zugestimmt hat (und melden sonst den Fehler statt Erfolg-dann-Fehler). Der
+`set_image`-Pfad hat seinen eigenen Zweig, weil er nach dem WP3-Pre-Decode
+immer noch am Payload-Cap der Engine scheitern kann.
+
+**Bewusst NICHT umgestellt:** die `toast-copied`-Sites. Das Kopieren ist
+eine lokale Operation ohne Engine-Runde — ein Toast beim Klick beschreibt
+dort genau das, was passiert ist, und ein Callback-Umbau würde nur Zeremonie
+hinzufügen.
 
 ### M13 — `roster_canonical_bytes` schreibt `ws_id` ungeframt (nicht-injektiv) 📋 DOKUMENTIERT
 `crates/molt-core/src/lib.rs` (~Z.1309). Anders als `approval_bytes` (das
