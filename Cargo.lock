@@ -4745,6 +4745,7 @@ dependencies = [
  "arboard",
  "base64",
  "chrono",
+ "i-slint-backend-testing",
  "image",
  "molt-config",
  "molt-core",

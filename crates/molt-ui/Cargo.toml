@@ -38,6 +38,11 @@ paste.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The HEADLESS Slint backend. The GUI's own logic - the live-mirror pushes
+# and what they put into the window's models - was untestable without a
+# display, so three chat bugs in a row were diagnosed by reasoning instead
+# of by evidence. This runs the real AppWindow with no window.
+i-slint-backend-testing = "1.17"
 # TEST-ONLY, and deliberately not a runtime dep: the link-dispatch tests
 # render their fixtures through the real invite/recovery handover types
 # instead of hand-writing link strings a format change would silently

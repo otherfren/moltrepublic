@@ -3402,18 +3402,23 @@ struct ProposalRowData {
     declined_when: String,
 }
 
-/// Read status + every surface snapshot and push them into the Slint models.
+/// Read status + every surface snapshot into a bundle the window can apply.
+///
+/// `None` = nothing to render: no session, or this pass is reading for a
+/// workspace/selection the user has since left.
 ///
 /// The chat surface is read TWICE: once unfiltered (channel enumeration and
 /// quote teasers are whole-log concerns — a quote may point across
 /// channels), and once through the engine's channel filter for the
 /// displayed log. Filtering client-side would break co-equality with MCP,
 /// so the filter deliberately rides `ReadState { channel }`.
-async fn push_surfaces(
+///
+/// Deliberately free of the window: every decision this layer makes lives
+/// here, so a test can make them without a display (`gui_tests`).
+async fn gather_surfaces(
     wallet: &WalletHandle,
-    weak: &slint::Weak<AppWindow>,
     chat_ui: &Arc<Mutex<ChatUiState>>,
-) {
+) -> Option<(u64, SurfacesBundle)> {
     let (member, threshold_badge, org_stats) = match wallet.execute(Command::Status).await {
         Ok(Reply::Status(s)) => (
             s.member,
@@ -3432,7 +3437,7 @@ async fn push_surfaces(
                 relays: s.relays,
             },
         ),
-        _ => return,
+        _ => return None,
     };
     // the chat-bus UI state is per-workspace: bind it to the active id so
     // a workspace switch drops the previous selection/unread/first-seen
@@ -3464,7 +3469,7 @@ async fn push_surfaces(
     else {
         // this push read the session for a workspace that is no longer the
         // active one — its bundle would describe the wrong log
-        return;
+        return None;
     };
     let full_chat = match wallet
         .execute(Command::ReadState {
@@ -3651,7 +3656,7 @@ async fn push_surfaces(
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
             // mis-mark the fresh channel read, and the bundle is stale
-            return;
+            return None;
         }
         for p in &all_pending {
             st.first_seen.entry(p.id.0).or_insert(now);
@@ -3762,6 +3767,23 @@ async fn push_surfaces(
         list_pages,
         org_stats,
         group_unread,
+    };
+    Some((my_gen, bundle))
+}
+
+/// Read every surface and push it into the window.
+///
+/// The gathering ([`gather_surfaces`]) is separate so it can be TESTED: it
+/// is all of the decisions — which workspace, which channel, whether this
+/// pass is still current — and it needs no window and no event loop. What
+/// stays here is the hop onto the UI thread, which is Slint's own.
+async fn push_surfaces(
+    wallet: &WalletHandle,
+    weak: &slint::Weak<AppWindow>,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
+) {
+    let Some((my_gen, bundle)) = gather_surfaces(wallet, chat_ui).await else {
+        return;
     };
     let weak = weak.clone();
     let chat_ui = chat_ui.clone();
@@ -7988,5 +8010,228 @@ mod tests {
         assert_eq!(tor_probe_args(0, 0, -1).2, 0);
         assert_eq!(tor_probe_args(0, 0, 70000).2, 0);
         assert_eq!(tor_probe_args(0, 0, 0).2, 0);
+    }
+}
+
+#[cfg(test)]
+mod gui_tests {
+    //! **The GUI's own logic, run headless.**
+    //!
+    //! Everything here drives the REAL `AppWindow` against a REAL engine
+    //! through the same live-mirror functions the running app uses — with
+    //! `i-slint-backend-testing` there is no display and no window, so these
+    //! belong in the ordinary suite.
+    //!
+    //! They exist because three chat bugs in a row were diagnosed by reading
+    //! code instead of by evidence: the engine was provably right each time
+    //! (checked against a live `moltd` over MCP), and the fault was in this
+    //! layer, where nothing could observe it.
+
+    use super::*;
+    use molt_core::{ChannelRef, GroupConfig, SessionView};
+
+    /// A node with storage, a founded workspace, and chat in it — the state
+    /// a user's second launch starts from.
+    fn node_with_chat(root: &std::path::Path) -> (WalletHandle, String) {
+        // exactly the session `moltd` hands the engine at startup: the
+        // workspaces are what is ON DISK. `SessionView::default()` carries
+        // the demo fixtures, which would list six republics that do not
+        // exist and hide the one that does.
+        let session = SessionView {
+            workspaces: molt_storage::scan_workspaces(root)
+                .iter()
+                .map(molt_storage::ScanEntry::info)
+                .collect(),
+            settings: molt_core::SessionSettings {
+                workspace_dir: root.display().to_string(),
+                ..molt_core::SessionSettings::default()
+            },
+            ..SessionView::default()
+        };
+        let w = molt_engine::spawn_with_storage(GroupConfig::demo(), session);
+        (w, String::new())
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    /// How many chat rows the window is showing right now.
+    fn chat_rows(ui: &AppWindow) -> usize {
+        ui.get_surfaces()
+            .iter()
+            .find(|s| s.key == "chat")
+            .map_or(0, |s| s.log.row_count())
+    }
+
+    /// **THE reported sequence: a cold start, then OPEN a workspace that is
+    /// already on disk.**
+    ///
+    /// "beim ersten öffnen eines workspaces wird ein leerer chat angezeigt,
+    /// ich muss auf organization klicken und wieder zurück" — the switch is
+    /// what the second push stands for, and the assertion is BEFORE it.
+    #[test]
+    fn a_cold_open_of_a_stored_workspace_fills_the_chat_pane() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let rt = rt();
+        let _guard = rt.enter();
+
+        // --- a workspace ON DISK, the way a previous run left one behind
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let roster = molt_core::SealedRoster {
+            name: "DevTest".to_string(),
+            republic_id: "d0".repeat(32),
+            rule_m: 1,
+            rule_n: 1,
+            roster: vec!["walter".to_string()],
+            identities: Vec::new(),
+            attestations: Vec::new(),
+            relays: Vec::new(),
+            agenda: "test the chat".to_string(),
+        };
+        // NOW, not a fixed stamp: chat older than the retention window is
+        // correctly invisible, and a fixture from last year would "reproduce"
+        // a bug that is the product working as specified
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let genesis = roster.into_genesis("walter", now);
+        let mut ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        // …with a message in it
+        ws.append(&molt_core::EventEnvelope {
+            prev_seq: 1,
+            seq: 2,
+            ts: now,
+            by: "walter".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([7u8; 16]),
+                "walter",
+                "hello group",
+                now,
+            )),
+        })
+        .expect("append");
+        ws.sync().expect("sync");
+        drop(ws);
+
+        // --- second run: a COLD app, the way the user starts it
+        let (w, _) = node_with_chat(&root);
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        rt.block_on(async {
+            let weak = ui.as_weak();
+            // the app comes up on the Choice screen and mirrors once
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+            assert_eq!(
+                chat_rows(&ui),
+                0,
+                "nothing is open yet - if this is not empty the test proves nothing"
+            );
+
+            // …and then the user opens the workspace
+            let stored = molt_storage::scan_workspaces(&root)
+                .first()
+                .map(|e| e.info().id)
+                .expect("the workspace is on disk");
+            let open_id = stored;
+            w.execute(Command::OpenWorkspace { id: open_id })
+                .await
+                .expect("the stored workspace opens");
+            // the engine's own answer first: if IT is empty, the fault is
+            // not in this layer and the assertion below would blame the
+            // wrong one
+            let engine_rows = match w
+                .execute(Command::ReadState {
+                    surface: Surface::Chat,
+                    channel: Some(molt_core::ChannelRef::Group),
+                    view: None,
+                })
+                .await
+            {
+                Ok(Reply::State(snap)) => snap.applied.len(),
+                _ => 0,
+            };
+            assert_eq!(engine_rows, 1, "the engine holds the stored message");
+
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+        });
+
+        assert!(
+            chat_rows(&ui) > 0,
+            "opening a stored workspace must fill the chat pane - having to \
+             visit another surface and come back IS the bug"
+        );
+    }
+
+    /// **The reported bug: opening a workspace must fill the chat pane.**
+    ///
+    /// "beim ersten öffnen eines workspaces wird ein leerer chat angezeigt,
+    /// ich muss auf organization klicken und wieder zurück" — so the test
+    /// asserts the pane after the OPEN, before any surface switch.
+    #[test]
+    fn opening_a_workspace_fills_the_chat_pane() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rt = rt();
+        let _guard = rt.enter(); // the engine spawns tasks at construction
+        let (w, _) = node_with_chat(tmp.path());
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+
+        rt.block_on(async {
+            // found a session-only workspace and say something in it
+            w.execute(Command::CreateStart {
+                name: "DevTest".to_string(),
+                member: "walter".to_string(),
+                threshold: 1,
+                members: 1,
+                relays: Vec::new(),
+            })
+            .await
+            .ok();
+            w.execute(Command::Chat {
+                body: "hello group".to_string(),
+                quote: None,
+                channel: ChannelRef::Group,
+            })
+            .await
+            .ok();
+
+            // the live-mirror's own two steps, in its own order. The apply
+            // runs DIRECTLY rather than through `invoke_from_event_loop`:
+            // the headless backend never drains that queue, and the hop
+            // onto the UI thread is Slint's business, not this layer's.
+            let weak = ui.as_weak();
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, bundle)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &bundle);
+            }
+        });
+
+        assert!(
+            ui.get_surfaces().row_count() > 0,
+            "the bundle must have landed at all (else this test proves nothing)"
+        );
+        assert!(
+            chat_rows(&ui) > 0,
+            "the chat pane must hold the message the engine has - it took a \
+             surface switch to appear, which is the reported bug"
+        );
     }
 }
