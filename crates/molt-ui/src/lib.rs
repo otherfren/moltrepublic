@@ -5965,7 +5965,7 @@ lexicon! {
     jw_busy_title: "Joining the republic", "Beitritt zur Republik";
     jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
-    jw_ph2: "Receiving MLS welcome…", "Empfange MLS-Welcome…";
+    jw_ph2: "Synchronizing ritual, please wait…", "Synchronisiere Ritual, bitte warten…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     // no cause here: the headline above carries it, and "invite rejected" was
     // wrong for the commonest refusal of all — the relay gate, which turns the
