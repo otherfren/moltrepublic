@@ -8422,4 +8422,126 @@ mod gui_tests {
              surface switch to appear, which is the reported bug"
         );
     }
+
+    /// **The reported bug: a member wrote into a fresh topic and the two
+    /// RECEIVING clients stopped reacting — "klick auf linke navbar Chat
+    /// zeigt keine Funktion".**
+    ///
+    /// Receiver perspective, headless: the workspace holds a group message
+    /// and a FOREIGN member's message in a topic channel (arrived over the
+    /// wire, so it is unread here). The mirror must survive that state, the
+    /// nav must list the topic row, and the Chat click must keep working.
+    #[test]
+    fn a_foreign_topic_message_keeps_the_chat_usable() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let rt = rt();
+        let _guard = rt.enter();
+
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let roster = molt_core::SealedRoster {
+            name: "DevTest".to_string(),
+            republic_id: "d0".repeat(32),
+            rule_m: 1,
+            rule_n: 2,
+            roster: vec!["walter".to_string(), "ingrid".to_string()],
+            identities: Vec::new(),
+            attestations: Vec::new(),
+            relays: Vec::new(),
+            agenda: "test the chat".to_string(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let genesis = roster.into_genesis("walter", now);
+        let mut ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        ws.append(&molt_core::EventEnvelope {
+            prev_seq: 1,
+            seq: 2,
+            ts: now,
+            by: "walter".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([7u8; 16]),
+                "walter",
+                "hello group",
+                now,
+            )),
+        })
+        .expect("append group message");
+        // the foreign topic message, the way the wire landed it
+        ws.append(&molt_core::EventEnvelope {
+            prev_seq: 2,
+            seq: 3,
+            ts: now,
+            by: "ingrid".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(
+                molt_core::ChatMessage::text(
+                    molt_core::MessageId([9u8; 16]),
+                    "ingrid",
+                    "topic talk",
+                    now,
+                )
+                .with_channel(ChannelRef::Topic {
+                    name: "asdf".to_string(),
+                }),
+            ),
+        })
+        .expect("append topic message");
+        ws.sync().expect("sync");
+        drop(ws);
+
+        let (w, _) = node_with_chat(&root);
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        rt.block_on(async {
+            let weak = ui.as_weak();
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+
+            let stored = molt_storage::scan_workspaces(&root)
+                .first()
+                .map(|e| e.info().id)
+                .expect("the workspace is on disk");
+            w.execute(Command::OpenWorkspace { id: stored })
+                .await
+                .expect("the stored workspace opens");
+            // the mirror push that follows the delivery — the receivers
+            // froze HERE if this layer chokes on the topic state
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+            assert!(
+                chat_rows(&ui) > 0,
+                "the group log must still show after a topic message arrived"
+            );
+            assert!(
+                ui.get_chat_channels().iter().any(|c| c.key == "topic:asdf"),
+                "the nav must list the foreign topic's row"
+            );
+
+            // …and the user's Chat click still navigates
+            w.execute(Command::SelectSurface {
+                surface: Surface::Chat,
+            })
+            .await
+            .expect("the chat click reaches the engine");
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+        });
+
+        assert!(
+            chat_rows(&ui) > 0,
+            "after clicking Chat the pane must keep its rows - a dead pane \
+             IS the reported bug"
+        );
+    }
 }
