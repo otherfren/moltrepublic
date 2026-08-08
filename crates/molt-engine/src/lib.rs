@@ -1420,6 +1420,7 @@ impl State {
             Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
             Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
             Command::JoinDeclineCharter => self.cmd_join_decline_charter(),
+            Command::JoinFinish => self.cmd_join_finish(),
             Command::NetJoinDeclined { seat, from, generation } => {
                 self.cmd_net_join_declined(seat, from, generation)
             }
@@ -4308,6 +4309,12 @@ mod tests {
         let sealed = serde_json::to_string(&valid_sealed_roster()).expect("json");
         st.cmd_net_join_sealed(sealed, String::new(), Vec::new(), String::new(), Vec::new(), String::new(), Some(1))
             .expect("sealed");
+        // sealed ≠ entered (2026-08-08): entry waits for the phrase-backup
+        // confirmation — JoinFinish is the joiner's CreateFinish
+        assert_ne!(st.session.screen, Screen::Main, "sealing must not auto-enter");
+        assert_eq!(st.session.join.run.outcome, 1, "the run reports sealed");
+        assert!(!st.session.join.sealed_id.is_empty(), "the sealed id is exposed");
+        st.cmd_join_finish().expect("finish enters");
         assert_eq!(st.session.screen, Screen::Main, "entered the republic");
         assert_eq!(st.session.join, molt_core::JoinState::default(), "join reset");
         let ws = st.session.workspaces.iter().find(|ws| ws.name == "R").expect("workspace added");
@@ -4412,7 +4419,9 @@ mod tests {
             Some(1),
         )
         .expect("handler never errors");
-        assert_eq!(st.session.screen, Screen::Main, "the matching secret enters the republic");
+        // sealed (entering waits for the phrase-backup step; the secret's
+        // validation + persistence is what THIS test pins)
+        assert_eq!(st.session.join.run.outcome, 1, "the matching secret seals the join");
         let dir = st.active.as_ref().expect("materialized").dir.clone();
         drop(st); // release the writer + flock before reopening
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

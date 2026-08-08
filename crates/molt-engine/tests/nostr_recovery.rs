@@ -179,6 +179,12 @@ async fn found_republic(
     })
     .await;
     wait_for(&b, "the join to seal on petra", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "petra to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;

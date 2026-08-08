@@ -917,6 +917,7 @@ export component AppWindow inherits Window {
     // the joiner ratifies the founder's proposed charter (releases its seal
     // signature; the workspace opens only after this)
     callback join-confirm-charter();
+    callback join-finish();
     // …or declines it (tells the founder, ends the join)
     callback join-decline-charter();
     // copy a text (seed / invite link) into the system clipboard, in Rust
@@ -1138,10 +1139,11 @@ export component AppWindow inherits Window {
     // are now ratifying; re-proposing a different charter would be a footgun)
     property <bool> cw-proposed;
     property <string> cw-member;
-    // the re-typed phrase proving the backup (step 4); checked in Rust so
-    // whitespace/case never block an honest re-type
+    // the re-typed phrase proving the backup (create step 4 / join finish);
+    // checked in Rust so whitespace/case never block an honest re-type
     property <string> cw-seed-check;
-    pure callback seed-matches(string) -> bool;
+    property <string> jw-seed-check;
+    pure callback seed-matches(string, string) -> bool;
     property <int> cw-threshold: 2;
     property <int> cw-members: 3;
     // the configured workspace root (mirrored from the session settings)
@@ -1201,6 +1203,9 @@ export component AppWindow inherits Window {
     in property <bool> jw-awaiting-ratify;
     in property <string> jw-proposed-name;
     in property <string> jw-proposed-agenda;
+    // the join sealed a workspace (join.sealed_id) — entry now waits on the
+    // phrase-backup modal and its join-finish()
+    in property <bool> jw-sealed;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
     // recovery (total-loss rejoin over a molt://recover/… link):
@@ -1631,6 +1636,11 @@ export component AppWindow inherits Window {
         root.open-state = 0;
         root.open-s3 = false;
         root.open-seed = "";
+        // the chain-history tab exists only WITH a workspace — leave it
+        // before it turns into an empty pane
+        if (root.set-tab == 7) {
+            root.set-tab = 0;
+        }
     }
 
     // Sort the backup table by a header column: clicking the active column
@@ -3072,7 +3082,7 @@ export component AppWindow inherits Window {
                             icon: @image-url("assets/create.svg");
                             icon-set: true;
                             label: Strings.enter-republic;
-                            enabled: root.seed-matches(root.cw-seed-check);
+                            enabled: root.seed-matches(root.cw-seed-check, root.cw-seed);
                             clicked => {
                                 root.create-finish();
                             }
@@ -3794,20 +3804,13 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                 }
 
-                // step 2: the real join run. The joiner's own recovery phrase
-                // is shown once (record it now), then the live log while it
-                // waits for every member to seal. On success the engine enters
-                // the republic on its own — no finish button, no fake progress.
+                // step 2: the real join run — the live log while it waits for
+                // every member to seal. The recovery phrase is NOT shown here
+                // (2026-08-08): a failed founding needs no phrase, and a
+                // sealed one gates entry on the backup step (the modal below).
                 if root.jw-step == 1: VerticalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
-                    if root.jw-seed != "": SeedPanel {
-                        seed: root.jw-seed;
-                        copy-requested => {
-                            root.copy-text(root.jw-seed);
-                            root.show-toast(Strings.toast-copied);
-                        }
-                    }
                     // ---- ratification: confirm the founder's proposed charter
                     if root.jw-awaiting-ratify: Rectangle {
                         border-radius: Theme.win95 ? 0px : 8px;
@@ -3879,9 +3882,9 @@ export component AppWindow inherits Window {
                         headline: root.jw-headline;
                         tones: root.jw-log-tone;
                         back-shown: false;
-                        // the engine enters the republic on its own once the
-                        // founder seals — so the only button here is the way
-                        // OUT after a failure/decline (labelled, never blank)
+                        // a sealed join enters through the phrase-backup
+                        // modal — so the only button here is the way OUT
+                        // after a failure/decline (labelled, never blank)
                         finish-label: root.jw-outcome == 2 ? Strings.jw-back-to-start : "";
                         finish-enabled: root.jw-outcome == 2;
                         finish => {
@@ -4055,8 +4058,9 @@ export component AppWindow inherits Window {
                 // invite runs the join, a molt://recover/… link runs the
                 // recovery ritual with the phrase above. Which one it is, is
                 // the link's business to say - not the user's to know. The
-                // engine notices drive the running / failed states; on
-                // success the engine flips the screen by itself.
+                // engine notices drive the running / failed states; a sealed
+                // JOIN enters through the phrase-backup modal (JoinFinish),
+                // a recovery still enters by itself.
                 if root.rw-mode == "link": WayBranch {
                     // never dimmed: an empty link gates only the Continue
                     // button, not the panel the user is about to type into
@@ -6442,7 +6446,9 @@ export component AppWindow inherits Window {
                         index: 6;
                         current <=> root.set-tab;
                     }
-                    SettingsTab {
+                    // only WITH an open workspace: the chain history is that
+                    // workspace's — without one the tab is pure confusion
+                    if root.active-workspace != "": SettingsTab {
                         label: Strings.set-tab-chain;
                         floor: Strings.set-tab-chain-floor;
                         index: 7;
@@ -7257,31 +7263,6 @@ export component AppWindow inherits Window {
                             && !(root.set-tab == 4 && root.relay-rows.length > 0): Rectangle {
                             vertical-stretch: 1;
                         }
-                        // the full config.toml path in its own panel, set
-                        // apart from the fields above: directory greyed,
-                        // the file name itself in text color
-                        Rectangle {
-                            vertical-stretch: 0;
-                            background: Theme.zebra;
-                            border-radius: Theme.win95 ? 0px : 6px;
-                            border-width: Theme.border-w;
-                            border-color: Theme.line;
-                            HorizontalLayout {
-                                padding: 8px;
-                                alignment: start;
-                                Text {
-                                    text: "\{Strings.set-path-label}:  \{root.config-dir}";
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    wrap: word-wrap;
-                                }
-                                Text {
-                                    text: root.config-file;
-                                    color: Theme.text;
-                                    font-size: Theme.fs-cap;
-                                }
-                            }
-                        }
                         // persistent (not a toast): these values only take
                         // effect on the next start of the node
                         if root.restart-keys != "": Text {
@@ -7323,8 +7304,33 @@ export component AppWindow inherits Window {
                             root.close-settings();
                         }
                     }
+                    // the config.toml path rides the button row (it stole a
+                    // whole panel row from every tab): directory greyed, the
+                    // file name in text color
                     Rectangle {
                         horizontal-stretch: 1;
+                        background: Theme.zebra;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        HorizontalLayout {
+                            padding: 8px;
+                            spacing: 0;
+                            alignment: start;
+                            Text {
+                                text: "\{Strings.set-path-label}:  \{root.config-dir}";
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.config-file;
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                     AppButton {
                         label: Strings.set-save;
@@ -7749,7 +7755,7 @@ export component AppWindow inherits Window {
     // …but NOT while the charter awaits ratification: that step is still
     // "running" and needs the joiner's decision, so blocking the screen there
     // would hang the join on a panel the operator cannot reach.
-    if root.jw-running && !root.jw-awaiting-ratify: BusyModal {
+    if root.jw-running && !root.jw-awaiting-ratify && !root.jw-sealed: BusyModal {
         title: root.jw-republic == "" ? Strings.jw-busy-title : root.jw-republic;
         detail: root.jw-progress < 0.3 ? Strings.jw-ph1
             : (root.jw-progress < 0.5 ? Strings.jw-ph-founder
@@ -7758,6 +7764,73 @@ export component AppWindow inherits Window {
         cancel-label: Strings.jw-busy-cancel;
         cancelled => {
             root.join-cancel();
+        }
+    }
+
+    // The join SEALED: the phrase-backup step, the joiner twin of the
+    // founder's. A modal on purpose — it must catch the operator on the
+    // dedicated join screen and on the restore-link flow alike, and the only
+    // way past it is entering (which is the backup confirmation).
+    if root.jw-sealed: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0000008c;
+        TouchArea { }
+        Rectangle {
+            width: min(560px, parent.width - 48px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            height: jw-seal-col.preferred-height + 36px;
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 10px;
+            border-width: Theme.border-w;
+            border-color: Theme.accent;
+            jw-seal-col := VerticalLayout {
+                x: 18px;
+                y: 18px;
+                width: parent.width - 36px;
+                spacing: 10px;
+                Text {
+                    text: Strings.cw-seed-confirm-title;
+                    color: Theme.text;
+                    font-size: Theme.fs-h2;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                }
+                SeedPanel {
+                    seed: root.jw-seed;
+                    copy-requested => {
+                        root.copy-text(root.jw-seed);
+                        root.show-toast(Strings.toast-copied);
+                    }
+                }
+                Text {
+                    text: Strings.cw-seed-confirm-hint;
+                    color: Theme.dim;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+                AppField {
+                    text <=> root.jw-seed-check;
+                    placeholder: Strings.cw-seed-confirm-ph;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    AppButton {
+                        height: 38px;
+                        primary: true;
+                        icon: @image-url("assets/join.svg");
+                        icon-set: true;
+                        label: Strings.enter-republic;
+                        enabled: root.seed-matches(root.jw-seed-check, root.jw-seed);
+                        clicked => {
+                            root.jw-seed-check = "";
+                            root.join-finish();
+                        }
+                    }
+                }
+            }
         }
     }
 

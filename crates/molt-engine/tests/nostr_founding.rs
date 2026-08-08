@@ -191,7 +191,13 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     })
     .await;
     let ws_id_a = s.active_workspace.clone();
-    let s = wait_for(&b, "the join to seal on petra", |s| {
+    wait_for(&b, "the join to seal on petra", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    let s = wait_for(&b, "petra to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
@@ -420,7 +426,13 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
-    let s = wait_for(&b, "the join to seal", |s| {
+    wait_for(&b, "the join to seal", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    let s = wait_for(&b, "the joiner to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
@@ -711,6 +723,83 @@ async fn a_declined_charter_aborts_both_sides() {
     assert!(s.workspaces.is_empty(), "nothing materialized on the founder");
 }
 
+/// NEGATIVE — a decline ends the founding for the BYSTANDER too (2026-08-08):
+/// in a 2-of-3, petra ratifies and then waits; dora declines. The founder
+/// fails — and petra must fail WITH it, loudly, instead of idling in a
+/// waiting posture on a founding that can never seal (the abort frame
+/// travels to every member, not only the decliner's own screen).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Nope".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 3,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "two joinable links", |s| {
+        s.create.seats.len() >= 2
+            && s.create
+                .seats
+                .iter()
+                .all(|seat| molt_engine::FoundingInvite::parse(&seat.link).is_ok())
+    })
+    .await;
+    let link_b = s.create.seats[0].link.clone();
+    let link_c = s.create.seats[1].link.clone();
+
+    let b = engine(&tmp.path().join("petra"));
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: link_b,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("petra joins");
+    let c = engine(&tmp.path().join("dora"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::JoinStart {
+        invite: link_c,
+        member: "dora".to_string(),
+    })
+    .await
+    .expect("dora joins");
+
+    wait_for(&a, "the founder to see both joiners", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Nope".to_string(),
+        agenda: "unacceptable terms".to_string(),
+    })
+    .await
+    .expect("proposed");
+
+    // petra RATIFIES and settles into the waiting posture…
+    wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("petra ratifies");
+    // …then dora declines
+    wait_for(&c, "dora to see the charter", |s| s.join.awaiting_ratify).await;
+    c.execute(Command::JoinDeclineCharter).await.expect("dora declines");
+
+    wait_for(&a, "the founder to fail", |s| s.create.run.outcome == 2).await;
+    // THE point: the bystander leaves its waiting modal with an honest
+    // failure — not a hang until some timeout
+    let s = wait_for(&b, "petra's join to fail too", |s| s.join.run.outcome == 2).await;
+    assert!(
+        s.join.run.log.iter().any(|l| l.contains("declined")),
+        "petra's log names the decline: {:?}",
+        s.join.run.log
+    );
+    assert!(s.workspaces.is_empty(), "nothing materialized on petra");
+}
+
 /// REGRESSION (cluster I) — a founder with MORE relays than an invite may
 /// carry still founds, over its first eight.
 ///
@@ -805,7 +894,11 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
-    wait_for(&b, "the join to seal", |s| {
+    wait_for(&b, "the join to seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty())
+        .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
@@ -1703,6 +1796,12 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     .await;
     let ws_id = s.active_workspace.clone();
     wait_for(&b, "the join seal", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;

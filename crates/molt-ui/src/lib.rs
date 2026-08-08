@@ -967,18 +967,17 @@ pub fn run_app(
         });
     }
     {
-        // step 4 of the create wizard: the re-typed phrase must MATCH, but
-        // whitespace runs and letter case never block an honest re-type
-        let weak = ui.as_weak();
-        ui.on_seed_matches(move |typed| {
-            let Some(ui) = weak.upgrade() else { return false };
+        // the phrase-backup gates (create step 4, join finish): the re-typed
+        // phrase must MATCH, but whitespace runs and letter case never block
+        // an honest re-type
+        ui.on_seed_matches(|typed, expected| {
             let norm = |s: &str| {
                 s.split_whitespace()
                     .map(str::to_lowercase)
                     .collect::<Vec<_>>()
                     .join(" ")
             };
-            !typed.trim().is_empty() && norm(&typed) == norm(&ui.get_cw_seed())
+            !typed.trim().is_empty() && norm(&typed) == norm(&expected)
         });
     }
     {
@@ -1113,6 +1112,14 @@ pub fn run_app(
         let weak = ui.as_weak();
         ui.on_join_decline_charter(move || {
             issue(&rt, &w, &weak, Command::JoinDeclineCharter);
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_join_finish(move || {
+            issue(&rt, &w, &weak, Command::JoinFinish);
         });
     }
     {
@@ -2911,6 +2918,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     // the ratification step: the founder's proposed charter, which the joiner
     // must confirm before its signature is released and the workspace opens
     ui.set_jw_awaiting_ratify(sv.join.awaiting_ratify);
+    ui.set_jw_sealed(!sv.join.sealed_id.is_empty());
     ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
@@ -6043,7 +6051,7 @@ lexicon! {
     set_tab_relays: "Nostr relays", "Nostr-Relays";
     set_tab_mcp: "MCP", "MCP";
     set_tab_node: "Node", "Node";
-    set_tab_chain: "Chain-History", "Chain-History";
+    set_tab_chain: "Workspace chain history", "Workspace-Chain-History";
     chain_col_height: "Block", "Block";
     chain_col_what: "Change", "Änderung";
     chain_col_signers: "Signed by", "Signiert von";

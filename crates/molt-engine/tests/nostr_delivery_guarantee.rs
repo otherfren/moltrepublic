@@ -163,6 +163,12 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     })
     .await;
     wait_for(&b, "the join seal", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;

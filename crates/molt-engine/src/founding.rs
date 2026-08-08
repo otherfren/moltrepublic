@@ -2935,16 +2935,21 @@ mod ritual_ops {
             ));
             // a declined seat can never turn sealed, so this founding is over
             // for good: mark the run FAILED so the GUI leaves the waiting
-            // posture (abort re-arms, the lobby says so) instead of idling
-            // on a ritual that cannot complete. The ritual itself is kept —
-            // other members may still be mid-flight — until cancel tears it
-            // down; outcome 2 already blocks maybe_finalize.
+            // posture instead of idling on a ritual that cannot complete —
+            // and tell EVERY member (2026-08-08): a co-member that already
+            // ratified sits in its waiting modal, and without the abort
+            // broadcast it would hang there until its timeout while the
+            // founder already knows the founding is dead. abandon_ritual
+            // sends the Aborted frame both pre-birth (per-seat wraps) and
+            // over the born group, then tears the ritual down; outcome 2
+            // already blocks maybe_finalize.
             if self.session.create.run.outcome == 0 {
                 self.session.create.run.outcome = 2;
                 self.session.create.run.log.push(
                     "✗ the ritual is over — this republic must be founded anew (close and re-mint)"
                         .to_string(),
                 );
+                self.abandon_ritual(&format!("{who} declined the charter - the founding is over"));
             }
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)

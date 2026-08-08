@@ -1357,7 +1357,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_confirm_charter",
             command: "join_confirm_charter",
-            description: "Ratify the founder's proposed charter, surfaced when the join reaches the ratification step (read_session shows join.awaiting_ratify with proposed_name / proposed_agenda). This is the joiner's confirmation — it releases the seal signature and the workspace opens.",
+            description: "Ratify the founder's proposed charter, surfaced when the join reaches the ratification step (read_session shows join.awaiting_ratify with proposed_name / proposed_agenda). This is the joiner's confirmation — it releases the seal signature; once sealed, join_finish enters the republic.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinConfirmCharter),
         },
@@ -1367,6 +1367,13 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Decline the founder's proposed charter at the ratification step (the other choice besides join_confirm_charter). Tells the founder the charter was declined (its seat shows declined so it can re-mint) and ends the join as failed.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinDeclineCharter),
+        },
+        ToolDef {
+            name: "join_finish",
+            command: "join_finish",
+            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The join deliberately does not auto-enter: the joiner first confirms it backed up its recovery phrase (join.seed) - entering is that confirmation, the joiner twin of create_finish.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::JoinFinish),
         },
         ToolDef {
             name: "join_cancel",

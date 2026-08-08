@@ -2628,6 +2628,12 @@ pub struct JoinState {
     /// and the workspace opens only once confirmed.
     #[serde(default)]
     pub awaiting_ratify: bool,
+    /// The sealed workspace's id, set when the join completes (run outcome 1).
+    /// The joiner does NOT enter automatically (2026-08-08): the wizard's
+    /// final step shows the recovery phrase and requires re-typing it —
+    /// [`Command::JoinFinish`] then enters. Empty until sealed.
+    #[serde(default)]
+    pub sealed_id: String,
 }
 
 /// The restore lifecycle (real: download/read → decrypt+stage →
@@ -4051,9 +4057,9 @@ pub enum Command {
     /// queue-shaped one, is rejected. Since N4a the join runs over Nostr: the
     /// engine spawns the off-actor member task (gated on the operator's
     /// confirmed relay pool), shows the joiner's own recovery phrase, and
-    /// enters the republic once the founder seals — the outcome arrives as
-    /// `NetJoinSealed` / `NetJoinFailed`. The loopback seams still serve the
-    /// state-level tests.
+    /// seals the workspace once the founder seals (entering then waits for
+    /// [`Command::JoinFinish`]) — the outcome arrives as `NetJoinSealed` /
+    /// `NetJoinFailed`. The loopback seams still serve the state-level tests.
     JoinStart {
         /// The `molt://invite/…` link.
         invite: String,
@@ -4069,6 +4075,12 @@ pub enum Command {
     /// ratification step). The joiner's node tells the founder it declined (so
     /// the founder can re-mint) and the join ends as failed. Co-equal.
     JoinDeclineCharter,
+    /// Enter the republic a completed join sealed (`join.sealed_id`). The
+    /// join deliberately does not auto-enter (2026-08-08): the wizard's last
+    /// step makes the joiner back its recovery phrase up first — entering is
+    /// the human's confirmation, so it is a tool on both surfaces (the
+    /// joiner twin of [`Command::CreateFinish`]).
+    JoinFinish,
     /// A member explicitly declined the proposed charter (engine-internal;
     /// raised by the founder's ritual recv loop). The founder marks the seat and
     /// logs it. Never an MCP tool.

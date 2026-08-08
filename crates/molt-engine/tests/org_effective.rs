@@ -127,7 +127,11 @@ async fn found_pair(
         s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
     })
     .await;
-    wait_for(&b, "the join to seal", |s| {
+    wait_for(&b, "the join to seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty())
+        .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;

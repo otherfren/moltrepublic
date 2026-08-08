@@ -1157,6 +1157,7 @@ impl State {
             proposed_name: String::new(),
             proposed_agenda: String::new(),
             awaiting_ratify: false,
+            sealed_id: String::new(),
         };
         self.session.screen = Screen::Join;
         // a fresh transport slot for this join incarnation (the loopback
@@ -1400,7 +1401,6 @@ impl State {
         // a real sighting for each of them
         let now = self.presence_now();
         let members = roster_members(&sealed.roster, now, |_| now);
-        self.session.join = JoinState::default();
         self.push_workspace_entry(
             &id,
             &sealed.name,
@@ -1412,7 +1412,6 @@ impl State {
             self.session.settings.s3_backup,
             sealed.agenda.clone(),
         );
-        self.session.active_workspace = id;
         // stand the runtime supervisor up over the joiner's direct mesh, REUSING
         // the transport the ritual ran over (its Arc owns the bootstrap queues'
         // receive credentials — a fresh transport could send but never subscribe).
@@ -1444,7 +1443,18 @@ impl State {
                 }
             }
         }
-        self.session.screen = Screen::Main;
+        // sealed, but NOT entered (2026-08-08): the wizard's last step makes
+        // the joiner back its phrase up first; `JoinFinish` enters. The seed
+        // and the run stay in `session.join` for exactly that step.
+        self.session.join.sealed_id = id;
+        self.session.join.awaiting_ratify = false;
+        self.session.join.run.outcome = 1;
+        self.session.join.run.progress_pct = 100;
+        self.session
+            .join
+            .run
+            .log
+            .push("✓ sealed - back up your recovery phrase to enter".to_string());
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1960,6 +1970,24 @@ impl State {
             self.session.notice = notice;
             self.emit_session(SessionScope::Full);
         }
+        Ok(Reply::Ack)
+    }
+
+    /// Enter the republic a completed join sealed — the joiner twin of
+    /// [`Self::cmd_create_finish`] (2026-08-08): the seal materializes and
+    /// stands the runtime up, but entering waits for the human's
+    /// phrase-backup confirmation.
+    pub(crate) fn cmd_join_finish(&mut self) -> Result<Reply, MoltError> {
+        if self.session.join.run.outcome != 1 || self.session.join.sealed_id.is_empty() {
+            return Err(MoltError::Join(
+                "no sealed join awaits entry".to_string(),
+            ));
+        }
+        let id = self.session.join.sealed_id.clone();
+        self.session.join = JoinState::default();
+        self.session.active_workspace = id;
+        self.session.screen = Screen::Main;
+        self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
