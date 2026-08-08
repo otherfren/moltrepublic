@@ -56,59 +56,40 @@ Your MoltRepublic DAO can be whatever your members agree to run.
 
 ## Build, test, run
 
-Default build — the whole workspace, Slint GUI included without embedded Tor.
+Build:
 
 ```sh
-cargo build
+cargo build                 # whole workspace incl. GUI, no embedded Tor
+cargo build -p molt-app --features molt-net/embedded-tor   # with embedded Tor (slow first build)
 ```
 
-**Full build incl. embedded Tor.**
-Enabling it pulls the arti dependency tree, so the first build is much
-slower. The feature is declared on `molt-net`, so build the node with:
-
-```sh
-cargo build -p molt-app --features molt-net/embedded-tor
-```
-
-Test — tiers that need a real network are `#[ignore]`d (the Nostr real-relay
-PoC, the live-S3 probe, the embedded-tor bootstrap); the fast suite proves
-founding + join + MLS over loopback:
+Test:
 
 ```sh
 cargo test                  # fast suite (loopback)
 cargo test -- --ignored     # real-network tiers (Nostr relay / S3 / Tor)
 ```
 
-Run — `moltd` is the only binary, so a bare `cargo run` resolves to it. It needs
-a `config.toml`; generate one first:
+Run (`moltd` is the only binary; it needs a `config.toml`):
 
 ```sh
 cargo run -- --generate-config ./config.toml
-cargo run                   # UI mode: GUI + MCP over TCP (127.0.0.1)
+cargo run                   # GUI + MCP over TCP (127.0.0.1)
 ```
 
-**GUI development — hot reload instead of the 6-GiB build.**
-The Slint GUI normally compiles `ui/app.slint` into a ~400k-line Rust module
-whose single rustc run peaks at ~6 GiB RAM and ~4 minutes — pain when you are
-iterating on the UI. `scripts/dev-ui.sh` switches to Slint's live-preview
-mode: the same API is emitted as small interpreter-backed stubs, so a
-`.slint` edit recompiles in ~2 s at under 1 GiB, and the *running* app
-hot-reloads `.slint` saves (properties, models and callbacks survive; an
-incompatible interface change panics the app — restart it, still without a
-recompile):
+GUI development — `.slint` edits rebuild in ~2 s (live preview + hot reload)
+instead of the ~4-min/6-GiB full window build:
 
 ```sh
 scripts/dev-ui.sh build     # compile window + GUI logic against the stubs
 scripts/dev-ui.sh run       # build + start moltd with live .slint reload
 ```
 
-It uses its own cache (`target/dev-ui`), so it never thrashes the normal
-build's cache; the first run fills it once (RAM-light). Dev-only — before
-committing a UI change, run one normal
-`cargo build -p molt-ui-window -p molt-ui` as the authoritative check.
+Dev-only; before committing a UI change run the authoritative
+`cargo build -p molt-ui-window -p molt-ui`.
 
-Headless (MCP-only, no GUI) is a runtime choice: set `[node].headless = true`,
-or the node drops to headless automatically when no display is available.
+Headless (MCP-only) is a runtime choice: `[node].headless = true`, or
+automatic when no display is available.
 
 ## License
 
