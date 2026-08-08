@@ -753,6 +753,7 @@ fn spawn_founder_recv(
                     // loopback carries no gift wrap, so nothing is proven
                     sender_npub: String::new(),
                     key_package: j.key_package,
+                    relays: j.relays,
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
@@ -793,6 +794,23 @@ fn spawn_founder_recv(
             }
         }
     });
+}
+
+/// The founder-side pool-deviation line (2026-08-08): a joiner's declared
+/// dial set vs the invite pool — `None` when every pool relay is reachable
+/// or nothing was declared. One line, the count and the FIRST missing relay
+/// (the remedy is the same for all of them: bridge the pool).
+fn join_relay_deviation(member: &str, pool: &[String], declared: &[String]) -> Option<String> {
+    if declared.is_empty() || pool.is_empty() {
+        return None;
+    }
+    let unreachable: Vec<&String> = pool.iter().filter(|u| !declared.contains(u)).collect();
+    let first = unreachable.first()?;
+    Some(format!(
+        "✗ {member} does not reach {} of {} pool relays - {first}",
+        unreachable.len(),
+        pool.len(),
+    ))
 }
 
 /// Map a returning member's [`invite::RecoverRequest`] to the internal
@@ -1635,6 +1653,8 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
             wrap: hex::encode(reply_wrap.to_bytes()),
         }),
         key_package: hex::encode(&key_package),
+        // the loopback path has no relays to declare
+        relays: Vec::new(),
     });
     let payload = serde_json::to_vec(&join).map_err(|e| e.to_string())?;
     supervisor::send_framed(
@@ -2338,6 +2358,7 @@ mod ritual_ops {
         /// canonical table to all members to sign. Verification failures
         /// are logged and dropped (a bad request must not wedge anything).
         #[allow(clippy::too_many_arguments)]
+        #[allow(clippy::too_many_arguments)] // one wire request's fields, not a bag
         pub(crate) fn cmd_net_join_requested(
             &mut self,
             seat: u32,
@@ -2348,10 +2369,27 @@ mod ritual_ops {
             reply: String,
             sender_npub: String,
             key_package: String,
+            relays: Vec<String>,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
                 return Ok(molt_core::Reply::Ack);
+            }
+            // R4's founding twin (2026-08-08): a joiner that declares its
+            // dialable relays lets the founder SEE a pool deviation while
+            // everyone is still in the ritual — one log line naming the
+            // relay, not two sides staring at a partial mesh later. Empty =
+            // no declaration (loopback, older builds); display-grade only.
+            if !relays.is_empty() {
+                let pool = self
+                    .net_ritual
+                    .as_ref()
+                    .map(|r| r.group_relays())
+                    .unwrap_or_default();
+                if let Some(line) = join_relay_deviation(&member, &pool, &relays) {
+                    self.session.create.run.log.push(line);
+                    self.emit_session(molt_core::SessionScope::Create);
+                }
             }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
             // the ticket is single-use — handle a spent seat FIRST, on an
@@ -3105,6 +3143,23 @@ mod tests {
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
 
+    /// The founder's pool-deviation line: silent when the joiner reaches the
+    /// whole pool (or declared nothing), one factual line naming the first
+    /// missing relay otherwise.
+    #[test]
+    fn a_joiners_partial_pool_declaration_yields_one_deviation_line() {
+        let pool = vec!["wss://a.example".to_string(), "wss://b.example".to_string()];
+        assert_eq!(join_relay_deviation("petra", &pool, &pool), None);
+        assert_eq!(join_relay_deviation("petra", &pool, &[]), None);
+        assert_eq!(join_relay_deviation("petra", &[], &pool), None);
+        let line = join_relay_deviation("petra", &pool, &pool[..1])
+            .expect("a missing pool relay yields the line");
+        assert!(
+            line.contains("petra") && line.contains("1 of 2") && line.contains("wss://b.example"),
+            "the line names the member, the count and the relay: {line}"
+        );
+    }
+
     #[test]
     fn recover_command_maps_the_request_and_encodes_the_reply() {
         let r = invite::RecoverRequest {
@@ -3642,6 +3697,7 @@ mod tests {
                 // loopback ritual in this fixture: nothing is wrap-proven
                 String::new(),
                 kp.to_string(),
+                Vec::new(),
                 None,
             )
             .expect("handler never errors");

@@ -220,6 +220,11 @@ export struct LinkPreview {
     republic: string,
     // invite: who minted it · recovery: the seat coming back
     who: string,
+    // how many of the link's relays this node does NOT have, and the first
+    // such URL — a pool deviation is a hard blocker (relays do not
+    // federate), so the panel shows it loudly before the run can fail
+    missing: int,
+    missing-first: string,
 }
 
 // One sub-view of a surface (nav entry), from molt-core's shared view list.
@@ -451,7 +456,10 @@ export global Strings {
     in property <string> cw-rule-c;
     in property <string> cw-grp-relays;
     in property <string> cw-relays-hint;
-    in property <string> cw-relays-rule;
+    in property <string> cw-open-relay-settings;
+    in property <string> cw-seed-confirm-title;
+    in property <string> cw-seed-confirm-hint;
+    in property <string> cw-seed-confirm-ph;
     in property <string> cw-relays-none;
     in property <string> cw-relays-toggle;
     in property <string> cw-grp-transport;
@@ -669,6 +677,7 @@ export global Strings {
     in property <string> rw-link-join;
     in property <string> rw-link-recover;
     in property <string> rw-link-unknown;
+    in property <string> rw-link-missing-relays;
     in property <string> rw-link-name-ph;
     in property <string> rw-via-s3;
     in property <string> rw-s3-hint;

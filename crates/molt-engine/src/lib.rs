@@ -1307,6 +1307,7 @@ impl State {
                 reply,
                 sender_npub,
                 key_package,
+                relays,
                 generation,
             } => self.cmd_net_join_requested(
                 seat,
@@ -1317,6 +1318,7 @@ impl State {
                 reply,
                 sender_npub,
                 key_package,
+                relays,
                 generation,
             ),
             Command::NetSealSigned {

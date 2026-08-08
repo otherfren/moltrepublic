@@ -205,19 +205,50 @@ pub fn run_app(
         });
         // the Restore wizard's one link field: which of the two flows is
         // this link for? Pure, like parse_invite, so the panel re-reads it
-        // on every keystroke without any state to keep in sync.
-        ui.on_classify_link(|s| match link_kind(&s) {
-            LinkKind::Invite { republic, inviter } => LinkPreview {
-                kind: 1,
-                republic: republic.into(),
-                who: inviter.into(),
-            },
-            LinkKind::Recovery { republic, member } => LinkPreview {
-                kind: 2,
-                republic: republic.into(),
-                who: member.into(),
-            },
-            LinkKind::Unrecognized => LinkPreview::default(),
+        // on every keystroke without any state to keep in sync. The relay
+        // deviation rides along: relays do not federate, so a link whose
+        // pool this node does not share is a hard blocker worth showing
+        // BEFORE the run can fail on it.
+        let weak_cl = ui.as_weak();
+        ui.on_classify_link(move |s| {
+            let missing = |relays: &[String]| -> (i32, slint::SharedString) {
+                let Some(ui) = weak_cl.upgrade() else { return (0, "".into()) };
+                let have: Vec<String> =
+                    ui.get_relay_rows().iter().map(|r| r.url.to_string()).collect();
+                let miss: Vec<&String> =
+                    relays.iter().filter(|u| !have.contains(u)).collect();
+                (
+                    i32::try_from(miss.len()).unwrap_or(0),
+                    miss.first().map(|u| u.as_str()).unwrap_or("").into(),
+                )
+            };
+            match link_kind(&s) {
+                LinkKind::Invite { republic, inviter } => {
+                    let (n, first) = molt_engine::FoundingInvite::parse(s.trim())
+                        .map(|inv| missing(&inv.handover.relays))
+                        .unwrap_or((0, "".into()));
+                    LinkPreview {
+                        kind: 1,
+                        republic: republic.into(),
+                        who: inviter.into(),
+                        missing: n,
+                        missing_first: first,
+                    }
+                }
+                LinkKind::Recovery { republic, member } => {
+                    let (n, first) = molt_engine::RecoveryInvite::parse(s.trim())
+                        .and_then(|inv| inv.handover.map(|h| missing(&h.relays)))
+                        .unwrap_or((0, "".into()));
+                    LinkPreview {
+                        kind: 2,
+                        republic: republic.into(),
+                        who: member.into(),
+                        missing: n,
+                        missing_first: first,
+                    }
+                }
+                LinkKind::Unrecognized => LinkPreview::default(),
+            }
         });
     }
 
@@ -933,6 +964,21 @@ pub fn run_app(
             if let Some(ui) = weak_toggle.upgrade() {
                 ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
             }
+        });
+    }
+    {
+        // step 4 of the create wizard: the re-typed phrase must MATCH, but
+        // whitespace runs and letter case never block an honest re-type
+        let weak = ui.as_weak();
+        ui.on_seed_matches(move |typed| {
+            let Some(ui) = weak.upgrade() else { return false };
+            let norm = |s: &str| {
+                s.split_whitespace()
+                    .map(str::to_lowercase)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            !typed.trim().is_empty() && norm(&typed) == norm(&ui.get_cw_seed())
         });
     }
     {
@@ -2162,6 +2208,11 @@ enum RecoverNotice {
     Failed(String),
     /// Rejoiner: the seat is recovered — the engine flips to Main itself.
     Done(String),
+    /// Coordinator: a returning member's request arrived and was REFUSED
+    /// (`member:reason` — e.g. the R5 relay gate naming the relay to add).
+    /// Without this the coordinator stares at a silent screen while the
+    /// rejoiner waits out its timeout.
+    Refused(String),
 }
 
 /// Split a session notice into its recovery reading (verbatim payload —
@@ -2181,6 +2232,8 @@ fn parse_recover_notice(notice: &str) -> RecoverNotice {
         RecoverNotice::Failed(error.to_string())
     } else if let Some(member) = notice.strip_prefix("recovered:") {
         RecoverNotice::Done(member.to_string())
+    } else if let Some(rest) = notice.strip_prefix("recover-refused:") {
+        RecoverNotice::Refused(rest.to_string())
     } else {
         RecoverNotice::None
     }
@@ -2547,6 +2600,13 @@ fn apply_session(
                 ui.set_rv_running(false);
                 ui.set_rv_error("".into());
                 ui.set_rv_note("".into());
+            }
+            RecoverNotice::Refused(what) => {
+                // coordinator: the request was refused — same link dialog,
+                // loud error slot (the reason names what to fix, e.g. the
+                // relay the pool must gain)
+                ui.set_recovery_link_error(what.into());
+                ui.set_recover_link_open(true);
             }
             RecoverNotice::None => {}
         }
@@ -5723,10 +5783,9 @@ lexicon! {
     // dial a relay in common. Stated at CREATE time because that is the last
     // moment the choice is cheap (§10.15, user-ratified 2026-08-02).
     cw_grp_relays: "Relays", "Relays";
-    cw_relays_hint: "Every member must reach the same relay.", "Jedes Mitglied muss denselben Relay erreichen.";
+    cw_relays_hint: "Nostr relays are the group's mailboxes. All members must share the identical relay pool.", "Nostr-Relays dienen als Briefkästen. Alle Mitglieder müssen sich den identischen Pool an Nostr-Relays teilen.";
     cw_relays_none: "No relay this node can dial - add one in Settings.", "Kein erreichbarer Relay - in den Einstellungen einen hinzufügen.";
     cw_relays_toggle: "Use for this republic", "Für diese Republik verwenden";
-    cw_relays_rule: "A self-hosted relay must be in every member's pool before they join.", "Ein selbst betriebener Relay muss vor dem Beitritt im Pool jedes Mitglieds stehen.";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
     cw_transport_hint: "How this node reaches the other members - one global setting for every republic.", "Wie dieser Node die anderen Mitglieder erreicht - eine globale Einstellung für jede Republik.";
     // this panel is about the ANONYMITY layer only (tor/none) — never the
@@ -5750,10 +5809,14 @@ lexicon! {
     // the button jumps to the anonymity tab (set-tab = 3) — it must not
     // promise the relay settings that now live one tab further
     cw_open_net_settings: "Open anonymity settings", "Anonymitäts-Einstellungen öffnen";
+    cw_open_relay_settings: "Relay settings", "Relay-Einstellungen";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members - it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder - er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
-    cw_charter_step: "Next step: agree on the charter - your input is needed", "Nächster Schritt: Einigt euch auf die Satzung - deine Eingabe ist gefragt";
+    cw_charter_step: "Agree on the charter", "Einigt euch auf die Satzung";
+    cw_seed_confirm_title: "Save your recovery phrase", "Sichere deine Wiederherstellungs-Phrase";
+    cw_seed_confirm_hint: "It is the only way back to this seat. Re-type it to continue.", "Sie ist der einzige Weg zurück zu deinem Sitz. Gib sie zur Bestätigung erneut ein.";
+    cw_seed_confirm_ph: "Re-type the phrase", "Phrase erneut eingeben";
     cw_charter_name_label: "Republic name", "Name der Republik";
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
     cw_charter_agenda_ph: "Agenda / charter - what this republic is for", "Agenda / Satzung - wofür diese Republik steht";
@@ -5937,6 +6000,7 @@ lexicon! {
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
+    rw_link_missing_relays: "of the link's relays are not in your pool", "der Link-Relays fehlen in deinem Pool";
     rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";

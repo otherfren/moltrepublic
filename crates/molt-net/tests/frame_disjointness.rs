@@ -33,6 +33,7 @@ fn ritual() -> RitualMsg {
         mac: "cc".repeat(32),
         reply: None,
         key_package: "dd".repeat(64),
+        relays: Vec::new(),
     })
 }
 

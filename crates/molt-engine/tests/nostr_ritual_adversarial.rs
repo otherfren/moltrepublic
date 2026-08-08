@@ -216,6 +216,7 @@ async fn a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused() {
             ),
             reply: None,
             key_package: mallory.key_package.clone(),
+            relays: Vec::new(),
         }),
     )
     .await
@@ -255,6 +256,7 @@ async fn a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused() {
             ),
             reply: None,
             key_package: mallory.key_package.clone(),
+            relays: Vec::new(),
         }),
     )
     .await

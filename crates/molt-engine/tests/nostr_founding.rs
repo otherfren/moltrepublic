@@ -1460,6 +1460,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
                 mac,
                 reply: None,
                 key_package: String::new(),
+                relays: Vec::new(),
             }),
         )
         .await

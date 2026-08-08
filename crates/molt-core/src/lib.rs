@@ -3571,6 +3571,11 @@ pub enum Command {
         /// can add it to the group. Empty on a pre-MLS path.
         #[serde(default)]
         key_package: String,
+        /// The relays the joiner actually dials (its confirmed subset of the
+        /// invite pool) — display-grade: lets the founder's ritual log name a
+        /// relay this member cannot reach. Empty = no declaration.
+        #[serde(default)]
+        relays: Vec<String>,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

@@ -172,6 +172,7 @@ pub(crate) fn spawn_founder_inbox(
                 reply: String::new(),
                 sender_npub: sender,
                 key_package: j.key_package,
+                relays: j.relays,
                 generation: Some(generation),
             };
             if !send_cmd(&tx, cmd).await {
@@ -1138,6 +1139,9 @@ async fn member_join(
             mac,
             reply: None,
             key_package: hex::encode(&kp),
+            // what this joiner actually dials — the founder's log names any
+            // pool relay missing from it
+            relays: dial_relays.clone(),
         }),
     )
     .await

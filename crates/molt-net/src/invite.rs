@@ -383,6 +383,13 @@ pub struct JoinRequest {
     /// and the MLS credential (concept §3.3). Empty on a pre-MLS path.
     #[serde(default)]
     pub key_package: String,
+    /// The relays this joiner actually dials (its confirmed subset of the
+    /// invite pool) — DISPLAY-grade, not MAC-bound: it lets the founder say
+    /// "this member cannot reach relay X" in the ritual log instead of both
+    /// sides staring at a partial mesh. Empty = no declaration (loopback,
+    /// pre-declaration senders).
+    #[serde(default)]
+    pub relays: Vec<String>,
 }
 
 /// A total-loss member's activation of a recovery link (recovery_ritual.md §4):
@@ -757,6 +764,7 @@ mod tests {
                 mac: "bb".repeat(32),
                 reply: None,
                 key_package: "cc".repeat(20),
+                relays: Vec::new(),
             }),
             RitualMsg::Seal {
                 proposal: "{\"name\":\"Guild\"}".into(),

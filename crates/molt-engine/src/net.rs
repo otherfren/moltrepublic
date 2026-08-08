@@ -1669,6 +1669,12 @@ impl State {
                 tracing::info!(%member, "recovery seat proof verified — proposing re-admission");
             }
             Err(e) => {
+                // the operator must SEE the refusal (relay-pool mismatch is
+                // the common honest cause — R5 names the relay to add); a
+                // tracing-only drop left the coordinator staring at a silent
+                // screen while the rejoiner waited out its timeout
+                self.session.notice = format!("recover-refused:{member}:{e}");
+                self.emit_session(SessionScope::Full);
                 tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
             }
         }
