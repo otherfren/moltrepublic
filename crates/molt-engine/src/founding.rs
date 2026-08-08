@@ -900,9 +900,13 @@ pub struct InviteMaterial<T: molt_net::Transport = RitualTransport> {
 /// A full founding-invite link: the [`molt_core::InviteInfo`] display preview
 /// plus the **v2 handover** ([`molt_net::invite::InviteHandoverV2`] — founder
 /// npub, invite relays, the FULL ticket) a *separate node* (a second moltd,
-/// the GUI join flow) needs to join a founding over Nostr. Rendered as the
-/// preview link with one extra hex-wrapped segment, so `InviteInfo::parse`
-/// still reads the preview and a joining node reads the whole thing here.
+/// the GUI join flow) needs to join a founding over Nostr.
+///
+/// The URL is **neutral** (2026-08-08): `molt://invite/<segment>`, hex over a
+/// versioned envelope carrying preview and handover — the URL itself names
+/// neither the republic nor the inviter. (Hex is encoding, not encryption:
+/// the link's holder can decode it — but the holder is the invitee, who must
+/// learn those names anyway.) Pre-neutral path-shaped links still parse.
 /// The pre-N4 queue-shaped handover is REJECTED with an honest message —
 /// nothing real could ever join from it (it carried only a ticket prefix).
 #[doc(hidden)]
@@ -915,22 +919,93 @@ pub struct FoundingInvite {
     pub handover: molt_net::invite::InviteHandoverV2,
 }
 
+/// The neutral link's envelope: the display preview plus the v2 handover's
+/// wire JSON, hexed once as the link's single segment.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NeutralInviteWire {
+    v: u8,
+    republic: String,
+    m: u8,
+    n: u8,
+    inviter: String,
+    ticket: String,
+    h2: String,
+}
+
+/// The neutral-envelope version — the third link generation (path+queue,
+/// path+v2, neutral). Distinct from the inner handover's version (v2).
+const INVITE_LINK_VERSION: u8 = 3;
+
 impl FoundingInvite {
-    /// Render the full joinable link: the preview link plus the handover as
-    /// one URL-safe hex segment.
+    /// Render the full joinable link as its one neutral hex segment.
     pub fn render(&self) -> Result<String, String> {
         let blob = self.handover.encode().map_err(|e| e.to_string())?;
-        Ok(format!("{}/{}", self.info.render(), blob))
+        let wire = NeutralInviteWire {
+            v: INVITE_LINK_VERSION,
+            republic: self.info.republic.clone(),
+            m: self.info.threshold,
+            n: self.info.members,
+            inviter: self.info.inviter.clone(),
+            ticket: self.info.ticket.clone(),
+            // the inner WIRE JSON, not its hex — hexing once at the end
+            // keeps the link half the length
+            h2: String::from_utf8(hex::decode(&blob).unwrap_or_default()).unwrap_or_default(),
+        };
+        let json = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+        Ok(format!("molt://invite/{}", hex::encode(json)))
+    }
+
+    /// Parse a neutral single-segment link — same sanity gates the path
+    /// shape enforced, then the handover decode's own fail-closed ladder.
+    fn parse_neutral(segment: &str) -> Result<FoundingInvite, String> {
+        let bytes =
+            hex::decode(segment).map_err(|_| "not an invite link".to_string())?;
+        let text =
+            String::from_utf8(bytes).map_err(|_| "not an invite link".to_string())?;
+        let wire: NeutralInviteWire =
+            serde_json::from_str(&text).map_err(|_| "not an invite link".to_string())?;
+        if wire.v != INVITE_LINK_VERSION {
+            return Err(format!(
+                "unsupported invite link version {} — this build reads v{INVITE_LINK_VERSION}",
+                wire.v
+            ));
+        }
+        let info = molt_core::InviteInfo {
+            republic: wire.republic,
+            threshold: wire.m,
+            members: wire.n,
+            inviter: wire.inviter,
+            ticket: wire.ticket,
+        };
+        if info.republic.trim().is_empty()
+            || info.inviter.is_empty()
+            || info.ticket.len() < 4
+            || info.threshold == 0
+            || info.members < 2
+            || info.threshold > info.members
+        {
+            return Err("not an invite link".to_string());
+        }
+        let handover = molt_net::invite::InviteHandoverV2::decode(&hex::encode(wire.h2.as_bytes()))
+            .map_err(|e| e.to_string())?;
+        Ok(FoundingInvite { info, handover })
     }
 
     /// Parse a full founding link — the error is surfaced to the joiner, so
     /// it distinguishes "no handover at all" (a bare preview link) from a
     /// malformed/older handover.
     pub fn parse(link: &str) -> Result<FoundingInvite, String> {
-        let info = molt_core::InviteInfo::parse(link)
+        let trimmed = link.trim();
+        let rest = trimmed
+            .strip_prefix("molt://invite/")
             .ok_or_else(|| "not an invite link".to_string())?;
-        let (head, blob) = link
-            .trim()
+        if !rest.contains('/') {
+            return Self::parse_neutral(rest);
+        }
+        // the pre-neutral path shape
+        let info = molt_core::InviteInfo::parse(trimmed)
+            .ok_or_else(|| "not an invite link".to_string())?;
+        let (head, blob) = trimmed
             .rsplit_once('/')
             .ok_or_else(|| "not an invite link".to_string())?;
         // a bare preview link's last segment is the ticket prefix itself —
@@ -3858,7 +3933,35 @@ mod tests {
         let link = sample_invite().render().expect("renders");
         let back = FoundingInvite::parse(&link).expect("parses");
         assert_eq!(back.handover, sample_invite().handover);
-        assert_eq!(back.info.republic, "Chess Club");
+        assert_eq!(back.info, sample_invite().info);
+    }
+
+    /// The link is NEUTRAL (2026-08-08): one opaque hex segment. Republic,
+    /// rule and inviter ride inside it — the URL itself names nothing.
+    #[test]
+    fn a_founding_invite_link_is_neutral() {
+        let link = sample_invite().render().expect("renders");
+        let seg = link.strip_prefix("molt://invite/").expect("invite scheme");
+        assert!(!seg.contains('/'), "one opaque segment: {link}");
+        assert!(
+            seg.bytes().all(|b| b.is_ascii_hexdigit()),
+            "nothing but hex after the scheme: {link}"
+        );
+    }
+
+    /// Pre-neutral links (`molt://invite/<republic>/<m>of<n>/<inviter>/
+    /// <ticket>/<blob>`) still parse — the preview from the path.
+    #[test]
+    fn an_old_path_shaped_invite_link_still_parses() {
+        let inv = sample_invite();
+        let old = format!(
+            "{}/{}",
+            inv.info.render(),
+            inv.handover.encode().expect("encodes")
+        );
+        let back = FoundingInvite::parse(&old).expect("old link parses");
+        assert_eq!(back.info, inv.info);
+        assert_eq!(back.handover, inv.handover);
     }
 
     /// The parse is fail-closed AND honest: a bare preview link, a

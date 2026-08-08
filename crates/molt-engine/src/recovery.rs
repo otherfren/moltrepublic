@@ -24,16 +24,21 @@ use tokio::sync::mpsc;
 /// 2026-07-11).
 pub const RECOVERY_WELCOME_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-/// A recovery link — `molt://recover/<republic>/<member>/<ticket>/<handover>` —
-/// mirroring [`crate::FoundingInvite`], but for an *existing* seat. It carries a
-/// transport handover (the coordinator's recovery queue) and a single-use ticket
-/// the seat proof binds. The `<handover>` segment is
-/// `hex(server ‖ '\n' ‖ queue_id ‖ '\n' ‖ wrap)` so a server URL's `//@=`
-/// cannot leak into the path. A link without a handover parses as a preview
-/// only and is not actionable.
+/// A recovery link — `molt://recover/<segment>` — mirroring
+/// [`crate::FoundingInvite`], but for an *existing* seat. It carries a
+/// transport handover (the coordinator's recovery queue) and a single-use
+/// ticket the seat proof binds.
+///
+/// The URL is **neutral** (2026-08-08): the one `<segment>` is hex over a
+/// versioned envelope carrying republic, member and the handover — a link
+/// glimpsed in a chat log, a shoulder-surf or a link preview names neither
+/// the workspace nor the seat. (Hex is encoding, not encryption: whoever
+/// HOLDS the link can decode it — but the holder is the rejoiner, who must
+/// learn those names anyway.) Pre-neutral path-shaped links
+/// (`molt://recover/<republic>/<member>/<ticket>/<handover>`) still parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryInvite {
-    /// The republic's display name (spaces travel as dashes).
+    /// The republic's display name.
     pub republic: String,
     /// The returning member's seat handle.
     pub member: String,
@@ -59,26 +64,115 @@ pub struct RecoveryInvite {
     pub handover: Option<molt_net::invite::RecoveryHandoverV2>,
 }
 
+/// The neutral link's envelope: the display names plus EITHER the v2 Nostr
+/// handover's wire JSON (`h2`) or the legacy queue fields — exactly what the
+/// path segments used to leak. Hexed once as the link's single segment.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NeutralRecoveryWire {
+    v: u8,
+    republic: String,
+    member: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    h2: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    ticket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    server: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    queue_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    wrap: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    republic_id: String,
+}
+
+/// The neutral-envelope version — the third link generation (path+queue,
+/// path+v2, neutral). Distinct from `RECOVERY_HANDOVER_VERSION` (the inner
+/// blob), which stays v2.
+const RECOVERY_LINK_VERSION: u8 = 3;
+
 impl RecoveryInvite {
-    /// Render the link (preview + hex transport handover).
+    /// Render the link as its one neutral hex segment.
     ///
-    /// A v2 handover renders the Nostr shape; without one it falls back to
-    /// the queue shape, so a loopback/test link still round-trips.
+    /// A v2 handover rides as its wire JSON; without one the envelope carries
+    /// the queue fields, so a loopback/test link still round-trips.
     pub fn render(&self) -> String {
-        let handover = match self.handover.as_ref().map(|h| h.encode()) {
-            Some(Ok(blob)) => blob,
-            _ => hex::encode(format!(
-                "{}\n{}\n{}\n{}",
-                self.server, self.queue_id, self.wrap, self.republic_id
-            )),
+        let wire = match self.handover.as_ref().map(|h| h.encode()) {
+            Some(Ok(blob)) => NeutralRecoveryWire {
+                v: RECOVERY_LINK_VERSION,
+                republic: self.republic.clone(),
+                member: self.member.clone(),
+                // the inner WIRE JSON, not its hex — hexing once at the end
+                // keeps the link half the length
+                h2: String::from_utf8(hex::decode(&blob).unwrap_or_default())
+                    .unwrap_or_default(),
+                ticket: String::new(),
+                server: String::new(),
+                queue_id: String::new(),
+                wrap: String::new(),
+                republic_id: String::new(),
+            },
+            _ => NeutralRecoveryWire {
+                v: RECOVERY_LINK_VERSION,
+                republic: self.republic.clone(),
+                member: self.member.clone(),
+                h2: String::new(),
+                ticket: self.ticket.clone(),
+                server: self.server.clone(),
+                queue_id: self.queue_id.clone(),
+                wrap: self.wrap.clone(),
+                republic_id: self.republic_id.clone(),
+            },
         };
         format!(
-            "molt://recover/{}/{}/{}/{}",
-            self.republic.replace(' ', "-"),
-            self.member,
-            self.ticket,
-            handover,
+            "molt://recover/{}",
+            hex::encode(serde_json::to_string(&wire).unwrap_or_default())
         )
+    }
+
+    /// Parse a neutral single-segment link; `None` if the envelope or its
+    /// handover is damaged, or the names a rejoiner needs are missing.
+    fn parse_neutral(segment: &str) -> Option<RecoveryInvite> {
+        let text = String::from_utf8(hex::decode(segment).ok()?).ok()?;
+        let wire: NeutralRecoveryWire = serde_json::from_str(&text).ok()?;
+        if wire.v != RECOVERY_LINK_VERSION
+            || wire.republic.trim().is_empty()
+            || wire.member.is_empty()
+        {
+            return None;
+        }
+        if !wire.h2.is_empty() {
+            let h = molt_net::invite::RecoveryHandoverV2::decode(&hex::encode(wire.h2.as_bytes()))
+                .ok()?;
+            return Some(RecoveryInvite {
+                republic: wire.republic,
+                member: wire.member,
+                ticket: h.ticket.clone(),
+                server: String::new(),
+                queue_id: String::new(),
+                wrap: String::new(),
+                republic_id: h.republic_id.clone(),
+                handover: Some(h),
+            });
+        }
+        if wire.ticket.len() < 4
+            || wire.server.is_empty()
+            || wire.queue_id.is_empty()
+            || wire.wrap.is_empty()
+            || wire.republic_id.is_empty()
+        {
+            return None;
+        }
+        Some(RecoveryInvite {
+            republic: wire.republic,
+            member: wire.member,
+            ticket: wire.ticket,
+            server: wire.server,
+            queue_id: wire.queue_id,
+            wrap: wire.wrap,
+            republic_id: wire.republic_id,
+            handover: None,
+        })
     }
 
     /// Parse a `molt://recover/…` link; `None` if it is not a well-formed,
@@ -86,8 +180,13 @@ impl RecoveryInvite {
     pub fn parse(link: &str) -> Option<RecoveryInvite> {
         let rest = link.trim().strip_prefix("molt://recover/")?;
         let mut parts = rest.split('/');
-        let republic = parts.next()?.replace('-', " ");
-        let member = parts.next()?.to_string();
+        let first = parts.next()?;
+        let Some(second) = parts.next() else {
+            return Self::parse_neutral(first);
+        };
+        // the pre-neutral path shape: republic/member/ticket/handover
+        let republic = first.replace('-', " ");
+        let member = second.to_string();
         let ticket = parts.next()?.to_string();
         let handover_hex = parts.next()?;
         if parts.next().is_some() {
@@ -888,11 +987,84 @@ mod tests {
         let inv = sample();
         let link = inv.render();
         assert!(link.starts_with("molt://recover/"), "the scheme names recovery");
-        assert!(
-            link.contains("Chess-Club"),
-            "spaces in the republic travel as dashes"
-        );
         assert_eq!(RecoveryInvite::parse(&link).as_ref(), Some(&inv));
+    }
+
+    /// The link is NEUTRAL (2026-08-08): one opaque hex segment. Republic and
+    /// member ride inside it — a URL glimpsed over a shoulder, in a chat log
+    /// or a link preview names neither the workspace nor the seat. Both
+    /// shapes (v2/Nostr and legacy queue) render neutral.
+    #[test]
+    fn a_recovery_link_is_neutral() {
+        let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
+        let v2 = RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "dora".to_string(),
+            ticket: "ab".repeat(32),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            republic_id: "f00dcafe".to_string(),
+            handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                ticket: "ab".repeat(32),
+                npub,
+                relays: vec!["wss://relay.example.org".to_string()],
+                republic_id: "f00dcafe".to_string(),
+            }),
+        };
+        let legacy = RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "dora".to_string(),
+            ticket: "cd".repeat(8),
+            server: "smp://f@h".to_string(),
+            queue_id: "aabb".to_string(),
+            wrap: "ef".repeat(32),
+            republic_id: "f00d".to_string(),
+            handover: None,
+        };
+        for inv in [v2, legacy] {
+            let link = inv.render();
+            let seg = link.strip_prefix("molt://recover/").expect("recovery scheme");
+            assert!(!seg.contains('/'), "one opaque segment: {link}");
+            assert!(
+                seg.bytes().all(|b| b.is_ascii_hexdigit()),
+                "nothing but hex after the scheme: {link}"
+            );
+            let back = RecoveryInvite::parse(&link).expect("neutral link parses");
+            assert_eq!(back.republic, inv.republic, "the name still reaches the rejoiner");
+            assert_eq!(back.member, inv.member);
+        }
+    }
+
+    /// Pre-neutral links (`molt://recover/<republic>/<member>/<ticket>/<blob>`)
+    /// still parse — names from the path, both blob shapes.
+    #[test]
+    fn an_old_path_shaped_recovery_link_still_parses() {
+        // legacy queue blob
+        let blob = hex::encode("smp://f@h\naabb\ncdcd\nf00d");
+        let link = format!("molt://recover/Chess-Club/dora/{}/{}", "cd".repeat(8), blob);
+        let back = RecoveryInvite::parse(&link).expect("old legacy link parses");
+        assert_eq!(back.republic, "Chess Club", "dashes decode back to spaces");
+        assert_eq!(back.member, "dora");
+        assert_eq!(back.server, "smp://f@h");
+        assert!(back.handover.is_none());
+        // v2 blob straight as the fourth segment
+        let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
+        let h = molt_net::invite::RecoveryHandoverV2 {
+            ticket: "ab".repeat(32),
+            npub,
+            relays: vec!["wss://relay.example.org".to_string()],
+            republic_id: "f00dcafe".to_string(),
+        };
+        let link = format!(
+            "molt://recover/Chess-Club/dora/{}/{}",
+            "ab".repeat(32),
+            h.encode().expect("encodes")
+        );
+        let back = RecoveryInvite::parse(&link).expect("old v2 link parses");
+        assert_eq!(back.republic, "Chess Club");
+        assert_eq!(back.member, "dora");
+        assert!(back.handover.is_some());
     }
 
     /// The coordinator's welcome-send half: given the rejoiner's advertised reply

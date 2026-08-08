@@ -68,9 +68,15 @@ layers:
 
 - a **preview** — republic name, *m*-of-*n*, inviter handle, a ticket stub —
   which any node can parse to show the user *what* they are joining; and
-- a **transport handover** — where and how to reach the founder — appended as
-  one opaque segment. A link that carries no handover is a preview only and is
-  **not joinable** (it is rejected with a clear message).
+- a **transport handover** — where and how to reach the founder.
+
+Since 2026-08-08 both layers ride inside the link's ONE opaque hex segment
+(`molt://invite/<segment>`): the URL itself is **neutral** — it names neither
+the republic nor the inviter, so a glimpsed or logged link leaks nothing.
+(Hex is encoding, not encryption; the link's *holder* — the invitee — decodes
+the preview, which they must learn anyway.) Older path-shaped links still
+parse. A link that carries no handover is a preview only and is **not
+joinable** (it is rejected with a clear message).
 
 The security core of the invite is the **ticket**: a high-entropy, single-use
 secret. Activating an invite is cryptographically bound to its ticket by a MAC

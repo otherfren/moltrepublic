@@ -3976,6 +3976,9 @@ mod tests {
                     for seat in &s.create.seats {
                         assert_eq!(seat.state, 2, "every seat sealed");
                         assert!(!seat.member.is_empty(), "the member named itself");
+                        // a SIMULATED founding mints preview-only links (the
+                        // path shape, no handover) — the preview parser is
+                        // the right reader; real links are neutral segments
                         let info =
                             molt_core::InviteInfo::parse(&seat.link).expect("invite parses");
                         assert_eq!(info.republic, "Chess Club");

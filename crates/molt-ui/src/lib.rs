@@ -181,8 +181,11 @@ pub fn run_app(
 
     {
         let weak = ui.as_weak();
-        ui.on_parse_invite(move |s| match molt_core::InviteInfo::parse(&s) {
-            Some(i) => {
+        // the FULL parser, not the preview one: since the neutral link shape
+        // (2026-08-08) the preview data rides inside the handover segment,
+        // and only a JOINABLE link should ever preview as valid
+        ui.on_parse_invite(move |s| match molt_engine::FoundingInvite::parse(&s).map(|i| i.info) {
+            Ok(i) => {
                 // how many of the republic's relays this node does not have.
                 // The invite carries them, so a refused joiner never has to
                 // copy them out of a chat message by hand.
@@ -198,7 +201,7 @@ pub fn run_app(
                     missing_relays: missing,
                 }
             }
-            None => InvitePreview::default(),
+            Err(_) => InvitePreview::default(),
         });
         // the Restore wizard's one link field: which of the two flows is
         // this link for? Pure, like parse_invite, so the panel re-reads it
@@ -5680,8 +5683,8 @@ lexicon! {
     field_tor_mode: "Tor mode", "Tor-Modus";
     field_tor_port: "Tor SOCKS port", "Tor-SOCKS-Port";
     smp_testing: "testing…", "teste…";
-    field_threshold: "Threshold (m)", "Schwelle (m)";
-    field_members: "Members (n)", "Mitglieder (n)";
+    field_threshold: "Threshold", "Schwelle";
+    field_members: "Members", "Mitglieder";
     field_language: "Language", "Sprache";
     field_theme: "Theme", "Erscheinungsbild";
     field_workspace_dir: "Workspace directory", "Workspace-Verzeichnis";
@@ -5698,7 +5701,7 @@ lexicon! {
     ph_ws_name: "My new republic", "Meine neue Republik";
     ph_member: "my name", "mein Name";
     ph_seed: "word1 word2 word3 …", "wort1 wort2 wort3 …";
-    cw_republic_hint: "Its name, and the handle the other members will see you by.", "Ihr Name und das Handle, unter dem dich die anderen Mitglieder sehen.";
+    field_member_name: "My user name", "Mein Benutzername";
     cw_grp_rule: "Approval Rules", "Zustimmungsregeln";
     cw_rule_hint: "Gated changes apply only once enough members approve.", "Geschützte Änderungen gelten erst, wenn genug Mitglieder zustimmen.";
     cw_rule_warn: "not recommended", "nicht empfohlen";

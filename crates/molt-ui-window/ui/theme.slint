@@ -197,8 +197,8 @@ export struct BackupRow {
 }
 
 // The parsed preview of an invite link on the Join screen. Filled by Rust via
-// the pure `parse-invite` callback (the same molt-core parser the engine's
-// join run uses, so the preview and the run can never disagree).
+// the pure `parse-invite` callback (the same molt-engine parser the join run
+// uses, so the preview and the run can never disagree).
 export struct InvitePreview {
     valid: bool,
     republic: string,
@@ -442,7 +442,7 @@ export global Strings {
     in property <string> ph-ws-name;
     in property <string> ph-member;
     in property <string> ph-seed;
-    in property <string> cw-republic-hint;
+    in property <string> field-member-name;
     in property <string> cw-grp-rule;
     in property <string> cw-rule-hint;
     in property <string> cw-rule-warn;

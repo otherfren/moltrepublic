@@ -2341,21 +2341,35 @@ export component AppWindow inherits Window {
                     // who this republic is
                     RestoreWay {
                         title: Strings.cw-grp-republic;
-                        hint: Strings.cw-republic-hint;
                         icon: @image-url("assets/republic.svg");
                         VerticalLayout {
                             spacing: 6px;
                             HorizontalLayout {
                                 spacing: 12px;
-                                AppField {
+                                VerticalLayout {
                                     horizontal-stretch: 3;
-                                    text <=> root.cw-name;
-                                    placeholder: Strings.ph-ws-name;
+                                    spacing: 5px;
+                                    // the panel title IS this field's caption;
+                                    // the spacer keeps both fields on one
+                                    // baseline beside the captioned one
+                                    Rectangle { vertical-stretch: 1; }
+                                    AppField {
+                                        text <=> root.cw-name;
+                                        placeholder: Strings.ph-ws-name;
+                                    }
                                 }
-                                AppField {
+                                VerticalLayout {
                                     horizontal-stretch: 2;
-                                    text <=> root.cw-member;
-                                    placeholder: Strings.ph-member;
+                                    spacing: 5px;
+                                    Text {
+                                        text: Strings.field-member-name;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                    }
+                                    AppField {
+                                        text <=> root.cw-member;
+                                        placeholder: Strings.ph-member;
+                                    }
                                 }
                             }
                             // where this republic will live on disk, live
@@ -2387,7 +2401,11 @@ export component AppWindow inherits Window {
                                 AppStepper {
                                     width: 120px;
                                     value <=> root.cw-threshold;
-                                    minimum: 1;
+                                    // never 1: a lone voice is no threshold,
+                                    // and m=1 breeds special cases in the
+                                    // decision logic (product decision
+                                    // 2026-08-08)
+                                    minimum: 2;
                                     maximum: root.cw-members;
                                 }
                             }

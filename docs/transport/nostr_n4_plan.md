@@ -164,6 +164,12 @@ molt://invite/<republic>/<m>of<n>/<inviter>/<ticket-prefix>/<hex(v2-handover)>
 v2-handover = JSON { v: 2, ticket, npub, relays: [url, …] }
 ```
 
+> **Superseded 2026-08-08 (neutral URL):** the link is now ONE opaque hex
+> segment — `molt://invite/<hex({v:3, republic, m, n, inviter, ticket, h2})>`
+> with the v2 handover's wire JSON as `h2` — so the URL no longer names the
+> republic or the inviter. Path-shaped links still parse. Authority:
+> `molt-engine/src/founding.rs` (`FoundingInvite`).
+
 - **The FULL ticket moves into the handover blob** (the preview segment
   stays the 10-char display prefix). Today's joinable link cannot compute
   `join_mac` at all — production join was never reachable, so there is no
@@ -353,6 +359,10 @@ founded Nostr workspace → honest classification, no supervisor, no crash.
    <hex({v:2, ticket, npub, relays, republic_id})>` — coordinator npub +
    relays; minting requires no queue, so `spawn_recovery_provisioning`
    reduces to inbox-subscription-then-`NetRecoverLinkReady`.
+   *(Superseded 2026-08-08, neutral URL: one opaque hex segment
+   `molt://recover/<hex({v:3, republic, member, h2})>` — the URL names
+   neither workspace nor member; path-shaped links still parse. Authority:
+   `molt-engine/src/recovery.rs`.)*
 2. **RecoverRequest** rides a 1059 to the coordinator npub. The total-loss
    rejoiner has NO anchored nostr key, so it derives an **ephemeral rejoin
    key from the recovery ticket** (`nostr_identity(entropy, ticket)` —

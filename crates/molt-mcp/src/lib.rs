@@ -1344,7 +1344,7 @@ pub fn tools() -> Vec<ToolDef> {
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "invite": { "type": "string", "description": "molt://invite/<republic>/<m>of<n>/<inviter>/<ticket>" },
+                    "invite": { "type": "string", "description": "the molt://invite/… link (one opaque segment; older path-shaped links still parse)" },
                     "member": { "type": "string", "description": "the joiner's handle" }
                 },
                 "required": ["invite", "member"]
