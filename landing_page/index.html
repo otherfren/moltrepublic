@@ -132,8 +132,9 @@
   .hero-row .hero-text { flex: 1 1 44%; min-width: 0; }
   .hero-row .hero-fig { flex: 1 1 56%; min-width: 0; margin: 0; }
   @media (max-width: 760px) { .hero-row { flex-direction: column; align-items: stretch; gap: 28px; } }
-  .current_dev { margin-top: 28px; display: flex; align-items: center; justify-content: center; gap: 16px; text-align: center; color: var(--live); }
-  .current_dev .warn-ico { width: 46px; height: 46px; flex: 0 0 auto; }
+  .current_dev { margin-top: 28px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; color: var(--live); }
+  .current_dev_title { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.15rem; }
+  .current_dev .warn-ico { width: 20px; height: 20px; flex: 0 0 auto; }
 
   /* diagram */
   section { padding: 56px 0; border-bottom: 1px solid var(--rule); }
@@ -340,11 +341,19 @@
       </div>
     </div>
     <div class="current_dev">
-      <svg class="warn-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M12 3 2 21h20z" fill="#f7c948" stroke="#f7c948" stroke-width="2.5" stroke-linejoin="round"/>
-        <path d="M12 9.2v5" stroke="#161a20" stroke-width="2.4" stroke-linecap="round"/>
-        <circle cx="12" cy="17.6" r="1.35" fill="#161a20"/>
-      </svg>
+      <div class="current_dev_title">
+        <svg class="warn-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 3 2 21h20z" fill="#f7c948" stroke="#f7c948" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M12 9.2v5" stroke="#161a20" stroke-width="2.4" stroke-linecap="round"/>
+          <circle cx="12" cy="17.6" r="1.35" fill="#161a20"/>
+        </svg>
+        <span>pre-alpha Version</span>
+        <svg class="warn-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 3 2 21h20z" fill="#f7c948" stroke="#f7c948" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M12 9.2v5" stroke="#161a20" stroke-width="2.4" stroke-linecap="round"/>
+          <circle cx="12" cy="17.6" r="1.35" fill="#161a20"/>
+        </svg>
+      </div>
       <span data-i18n-html="currentDev">Live today: founding, membership and threshold governance over Nostr relays and Tor.<br/>In development: Company brain</span>
     </div>
   </div>
