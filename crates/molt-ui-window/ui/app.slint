@@ -1933,10 +1933,11 @@ export component AppWindow inherits Window {
                             s: s;
                             selected: s.key == root.nav-expanded;
                             compact: root.nav-collapsed;
-                            // every surface is selectable again: Memory,
-                            // Quests, Vault and Wallet open their badged
-                            // DESIGN-MOCK panes (surfaces.slint) while the
-                            // real implementations land stepwise
+                            // Quests, Vault and Wallet are staged out (greyed,
+                            // click-dead) until their real implementations
+                            // land; Memory stays selectable and opens its
+                            // badged DESIGN-MOCK pane (surfaces.slint)
+                            enabled: s.key != "quests" && s.key != "vault" && s.key != "wallet";
                             chosen => {
                                 root.mv-draft = "";
                                 root.select-surface(s.key);
