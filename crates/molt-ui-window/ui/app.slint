@@ -2669,6 +2669,7 @@ export component AppWindow inherits Window {
                     // means the ritual is over for good; anything else is a
                     // network-shaped failure and links to the settings.
                     if root.cw-outcome == 2: Rectangle {
+                        vertical-stretch: 0;
                         background: Theme.bad.transparentize(0.92);
                         border-radius: Theme.win95 ? 0px : 8px;
                         border-width: Theme.border-w;
@@ -2725,6 +2726,7 @@ export component AppWindow inherits Window {
                     // the screen must SAY so (a silent lobby right after
                     // "Propose & Seal" reads as a bug)
                     if root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                        vertical-stretch: 0;
                         background: Theme.panel;
                         border-radius: Theme.win95 ? 0px : 8px;
                         border-width: Theme.border-w;
@@ -2897,6 +2899,9 @@ export component AppWindow inherits Window {
                     // "input needed now". It never stretches; the log below
                     // takes the leftover height. ----
                     if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                        // explicit: a Rectangle's implicit stretch is 1 and
+                        // would split the leftover height with the log
+                        vertical-stretch: 0;
                         background: Theme.panel;
                         border-radius: Theme.win95 ? 0px : 8px;
                         border-width: Theme.border-w;
@@ -2939,10 +2944,11 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                 }
                             }
-                            // the charter itself: seven visible lines, its
-                            // own scroll hint, the engine's 4096-char limit
+                            // the charter itself: seven visible body lines
+                            // (plus the skin's 2x8px padding), its own
+                            // scroll hint, the engine's 4096-char limit
                             AppArea {
-                                height: 156px;
+                                height: 7 * 1.2 * Theme.fs-body + 16px;
                                 text <=> root.cw-agenda;
                                 placeholder: Strings.cw-charter-agenda-ph;
                             }
