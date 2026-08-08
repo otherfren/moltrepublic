@@ -2155,6 +2155,12 @@ pub enum WorkspaceEvent {
         /// sign-the-SAME-change reason as `nostr_pk`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         relays: Vec<String>,
+        /// The restored seat's own co-signature over
+        /// [`chain::restore_consent_bytes`] — travels for the same
+        /// sign-the-SAME-change reason: it rides inside the change every
+        /// member signs (recovery approval design, 2026-08-08).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consent: Option<String>,
     },
     /// WP4b: a checkpoint cut was put forward — the gossip that lets every
     /// member recompute and co-sign the SAME state hash. Transport-only,
@@ -3617,6 +3623,13 @@ pub enum Command {
         /// Empty = no declaration.
         #[serde(default)]
         relays: Vec<String>,
+        /// The rejoiner's own co-signature over
+        /// [`chain::restore_consent_bytes`] — its automatic approval of its
+        /// re-admission (recovery approval design, 2026-08-08). Validated at
+        /// the ingest choke point; rides the `Restored` change and counts as
+        /// one distinct signer. Empty on pre-consent requests.
+        #[serde(default)]
+        consent: String,
         /// The member's reply-queue handover, for the coordinator to send the
         /// Welcome back once re-admission commits. Opaque here.
         #[serde(default)]

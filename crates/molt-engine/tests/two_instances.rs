@@ -2175,6 +2175,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         seat_proof,
         relays: Vec::new(),
         reply: None,
+        consent: String::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(
@@ -2209,7 +2210,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
 }
 
 /// **The recovery capstone: the whole ritual end-to-end, across instances.**
-/// A republic is founded 1-of-2 (threshold 1, so the lone surviving
+/// A republic is founded 2-of-2 (the surviving
 /// coordinator's self-cosign commits the re-admission — the lightest vehicle
 /// that exercises the REAL committed-block path). Member-b loses its device.
 /// The coordinator mints a recovery link; the rejoiner drives the real
@@ -2236,12 +2237,13 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
             molt_core::GroupConfig::demo(),
             session_a,
         );
-    // 1-of-2: the coordinator alone reaches the threshold (self-cosign), so
-    // the Restored block COMMITS with member-b's device gone
+    // 2-of-2: the coordinator's signature plus the rejoiner's consent
+    // (recovery approval design, 2026-08-08) seal the Restored block with
+    // member-b's device gone
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
-        threshold: 1,
+        threshold: 2,
         members: 2,
         relays: Vec::new(),
     })
@@ -2314,7 +2316,8 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     let inv = molt_engine::RecoveryInvite::parse(&material.link).expect("actionable link");
 
     // ❷–❻ the rejoiner drives the REAL recovery: seat proof over the minted
-    // ticket, coordinator verifies + proposes, the 1-of-2 self-cosign COMMITS
+    // ticket, coordinator verifies + proposes, its co-signature + the
+    // request's consent COMMIT
     // the Restored block, coordinator_rekey fires (restore_member → commit
     // broadcast + welcome + chain served), run_rejoin re-enters the group,
     // verifies the served chain from its genesis, and — dynamic mesh
@@ -2541,7 +2544,8 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
 /// second round runs, producing a SECOND `Restored` block for the same seat
 /// (same anchored identity; only the MLS leaf re-keys again).
 ///
-/// Founded 1-of-2 like the capstone test. ROUND 1 is the attempt that dies
+/// Founded 2-of-2 like the capstone test (the request's consent is the
+/// second voice). ROUND 1 is the attempt that dies
 /// from the REJOINER's perspective: a hand-driven `RecoverRequest` with a REAL
 /// fresh KeyPackage whose reply queue is never read — the coordinator
 /// verifies, proposes, self-cosigns, COMMITS Restored #1 and re-keys, and the
@@ -2567,12 +2571,12 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
             molt_core::GroupConfig::demo(),
             session_a,
         );
-    // 1-of-2: the coordinator alone reaches the threshold (self-cosign), so a
-    // Restored block COMMITS with member-b's device gone
+    // 2-of-2: coordinator signature + request consent, so a Restored block
+    // COMMITS with member-b's device gone
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
-        threshold: 1,
+        threshold: 2,
         members: 2,
         relays: Vec::new(),
     })
@@ -2658,6 +2662,12 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     let dead_reply_wrap = WrapKey::fresh().expect("round-1 reply wrap");
     let seat_proof =
         molt_engine::make_seat_proof(&b_sk, &material1.ticket, &kp_hex, &material1.republic_id, "", &[]);
+    // the seat's real consent — at 2-of-2 the Restored block seals from the
+    // coordinator's signature plus exactly this
+    let consent = molt_storage::identity_sign(
+        &b_sk,
+        &molt_core::chain::restore_consent_bytes(&material1.republic_id, "member-b", &b_pk, ""),
+    );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         new_nostr_pk: String::new(),
         member: "member-b".to_string(),
@@ -2666,6 +2676,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         ticket: material1.ticket.clone(),
         seat_proof,
         relays: Vec::new(),
+        consent,
         reply: Some(invite::ReplyHandover {
             server: dead_reply_q.snd.server.clone(),
             queue_id: hex::encode(&dead_reply_q.snd.id.0),
@@ -2801,7 +2812,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
 }
 
 /// **Recovery with a LIVE survivor: the re-key commit reaches the mesh.** A
-/// republic of three (1-of-3): the coordinator, member-c (a survivor whose
+/// republic of three (2-of-3): the coordinator, member-c (a survivor whose
 /// runtime supervisor keeps running), and member-b (device lost). The
 /// coordinator re-admits b through the full ritual; the survivor must live
 /// through the re-key — the engine's `coordinator_rekey` broadcasts the raw
@@ -2830,7 +2841,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
-        threshold: 1,
+        threshold: 2,
         members: 3,
         relays: Vec::new(),
     })
@@ -3907,7 +3918,7 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
-        threshold: 1,
+        threshold: 2,
         members: 2,
         relays: Vec::new(),
     })
@@ -4285,6 +4296,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         seat_proof,
         relays: Vec::new(),
         reply: None,
+        consent: String::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(

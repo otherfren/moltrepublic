@@ -323,6 +323,16 @@ impl State {
                 "payload must be a JSON object".into(),
             ));
         }
+        // reserved for the engine's membership machinery (recovery approval
+        // design, 2026-08-08): a user proposal wearing one of these ops would
+        // impersonate a membership record — `proposal_change`,
+        // `id_free_for` and `settle_membership_records` key on them
+        if matches!(
+            payload.get("op").and_then(Value::as_str),
+            Some("restore_member" | "add_member")
+        ) {
+            return Err(MoltError::BadPayload("reserved op".into()));
+        }
         validate_org_payload(surface, &payload)?;
         validate_payload_fits(surface, &payload, &self.roster())?;
         // R6: a pool edit that would strand a DECLARED member — sharing no

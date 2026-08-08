@@ -95,6 +95,32 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
 /// Found a real `threshold`-of-2 "Chess Club" over one in-process relay and
 /// hand back both live engines plus **petra's recovery phrase** — which a
 /// total-loss rejoiner is the only thing that still has.
+/// The second voice: wait until `w` sees the open proposal whose payload
+/// `value` matches, then approve it through the public command surface.
+async fn approve_value(w: &WalletHandle, value: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Reply::Proposals { proposals } =
+            w.execute(Command::ListProposals).await.expect("list proposals")
+        {
+            if let Some(p) = proposals.iter().find(|p| {
+                p.state == molt_core::ProposalState::Proposed
+                    && p.payload.get("value").and_then(|v| v.as_str()) == Some(value)
+            }) {
+                w.execute(Command::Approve { proposal: p.id })
+                    .await
+                    .expect("approve");
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the proposal {value:?} never reached the second voice"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn found_republic(
     root: &std::path::Path,
     url: &str,
@@ -355,10 +381,11 @@ async fn a_coordinator_that_cannot_reach_the_group_relays_says_which_switch() {
 /// 4. the rejoiner assembles the anchor until it verifies standalone and
 ///    materializes (6d) as a Nostr workspace.
 ///
-/// Threshold 1-of-2 is not a convenience: with m=2 the lost seat's own
-/// signature would be needed to re-admit it, so no 2-of-2 republic can ever
-/// recover a member. That is a real product limit, and this test is where it
-/// would otherwise have been discovered.
+/// Threshold **2-of-2** — the case that used to be a structural dead end
+/// (the lost seat's own signature would have been needed). Since the
+/// recovery approval design (2026-08-08) the rejoiner's CONSENT counts as
+/// one distinct signer, so walter's surviving signature plus petra's
+/// consent reach the threshold: m = n republics recover.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_seat_rejoins_the_republic_over_relays() {
     let _ = tracing_subscriber::fmt()
@@ -371,18 +398,16 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
 
-    // 1-of-2: walter alone can seal the Restored block that re-admits petra
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 1).await;
-    // petra's device is gone
-    drop(b);
+    // 2-of-2: walter's signature + petra's consent seal the Restored block
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
 
     // …and the republic keeps governing meanwhile, so the recovery's own
     // Restored block does NOT land at height 1. That gap is the point: the
     // coordinator serves the ANCHOR (height 0) while its outbox also carries
     // the new head, so the rejoiner sees a non-consecutive pair and must not
     // try to verify across the hole.
-    // at m=1 the proposer's own co-signature already meets the threshold, so
-    // each propose commits a block on its own
+    // At 2-of-2 each rename needs BOTH voices, so they commit while petra's
+    // device still lives — through the PUBLIC approve surface.
     for name in ["Chess Club Reloaded", "Chess Club Again"] {
         a.execute(Command::Propose {
             surface: molt_core::Surface::Organization,
@@ -390,11 +415,14 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
         })
         .await
         .expect("propose");
+        approve_value(&b, name).await;
+        wait_for(&a, "the rename to commit on both voices", |s| {
+            s.workspaces.iter().any(|w| w.name == name)
+        })
+        .await;
     }
-    wait_for(&a, "both governance blocks to commit", |s| {
-        s.workspaces.iter().any(|w| w.name == "Chess Club Again")
-    })
-    .await;
+    // NOW petra's device is gone
+    drop(b);
 
     a.execute(Command::RecoverInviteStart {
         member: "petra".to_string(),
@@ -491,7 +519,9 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
 
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 1).await;
+    // 2-of-2: the honest tail below still succeeds, because the rejoiner's
+    // consent is the second voice (recovery approval design, 2026-08-08)
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
     drop(b);
 
     a.execute(Command::RecoverInviteStart {
@@ -538,6 +568,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
                 new_nostr_pk: anchor,
                 relays: Vec::new(),
                 reply: None,
+                consent: String::new(),
             }),
         )
         .await

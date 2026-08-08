@@ -1403,8 +1403,17 @@ impl State {
                 member,
                 identity_pk,
                 relays,
+                consent,
             } if self.is_chain_governed() => {
-                self.receive_membership_proposal(id.0, op, &member, &identity_pk, nostr_pk, relays);
+                self.receive_membership_proposal(
+                    id.0,
+                    op,
+                    &member,
+                    &identity_pk,
+                    nostr_pk,
+                    relays,
+                    consent,
+                );
             }
             // WP4b: a peer proposed a compaction cut — recompute the state
             // hash from OUR chain and auto-co-sign only on a match
@@ -1578,6 +1587,7 @@ impl State {
         seat_proof: String,
         new_nostr_pk: String,
         relays: Vec<String>,
+        consent: String,
         reply: String,
         sender_npub: String,
         generation: Option<u64>,
@@ -1648,6 +1658,7 @@ impl State {
             &seat_proof,
             &canonical,
             &relays,
+            &consent,
             &reply,
         ) {
             Ok(_id) => {

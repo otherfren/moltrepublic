@@ -393,8 +393,9 @@ async fn publish_frame_now(
 /// republishes the SAME ciphertext — for an application frame that is safe:
 /// `decrypt_at`'s carrier stamp only feeds the concurrent-COMMIT tiebreak.
 pub(crate) enum FramePayload {
-    /// Encrypt this message against the group, then publish.
-    Encrypt(Arc<Mutex<molt_net::MlsMember>>, RitualMsg),
+    /// Encrypt this message against the group, then publish. Boxed: a
+    /// `RitualMsg` (a `RecoverRequest` is its widest arm) dwarfs `Sealed`.
+    Encrypt(Arc<Mutex<molt_net::MlsMember>>, Box<RitualMsg>),
     /// Already sealed by the caller (the genesis, encrypted before the group
     /// snapshot) — publish these bytes as they are.
     Sealed { ct: Vec<u8>, exporter: [u8; 32] },
@@ -864,6 +865,17 @@ async fn recovery_rejoin(
         &new_nostr_pk,
         &declared,
     );
+    // the automatic co-approval of the own re-admission (recovery approval
+    // design, 2026-08-08): one distinct signer toward the threshold
+    let consent = molt_storage::identity_sign(
+        &sk,
+        &molt_core::chain::restore_consent_bytes(
+            &h.republic_id,
+            &ctx.member,
+            &pk,
+            &new_nostr_pk,
+        ),
+    );
     net.send_ritual(
         &h.npub,
         &RitualMsg::Recover(invite::RecoverRequest {
@@ -875,6 +887,7 @@ async fn recovery_rejoin(
             new_nostr_pk,
             // R5: what this seat can actually dial — its ledger entry
             relays: declared,
+            consent,
             // Nostr replies to the gift-wrap anchor, not to a queue
             reply: None,
         }),

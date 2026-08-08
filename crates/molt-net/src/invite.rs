@@ -416,6 +416,13 @@ pub struct RecoverRequest {
     /// Empty = no declaration (pre-R5 requests, loopback).
     #[serde(default)]
     pub relays: Vec<String>,
+    /// The rejoiner's own co-signature over the restore-consent bytes
+    /// (`molt_core::chain::restore_consent_bytes`) — its automatic approval
+    /// of its re-admission, counted as one distinct signer once it rides the
+    /// `Restored` block. Empty on pre-consent requests (recovery approval
+    /// design, 2026-08-08).
+    #[serde(default)]
+    pub consent: String,
     /// The member's reply queue, so the coordinator can send the Welcome back.
     #[serde(default)]
     pub reply: Option<ReplyHandover>,
@@ -680,6 +687,7 @@ mod tests {
             seat_proof: "dd".to_string(),
             new_nostr_pk: String::new(),
             relays: Vec::new(),
+            consent: String::new(),
             reply: Some(ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),

@@ -1358,6 +1358,7 @@ impl State {
                 identity_pk,
                 new_nostr_pk,
                 relays,
+                consent,
                 key_package,
                 ticket,
                 seat_proof,
@@ -1372,6 +1373,7 @@ impl State {
                 seat_proof,
                 new_nostr_pk,
                 relays,
+                consent,
                 reply,
                 sender_npub,
                 generation,
@@ -3950,6 +3952,19 @@ mod tests {
                     Err(MoltError::Create(_))
                 ));
             }
+            // threshold 1 is refused since 2026-08-08 (product decision) —
+            // the engine gate, so MCP meets it too, not only the GUI stepper
+            assert!(matches!(
+                w.execute(Command::CreateStart {
+                    name: "X".to_string(),
+                    member: "me".to_string(),
+                    threshold: 1,
+                    members: 2,
+                    relays: Vec::new(),
+                })
+                .await,
+                Err(MoltError::Create(_))
+            ));
 
             // a valid founding runs the ritual: two seats, each activated
             // and sealed by a simulated member, then the workspace is born
@@ -4505,6 +4520,7 @@ mod tests {
             identity_pk: bob_pk,
             nostr_pk: Some(new_anchor),
             relays: Vec::new(),
+            consent: None,
         };
         let bytes2 = molt_core::approval_bytes(&republic_id, 2, &change2);
         let block2 = ChainBlock {
@@ -4936,7 +4952,7 @@ mod tests {
         let _ = st.cmd_create_start(
             "Other Republic".to_string(),
             "bob".to_string(),
-            1,
+            2,
             2,
             Vec::new(),
         );

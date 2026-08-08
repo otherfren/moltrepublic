@@ -662,7 +662,7 @@ impl State {
                 {
                     crate::nostr_ritual::spawn_publish_frame(
                         chan,
-                        crate::nostr_ritual::FramePayload::Encrypt(group, msg),
+                        crate::nostr_ritual::FramePayload::Encrypt(group, Box::new(msg)),
                         "abort",
                         crate::nostr_ritual::RetryPolicy::PRE_SEAL,
                         tx.downgrade(),
@@ -814,6 +814,7 @@ pub(crate) fn recover_command(
         seat_proof: r.seat_proof,
         new_nostr_pk: r.new_nostr_pk,
         relays: r.relays,
+        consent: r.consent,
         reply: r
             .reply
             .as_ref()
@@ -2979,7 +2980,7 @@ mod ritual_ops {
                     };
                     crate::nostr_ritual::spawn_publish_frame(
                         chan,
-                        crate::nostr_ritual::FramePayload::Encrypt(group, msg),
+                        crate::nostr_ritual::FramePayload::Encrypt(group, Box::new(msg)),
                         "seal",
                         crate::nostr_ritual::RetryPolicy::PRE_SEAL,
                         tx.downgrade(),
@@ -3114,6 +3115,7 @@ mod tests {
             seat_proof: "dd".to_string(),
             new_nostr_pk: String::new(),
             relays: Vec::new(),
+            consent: String::new(),
             reply: Some(invite::ReplyHandover {
                 server: "smp://f@h".to_string(),
                 queue_id: "ee".to_string(),
@@ -3149,6 +3151,7 @@ mod tests {
             new_nostr_pk: String::new(),
             relays: Vec::new(),
             reply: None,
+            consent: String::new(),
         };
         let Command::NetRecoverRequested { reply, .. } = recover_command(bare, String::new(), 1) else {
             panic!("expected NetRecoverRequested");

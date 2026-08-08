@@ -131,10 +131,15 @@ is spent; a bad or replayed proof is dropped without a trace.
 
 **❹ Re-admit (threshold).** `S` proposes a `Membership{Restored, member, pkᵣ}`
 change; the survivors approve it over the mesh and a block seals at m-of-n
-(`persistent_chain.md` §7). The block records, tamper-evidently, that the group
-re-admitted `R` at height `H+1`. Because `pkᵣ` equals the already-anchored key,
-the roster identity is unchanged — the block re-keys only the **MLS leaf**, not
-the roster.
+(`persistent_chain.md` §7). Since 2026-08-08
+(`recovery_approval_design.md`): the proposal appears as an ordinary
+**proposal card** on every member's surface ("Restore seat: R" —
+approve/decline like any proposal), and `R`'s request carries a **consent
+signature** over `restore_consent_bytes` that counts as one distinct signer —
+which is what lets an m = n republic re-admit a seat at all. The block
+records, tamper-evidently, that the group re-admitted `R` at height `H+1`.
+Because `pkᵣ` equals the already-anchored key, the roster identity is
+unchanged — the block re-keys only the **MLS leaf**, not the roster.
 
 **❺ MLS re-key.** When the Restored block commits, `S` runs
 `restore_member(member, kpᵣ)` → `(commit, welcome)`: an inline Remove(`R`'s stale

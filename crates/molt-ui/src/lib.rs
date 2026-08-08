@@ -5128,9 +5128,20 @@ fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
 /// everything else falls back to the payload's own user content
 /// ([`summarize`]).
 fn display_title(lang: i32, v: &serde_json::Value) -> String {
-    v.get("op")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|op| org_op_label(lang, op))
+    let op = v.get("op").and_then(serde_json::Value::as_str);
+    // a membership record decides about a SEAT (recovery approval design,
+    // 2026-08-08) — the member's name is the title's whole point
+    if let (Some(op @ ("restore_member" | "add_member")), Some(member)) =
+        (op, v.get("member").and_then(serde_json::Value::as_str))
+    {
+        return match (lang, op) {
+            (1, "restore_member") => format!("Sitz wiederherstellen: {member}"),
+            (_, "restore_member") => format!("Restore seat: {member}"),
+            (1, _) => format!("Sitz hinzufügen: {member}"),
+            (_, _) => format!("Add seat: {member}"),
+        };
+    }
+    op.and_then(|o| org_op_label(lang, o))
         .map(str::to_string)
         .unwrap_or_else(|| summarize(v))
 }

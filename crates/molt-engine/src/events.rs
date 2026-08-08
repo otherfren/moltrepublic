@@ -350,21 +350,48 @@ impl State {
                 // presence is runtime state owned by the transport; the
                 // variant exists so checkpoints have a schema slot
             }
+            WorkspaceEvent::MembershipProposed { id, op, member, .. } => {
+                // the approval surface (recovery approval design, 2026-08-08):
+                // the gossip that makes every member sign the SAME change also
+                // creates the HUMAN-facing record — one applier for the
+                // proposer, every receiver and replay. Idempotent (`entry`):
+                // a re-gossip must not reset collected votes. The CHAIN-side
+                // registration stays in the net ingest — the chain is not
+                // rebuilt from the log — and `proposal_change` refuses to
+                // resolve a membership record without it, so a half-restored
+                // state can never sign fabricated bytes.
+                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord {
+                    surface: Surface::Organization,
+                    payload: serde_json::json!({
+                        "op": match op {
+                            molt_core::MembershipOp::Restored => "restore_member",
+                            molt_core::MembershipOp::Joined => "add_member",
+                        },
+                        "member": member,
+                    }),
+                    approvals: 0,
+                    state: ProposalState::Proposed,
+                    declined_at: 0,
+                    declined_by: MemberId::new(),
+                    decliners: Vec::new(),
+                });
+                self.next_id = self.next_id.max(id.0 + 1);
+            }
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
-            | WorkspaceEvent::MembershipProposed { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
             | WorkspaceEvent::CheckpointServed { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
-                // catch-up request, a membership-proposal announcement, a raw MLS
-                // re-key commit, a relayed mesh announce, a file fetch request)
-                // ride the log only to reach the outbox; the chain lives in
-                // chain.state, the MLS ratchet in the group, the mesh in
-                // transport.state and a file transfer on its dedicated queue,
-                // none rebuilt from the log, so apply/replay is a deliberate no-op
+                // catch-up request, a raw MLS re-key commit, a relayed mesh
+                // announce, a file fetch request) ride the log only to reach
+                // the outbox; the chain lives in chain.state, the MLS ratchet
+                // in the group, the mesh in transport.state and a file
+                // transfer on its dedicated queue, none rebuilt from the log,
+                // so apply/replay is a deliberate no-op (MembershipProposed
+                // left this group: its RECORD is log state, see its arm)
             }
         }
         // G7 in-order chain bookkeeping: our own ackable envelopes form the

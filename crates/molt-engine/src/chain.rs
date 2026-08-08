@@ -416,7 +416,53 @@ fn verify_next(
         }
     }
     let bytes = approval_bytes(&head.republic_id, block.height, &block.change);
-    let signers = valid_signers(&head.identities, &bytes, &block.sigs);
+    let mut signers = valid_signers(&head.identities, &bytes, &block.sigs);
+    // the restored member's consent counts as ONE distinct signer (recovery
+    // approval design, 2026-08-08) — what lets an m = n republic recover a
+    // seat. Hard rules, all fail-closed: consent belongs to Restored blocks
+    // only, must verify against the member's ANCHORED key over the
+    // consent bytes, and the member must not ALSO appear in `sigs` (the
+    // distinctness rule — one member, one voice).
+    if let ChainChange::Membership {
+        op,
+        member,
+        nostr_pk,
+        consent: Some(consent),
+        ..
+    } = &block.change
+    {
+        if *op != MembershipOp::Restored {
+            return Err(format!(
+                "block {} carries a consent on a non-restore membership change",
+                block.height
+            ));
+        }
+        if signers.contains(member) {
+            return Err(format!(
+                "block {} counts {member} twice — consent plus a roster signature",
+                block.height
+            ));
+        }
+        let anchored = head
+            .identities
+            .iter()
+            .find(|i| i.member == *member)
+            .map(|i| i.identity_pk.clone())
+            .ok_or_else(|| format!("block {} restores an unknown member", block.height))?;
+        let consent_bytes = molt_core::chain::restore_consent_bytes(
+            &head.republic_id,
+            member,
+            &anchored,
+            nostr_pk.as_deref().unwrap_or(""),
+        );
+        if !molt_storage::identity_verify(&anchored, &consent_bytes, consent) {
+            return Err(format!(
+                "block {} carries a consent that does not verify for {member}",
+                block.height
+            ));
+        }
+        signers.insert(member.clone());
+    }
     if signers.len() < usize::from(head.rule_m) {
         return Err(format!(
             "block {} has {} valid approvals, threshold is {}",
@@ -618,6 +664,9 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             identity_pk,
             nostr_pk,
             relays,
+            // spent at the block's own verification; the projection carries
+            // no per-block consent (nothing downstream re-checks it)
+            consent: _,
         } => {
             apply_membership(&mut state.roster, *op, member, identity_pk)?;
             // v5: the re-anchor rides BESIDE the roster, because
@@ -1285,6 +1334,17 @@ impl State {
             return Some(change.clone());
         }
         let p = self.proposals.get(&id)?;
+        // a MEMBERSHIP record without its registered chain change must not
+        // fall through to the Applied shape — an approve would then sign a
+        // fabricated surface transition instead of the membership bytes
+        // everyone else signs (the reserved ops below never pass
+        // `validate_org_payload`, so no user proposal can wear them)
+        if matches!(
+            p.payload.get("op").and_then(serde_json::Value::as_str),
+            Some("restore_member" | "add_member")
+        ) {
+            return None;
+        }
         Some(ChainChange::Applied {
             proposal_id: id,
             surface: p.surface,
@@ -1303,6 +1363,7 @@ impl State {
         identity_pk: &str,
         nostr_pk: Option<String>,
         relays: Vec<String>,
+        consent: Option<String>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -1314,6 +1375,7 @@ impl State {
                 identity_pk: identity_pk.to_string(),
                 nostr_pk: nostr_pk.clone(),
                 relays: relays.clone(),
+                consent: consent.clone(),
             },
         );
         // announce the proposal over the mesh so every member registers + signs
@@ -1328,6 +1390,7 @@ impl State {
                 identity_pk: identity_pk.to_string(),
                 nostr_pk: nostr_pk.clone(),
                 relays,
+                consent,
             },
         );
         self.record(env);
@@ -1339,6 +1402,7 @@ impl State {
 
     /// Register a membership proposal another member put forward, so this node
     /// signs the SAME change (its bytes) when it approves.
+    #[allow(clippy::too_many_arguments)] // one gossiped change's fields, not a bag
     pub(crate) fn receive_membership_proposal(
         &mut self,
         id: u64,
@@ -1347,6 +1411,7 @@ impl State {
         identity_pk: &str,
         nostr_pk: Option<String>,
         relays: Vec<String>,
+        consent: Option<String>,
     ) {
         self.next_id = self.next_id.max(id.saturating_add(1));
         let change = ChainChange::Membership {
@@ -1355,6 +1420,7 @@ impl State {
             identity_pk: identity_pk.to_string(),
             nostr_pk,
             relays,
+            consent,
         };
         // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
         // to `proposal_changes` first, so registering a Membership under an
@@ -1377,12 +1443,36 @@ impl State {
     /// (`receive_proposed` / `receive_membership_proposal` /
     /// `receive_checkpoint_proposal`) — see the security note there.
     pub(crate) fn id_free_for(&self, id: u64, change: &ChainChange) -> bool {
-        if self.proposals.contains_key(&id) {
-            return false;
+        // the identical change re-gossiped is idempotent — checked FIRST,
+        // because a membership proposal now also owns a ProposalRecord under
+        // its id (the approval surface), and reading that record as a
+        // collision would refuse the legitimate re-serve of the very change
+        // it belongs to
+        if let Some(existing) = self.proposal_changes.get(&id) {
+            return existing == change;
         }
-        match self.proposal_changes.get(&id) {
-            Some(existing) => existing == change,
+        match self.proposals.get(&id) {
             None => true,
+            // a membership RECORD may precede its chain-side registration —
+            // the log applier runs first in the same ingest turn. It is the
+            // same proposal, not a collision, exactly when the record wears
+            // this change's reserved op + member (a record can never wear
+            // them via cmd_propose — validate_org_payload knows no such op).
+            // The threshold stays the security gate, as it always was for
+            // membership gossip.
+            Some(p) => {
+                let ChainChange::Membership { op, member, .. } = change else {
+                    return false;
+                };
+                let want = match op {
+                    MembershipOp::Restored => "restore_member",
+                    MembershipOp::Joined => "add_member",
+                };
+                p.surface == Surface::Organization
+                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some(want)
+                    && p.payload.get("member").and_then(serde_json::Value::as_str)
+                        == Some(member.as_str())
+            }
         }
     }
 
@@ -1409,6 +1499,7 @@ impl State {
         seat_proof: &str,
         new_nostr_pk: &str,
         declared_relays: &[String],
+        consent: &str,
         reply: &str,
     ) -> Result<u64, String> {
         let anchored = self
@@ -1434,6 +1525,22 @@ impl State {
             seat_proof,
         ) {
             return Err(format!("seat proof for {member} does not verify"));
+        }
+        // the rejoiner's consent — its automatic co-approval (recovery
+        // approval design, 2026-08-08). Verified HERE, in the one validation
+        // ladder, against the ANCHORED key over the exact content the
+        // `Restored` change will carry; present-but-invalid is fail-closed
+        // (a doctored consent must not ride a block m members then sign)
+        if !consent.is_empty() {
+            let bytes = molt_core::chain::restore_consent_bytes(
+                &rid,
+                member,
+                &anchored,
+                new_nostr_pk,
+            );
+            if !molt_storage::identity_verify(&anchored, &bytes, consent) {
+                return Err(format!("restore consent for {member} does not verify"));
+            }
         }
         // R5 — the re-join gate: a declaration that shares no relay with
         // some member would commit the very split R4 exists to detect. The
@@ -1479,7 +1586,12 @@ impl State {
         } else {
             Vec::new()
         };
-        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays))
+        let consent = if consent.is_empty() {
+            None
+        } else {
+            Some(consent.to_string())
+        };
+        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays, consent))
     }
 
     /// Distinct collected approvals for a proposal (for the UI progress).
@@ -1569,10 +1681,33 @@ impl State {
             .collect();
         valid.sort_by(|a, b| a.member.cmp(&b.member));
         valid.dedup_by(|a, b| a.member == b.member);
-        if valid.len() < usize::from(head.rule_m) {
+        // the restored member's consent is one distinct signer (recovery
+        // approval design, 2026-08-08) — the sealer must count EXACTLY like
+        // `verify_next`, or it seals blocks the verifiers reject. The consent
+        // was validated when the change was registered; the member's own
+        // roster signature (it is not on the mesh) cannot legitimately be in
+        // `pending`, and dropping it here keeps the distinctness rule the
+        // verifier enforces.
+        let consented = match &change {
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member,
+                consent: Some(_),
+                ..
+            } => {
+                valid.retain(|a| a.member != *member);
+                1
+            }
+            _ => 0,
+        };
+        let need = usize::from(head.rule_m);
+        if valid.len() >= need {
+            // enough survivor signatures on their own — the consent still
+            // rides the change, but never displaces a survivor's voice
+            valid.truncate(need);
+        } else if valid.len() + consented < need {
             return;
         }
-        valid.truncate(usize::from(head.rule_m));
         let block = ChainBlock {
             height: target,
             prev: head.hash.clone(),
@@ -1708,11 +1843,23 @@ impl State {
                 member,
                 ..
             } => {
+                // the approval surface (recovery approval design, 2026-08-08):
+                // flip the visible membership record and drop the vote
+                // bookkeeping on EVERY node. A Membership block carries no
+                // proposal id, so match by content — the Checkpoint arm's
+                // pattern (the committer also cleans by id upstream).
+                self.settle_membership_records(&block.change);
                 self.mesh_extension_at.remove(member);
                 if self.pending_recovery.contains_key(member) {
                     let member = member.clone();
                     self.coordinator_rekey(&member);
                 }
+            }
+            ChainChange::Membership {
+                op: MembershipOp::Joined,
+                ..
+            } => {
+                self.settle_membership_records(&block.change);
             }
             // WP4b: a checkpoint sealed — on EVERY node, drop the matching
             // proposal bookkeeping (the committer also cleans by id in
@@ -1759,6 +1906,53 @@ impl State {
             _ => {}
         }
         self.rebase_pending_approvals();
+    }
+
+    /// A membership block sealed — settle its approval surface on THIS node
+    /// (recovery approval design, 2026-08-08): flip every open membership
+    /// record that describes exactly this change to `Applied` and drop the
+    /// matching vote bookkeeping. Content-matched (a Membership block carries
+    /// no proposal id), so the sealer, every passive applier and a catch-up
+    /// all settle identically.
+    fn settle_membership_records(&mut self, sealed: &ChainChange) {
+        let ChainChange::Membership { op, member, .. } = sealed else {
+            return;
+        };
+        let want_op = match op {
+            MembershipOp::Restored => "restore_member",
+            MembershipOp::Joined => "add_member",
+        };
+        let ids: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| {
+                p.state == ProposalState::Proposed
+                    && p.surface == Surface::Organization
+                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some(want_op)
+                    && p.payload.get("member").and_then(serde_json::Value::as_str)
+                        == Some(member.as_str())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Applied;
+            }
+            self.emit(Event::Applied {
+                id: ProposalId(id),
+                surface: Surface::Organization,
+            });
+        }
+        let stale: Vec<u64> = self
+            .proposal_changes
+            .iter()
+            .filter(|(_, c)| *c == sealed)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.proposal_changes.remove(&id);
+            self.pending_sigs.remove(&id);
+        }
     }
 
     /// WP4b automation (product decision 2026-07-18): the compaction cut
@@ -2712,6 +2906,16 @@ impl State {
             .proposals
             .iter()
             .filter(|(_, p)| p.state == ProposalState::Proposed)
+            // membership records stay out (their window is liveness-bound, see
+            // the doc above) — re-serving one as a plain `Proposed` would make
+            // receivers register a SURFACE change under the membership id and
+            // sign different bytes than everyone else
+            .filter(|(id, _)| {
+                !matches!(
+                    self.proposal_changes.get(id),
+                    Some(ChainChange::Membership { .. })
+                )
+            })
             .collect();
         // deterministic order (the map is a HashMap): by id
         open.sort_by_key(|(id, _)| **id);
@@ -2922,6 +3126,7 @@ mod tests {
                 identity_pk: self.pk(member),
                 nostr_pk: Some(nostr_pk.to_string()),
                 relays: Vec::new(),
+                consent: None,
             };
             let block = self.seal(height, change, signers);
             self.push(block);
@@ -3040,6 +3245,7 @@ mod tests {
             identity_pk: dora_pk,
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         let block = b.seal(height, join, &["petra", "walter"]);
         b.push(block);
@@ -3102,6 +3308,7 @@ mod tests {
                 identity_pk: b.pk("petra"),
                 nostr_pk: Some(fresh.clone()),
                 relays: Vec::new(),
+                consent: None,
             },
             &["petra", "walter"],
         );
@@ -3228,6 +3435,7 @@ mod tests {
                 identity_pk: b.pk("petra"),
                 nostr_pk: Some(fresh),
                 relays: declared.clone(),
+                consent: None,
             },
             &["petra", "walter"],
         );
@@ -3298,6 +3506,7 @@ mod tests {
                 identity_pk: b.pk("petra"),
                 nostr_pk: Some(fresh),
                 relays: vec!["wss://relay.two.example".to_string()],
+                consent: None,
             },
             &["petra", "walter"],
         );
@@ -4319,7 +4528,7 @@ mod tests {
         // honest surface proposal id 5, awaiting approvals
         walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}));
         // attacker gossips a membership change under the SAME id
-        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None, Vec::new());
+        walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None, Vec::new(), None);
         // the id still resolves to the SURFACE proposal — approving it can
         // never sign membership bytes
         assert!(matches!(
@@ -4328,7 +4537,7 @@ mod tests {
         ));
         // the reverse: a surface proposal cannot shadow a pending membership
         let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
-        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None, Vec::new());
+        walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None, Vec::new(), None);
         walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
         assert!(matches!(
             walter2.proposal_change(6),
@@ -4377,7 +4586,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
         // id already names a pending MEMBERSHIP change → refused, unsigned
-        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new());
+        walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new(), None);
         walter.receive_checkpoint_proposal(5, 1, &hash);
         assert!(
             !walter.pending_sigs.contains_key(&5),
@@ -5062,7 +5271,7 @@ mod tests {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
 
         // petra proposes re-admitting walter and co-signs (1 of 2 — pending)
-        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None, Vec::new());
+        let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None, Vec::new(), None);
         assert_eq!(
             petra.chain_head.as_ref().expect("head").height,
             0,
@@ -5070,7 +5279,7 @@ mod tests {
         );
 
         // walter learns the proposal + petra's signature, then co-signs
-        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None, Vec::new());
+        walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None, Vec::new(), None);
         let petra_sig = petra
             .pending_sigs
             .get(&id)
@@ -5114,7 +5323,7 @@ mod tests {
         // the returning member (dora) signs the seat proof with its OWN key
         let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
         let id = coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "")
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
             .expect("a valid seat proof re-admits");
         assert!(matches!(
             coord.proposal_changes.get(&id),
@@ -5130,14 +5339,210 @@ mod tests {
         // a proof signed by the WRONG key (petra forging dora's) is rejected
         let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "", &[]);
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "")
+            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "", "")
             .is_err());
 
         // a request that re-keys the seat to a DIFFERENT identity is rejected —
         // recovery re-derives the SAME key
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "")
+            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "", "")
             .is_err());
+    }
+
+    /// The restored member's consent bytes, signed with its own roster key.
+    fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
+        molt_storage::identity_sign(
+            b.key(member),
+            &molt_core::chain::restore_consent_bytes(
+                &b.republic_id,
+                member,
+                &b.pk(member),
+                nostr_pk,
+            ),
+        )
+    }
+
+    /// The rejoiner's consent counts as ONE distinct signer (recovery
+    /// approval design, 2026-08-08): at m = n the coordinator's single
+    /// surviving signature plus a valid consent seals the Restored block —
+    /// the case that was a structural dead end before — and the sealed
+    /// chain verifies from zero on an adopting reader.
+    #[test]
+    fn a_consented_restore_seals_at_m_equals_n() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let walter_pk = b.pk("walter");
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let consent = consent_for(&b, "walter", "");
+        petra.propose_membership(
+            MembershipOp::Restored,
+            "walter",
+            &walter_pk,
+            None,
+            Vec::new(),
+            Some(consent),
+        );
+        let head = petra.chain_head.as_ref().expect("head");
+        assert_eq!(head.height, 1, "petra's signature + walter's consent reach 2-of-2");
+        verify_chain(&petra.chain).expect("an adopting reader accepts the consented block");
+    }
+
+    /// Fail-closed on every consent abuse — the whole chain rejects
+    /// (verify_chain is all-or-nothing): a forged consent, a consent on a
+    /// non-restore change, a double-counted member, and a consent that has
+    /// to stand in for EVERY missing signature.
+    #[test]
+    fn consent_abuse_rejects_the_chain() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let restored = |consent: Option<String>| ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent,
+        };
+
+        // the honest shape: one survivor signature + dora's consent = 2-of-3
+        let good = consent_for(&b, "dora", "");
+        let mut chain = b.blocks.clone();
+        chain.push(b.seal(1, restored(Some(good.clone())), &["petra"]));
+        verify_chain(&chain).expect("one survivor + consent reaches m");
+
+        // (a) forged: walter's key cannot consent for dora
+        let forged = molt_storage::identity_sign(
+            b.key("walter"),
+            &molt_core::chain::restore_consent_bytes(
+                &b.republic_id,
+                "dora",
+                &b.pk("dora"),
+                "",
+            ),
+        );
+        let mut chain = b.blocks.clone();
+        chain.push(b.seal(1, restored(Some(forged)), &["petra"]));
+        let err = verify_chain(&chain).expect_err("a forged consent must reject");
+        assert!(err.contains("consent"), "the error names the consent: {err}");
+
+        // (b) a consent on a non-restore membership change
+        let mut chain = b.blocks.clone();
+        chain.push(b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Joined,
+                member: "erika".to_string(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: Some(good.clone()),
+            },
+            &["petra", "walter"],
+        ));
+        let err = verify_chain(&chain).expect_err("consent on a join must reject");
+        assert!(err.contains("non-restore"), "{err}");
+
+        // (c) the restored member must not count twice (consent + signature)
+        let mut chain = b.blocks.clone();
+        chain.push(b.seal(1, restored(Some(good.clone())), &["dora"]));
+        let err = verify_chain(&chain).expect_err("double-counting must reject");
+        assert!(err.contains("twice"), "{err}");
+
+        // (d) consent alone is ONE voice — it never reaches m = 2 by itself
+        let mut chain = b.blocks.clone();
+        chain.push(b.seal(1, restored(Some(good)), &[]));
+        let err = verify_chain(&chain).expect_err("consent alone is below threshold");
+        assert!(err.contains("threshold"), "{err}");
+    }
+
+    /// The approval surface (recovery approval design, 2026-08-08): a
+    /// verified request creates a HUMAN-visible proposal record, a survivor
+    /// approves it through the PUBLIC `cmd_approve`, and the commit settles
+    /// the record to `Applied` with the vote bookkeeping dropped.
+    #[test]
+    fn a_membership_proposal_is_a_visible_approvable_record() {
+        let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let rid = b.republic_id.clone();
+        let ticket = "recovery-ticket-xyz";
+        let kp_hex = "beef";
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
+        let consent = consent_for(&b, "dora", "");
+        let id = coord
+            .verify_and_propose_restore(
+                "dora",
+                &b.pk("dora"),
+                kp_hex,
+                ticket,
+                &proof,
+                "",
+                &[],
+                &consent,
+                "",
+            )
+            .expect("a valid request proposes");
+
+        // visible on the proposer: a real record with the reserved op
+        let rec = coord.proposals.get(&id).expect("the proposer holds a record");
+        assert_eq!(rec.payload["op"], "restore_member");
+        assert_eq!(rec.payload["member"], "dora");
+        assert_eq!(rec.state, ProposalState::Proposed, "2 of 3 voices — still open");
+
+        // …and on a receiver: the gossip's log event creates the SAME record
+        let env = walter.make_env(
+            "petra".to_string(),
+            WorkspaceEvent::MembershipProposed {
+                id: ProposalId(id),
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: Some(consent.clone()),
+            },
+        );
+        walter.apply(&env);
+        walter.receive_membership_proposal(
+            id,
+            MembershipOp::Restored,
+            "dora",
+            &b.pk("dora"),
+            None,
+            Vec::new(),
+            Some(consent),
+        );
+        assert_eq!(
+            walter.proposals.get(&id).map(|p| p.state),
+            Some(ProposalState::Proposed),
+            "the receiver sees an open, votable record"
+        );
+        let petra_sig = coord
+            .pending_sigs
+            .get(&id)
+            .expect("petra's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "petra")
+            .expect("petra co-signed")
+            .sig
+            .clone();
+        walter.receive_approval(id, "petra", 1, &petra_sig);
+
+        // the PUBLIC approve — the exact call that answered UnknownProposal
+        // before the record existed
+        walter.cmd_approve(ProposalId(id)).expect("approve accepts the id");
+
+        // petra + walter + dora's consent = 3-of-4: sealed, settled
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+        assert_eq!(
+            walter.proposals.get(&id).map(|p| p.state),
+            Some(ProposalState::Applied),
+            "the commit settles the record"
+        );
+        assert!(
+            !walter.pending_sigs.contains_key(&id) && !walter.proposal_changes.contains_key(&id),
+            "the vote bookkeeping is dropped"
+        );
+        verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
     }
 
     /// R6 — the pool is group state any member can move and no member can
@@ -5209,6 +5614,7 @@ mod tests {
                 identity_pk: b.pk("petra"),
                 nostr_pk: Some(fresh),
                 relays: vec!["wss://relay.two.example".to_string()],
+                consent: None,
             },
             &["petra", "walter"],
         );
@@ -5265,6 +5671,7 @@ mod tests {
                 "",
                 &declared,
                 "",
+                "",
             )
             .expect_err("a declaration bridging nobody must be refused");
         assert!(
@@ -5296,6 +5703,7 @@ mod tests {
                 &proof2,
                 "",
                 &declared,
+                "",
                 "",
             )
             .expect("the same declaration passes once the pool carries it");
@@ -5332,6 +5740,7 @@ mod tests {
             identity_pk: walter_pk,
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         coord.receive_block(block);
@@ -5363,6 +5772,7 @@ mod tests {
             identity_pk: walter_pk.clone(),
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         // round 1: the first recovery attempt's Restored block commits …
         let block = b.seal(1, restored.clone(), &["petra", "walter"]);
@@ -5392,6 +5802,7 @@ mod tests {
             identity_pk: other_pk,
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         let block = b.seal(3, hijack, &["petra", "walter"]);
         b.push(block);
@@ -5555,6 +5966,7 @@ mod tests {
             identity_pk: walter_pk,
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         let block = b.seal(1, change, &["petra", "walter"]);
         node.receive_block(block);

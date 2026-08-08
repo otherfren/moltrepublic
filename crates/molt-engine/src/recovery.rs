@@ -562,6 +562,12 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         &new_nostr_pk,
         &[],
     );
+    // the automatic co-approval of the own re-admission (recovery approval
+    // design, 2026-08-08): one distinct signer toward the threshold
+    let consent = molt_storage::identity_sign(
+        &sk,
+        &molt_core::chain::restore_consent_bytes(&inv.republic_id, &inv.member, &pk, &new_nostr_pk),
+    );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         member: inv.member.clone(),
         identity_pk: pk.clone(),
@@ -571,6 +577,7 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         new_nostr_pk,
         // the loopback path has no relays to declare
         relays: Vec::new(),
+        consent,
         reply: Some(invite::ReplyHandover {
             server: reply_q.snd.server.clone(),
             queue_id: hex::encode(&reply_q.snd.id.0),
@@ -1651,6 +1658,7 @@ mod tests {
             identity_pk: dave_pk.clone(),
             nostr_pk: None,
             relays: Vec::new(),
+            consent: None,
         };
         let bytes = approval_bytes(&republic_id, 1, &change);
         let block1 = ChainBlock {

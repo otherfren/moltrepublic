@@ -1,6 +1,11 @@
 # Recovery approval: the survivors' vote gets a surface, the rejoiner co-signs
 
-**Status: DESIGN, ratified 2026-08-08 — implementation in the same session.**
+**Status: IMPLEMENTED 2026-08-08 (same session as the ratification), green on
+master.** Keystones: `chain::tests::{a_consented_restore_seals_at_m_equals_n,
+consent_abuse_rejects_the_chain, a_membership_proposal_is_a_visible_approvable_record}`,
+the 2-of-2 `nostr_recovery` capstone, and the migrated `two_instances`
+recovery suite. §2's settle runs in `after_block_applied`
+(`settle_membership_records`), not the Committed apply arm.
 Product decisions (user, 2026-08-08): (1) membership proposals appear as
 normal proposal cards and are approved/declined like any proposal; (2) the
 rejoiner automatically co-signs its own re-admission; (3) the engine refuses

@@ -125,6 +125,16 @@ pub enum ChainChange {
         /// the founding roster).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         relays: Vec<String>,
+        /// The RESTORED member's own co-signature over
+        /// [`restore_consent_bytes`] (recovery approval design, 2026-08-08):
+        /// hex Ed25519 by the seat's anchored identity key. Height-free by
+        /// design — it authorizes "re-admit ME with this identity and this
+        /// transport anchor", not a chain position — and it counts as one
+        /// distinct signer toward the threshold, which is what lets an
+        /// m = n republic recover a seat at all. `None` on `Joined` blocks
+        /// and every block written before the design landed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consent: Option<String>,
     },
     /// WP4b: a threshold-signed compaction cut. m-of-n members signed the
     /// SHA-256 of the deterministically serialized republic state after
@@ -207,6 +217,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             identity_pk,
             nostr_pk,
             relays,
+            consent,
         } => {
             let mut out = Vec::new();
             out.extend_from_slice(b"molt-chain-change-v2\0");
@@ -241,6 +252,15 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
                     put_bytes(&mut out, r.as_bytes());
                 }
             }
+            // the restored member's consent (recovery approval design,
+            // 2026-08-08) — same conditional-extension scheme, its own
+            // marker byte: absent appends NOTHING (pre-consent preimages
+            // stay byte-identical), present extends with a 2-marker no
+            // other extension writes, so the streams cannot collide.
+            if let Some(c) = consent {
+                out.push(2);
+                put_bytes(&mut out, c.as_bytes());
+            }
             out
         }
         ChainChange::Checkpoint { upto, state_hash } => {
@@ -254,6 +274,35 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             out
         }
     }
+}
+
+/// **What a returning seat signs to co-approve its own re-admission**
+/// (recovery approval design, 2026-08-08). Height-free on purpose — the
+/// consent authorizes content ("re-admit ME, with this identity and this
+/// transport anchor"), never a chain position; the survivors' position-bound
+/// signatures cover the block, and they sign over the consent riding inside
+/// the change. Versioned + length-prefixed like every sibling layout (never
+/// separator-joined). `nostr_pk` is the
+/// CANONICAL new transport anchor ("" on loopback), carried with the same
+/// presence discriminator the block layout uses.
+pub fn restore_consent_bytes(
+    republic_id: &str,
+    member: &str,
+    identity_pk: &str,
+    nostr_pk: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-restore-consent-v1\0");
+    put_bytes(&mut out, republic_id.as_bytes());
+    put_bytes(&mut out, member.as_bytes());
+    put_bytes(&mut out, identity_pk.as_bytes());
+    if nostr_pk.is_empty() {
+        out.push(0);
+    } else {
+        out.push(1);
+        put_bytes(&mut out, nostr_pk.as_bytes());
+    }
+    out
 }
 
 /// The projected republic state a checkpoint attests — everything a
@@ -620,6 +669,7 @@ mod tests {
                 identity_pk: "aa".to_string(),
                 nostr_pk: Some("cc".repeat(32)),
                 relays: Vec::new(),
+                consent: None,
             },
         );
         // the pre-R3b layout, recomputed independently
@@ -648,6 +698,7 @@ mod tests {
                 identity_pk: "aa".to_string(),
                 nostr_pk: Some("cc".repeat(32)),
                 relays: vec!["wss://relay.example".to_string()],
+                consent: None,
             },
         );
         want.push(1);
@@ -741,6 +792,7 @@ mod tests {
             identity_pk: "aa".repeat(32),
             nostr_pk: npk.map(str::to_string),
             relays: Vec::new(),
+            consent: None,
         };
         let with = mk(Some(&"bb".repeat(32)));
         assert_ne!(
@@ -761,6 +813,65 @@ mod tests {
         assert!(
             approval_bytes("f00", 4, &with).starts_with(b"molt-chain-change-v2\0"),
             "the layout tag must be bumped when the layout changes"
+        );
+    }
+
+    /// The consent extension (recovery approval design, 2026-08-08): absent
+    /// consent appends NOTHING — a pre-consent block's preimage, and every
+    /// signature recorded over it, stays byte-identical — while a present
+    /// consent extends the bytes (the survivors sign over it, so it cannot
+    /// be stripped or swapped after the fact).
+    #[test]
+    fn membership_approval_bytes_bind_the_consent() {
+        let mk = |consent: Option<&str>| ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: Some("bb".repeat(32)),
+            relays: vec!["wss://r.example".to_string()],
+            consent: consent.map(str::to_string),
+        };
+        let plain = approval_bytes("f00", 4, &mk(None));
+        let with = approval_bytes("f00", 4, &mk(Some(&"dd".repeat(64))));
+        assert_ne!(plain, with, "consent must be inside the signed bytes");
+        assert!(
+            with.starts_with(&plain[..]),
+            "absent consent appends nothing — the pre-consent preimage is a strict prefix, \
+             so every pre-consent signature stays valid unchanged"
+        );
+        assert_ne!(
+            with,
+            approval_bytes("f00", 4, &mk(Some(&"ee".repeat(64)))),
+            "swapping the consent after signing must change the signed bytes"
+        );
+        assert_ne!(
+            plain,
+            approval_bytes("f00", 4, &mk(Some(""))),
+            "present-but-empty must not collide with absent"
+        );
+    }
+
+    /// The consent preimage is versioned and length-prefixed — field
+    /// boundaries cannot slide (the separator-collision class the
+    /// republic-id v2 rework closed stays closed here).
+    #[test]
+    fn restore_consent_bytes_are_versioned_and_injective() {
+        let b = restore_consent_bytes("f00d", "dora", "aabb", "ccdd");
+        assert!(b.starts_with(b"molt-restore-consent-v1\0"));
+        assert_ne!(
+            restore_consent_bytes("f00d", "ab", "c", ""),
+            restore_consent_bytes("f00d", "a", "bc", ""),
+            "shifting a boundary between fields must change the bytes"
+        );
+        assert_ne!(
+            restore_consent_bytes("f00d", "dora", "aabb", ""),
+            restore_consent_bytes("f00d", "dora", "aabb", "ccdd"),
+            "the transport anchor is bound"
+        );
+        assert_ne!(
+            restore_consent_bytes("f00d", "dora", "aabb", "ccdd"),
+            restore_consent_bytes("beef", "dora", "aabb", "ccdd"),
+            "the republic id is bound"
         );
     }
 
@@ -817,6 +928,7 @@ mod tests {
                 identity_pk: "cc".to_string(),
                 nostr_pk: None,
                 relays: Vec::new(),
+                consent: None,
             },
             sigs,
         };

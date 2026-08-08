@@ -746,9 +746,13 @@ impl State {
                 "the handle must not be empty".to_string(),
             ));
         }
-        if threshold == 0 || threshold > members || !(2..=13).contains(&members) {
+        // threshold 1 is refused since 2026-08-08 (product decision): a lone
+        // voice is no threshold. The gate sits HERE, not in the verifier —
+        // the genesis is immutable, and rejecting existing m=1 chains at
+        // adoption would brick them into the silent-legacy trap.
+        if threshold < 2 || threshold > members || !(2..=13).contains(&members) {
             return Err(MoltError::Create(
-                "threshold must be within 1..=members and members within 2..=13".to_string(),
+                "threshold must be within 2..=members and members within 2..=13".to_string(),
             ));
         }
         // The founder's recovery phrase is real entropy — the workspace id
