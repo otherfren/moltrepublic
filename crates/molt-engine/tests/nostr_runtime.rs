@@ -122,10 +122,9 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     wait_for(&b, "petra to see the proposed charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
 
-    wait_for(&a, "the founding to seal on the founder", |s| {
-        s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
-    })
-    .await;
+    wait_for(&a, "the founding to seal on the founder", |s| s.create.run.outcome == 1).await;
+    // entering is gated on the phrase-backup step now (2026-08-08) — both ends
+    a.execute(Command::CreateFinish).await.expect("create finish");
     wait_for(&b, "the join to seal on petra", |s| {
         s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
     })

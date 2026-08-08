@@ -121,7 +121,8 @@ async fn adopt_relay_unprobed(w: &WalletHandle, url: &str) {
 /// KEYSTONE — the full production founding+join choreography over Nostr:
 /// CreateStart → (link v2 via the once-dormant NetRitualLinkReady) →
 /// JoinStart on a second engine → founder sees the join → CreatePropose →
-/// joiner ratifies → both seal, auto-enter, and persist the v4 transport
+/// joiner ratifies → both seal, enter via the phrase-backup gate, and
+/// persist the v4 transport
 /// shape; the genesis anchors three verified anchors per seat; both reopen
 /// honestly (not "detached").
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -185,12 +186,15 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     assert_eq!(s.join.proposed_agenda, "play chess, decide together");
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
 
-    // both sides seal and auto-enter
+    // both sides seal; entering is gated on the phrase-backup step
+    // (2026-08-08) — the founder finishes exactly like the joiner
     let s = wait_for(&a, "the founding to seal on the founder", |s| {
-        s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
+        s.create.run.outcome == 1
     })
     .await;
+    assert_ne!(s.screen, molt_core::Screen::Main, "sealing must not auto-enter");
     let ws_id_a = s.active_workspace.clone();
+    a.execute(Command::CreateFinish).await.expect("create finish");
     wait_for(&b, "the join to seal on petra", |s| {
         s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
     })
@@ -1790,11 +1794,10 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     .expect("charter");
     wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    let s = wait_for(&a, "the seal", |s| {
-        s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
-    })
-    .await;
+    let s = wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
     let ws_id = s.active_workspace.clone();
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    a.execute(Command::CreateFinish).await.expect("create finish");
     wait_for(&b, "the join seal", |s| {
         s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
     })

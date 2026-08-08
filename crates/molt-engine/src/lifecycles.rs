@@ -867,12 +867,12 @@ impl State {
                     .run
                     .log
                     .push("✓ roster sealed by everyone · workspace created".to_string());
-                // auto-enter the republic, exactly like the joiner does on its
-                // own seal (cmd_net_join_sealed) — no manual "Enter republic"
-                // step. The post-founding mesh comes up in the background; the
-                // `create` state is kept (not reset) so the wizard's final log
-                // lines (incl. "direct mesh established") still land.
-                self.session.screen = Screen::Main;
+                // sealed ≠ entered (2026-08-08): the wizard's last step makes
+                // the founder back its phrase up first — `CreateFinish` enters,
+                // exactly like the joiner's `JoinFinish`. The post-founding
+                // mesh comes up in the background; the `create` state is kept
+                // (not reset) so the wizard's final log lines (incl. "direct
+                // mesh established") still land.
             }
             Err(e) => {
                 self.session.create.run.outcome = 2;

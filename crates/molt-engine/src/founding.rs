@@ -3135,8 +3135,9 @@ mod ritual_ops {
                 .push(format!("✓ {member} signed the roster · seat sealed"));
 
             self.maybe_finalize();
-            // maybe_finalize may have auto-entered the workspace (screen change),
-            // so mirror the FULL session, not just the create sub-state
+            // maybe_finalize may have sealed the workspace (active id + entry
+            // list change), so mirror the FULL session, not just the create
+            // sub-state
             self.emit_session(molt_core::SessionScope::Full);
             Ok(molt_core::Reply::Ack)
         }

@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, RunView, ProposalCard, Spinner
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, Spinner
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -1211,7 +1211,7 @@ export component AppWindow inherits Window {
     in property <string> jw-proposed-name;
     in property <string> jw-proposed-agenda;
     // the join sealed a workspace (join.sealed_id) — entry now waits on the
-    // phrase-backup modal and its join-finish()
+    // wizard's phrase-backup step and its join-finish()
     in property <bool> jw-sealed;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
@@ -3060,51 +3060,19 @@ export component AppWindow inherits Window {
 
                 // step 4: the republic EXISTS — now the phrase, alone on its
                 // own step. Re-typing it is the proof it was backed up;
-                // only that unlocks the door.
-                if root.cw-step == 1 && root.cw-outcome == 1: VerticalLayout {
-                    vertical-stretch: 1;
-                    spacing: 12px;
-                    alignment: start;
-                    Text {
-                        text: Strings.cw-seed-confirm-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        wrap: word-wrap;
+                // only that unlocks the door (CreateFinish enters).
+                if root.cw-step == 1 && root.cw-outcome == 1: SeedConfirmStep {
+                    seed: root.cw-seed;
+                    icon: @image-url("assets/create.svg");
+                    armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
+                    check <=> root.cw-seed-check;
+                    enter => {
+                        root.cw-seed-check = "";
+                        root.create-finish();
                     }
-                    SeedPanel {
-                        seed: root.cw-seed;
-                        copy-requested => {
-                            root.copy-text(root.cw-seed);
-                            root.show-toast(Strings.toast-copied);
-                        }
-                    }
-                    Text {
-                        text: Strings.cw-seed-confirm-hint;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        wrap: word-wrap;
-                    }
-                    AppField {
-                        text <=> root.cw-seed-check;
-                        placeholder: Strings.cw-seed-confirm-ph;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            icon: @image-url("assets/create.svg");
-                            icon-set: true;
-                            label: Strings.enter-republic;
-                            enabled: root.seed-matches(root.cw-seed-check, root.cw-seed);
-                            clicked => {
-                                root.create-finish();
-                            }
-                        }
+                    copy-requested => {
+                        root.copy-text(root.cw-seed);
+                        root.show-toast(Strings.toast-copied);
                     }
                 }
             }
@@ -3713,15 +3681,15 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // step dots: 1 = the invite, 2 = join progress
+                // step dots: 1 = the invite, 2 = join progress, 3 = phrase & enter
                 HorizontalLayout {
                     alignment: center;
                     spacing: 7px;
-                    for i in 2: Rectangle {
+                    for i in 3: Rectangle {
                         width: 9px;
                         height: 9px;
                         border-radius: 4.5px;
-                        background: i == root.jw-step ? Theme.accent : Theme.line;
+                        background: i == (root.jw-sealed ? 2 : root.jw-step) ? Theme.accent : Theme.line;
                     }
                 }
 
@@ -3825,8 +3793,8 @@ export component AppWindow inherits Window {
                 // step 2: the real join run — the live log while it waits for
                 // every member to seal. The recovery phrase is NOT shown here
                 // (2026-08-08): a failed founding needs no phrase, and a
-                // sealed one gates entry on the backup step (the modal below).
-                if root.jw-step == 1: VerticalLayout {
+                // sealed one gates entry on the backup step below.
+                if root.jw-step == 1 && !root.jw-sealed: VerticalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
                     // ---- ratification: confirm the founder's proposed charter
@@ -3901,7 +3869,7 @@ export component AppWindow inherits Window {
                         tones: root.jw-log-tone;
                         back-shown: false;
                         // a sealed join enters through the phrase-backup
-                        // modal — so the only button here is the way OUT
+                        // step — so the only button here is the way OUT
                         // after a failure/decline (labelled, never blank)
                         finish-label: root.jw-outcome == 2 ? Strings.jw-back-to-start : "";
                         finish-enabled: root.jw-outcome == 2;
@@ -3912,6 +3880,25 @@ export component AppWindow inherits Window {
                             root.copy-log("join");
                             root.show-toast(Strings.toast-copied);
                         }
+                    }
+                }
+
+                // step 3: the join SEALED — the phrase-backup step, the exact
+                // twin of the founder's. Entering IS the backup confirmation
+                // (JoinFinish); the restore-link flow lands here too, because
+                // a running join always owns the Join screen (engine-set).
+                if root.jw-sealed: SeedConfirmStep {
+                    seed: root.jw-seed;
+                    icon: @image-url("assets/join.svg");
+                    armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
+                    check <=> root.jw-seed-check;
+                    enter => {
+                        root.jw-seed-check = "";
+                        root.join-finish();
+                    }
+                    copy-requested => {
+                        root.copy-text(root.jw-seed);
+                        root.show-toast(Strings.toast-copied);
                     }
                 }
             }
@@ -4077,8 +4064,8 @@ export component AppWindow inherits Window {
                 // recovery ritual with the phrase above. Which one it is, is
                 // the link's business to say - not the user's to know. The
                 // engine notices drive the running / failed states; a sealed
-                // JOIN enters through the phrase-backup modal (JoinFinish),
-                // a recovery still enters by itself.
+                // JOIN enters through the join wizard's phrase-backup step
+                // (JoinFinish), a recovery still enters by itself.
                 if root.rw-mode == "link": WayBranch {
                     // never dimmed: an empty link gates only the Continue
                     // button, not the panel the user is about to type into
@@ -7820,73 +7807,6 @@ export component AppWindow inherits Window {
         cancel-label: Strings.jw-busy-cancel;
         cancelled => {
             root.join-cancel();
-        }
-    }
-
-    // The join SEALED: the phrase-backup step, the joiner twin of the
-    // founder's. A modal on purpose — it must catch the operator on the
-    // dedicated join screen and on the restore-link flow alike, and the only
-    // way past it is entering (which is the backup confirmation).
-    if root.jw-sealed: Rectangle {
-        width: 100%;
-        height: 100%;
-        background: #0000008c;
-        TouchArea { }
-        Rectangle {
-            width: min(560px, parent.width - 48px);
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            height: jw-seal-col.preferred-height + 36px;
-            background: Theme.panel-2;
-            border-radius: Theme.win95 ? 0px : 10px;
-            border-width: Theme.border-w;
-            border-color: Theme.accent;
-            jw-seal-col := VerticalLayout {
-                x: 18px;
-                y: 18px;
-                width: parent.width - 36px;
-                spacing: 10px;
-                Text {
-                    text: Strings.cw-seed-confirm-title;
-                    color: Theme.text;
-                    font-size: Theme.fs-h2;
-                    font-weight: 700;
-                    wrap: word-wrap;
-                }
-                SeedPanel {
-                    seed: root.jw-seed;
-                    copy-requested => {
-                        root.copy-text(root.jw-seed);
-                        root.show-toast(Strings.toast-copied);
-                    }
-                }
-                Text {
-                    text: Strings.cw-seed-confirm-hint;
-                    color: Theme.dim;
-                    font-size: Theme.fs-body;
-                    wrap: word-wrap;
-                }
-                AppField {
-                    text <=> root.jw-seed-check;
-                    placeholder: Strings.cw-seed-confirm-ph;
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Rectangle { horizontal-stretch: 1; }
-                    AppButton {
-                        height: 38px;
-                        primary: true;
-                        icon: @image-url("assets/join.svg");
-                        icon-set: true;
-                        label: Strings.enter-republic;
-                        enabled: root.seed-matches(root.jw-seed-check, root.jw-seed);
-                        clicked => {
-                            root.jw-seed-check = "";
-                            root.join-finish();
-                        }
-                    }
-                }
-            }
         }
     }
 

@@ -3548,7 +3548,10 @@ pub enum Command {
     CreateCancel,
     /// Enter the sealed republic: refused until every member is green
     /// (key received and roster signature verified — the engine enforces
-    /// this for every operator, not just the GUI).
+    /// this for every operator, not just the GUI). The founding deliberately
+    /// does not auto-enter (2026-08-08): the wizard's last step makes the
+    /// founder back its recovery phrase up first — entering is that
+    /// confirmation (the founder twin of [`Command::JoinFinish`]).
     CreateFinish,
 
     // --- founding-ritual transport events (engine-internal) ---

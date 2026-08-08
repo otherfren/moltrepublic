@@ -144,17 +144,15 @@ async fn founding_ritual_completes_across_two_instances() {
     assert_eq!(s.create.seats.len(), 1);
     assert_eq!(s.create.seats[0].member, "member-b");
     assert_eq!(s.create.seats[0].state, 2, "sealed");
-    // the founder AUTO-ENTERS on seal (no manual "Enter republic") — aligned
-    // with the joiner, which auto-enters on its own seal
-    assert_eq!(
-        s.screen,
-        molt_core::Screen::Main,
-        "the founder auto-enters the workspace when the ritual seals"
-    );
+    // sealed ≠ entered (2026-08-08): the founder backs its phrase up on the
+    // wizard's last step first — CreateFinish enters, like the joiner's
+    // JoinFinish
+    assert_ne!(s.screen, molt_core::Screen::Main, "sealing must not auto-enter");
     assert_eq!(s.active_workspace, id, "the founded workspace is active");
 
-    // CreateFinish is now idempotent (already entered) — still accepted
     a.execute(Command::CreateFinish).await.expect("enter");
+    let s = read_session(&a).await;
+    assert_eq!(s.screen, molt_core::Screen::Main, "CreateFinish enters");
 
     // --- A's genesis anchors B's real key with a verifying attestation
     a.execute(Command::CloseWorkspace).await.expect("close");

@@ -1346,7 +1346,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_finish",
             command: "create_finish",
-            description: "Finish a successful founding: the new republic joins the local list, becomes active, straight to the main screen.",
+            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The founding deliberately does not auto-enter: the founder first confirms it backed up its recovery phrase (create.seed) - entering is that confirmation, the founder twin of join_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateFinish),
         },

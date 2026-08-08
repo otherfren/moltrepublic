@@ -1528,6 +1528,69 @@ export component SeedPanel inherits Rectangle {
     }
 }
 
+// The wizards' shared last step (create + join): the freshly minted recovery
+// phrase, and the re-typed proof it was backed up — `enter` fires only while
+// `armed` (the caller's engine-side phrase match), and entering IS the backup
+// confirmation.
+export component SeedConfirmStep inherits VerticalLayout {
+    in property <string> seed;
+    in property <image> icon;
+    // the re-typed phrase matches — computed by the caller (engine rule)
+    in property <bool> armed;
+    in-out property <string> check;
+    callback enter();
+    callback copy-requested();
+    vertical-stretch: 1;
+    spacing: 12px;
+    alignment: start;
+    Text {
+        text: Strings.cw-seed-confirm-title;
+        color: Theme.text;
+        font-size: Theme.fs-h2;
+        font-weight: 700;
+        wrap: word-wrap;
+    }
+    SeedPanel {
+        seed: root.seed;
+        copy-requested => {
+            root.copy-requested();
+        }
+    }
+    Text {
+        text: Strings.cw-seed-confirm-hint;
+        color: Theme.dim;
+        font-size: Theme.fs-body;
+        wrap: word-wrap;
+    }
+    AppField {
+        text <=> root.check;
+        placeholder: Strings.cw-seed-confirm-ph;
+        // Enter confirms, exactly like the button — behind the SAME gate
+        accepted => {
+            if (root.armed) {
+                root.enter();
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        AppButton {
+            height: 38px;
+            primary: true;
+            icon: root.icon;
+            icon-set: true;
+            label: Strings.enter-republic;
+            enabled: root.armed;
+            clicked => {
+                root.enter();
+            }
+        }
+    }
+}
+
 // The shared run view for the engine-ticked mock runs (restore / found /
 // join): the way panel with a progress bar and phase line, an optional
 // success slot (`@children`, used for the founding result), the live detail

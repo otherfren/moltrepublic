@@ -3991,6 +3991,10 @@ mod tests {
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
                     assert_eq!(s.create.run.outcome, 1);
+                    // sealed ≠ entered (2026-08-08): the founder backs its
+                    // phrase up on the wizard's last step first — the exact
+                    // twin of the joiner's JoinFinish gate
+                    assert_ne!(s.screen, Screen::Main, "sealing must not auto-enter");
                     assert_eq!(s.create.seed.split(' ').count(), 24);
                     assert_eq!(s.create.seats.len(), 2);
                     for seat in &s.create.seats {

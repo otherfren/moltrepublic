@@ -123,10 +123,9 @@ async fn found_pair(
     .expect("charter proposed");
     wait_for(&b, "walter to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    wait_for(&a, "the founding to seal", |s| {
-        s.create.run.outcome == 1 && s.screen == molt_core::Screen::Main
-    })
-    .await;
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
+    // entering is gated on the phrase-backup step now (2026-08-08) — both ends
+    a.execute(Command::CreateFinish).await.expect("create finish");
     wait_for(&b, "the join to seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty())
         .await;
     // entering is gated on the phrase-backup step now (2026-08-08)
