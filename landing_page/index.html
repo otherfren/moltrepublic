@@ -132,7 +132,8 @@
   .hero-row .hero-text { flex: 1 1 44%; min-width: 0; }
   .hero-row .hero-fig { flex: 1 1 56%; min-width: 0; margin: 0; }
   @media (max-width: 760px) { .hero-row { flex-direction: column; align-items: stretch; gap: 28px; } }
-  .current_dev { margin-top: 28px; text-align: center; color: var(--live); }
+  .current_dev { margin-top: 28px; display: flex; align-items: center; justify-content: center; gap: 16px; text-align: center; color: var(--live); }
+  .current_dev .warn-ico { width: 46px; height: 46px; flex: 0 0 auto; }
 
   /* diagram */
   section { padding: 56px 0; border-bottom: 1px solid var(--rule); }
@@ -339,7 +340,12 @@
       </div>
     </div>
     <div class="current_dev">
-Live today: founding, membership and threshold governance over Nostr relays and Tor.<br/>In development: Company brain
+      <svg class="warn-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 3 2 21h20z" fill="#f7c948" stroke="#f7c948" stroke-width="2.5" stroke-linejoin="round"/>
+        <path d="M12 9.2v5" stroke="#161a20" stroke-width="2.4" stroke-linecap="round"/>
+        <circle cx="12" cy="17.6" r="1.35" fill="#161a20"/>
+      </svg>
+      <span data-i18n-html="currentDev">Live today: founding, membership and threshold governance over Nostr relays and Tor.<br/>In development: Company brain</span>
     </div>
   </div>
 </header>
@@ -657,6 +663,7 @@ Live today: founding, membership and threshold governance over Nostr relays and 
     "r13a": "Apache-2.0",
     "r13b": "GPL-3.0-or-later",
     "footer": "MoltRepublic.ai &#183; deine privacy-first, dezentrale KI-Firma. Du behältst die Kontrolle.",
+    "currentDev": "Heute live: Gründung, Mitgliedschaft und Schwellen-Governance über Nostr-Relays und Tor.<br>In Entwicklung: Firmengedächtnis",
     "mockNote": "Design-Vorschauen - Kasse, Tresor und Board sind noch nicht gebaut."
   };
   var btn = document.querySelector('.lang-toggle');
