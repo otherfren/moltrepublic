@@ -940,6 +940,9 @@ export component AppWindow inherits Window {
     // "create" | "join") joins one and puts it on the clipboard
     in property <[string]> rw-log;
     in property <[string]> cw-log;
+    // the same log as ONE string (joined in Rust) — feeds the selectable
+    // read-only text input the lobby shows
+    in property <string> cw-log-text;
     in property <[string]> jw-log;
     // per-line ✓/✗ tones for the three run logs (see cw-log-tone)
     in property <[int]> rw-log-tone;
@@ -2696,6 +2699,32 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // the charter is OUT — the founder can only wait now, and
+                    // the screen must SAY so (a silent lobby right after
+                    // "Propose & Seal" reads as a bug)
+                    if root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                        background: Theme.panel;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.accent;
+                        HorizontalLayout {
+                            padding: 14px;
+                            spacing: 10px;
+                            Spinner {
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: Strings.cw-ratify-wait;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+
                     // the member list: founder + one row per seat. Sized by
                     // its CONTENT (capped, the Flickable scrolls beyond the
                     // cap — a member is never cut off), never stretched; the
@@ -2856,8 +2885,16 @@ export component AppWindow inherits Window {
                             Text {
                                 text: Strings.cw-charter-step;
                                 color: Theme.accent;
-                                font-size: Theme.fs-body;
+                                font-size: Theme.fs-h2;
                                 font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            // the ONE instruction, at reading size — what to
+                            // write and what it means
+                            Text {
+                                text: Strings.cw-charter-hint;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
                                 wrap: word-wrap;
                             }
                             // the name was fixed when the ritual started —
@@ -2880,23 +2917,16 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                 }
                             }
-                            // the charter itself: a scrolling textarea with
-                            // the ONE limit the engine enforces (4096 chars)
+                            // the charter itself: seven visible lines, its
+                            // own scroll hint, the engine's 4096-char limit
                             AppArea {
-                                height: 110px;
+                                height: 156px;
                                 text <=> root.cw-agenda;
                                 placeholder: Strings.cw-charter-agenda-ph;
                             }
                             HorizontalLayout {
                                 spacing: 8px;
-                                Text {
-                                    text: Strings.cw-charter-hint;
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    wrap: word-wrap;
-                                    horizontal-stretch: 1;
-                                    preferred-width: 0px;
-                                }
+                                Rectangle { horizontal-stretch: 1; }
                                 VerticalLayout {
                                     horizontal-stretch: 0;
                                     alignment: end;
@@ -2941,9 +2971,12 @@ export component AppWindow inherits Window {
                             spacing: 6px;
                             HorizontalLayout {
                                 Text {
+                                    // the log IS this step's content — its
+                                    // title reads like one (gray = unimportant,
+                                    // and this is not unimportant)
                                     text: Strings.cw-log-title;
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-h2;
                                     font-weight: 700;
                                     horizontal-stretch: 1;
                                 }
@@ -2964,38 +2997,25 @@ export component AppWindow inherits Window {
                                     width: 100%;
                                     height: 100%;
                                     viewport-width: self.width;
-                                    viewport-height: loglist.preferred-height;
+                                    viewport-height: max(self.height, logtext.preferred-height);
                                     // pinned to the bottom: the newest line is
                                     // always in view (like the RunView log)
                                     viewport-y: min(0px, self.height - self.viewport-height);
-                                    loglist := VerticalLayout {
-                                        spacing: 2px;
-                                        alignment: start;
-                                        for line[i] in root.cw-log: Text {
-                                            text: line;
-                                            // terminal ✓/✗ lines stand out of
-                                            // the flow (tones from Rust);
-                                            // body-sized and high-contrast —
-                                            // this log is the step's content,
-                                            // not a footnote
-                                            color: i < root.cw-log-tone.length
-                                                ? (root.cw-log-tone[i] == 2 ? Theme.bad
-                                                    : root.cw-log-tone[i] == 1 ? Theme.good : Theme.text)
-                                                : Theme.text;
-                                            font-size: Theme.fs-body;
-                                            font-family: "monospace";
-                                            // WRAP, never elide: a failure
-                                            // line's tail is the part that
-                                            // says what to DO about it, and
-                                            // this log has no horizontal
-                                            // scroll, so an elided tail was
-                                            // unrecoverable. (Duplicate of
-                                            // RunView's log block in
-                                            // parts.slint — they must be
-                                            // fixed together until one of
-                                            // them is extracted.)
-                                            wrap: word-wrap;
-                                        }
+                                    // ONE read-only text input instead of a
+                                    // Text-per-line list: the operator can
+                                    // SELECT and copy any part of the log
+                                    // (wrap, never elide — a failure line's
+                                    // tail says what to DO about it)
+                                    logtext := TextInput {
+                                        width: 100%;
+                                        height: logfl.viewport-height;
+                                        text: root.cw-log-text;
+                                        read-only: true;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-body;
+                                        font-family: "monospace";
+                                        single-line: false;
+                                        wrap: word-wrap;
                                     }
                                 }
                                 ScrollHint {
@@ -3853,6 +3873,7 @@ export component AppWindow inherits Window {
                         ph1: Strings.jw-ph1;
                         ph2: Strings.jw-ph2;
                         ph3: Strings.jw-ph3;
+                        ph-founder: Strings.jw-ph-founder;
                         failed-label: Strings.jw-failed;
                         log: root.jw-log;
                         headline: root.jw-headline;
@@ -7731,7 +7752,8 @@ export component AppWindow inherits Window {
     if root.jw-running && !root.jw-awaiting-ratify: BusyModal {
         title: root.jw-republic == "" ? Strings.jw-busy-title : root.jw-republic;
         detail: root.jw-progress < 0.3 ? Strings.jw-ph1
-            : (root.jw-progress < 0.75 ? Strings.jw-ph2 : Strings.jw-ph3);
+            : (root.jw-progress < 0.5 ? Strings.jw-ph-founder
+            : (root.jw-progress < 0.75 ? Strings.jw-ph2 : Strings.jw-ph3));
         progress: root.jw-progress;
         cancel-label: Strings.jw-busy-cancel;
         cancelled => {

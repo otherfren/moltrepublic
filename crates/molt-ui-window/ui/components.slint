@@ -812,6 +812,12 @@ export component AppArea inherits Rectangle {
             wrap: word-wrap;
         }
     }
+    ScrollHint {
+        x: parent.width - 7px;
+        view-h: fl.height;
+        content-h: fl.viewport-height;
+        scroll-y: fl.viewport-y;
+    }
 }
 
 // The ubiquitous "coloured dot + label" status line.

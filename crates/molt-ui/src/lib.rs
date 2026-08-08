@@ -2857,6 +2857,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         .into(),
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
+    ui.set_cw_log_text(sv.create.run.log.join("\n").into());
     ui.set_cw_log_tone(log_tones(&sv.create.run.log));
     ui.set_cw_headline(sv.create.run.headline.clone().into());
     // a declined seat switches the failure banner to "the founding is over"
@@ -5817,10 +5818,11 @@ lexicon! {
     cw_seed_confirm_title: "Save your recovery phrase", "Sichere deine Wiederherstellungs-Phrase";
     cw_seed_confirm_hint: "It is the only way back to this seat. Re-type it to continue.", "Sie ist der einzige Weg zurück zu deinem Sitz. Gib sie zur Bestätigung erneut ein.";
     cw_seed_confirm_ph: "Re-type the phrase", "Phrase erneut eingeben";
+    cw_ratify_wait: "The charter is with the members - waiting for their signatures…", "Die Satzung liegt bei den Mitgliedern - warte auf ihre Unterschriften…";
     cw_charter_name_label: "Republic name", "Name der Republik";
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
     cw_charter_agenda_ph: "Agenda / charter - what this republic is for", "Agenda / Satzung - wofür diese Republik steht";
-    cw_charter_hint: "Every member has joined. Propose the charter; each member ratifies it with their signature before the workspace opens.", "Alle Mitglieder sind beigetreten. Schlage die Satzung vor; jedes Mitglied ratifiziert sie mit seiner Signatur, bevor der Workspace aufgeht.";
+    cw_charter_hint: "Write the republic's agenda - every member must sign it.", "Schreib die Agenda der Republik - alle Mitglieder müssen sie unterzeichnen.";
     cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
     cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
     cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
@@ -5966,6 +5968,7 @@ lexicon! {
     jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
     jw_ph2: "Synchronizing ritual, please wait…", "Synchronisiere Ritual, bitte warten…";
+    jw_ph_founder: "Waiting for the founder - the charter is being written…", "Warte auf den Gründer - die Satzung entsteht…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     // no cause here: the headline above carries it, and "invite rejected" was
     // wrong for the commonest refusal of all — the relay gate, which turns the

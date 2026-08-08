@@ -1543,6 +1543,9 @@ export component RunView inherits VerticalLayout {
     in property <string> ph1;
     in property <string> ph2;
     in property <string> ph3;
+    // optional extra phase for the 30–50% window (the join's "accepted,
+    // waiting for the founder's charter" stage); "" = fall through to ph2
+    in property <string> ph-founder: "";
     in property <string> failed-label;
     // the ONE thing that went wrong, in a few words — rendered large and in
     // the signal colour. The log below keeps the detail; a failure an
@@ -1601,7 +1604,9 @@ export component RunView inherits VerticalLayout {
                     // old label ("invite rejected") contradicted it outright
                     text: root.outcome == 2
                         ? (root.headline == "" ? root.failed-label : "")
-                        : (root.progress < 0.3 ? root.ph1 : (root.progress < 0.75 ? root.ph2 : root.ph3));
+                        : (root.progress < 0.3 ? root.ph1
+                            : (root.progress < 0.5 && root.ph-founder != "" ? root.ph-founder
+                            : (root.progress < 0.75 ? root.ph2 : root.ph3)));
                     color: root.outcome == 2 ? Theme.bad : Theme.dim;
                     font-size: Theme.fs-cap;
                     horizontal-stretch: 1;
