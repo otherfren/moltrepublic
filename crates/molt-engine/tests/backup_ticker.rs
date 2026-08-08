@@ -336,6 +336,74 @@ async fn stamp_moves_only_on_a_confirmed_upload_and_the_blob_is_real() {
     assert_eq!(puts_after, 1, "the interval was not elapsed — no second upload");
 }
 
+/// **The security floor of the whole backup feature (2026-08-08):** what
+/// reaches the bucket is CIPHERTEXT, always. A workspace's content — chat,
+/// display name, the recovery phrase — must never appear as plaintext in
+/// the uploaded body; the bucket operator holds an opaque blob and the
+/// workspace-id pseudonym, nothing else. If this test ever goes red, stop
+/// the release: workspaces would be landing readable on the backup server.
+#[tokio::test]
+async fn the_uploaded_blob_never_carries_workspace_plaintext() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
+
+    // distinctive content the blob must not leak
+    let marker = "PLAINTEXT-CANARY-9f3a7c must never reach the bucket";
+    w.execute(Command::Chat {
+        body: marker.to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("chat");
+    let phrase = entry(&session(&w).await, &id).seed.clone();
+    assert!(!phrase.is_empty(), "the harness entry carries the phrase");
+
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "confirmed upload", |sv| {
+        entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER
+    })
+    .await;
+
+    let reqs = log.lock().expect("log").clone();
+    let put = reqs
+        .iter()
+        .find(|r| r.method == "PUT")
+        .expect("one upload ran");
+    let body = &put.body;
+    let contains = |needle: &[u8]| body.windows(needle.len()).any(|w| w == needle);
+    assert!(
+        !contains(marker.as_bytes()),
+        "chat plaintext must never appear in the uploaded body"
+    );
+    assert!(
+        !contains("Backup Republic".as_bytes()),
+        "the display name rides inside the ciphertext, never the raw body"
+    );
+    assert!(
+        !contains(phrase.as_bytes()),
+        "the recovery phrase must never appear in the uploaded body"
+    );
+    // …and the id it MAY carry is the pseudonym the object key names anyway
+    let key = molt_storage::derive_workspace_key(
+        &molt_storage::seed_entropy(&phrase).expect("entropy"),
+        &id,
+    );
+    molt_storage::export::read_export(
+        &mut body.as_slice(),
+        &molt_storage::export::ExportSecret::WorkspaceKey(key),
+    )
+    .expect("the body is exactly the encrypted export - ciphertext, not a copy");
+}
+
 /// §8.3.1: a failing bucket keeps the stamp untouched and surfaces the
 /// real error — no fake success anywhere.
 #[tokio::test]

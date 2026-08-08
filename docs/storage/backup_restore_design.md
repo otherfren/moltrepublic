@@ -838,3 +838,43 @@ Defaults chosen throughout; the genuinely product-flavored ones:
 * **MLS/SMP live state**: **never exported** (§3.3) — the one
   recommendation in this document that should be treated as load-bearing
   rather than a tunable default.
+
+## 10. S7 — restore lands SEALED (ratified 2026-08-08, building)
+
+Product decision (user, 2026-08-08): the Welcome card "Restore from backup"
+routes to **Settings › Backup**. The table there restores the **newest**
+remote version of a selected workspace **without asking for any secret**;
+the result lands locally **still encrypted** (the user has entered no seed,
+so there is nothing to decrypt with — and if it arrived decrypted we would
+have proof of plaintext on the bucket, which
+`backup_ticker::the_uploaded_blob_never_carries_workspace_plaintext` exists
+to make impossible). Afterwards the GUI offers jumping to the Open list —
+the exact view "Open a local workspace" shows. Decryption happens THERE, on
+open, with the recovery phrase.
+
+Mechanism (reuses S4/S5 machinery, no new crypto):
+
+* **Fetch** — new co-equal command `BackupFetch { id }` (a human decision:
+  GUI button in the backup table, MCP tool). Downloads the newest
+  `molt/<id>/<ts>.molt.enc` object and writes it **verbatim** to
+  `<workspace_root>/<id>.<ts>.restored.molt.enc`. No decrypt, no staging,
+  no chain verification yet — the file is ciphertext byte-for-byte as
+  uploaded.
+* **Scan** — `scan_workspaces` lists such artifacts as entries in the
+  "restored backup, sealed" state: shown under the id pseudonym + the
+  backup timestamp (the NAME is inside the ciphertext, by design — showing
+  it would prove the leak this whole section forbids).
+* **Open** — opening such an entry prompts for the recovery phrase (the
+  same posture as an at-rest-sealed workspace) and then drives the
+  EXISTING file-restore pipeline (`RestoreStart{way:"file"}` semantics:
+  phrase → workspace key → `read_export` → hard chain verification →
+  materialize), deleting the artifact on success. A wrong phrase refuses
+  honestly and leaves the artifact in place.
+* **Welcome** — the "Restore from backup" card navigates to Settings tab
+  Backup; the `rw-mode == "s3"` wizard branch retires (the phrase step
+  moved to open-time; `RestoreStart{way:"s3"}` stays on the MCP surface).
+
+Tests (red first): fetch lands the exact uploaded bytes as a sealed
+artifact and never plaintext; the scan lists it sealed; open with the right
+phrase materializes through the verified pipeline and removes the artifact;
+a wrong phrase refuses and keeps it.
