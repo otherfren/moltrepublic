@@ -2269,21 +2269,14 @@ export component AppWindow inherits Window {
                             }
                         }
                         ChoiceCard {
+                            lead: Strings.choice-backup-lead;
                             key: Strings.choice-backup-key;
                             rest: Strings.choice-backup-rest;
-                            sub: Strings.choice-backup-sub;
                             icon: @image-url("assets/restore.svg");
                             marked: root.choice-focus == 3;
                             chosen => {
                                 root.choice-go(3);
                             }
-                        }
-                        Rectangle { height: 4px; }
-                        Text {
-                            text: Strings.choice-mock-note;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            horizontal-alignment: center;
                         }
                     }
                 }
@@ -3951,15 +3944,13 @@ export component AppWindow inherits Window {
                 // engine notices drive the running / failed states; on
                 // success the engine flips the screen by itself.
                 if root.rw-mode == "link": WayBranch {
-                    // armed by the LINK alone: what it needs beyond that -
-                    // a name for an invite, the phrase for a recovery - is
-                    // asked where it belongs, not up front
-                    armed: root.rv-link != "";
+                    // never dimmed: an empty link gates only the Continue
+                    // button, not the panel the user is about to type into
                     last: true;
                     RestoreWay {
                     horizontal-stretch: 1;
-                    title: Strings.rw-via-link;
-                    hint: Strings.rw-link-hint;
+                    title: Strings.rw-link-title;
+                    hero: true;
                     icon: @image-url("assets/link.svg");
                     // THE field this screen is about - hero-sized, accented
                     // and with a readable placeholder. It used to look like

@@ -87,7 +87,7 @@ export component ChoiceCard inherits Rectangle {
                 font-weight: 700;
             }
         }
-        Text {
+        if root.sub != "": Text {
             text: root.sub;
             color: Theme.dim;
             font-size: Theme.fs-body;
@@ -937,6 +937,9 @@ export component RestoreWay inherits Rectangle {
     in property <string> title;
     in property <string> hint;
     in property <image> icon;
+    // the screen's one main panel: its title carries the instruction, so it
+    // renders headline-sized instead of row-sized
+    in property <bool> hero: false;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
     border-color: Theme.line;
@@ -967,10 +970,11 @@ export component RestoreWay inherits Rectangle {
             Text {
                 text: root.title;
                 color: Theme.text;
-                font-size: Theme.fs-body;
+                font-size: root.hero ? Theme.fs-h2 : Theme.fs-body;
                 font-weight: 700;
+                wrap: word-wrap;
             }
-            Text {
+            if root.hint != "": Text {
                 text: root.hint;
                 color: Theme.faint;
                 font-size: Theme.fs-cap;

@@ -5659,7 +5659,6 @@ macro_rules! lexicon {
 
 lexicon! {
     choice_title: "Welcome", "Willkommen";
-    choice_mock_note: "Workspaces are stored encrypted in the workspace folder (see Settings).", "Workspaces werden verschlüsselt im Workspace-Ordner gespeichert (siehe Einstellungen).";
     // card titles split as hotkey letter + rest: the letter renders
     // underlined and typing it activates the card
     choice_create_key: "C", "G";
@@ -5668,9 +5667,9 @@ lexicon! {
     choice_open_key: "O", "Ö";
     choice_open_rest: "pen", "ffnen";
     choice_open_sub: "Open a local workspace", "Lokalen Workspace öffnen";
-    choice_backup_key: "B", "B";
-    choice_backup_rest: "ackup restore", "ackup wiederherstellen";
-    choice_backup_sub: "From your S3 backup, with the phrase it was sealed with", "Aus deinem S3-Backup, mit der Phrase, die es versiegelt hat";
+    choice_backup_lead: "Restore from ", "";
+    choice_backup_key: "b", "B";
+    choice_backup_rest: "ackup", "ackup wiederherstellen";
     choice_restore_lead: "(", "(";
     choice_restore_key: "R", "R";
     choice_restore_rest: "e)Join / Recovery", "e)Join / Recovery";
@@ -5907,21 +5906,20 @@ lexicon! {
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     set_token_failed: "Could not mint a token - the old one still applies.", "Konnte kein Token erzeugen - das alte gilt weiter.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
-    rw_title_s3: "Backup restore", "Backup wiederherstellen";
+    rw_title_s3: "Restore from backup", "Backup wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
     rw_paste: "Paste", "Einfügen";
     rw_seed_hint: "The phrase of the seat you are coming back to.", "Die Phrase des Sitzes, auf den du zurückkommst.";
     rw_seed_hint_s3: "The phrase the backup was sealed with.", "Die Phrase, mit der das Backup versiegelt wurde.";
     rw_back: "Back", "Zurück";
     rw_continue: "Continue", "Weiter";
-    rw_via_link: "With a link", "Mit einem Link";
+    rw_link_title: "The invite or recovery link you were given", "Der Einladungs- oder Recovery-Link, den du bekommen hast";
     rw_link_ph: "Paste your molt:// link here", "molt://-Link hier einfügen";
     rw_join_running: "A join is already running.", "Ein Beitritt läuft bereits.";
     rw_founding_running: "A founding is already running.", "Eine Gründung läuft bereits.";
     rw_recovery_running: "A recovery is already running.", "Eine Wiederherstellung läuft bereits.";
     rw_join_awaits: "A join is waiting for your confirmation.", "Ein Beitritt wartet auf deine Bestätigung.";
     rw_join_goto: "Go to it", "Dorthin";
-    rw_link_hint: "The invite or recovery link you were given.", "Der Einladungs- oder Recovery-Link, den du bekommen hast.";
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
