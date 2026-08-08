@@ -453,6 +453,109 @@ async fn s3_restore_round_trips_from_the_bucket_with_the_phrase() {
     assert_no_staging_residue(&dest_root);
 }
 
+/// S7 (2026-08-08, `backup_restore_design.md` §10): "Restore from backup"
+/// lands SEALED. `BackupFetch` downloads the newest object VERBATIM into a
+/// stub entry the Open list shows as a restored backup — no secret asked,
+/// nothing decrypted. `DecryptWorkspace` with the recovery phrase then
+/// drives the verified restore pipeline; a wrong phrase refuses (sync on a
+/// malformed one, async on a well-formed-but-wrong one) and keeps the
+/// artifact either way.
+#[tokio::test]
+async fn backup_fetch_lands_sealed_and_the_phrase_opens_it() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let endpoint = bucket_stub().await;
+    let (src, id, phrase) =
+        founded_source(&tmp.path().join("src"), s3_settings(&endpoint)).await;
+    src.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    poll_session(&src, "confirmed upload", |sv| {
+        sv.workspaces
+            .iter()
+            .any(|w| w.id == id && w.last_backup_min != molt_core::WorkspaceInfo::NEVER)
+    })
+    .await;
+
+    // total device loss: fresh engine + root — only the id from the backup
+    // table, NO phrase at fetch time
+    let dest_root = tmp.path().join("dst");
+    let w2 = restore_engine(&dest_root, s3_settings(&endpoint));
+    w2.execute(Command::BackupFetch { id: id.clone() })
+        .await
+        .expect("fetch acked");
+    let sv = poll_session(&w2, "the sealed artifact to land", |sv| {
+        sv.workspaces
+            .iter()
+            .any(|w| w.id == id && w.restored)
+    })
+    .await;
+    let entry = sv.workspaces.iter().find(|w| w.id == id).expect("entry");
+    assert!(
+        entry.seed.is_empty(),
+        "a fetched artifact must carry no phrase material"
+    );
+
+    // a malformed phrase refuses synchronously and changes nothing
+    let err = w2
+        .execute(Command::DecryptWorkspace {
+            id: id.clone(),
+            phrase: "not a bip39 phrase".to_string(),
+        })
+        .await
+        .expect_err("a malformed phrase must refuse");
+    assert!(!err.to_string().is_empty());
+    // a WELL-FORMED but wrong phrase fails the restore run and keeps the
+    // artifact (the decrypt happens off-actor)
+    let wrong = molt_storage::generate_seed_phrase().expect("wrong phrase");
+    w2.execute(Command::DecryptWorkspace { id: id.clone(), phrase: wrong })
+        .await
+        .expect("the well-formed wrong phrase starts the run");
+    let sv = poll_session(&w2, "the wrong-phrase run to fail", |sv| {
+        sv.restore.run.outcome == 2
+    })
+    .await;
+    assert!(
+        sv.workspaces
+            .iter()
+            .any(|w| w.id == id && w.restored),
+        "the artifact survives a wrong phrase"
+    );
+
+    // the RIGHT phrase drives the verified pipeline: chain-verify, then a
+    // real local workspace replaces the artifact
+    w2.execute(Command::DecryptWorkspace { id: id.clone(), phrase: phrase.clone() })
+        .await
+        .expect("decrypt starts");
+    let sv = poll_session(&w2, "the restore to verify + materialize", |sv| {
+        sv.workspaces
+            .iter()
+            .any(|w| w.id == id && !w.restored)
+    })
+    .await;
+    assert!(
+        sv.restore.run.log.iter().any(|l| l.contains("chain verified")),
+        "the open ran the verified pipeline: {:?}",
+        sv.restore.run.log
+    );
+    w2.execute(Command::OpenWorkspace { id: id.clone() }).await.expect("open");
+    match w2
+        .execute(Command::ReadState {
+            surface: molt_core::Surface::Chat,
+            channel: None,
+            view: None,
+        })
+        .await
+        .expect("read chat")
+    {
+        Reply::State(s) => assert!(
+            s.applied
+                .iter()
+                .any(|v| v.to_string().contains("history to restore")),
+            "the fetched + opened workspace carries the history"
+        ),
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert_no_staging_residue(&dest_root);
+}
+
 /// §8.1.3/§8.1.5 at the engine level: a flipped byte rejects at the
 /// decrypt layer; a FORGED CHAIN BLOCK rejects at the verify phase — and
 /// neither leaves a directory or staging residue.

@@ -409,6 +409,20 @@ pub fn run_app(
         });
     }
     {
+        // S7: fetch a bucket-only workspace onto this device — sealed; the
+        // outcome arrives on the session notice (backup-fetched/-failed)
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_backup_fetch(move |id| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_bk_fetched("".into());
+                ui.set_bk_fetch_error("".into());
+            }
+            issue(&rt, &w, &weak, Command::BackupFetch { id: id.to_string() });
+        });
+    }
+    {
         // Add a relay to the pool. The URL is pre-validated with molt-core's
         // own parser so the message under the field is localized; the engine
         // re-validates and stays the gate. The draft is cleared only once the
@@ -2564,6 +2578,13 @@ fn apply_session(
     // draft cache) and compared before acting.
     if ui.get_recover_notice_seen() != sv.notice.as_str() {
         ui.set_recover_notice_seen(sv.notice.clone().into());
+        // S7: the fetch outcome rides the notice — the backup tab shows it
+        if let Some(fetched) = sv.notice.strip_prefix("backup-fetched:") {
+            ui.set_bk_fetched(fetched.into());
+            ui.set_bk_fetch_error("".into());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-fetch-failed:") {
+            ui.set_bk_fetch_error(err.into());
+        }
         match parse_recover_notice(&sv.notice) {
             RecoverNotice::LinkPending(member) => {
                 // coordinator: a mint attempt started — open the dialog in
@@ -6087,6 +6108,9 @@ lexicon! {
     bk_refresh: "Refresh bucket", "Bucket aktualisieren";
     bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport - Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport - via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
     bk_listing: "listing the bucket…", "Bucket wird gelesen…";
+    bk_restore: "Restore", "Wiederherstellen";
+    bk_fetched_note: "Restored (still sealed) - open it with its recovery phrase", "Wiederhergestellt (noch versiegelt) - mit der Recovery-Phrase öffnen";
+    bk_goto_open: "To the workspace list", "Zur Workspace-Liste";
     bk_list_ok: "bucket listed ✓", "Bucket gelesen ✓";
     set_save: "Save", "Speichern";
     set_save_note: "Saved to config.toml.", "In config.toml gespeichert.";

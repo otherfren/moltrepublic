@@ -44,7 +44,7 @@
 //! what the opt-in phrase sealing is for.
 
 pub mod sealing;
-pub use sealing::{is_sealed, seal_at_rest, unseal_at_rest};
+pub use sealing::{is_restored, is_sealed, seal_at_rest, unseal_at_rest};
 
 pub mod export;
 pub mod import;
@@ -851,6 +851,49 @@ fn write_manifest(ws_dir: &Path, m: &WorkspaceManifest) -> Result<(), StorageErr
     let text = toml::to_string_pretty(m)
         .map_err(|e| StorageError::BadFile(format!("rendering manifest: {e}")))?;
     write_atomic(ws_dir, "manifest.toml", text.as_bytes(), false)
+}
+
+/// S7 — the verbatim blob a fetched backup stub holds, relative to its dir.
+pub const RESTORED_BLOB_FILE: &str = "restore.molt.enc";
+
+/// S7 (`backup_restore_design.md` §10): land a fetched backup blob as a
+/// SEALED stub the Open list shows. The directory holds a minimal manifest
+/// (the id pseudonym as its label — the real name is inside the ciphertext,
+/// by design) and the blob byte-for-byte as the bucket served it. No key
+/// material, no log: opening runs the verified restore pipeline. Refused
+/// when any directory already carries this id.
+pub fn write_restored_stub(
+    root: &Path,
+    id: &str,
+    ts: u64,
+    blob: &[u8],
+) -> Result<PathBuf, StorageError> {
+    if find_workspace_dir(root, id).is_some() {
+        return Err(StorageError::BadFile(format!(
+            "workspace {id} already exists locally"
+        )));
+    }
+    let short: String = id.chars().take(12).collect();
+    let dir = root.join(format!("restored-{short}"));
+    fs::create_dir_all(&dir)?;
+    let manifest = WorkspaceManifest {
+        format: MANIFEST_FORMAT.to_string(),
+        version: STORAGE_VERSION,
+        workspace: molt_core::ManifestWorkspace {
+            id: id.to_string(),
+            name: format!("restored {short}…"),
+            created: ts,
+            rule_m: 0,
+            rule_n: 0,
+        },
+        crypto: molt_core::CryptoParams {
+            sealed: molt_core::SEALED_RESTORED.to_string(),
+            ..molt_core::CryptoParams::default()
+        },
+    };
+    write_manifest(&dir, &manifest)?;
+    write_atomic(&dir, RESTORED_BLOB_FILE, blob, true)?;
+    Ok(dir)
 }
 
 /// Read a workspace's `prefs.toml`; a missing or broken file falls back to
@@ -1715,7 +1758,9 @@ fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
     if manifest.version > molt_core::STORAGE_VERSION_SEALED {
         return Err(StorageError::NewerVersion(manifest.version));
     }
-    if sealing::is_sealed(manifest) {
+    // both sealed shapes route to the decrypt flow: S6 (unseal) and the S7
+    // restored stub (whose "decrypt" is the verified restore pipeline)
+    if sealing::is_sealed(manifest) || sealing::is_restored(manifest) {
         return Err(StorageError::Sealed(manifest.workspace.id.clone()));
     }
     Ok(())
@@ -2053,9 +2098,10 @@ impl ScanEntry {
             // effective global setting (`molt_core::effective_net_label`);
             // claiming one here would mislabel every entry after a restart
             net: String::new(),
-            // derived from the directory (S6 marker), so the sealed state
-            // survives restarts instead of living in session memory
-            encrypted: sealing::is_sealed(&self.manifest),
+            // derived from the directory (S6/S7 markers), so the sealed
+            // state survives restarts instead of living in session memory
+            encrypted: sealing::is_sealed(&self.manifest) || sealing::is_restored(&self.manifest),
+            restored: sealing::is_restored(&self.manifest),
             members: Vec::new(),
             // the charter is in the encrypted genesis — filled in on open
             // (refresh_active_entry), like the roster

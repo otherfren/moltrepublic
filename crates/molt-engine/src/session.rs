@@ -1543,6 +1543,24 @@ impl State {
                 root.display()
             ))
         })?;
+        // S7: a fetched backup stub's "decrypt" IS the verified restore —
+        // phrase → workspace key → read_export → hard chain verification →
+        // materialize (replace trashes the stub only after the verify). The
+        // phrase is sanity-checked here so a typo refuses synchronously.
+        if molt_storage::read_manifest(&dir)
+            .map(|m| molt_storage::is_restored(&m))
+            .unwrap_or(false)
+        {
+            molt_storage::seed_entropy(&phrase)
+                .map_err(|e| MoltError::BadPayload(format!("recovery phrase: {e}")))?;
+            let blob = dir.join(molt_storage::RESTORED_BLOB_FILE);
+            return self.cmd_restore_start(
+                "file".to_string(),
+                blob.display().to_string(),
+                phrase,
+                true,
+            );
+        }
         molt_storage::unseal_at_rest(&root, &dir, &phrase)
             .map_err(molt_storage::StorageError::into_molt)?;
         // the key material is back — refill the details-panel facts the

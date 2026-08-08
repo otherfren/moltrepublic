@@ -1260,6 +1260,8 @@ impl State {
 
             // backup.rs (story 12: the auto-backup ticker + manual trigger)
             Command::BackupNow { id } => self.cmd_backup_now(id),
+            Command::BackupFetch { id } => self.cmd_backup_fetch(id),
+            Command::NetBackupFetched { id, error } => self.cmd_net_backup_fetched(id, error),
             Command::BackupTick => self.cmd_backup_tick(),
             Command::NetBackupDone {
                 id,

@@ -303,6 +303,7 @@ impl State {
             agenda,
             encrypted: false,
             members,
+            restored: false,
         });
     }
 
@@ -603,6 +604,7 @@ impl State {
                 seed: entry_seed,
                 net: self.effective_net_label(),
                 encrypted,
+                restored: false,
                 members,
                 agenda: sealed.agenda.clone(),
             });

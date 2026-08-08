@@ -1165,6 +1165,19 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "backup_fetch",
+            command: "backup_fetch",
+            description: "Fetch the NEWEST bucket backup of a workspace onto this device (S7): downloads the encrypted molt-export-v1 blob VERBATIM into a sealed stub the workspace list shows as 'restored' - no secret is asked and nothing is decrypted. Opening the stub later with decrypt_workspace + the recovery phrase runs the verified restore pipeline. Refused while a workspace with this id already exists locally. Async kickoff; the outcome arrives on the session notice ('backup-fetched:<id>' or 'backup-fetch-failed:<reason>').",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "the workspace-id pseudonym from the backup table (list_backups / read_session orphans)" } },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::BackupFetch {
+                id: str_arg(args, "id")?,
+            }),
+        },
+        ToolDef {
             name: "encrypt_workspace",
             command: "encrypt_workspace",
             description: "Seal a closed workspace at rest under its recovery phrase: the phrase is verified against the workspace first, then the device-sealed key material is removed from disk — the phrase becomes the only way back in. The workspace becomes inactive and open_workspace refuses until decrypt_workspace; the state survives restarts. The active workspace cannot be encrypted.",
@@ -1456,7 +1469,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 50] = [
+        const INTERNAL: [&str; 51] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1468,6 +1481,7 @@ mod tests {
             "backup_tick",
             "net_backup_done",
             "net_backup_failed",
+            "net_backup_fetched",
             "net_restore_progress",
             "net_restore_staged",
             "net_restore_failed",

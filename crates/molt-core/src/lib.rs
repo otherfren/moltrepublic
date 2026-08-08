@@ -520,6 +520,11 @@ pub struct WorkspaceInfo {
     /// decrypt with the recovery phrase.
     #[serde(default)]
     pub encrypted: bool,
+    /// A fetched-but-unopened backup (S7 — [`SEALED_RESTORED`]): sealed like
+    /// `encrypted`, but the label and the decrypt path differ (opening runs
+    /// the verified restore pipeline). Additive.
+    #[serde(default)]
+    pub restored: bool,
     /// Members and when each of them last synced.
     pub members: Vec<MemberInfo>,
     /// The ratified founding charter (free-text agenda) from the genesis —
@@ -646,6 +651,7 @@ impl WorkspaceInfo {
                 encrypted: false,
                 members,
                 agenda: String::new(),
+                restored: false,
             }
         }
         vec![
@@ -1256,6 +1262,12 @@ pub const SEALED_DEVICE: &str = "device";
 /// NO key material on disk — the workspace key is re-derived from the
 /// recovery phrase + the manifest id on decrypt (derive-and-verify).
 pub const SEALED_PHRASE: &str = "phrase";
+/// [`CryptoParams::sealed`] marker of a FETCHED backup that has not been
+/// opened yet (S7, `backup_restore_design.md` §10): the directory holds the
+/// downloaded `.molt.enc` blob VERBATIM and nothing else — no key material,
+/// no name (the name is inside the ciphertext). `DecryptWorkspace` with the
+/// recovery phrase drives the verified restore pipeline.
+pub const SEALED_RESTORED: &str = "restored";
 
 /// `manifest.toml` — the plaintext identity card of a workspace directory.
 /// Deliberately *minimal*: what the Open screen needs before the user
@@ -3785,6 +3797,27 @@ pub enum Command {
     BackupNow {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
+    },
+    /// Fetch the NEWEST bucket backup of a workspace onto this device — a
+    /// human decision (the backup table's restore button), so a tool on both
+    /// surfaces (S7, `backup_restore_design.md` §10). Downloads the blob
+    /// VERBATIM into a [`SEALED_RESTORED`] stub the Open list shows; **no
+    /// secret is asked and nothing is decrypted** — opening the entry with
+    /// its recovery phrase later drives the verified restore pipeline
+    /// ([`Command::DecryptWorkspace`]). Refused while a workspace with this
+    /// id already exists locally.
+    BackupFetch {
+        /// The workspace id ([`WorkspaceInfo::id`]) — the bucket pseudonym.
+        id: WorkspaceId,
+    },
+    /// The fetch task's outcome (engine-internal, from the off-actor fetch
+    /// task — an agent must not be able to forge a fetched artifact).
+    NetBackupFetched {
+        /// The fetched workspace id.
+        id: WorkspaceId,
+        /// Empty on success; the honest reason otherwise.
+        #[serde(default)]
+        error: String,
     },
     /// The backup ticker's heartbeat (engine-internal, sent by the engine's
     /// own clock): the synchronous handler only DECIDES — workspaces whose

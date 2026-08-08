@@ -340,6 +340,7 @@ mod tests {
             seed: String::new(),
             net: "none".to_string(),
             encrypted: false,
+            restored: false,
             members: molt_core::roster_members(&roster, now, |_| molt_core::MemberInfo::NEVER),
             agenda: String::new(),
         };

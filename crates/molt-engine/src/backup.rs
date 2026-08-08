@@ -228,6 +228,123 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// S7 (`backup_restore_design.md` §10): fetch the NEWEST bucket backup
+    /// of `id` onto this device as a SEALED stub — no secret asked, nothing
+    /// decrypted. The off-actor task lists `molt/<id>/`, downloads the
+    /// newest object VERBATIM and lands it via
+    /// [`molt_storage::write_restored_stub`]; the outcome returns as the
+    /// engine-internal [`Command::NetBackupFetched`].
+    pub(crate) fn cmd_backup_fetch(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
+        if !self.persist {
+            return Err(MoltError::Storage(
+                "this node has no workspace storage to fetch into".to_string(),
+            ));
+        }
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(MoltError::Storage(
+                "pick a backup: the workspace id from the backup table (64 hex chars)"
+                    .to_string(),
+            ));
+        }
+        let root = self.workspace_root();
+        if molt_storage::find_workspace_dir(&root, &id).is_some() {
+            return Err(MoltError::Storage(format!(
+                "workspace {id} already exists locally"
+            )));
+        }
+        let s = &self.session.settings;
+        let config = molt_net::s3::S3Config::from_settings(
+            &s.s3_endpoint,
+            &s.s3_access_key,
+            &s.s3_secret_key,
+            &s.s3_bucket,
+        )
+        .map_err(|e| MoltError::Settings(format!("backup target: {e}")))?;
+        let dialer = self
+            .dialer_for()
+            .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Storage("engine stopped".to_string()));
+        };
+        tokio::spawn(async move {
+            let done = |id: WorkspaceId, error: String| Command::NetBackupFetched { id, error };
+            let client = molt_net::s3::S3Client::new(config, dialer);
+            let outcome = async {
+                let prefix = format!("molt/{id}/");
+                let objects = client
+                    .list_objects(&prefix)
+                    .await
+                    .map_err(|e| format!("s3: list {prefix}: {e}"))?;
+                let newest = objects
+                    .iter()
+                    .filter_map(|o| molt_core::parse_backup_key(&o.key).map(|(_, ts)| (ts, &o.key)))
+                    .max_by_key(|(ts, _)| *ts)
+                    .map(|(ts, key)| (ts, key.clone()))
+                    .ok_or_else(|| format!("no backup for {id} in the bucket"))?;
+                let (ts, key) = newest;
+                let mut blob: Vec<u8> = Vec::new();
+                client
+                    .get_object(
+                        &key,
+                        &mut blob,
+                        crate::lifecycles::RESTORE_MAX_BYTES,
+                        &mut |_done, _total| {},
+                    )
+                    .await
+                    .map_err(|e| format!("s3: GET {key}: {e}"))?;
+                let stub_id = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    molt_storage::write_restored_stub(&root, &stub_id, ts, &blob)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| format!("stub write: {e}"))??;
+                Ok::<(), String>(())
+            }
+            .await;
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(crate::Envelope {
+                    cmd: done(id, outcome.err().unwrap_or_default()),
+                    reply,
+                })
+                .await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The fetch task's outcome: on success the sealed stub joins the
+    /// workspace list (the Open screen shows it); on failure the honest
+    /// reason rides the notice.
+    pub(crate) fn cmd_net_backup_fetched(
+        &mut self,
+        id: WorkspaceId,
+        error: String,
+    ) -> Result<Reply, MoltError> {
+        if !error.is_empty() {
+            self.session.notice = format!("backup-fetch-failed:{error}");
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
+        let root = self.workspace_root();
+        let net = self.effective_net_label();
+        if let Some(entry) = molt_storage::scan_workspaces(&root)
+            .iter()
+            .find(|e| e.manifest.workspace.id == id)
+        {
+            let mut info = entry.info();
+            info.net = net;
+            // replace-or-push: idempotent against a re-fetch after a delete
+            self.session.workspaces.retain(|w| w.id != id);
+            self.session.workspaces.push(info);
+        }
+        self.session.notice = format!("backup-fetched:{id}");
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Spawn the off-actor backup task for one workspace: blob build
     /// (blocking — Argon2-free in workspace key mode, but file I/O) on the
     /// blocking pool, then PUT + retention over the network. Marks the

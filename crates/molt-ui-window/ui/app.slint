@@ -1027,15 +1027,22 @@ export component AppWindow inherits Window {
         } else if (i == 1) {
             root.reset-create();
             root.navigate(AppScreen.create);
-        } else if (i == 2 || i == 3) {
+        } else if (i == 3) {
+            // S7: restore-from-backup lives in the settings' backup tab —
+            // pick a remote workspace there, fetch it sealed, open it from
+            // the workspace list with the phrase
+            root.settings-return = AppScreen.choice;
+            root.set-tab = 2;
+            root.navigate(AppScreen.settings);
+        } else if (i == 2) {
             root.rw-seed = "";
             // a fresh visit always starts at the way in, never on the
             // phrase step a previous visit walked to
             // …unless a recovery is in flight: it reports on the phrase
             // step, and dropping the user on step 1 would hide it
-            root.rw-phase = root.rv-running && i == 2 ? 1 : 0;
-            root.rw-pending = root.rv-running && i == 2 ? "recover" : "";
-            root.rw-mode = i == 2 ? "link" : "s3";
+            root.rw-phase = root.rv-running ? 1 : 0;
+            root.rw-pending = root.rv-running ? "recover" : "";
+            root.rw-mode = "link";
             // the join half of this wizard starts clean too - the name is
             // only asked for once a link turns out to be an invite
             root.jw-member = "";
@@ -1516,6 +1523,11 @@ export component AppWindow inherits Window {
     property <int> set-tab: 0;
     // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
     in property <[BackupRow]> bk-rows;
+    // S7: the fetched-sealed outcome (workspace id / honest failure), from
+    // the session notice
+    in property <string> bk-fetched;
+    in property <string> bk-fetch-error;
+    callback backup-fetch(string);
     callback set-ws-backup(string, bool);
     // backup-table sorting (view-local, like the Open list): column key
     // ("" = session order) + direction; the sort runs in Rust over the
@@ -6936,6 +6948,18 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                     horizontal-alignment: right;
                                                 }
+                                                // S7: a bucket-only workspace can come HOME —
+                                                // fetched sealed, opened from the workspace
+                                                // list with its phrase
+                                                if !r.has-local: AppButton {
+                                                    height: 26px;
+                                                    pad: 9px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    label: Strings.bk-restore;
+                                                    clicked => {
+                                                        root.backup-fetch(r.id);
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -6946,6 +6970,32 @@ export component AppWindow inherits Window {
                                     content-h: bkfl.viewport-height;
                                     scroll-y: bkfl.viewport-y;
                                 }
+                            }
+                            // the fetched artifact is IN the workspace list now —
+                            // one line + the jump there (it opens with the phrase)
+                            if root.bk-fetched != "": HorizontalLayout {
+                                spacing: 8px;
+                                DotLabel {
+                                    tone: Theme.good;
+                                    label: Strings.bk-fetched-note;
+                                    label-color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                AppButton {
+                                    height: 28px;
+                                    pad: 10px;
+                                    primary: true;
+                                    label: Strings.bk-goto-open;
+                                    clicked => {
+                                        root.navigate(AppScreen.open);
+                                    }
+                                }
+                            }
+                            if root.bk-fetch-error != "": Text {
+                                text: root.bk-fetch-error;
+                                color: Theme.bad;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
                             }
                         }
                         // Anonymity network: a compact form panel like the

@@ -839,7 +839,15 @@ Defaults chosen throughout; the genuinely product-flavored ones:
   recommendation in this document that should be treated as load-bearing
   rather than a tunable default.
 
-## 10. S7 — restore lands SEALED (ratified 2026-08-08, building)
+## 10. S7 — restore lands SEALED (ratified + BUILT 2026-08-08)
+
+Keystones: `restore_real::backup_fetch_lands_sealed_and_the_phrase_opens_it`
+(fetch → sealed stub → wrong-phrase refusals sync+async → verified open),
+`backup_ticker::the_uploaded_blob_never_carries_workspace_plaintext`.
+As built: the command is `BackupFetch`; the stub rides `SEALED_RESTORED`
+in the manifest (`WorkspaceInfo.restored` additive); the open path is the
+existing `DecryptWorkspace`, whose restored arm drives the file-restore
+pipeline with `replace` (the stub is trashed only after the verify).
 
 Product decision (user, 2026-08-08): the Welcome card "Restore from backup"
 routes to **Settings › Backup**. The table there restores the **newest**

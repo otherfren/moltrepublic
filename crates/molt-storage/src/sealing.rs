@@ -46,6 +46,13 @@ pub fn is_sealed(manifest: &WorkspaceManifest) -> bool {
     manifest.crypto.sealed == SEALED_PHRASE
 }
 
+/// S7: a fetched-but-unopened backup stub — the directory holds the
+/// verbatim `.molt.enc` blob and nothing else (no key material, no log);
+/// opening runs the verified restore pipeline instead of an unseal.
+pub fn is_restored(manifest: &WorkspaceManifest) -> bool {
+    manifest.crypto.sealed == molt_core::SEALED_RESTORED
+}
+
 /// Seal a closed workspace at rest under its recovery phrase.
 ///
 /// Verifies the phrase first (BIP-39 checksum, then an authenticated

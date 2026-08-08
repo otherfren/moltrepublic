@@ -3049,6 +3049,7 @@ mod tests {
             seed: String::new(),
             net: "none".to_string(),
             encrypted: false,
+            restored: false,
             members: molt_core::roster_members(&roster, T, |_| MemberInfo::NEVER),
             agenda: String::new(),
         });
@@ -3434,6 +3435,7 @@ mod tests {
             encrypted: false,
             members: molt_core::roster_members(&closed_roster, T, |_| T),
             agenda: String::new(),
+            restored: false,
         });
         // 31 minutes of total silence pass everywhere
         st.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
