@@ -26,7 +26,6 @@
     --rule-soft: #e5eaf1;
     --accent: #cf5f15;
     --accent-soft: #8a5a30;
-    --live: #b42318;
     --code-bg: #e7ecf3;
     --glow1: rgba(207,95,21,.13);
     --glow2: rgba(34,211,238,.08);
@@ -44,7 +43,6 @@
       --rule-soft: #19212d;
       --accent: #ff9a4d;
       --accent-soft: #d79a5e;
-      --live: #ff8177;
       --code-bg: #0d1320;
       --glow1: rgba(255,154,77,.16);
       --glow2: rgba(34,211,238,.11);
@@ -61,7 +59,6 @@
     --rule-soft: #19212d;
     --accent: #ff9a4d;
     --accent-soft: #d79a5e;
-    --live: #ff8177;
     --code-bg: #0d1320;
     --glow1: rgba(255,154,77,.16);
     --glow2: rgba(34,211,238,.11);
@@ -127,8 +124,6 @@
   .lede-list li { position: relative; padding: 1px 0 1px 22px; font-size: 1.1rem; line-height: 1.35; color: var(--fg-soft); }
   .lede-list li::before { content: ""; position: absolute; left: 0; top: 0.62em; width: 7px; height: 7px; border-radius: 2px; background: var(--accent); }
   .lede-list li strong { color: var(--fg); }
-  .lede-note { max-width: 40ch; margin: 0 0 16px; font-size: 0.95rem; line-height: 1.45; color: var(--fg-soft); }
-  .lede-note.live { color: var(--live); margin-bottom: 2px; }
   .car-note { text-align: center; margin-top: 4px; color: var(--fg-soft); font-size: 0.92rem; font-style: italic; }
   .hero-row { display: flex; gap: 40px; align-items: center; margin-top: 24px; }
   .hero-row .hero-text { flex: 1 1 44%; min-width: 0; }
@@ -327,8 +322,6 @@
           <li data-i18n-html="li4"><strong>Secret vault</strong> (custom ZK scheme)</li>
           <li data-i18n-html="li5"><strong>Questboard</strong> (decentral Kanban)</li>
         </ul>
-        <p class="lede-note live" data-i18n="heroStatus">Live today: founding, membership and threshold governance over Nostr relays and Tor.</p>
-        <p class="lede-note" data-i18n="heroDev">In development: Company brain</p>
         <p class="lede"><span data-i18n-html="lede2">Every change clears <strong>multisig threshold consensus</strong> over <strong>anonymous, metadata-poor</strong> transport.<br/>Build your DAO now:&nbsp;&nbsp;</span><a class="gh-btn gh-sm" href="https://github.com/moltrepublic/moltrepublic" target="_blank" rel="noopener noreferrer">
           <svg class="gh-ico" aria-hidden="true" focusable="false"><use href="#i-gh"/></svg>
           GitHub
@@ -655,8 +648,6 @@
     "r13a": "Apache-2.0",
     "r13b": "GPL-3.0-or-later",
     "footer": "MoltRepublic.ai &#183; deine privacy-first, dezentrale KI-Firma. Du behältst die Kontrolle.",
-    "heroStatus": "Heute live: Gründung, Mitgliedschaft und Schwellen-Governance über Nostr-Relays und Tor.",
-    "heroDev": "In Entwicklung: Firmengedächtnis",
     "mockNote": "Design-Vorschauen - Kasse, Tresor und Board sind noch nicht gebaut."
   };
   var btn = document.querySelector('.lang-toggle');
