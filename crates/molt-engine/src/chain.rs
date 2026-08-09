@@ -1251,6 +1251,66 @@ impl State {
         }
     }
 
+    /// Settle the gossip-built proposal cards against the verified chain:
+    /// every proposal a block (or the checkpoint blob below a cut) consumed
+    /// shows Applied, every sealed membership change settles its
+    /// content-matched cards. Idempotent — the re-base/prune rebuilds run it
+    /// harmlessly; the reopen order makes it load-bearing. Deliberation is
+    /// ephemeral: after a replay only chain truth remains, so a card the
+    /// chain consumed can only honestly read Applied.
+    fn settle_cards_against_chain(&mut self) {
+        let mut settle: Vec<(u64, Surface)> = Vec::new();
+        // ids consumed below a checkpoint cut: their blocks are gone, the
+        // blob remembers; the surviving card names its own surface
+        if let Some(blob) = &self.checkpoint_blob {
+            for id in &blob.consumed_ids {
+                if let Some(p) = self.proposals.get(id) {
+                    if p.state != ProposalState::Applied {
+                        settle.push((*id, p.surface));
+                    }
+                }
+            }
+        }
+        for block in &self.chain {
+            if let ChainChange::Applied {
+                proposal_id,
+                surface,
+                ..
+            } = &block.change
+            {
+                if self
+                    .proposals
+                    .get(proposal_id)
+                    .is_some_and(|p| p.state != ProposalState::Applied)
+                {
+                    settle.push((*proposal_id, *surface));
+                }
+            }
+        }
+        for (id, surface) in settle {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Applied;
+            }
+            self.pending_sigs.remove(&id);
+            self.proposal_changes.remove(&id);
+            self.emit(Event::Applied {
+                id: ProposalId(id),
+                surface,
+            });
+        }
+        // membership blocks carry no proposal id — settle by content, the
+        // `after_block_applied` pattern
+        let membership: Vec<ChainChange> = self
+            .chain
+            .iter()
+            .filter(|b| matches!(b.change, ChainChange::Membership { .. }))
+            .map(|b| b.change.clone())
+            .collect();
+        for change in membership {
+            self.settle_membership_records(&change);
+        }
+    }
+
     pub(crate) fn apply_chain_to_state(&mut self) {
         let mut projected: std::collections::HashMap<
             Surface,
@@ -1280,6 +1340,11 @@ impl State {
             }
         }
         self.chain_applied = projected;
+        // the gossip-replayed proposal CARDS are older than the chain on a
+        // reopen (`open_stored_workspace` replays them first) — settle them
+        // against the verified truth or every restart resurrects decided
+        // votes as open cards
+        self.settle_cards_against_chain();
         // …and the working transport anchors. A pruned holder SEEDS them from
         // the blob: the `Restored` blocks that established them were dropped
         // at the cut, and the roster keeps each seat's founding anchor by
@@ -2555,6 +2620,14 @@ impl State {
         // "surface proposal" would sign that change's bytes.
         if self.proposal_changes.contains_key(&id) {
             tracing::warn!(%id, "refusing a surface proposal whose id names a chain change");
+            return false;
+        }
+        // an id the verified chain already consumed (the walk's double-apply
+        // guard, blob-seeded on a pruned holder) can only be a stale resend —
+        // a fresh card would resurrect a decided vote. The reopen twin of
+        // this guard is `settle_cards_against_chain`.
+        if self.chain_walk.as_ref().is_some_and(|w| w.seen.contains(&id)) {
+            tracing::debug!(%id, "refusing a proposal the chain already consumed");
             return false;
         }
         let mut inserted = false;
@@ -4101,6 +4174,48 @@ mod tests {
             reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
             Some(2)
         );
+    }
+
+    /// A reopen replays the proposal CARDS from the persisted gossip first
+    /// and adopts the chain second (`open_stored_workspace`) — adoption must
+    /// settle every card the chain already consumed, or each restart
+    /// resurrects decided votes as open cards (live incident 2026-08-09: a
+    /// sealed `set_relays` vote came back 'proposed' on every launch of the
+    /// proposer's node, its `restore_member` twins with it).
+    #[test]
+    fn adopting_a_chain_settles_replayed_proposal_cards() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        b.commit_applied(7, &["petra", "walter"]);
+        b.commit_restored("petra", &"ab".repeat(32), &["petra", "walter"]);
+
+        // the reopen shape: gossip-replayed cards, THEN the chain
+        let mut reopened = chain_peer("walter", &b, genesis);
+        reopened.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }));
+        reopened.receive_proposed(
+            8,
+            Surface::Organization,
+            json!({ "op": "restore_member", "member": "petra" }),
+        );
+        reopened.adopt_chain(b.blocks.clone());
+
+        let card = reopened.proposals.get(&7).expect("card survives");
+        assert_eq!(card.state, ProposalState::Applied, "the chain consumed id 7");
+        let restore = reopened.proposals.get(&8).expect("restore card survives");
+        assert_eq!(
+            restore.state,
+            ProposalState::Applied,
+            "the Restored block settles the membership card"
+        );
+
+        // the LIVE twin: a late (resent) Proposed for a consumed id must not
+        // open a fresh card either
+        let mut live = chain_peer("walter", &b, b.blocks.clone());
+        assert!(
+            !live.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 })),
+            "a consumed id must not open a fresh card"
+        );
+        assert!(live.proposals.get(&7).is_none(), "no resurrected card");
     }
 
     /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
