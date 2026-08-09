@@ -1,7 +1,8 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **three defects fixed on master** (proposal-card resurrect, chat-nav
-pin deadlock, pool edit lost on reopen), **two open** (each with evidence
+Status: **five defects fixed on master** (proposal-card resurrect, chat-nav
+pin deadlock, pool edit lost on reopen, declines never converged, applied
+cards lost their voters), **two open** (each with evidence
 below). Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
@@ -124,6 +125,60 @@ building the group runtime — the chain-ratified pool outranks the persisted
 copy on every open (no runtime is up yet, so it only adopts the list).
 Keystone: `org_effective.rs::a_sealed_pool_edit_survives_the_reopen`, red at
 the reopen assert before the fix.
+
+## 6. FIXED — a decline never crossed the wire, so a declined vote never died
+
+Found in the evening continuation of the same three-node run (fresh
+republic "My Company 2", 2-of-3, seats `links`/`mitte`/`rechts`).
+
+**Symptom:** two proposals (`set_name`, `set_image`) proposed by `links`
+were declined by BOTH other members — globally dead (max 1 of 2 possible
+approvals) — yet stayed pending on every node forever; no click ends them.
+MCP evidence: each node's card listed only its OWN decline (`mitte`'s node:
+mitte=declined, rechts=open; `rechts`'s node: the mirror image), 1/2
+approvals everywhere.
+
+**Root cause:** `crosses_wire` sends `Declined` (the comment even states
+votes must converge), but `deliver_gated` had NO receive arm for it — the
+envelope was accepted, ACKed and dropped ("event over the wire not acted on
+here"). Every node judged the vote winnable from its local view, so it
+never turned Rejected anywhere. Once dropped, the at-least-once guarantee
+is spent: the decline never comes back on its own.
+
+**Fix (master):** one decline choke point (`register_decline`: dedup per
+member, Rejected when declines > n − m) fed by the log applier, the new
+wire arm and a bounded park for declines whose proposal is not known yet
+(G7 orders per sender only; an own-log decline also replays before the WP2
+re-serve returns its card). The wire arm counts a decline ONLY for the
+link identity — it carries no signature, so a body claiming another member
+is dropped. The WP2 re-serve now also carries the node's OWN declines
+(open cards, rejected cards, parked voices), so the terminal verdict
+reaches nodes that were closed while the vote died — that plus the
+existing reopen catch-up probe heals the stuck live pair after a restart
+of all three nodes (one member may need to decline once more if its node
+never held the card). Keystones:
+`chain.rs::wire_declines_converge_and_reject_at_the_veto_threshold`,
+`chain.rs::a_decline_ahead_of_its_proposal_parks_and_registers`,
+`chain.rs::open_governance_reserves_the_own_decline`,
+`org_effective.rs::a_declined_vote_dies_on_every_node`,
+`org_effective.rs::a_rejected_verdict_reaches_a_reopened_node` — all
+red-verified without the receive arm.
+
+## 7. FIXED — an applied card showed 0 approvals and no voters
+
+**Symptom:** every decided (applied) vote in the history read "0/2
+approvals, every pill open" — who voted was gone, on all three nodes, even
+though `read_chain` plainly listed the two signers per block.
+
+**Root cause:** the proposal view built its voting pills from the
+ephemeral signature collection (`pending_sigs`), which is cleared the
+moment a block seals — and on a reopen the settle-against-chain path
+reconstructs applied cards with no vote data at all.
+
+**Fix (master):** for an Applied chain proposal the view resolves the
+sealed block by proposal id and reports its signers (count, pills,
+`approved_by_me`); a pruned block (WP4) honestly leaves the pills open.
+Keystone: `chain.rs::an_applied_card_reports_the_block_signers`.
 
 ## Repro assets
 
