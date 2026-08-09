@@ -1,8 +1,9 @@
 # Relay topology — the group shares its relays, and says so
 
-**Status: PLANNED, nothing built.** Rules ratified by the user 2026-08-02;
-recorded in `nostr_transport_marmot.md` §10.15. This document is the execution
-plan.
+**Status: R2b–R6 BUILT (R3/R3b/R4/R5/R6 landed 2026-08-02..04, the R6
+make-before-break gate and the pool-edit UI 2026-08-09); R1, R2 and R2c still
+open.** Rules ratified by the user 2026-08-02; recorded in
+`nostr_transport_marmot.md` §10.15. This document is the execution plan.
 
 Read first: `relay_pool.md` (relays do not federate; the confirmation gate),
 `nostr_transport_marmot.md` §10.15, `nostr_n4_plan.md` §8.8 (N4b, in flight).
@@ -115,8 +116,9 @@ thing under rule 1, plus the headline.
 ### R2b — The pool is visible where the other group settings are ✅ DONE
 `StatusView.relays` carries the GROUP's pool (not this node's own settings
 pool — a different list), and `OrgSettingsCard` shows it beside the retention
-window. Read-only until R5 exists: a propose-pencil that proposed nothing
-would be a promise the engine cannot keep.
+window. *Amended 2026-08-09 (user decision): the Status card shows only the
+COUNT plus the edit pencil — the URL list itself lives in the R6 edit modal,
+which lists the pool as editable rows.*
 
 ### R2c — The founder PICKS the group's relays in the create dialog
 *(user idea, 2026-08-02 — and a prerequisite for R3)*
@@ -220,6 +222,24 @@ member can move alone.
   (undeclared members follow the governed pool and never gate).
   (`a_pool_edit_commits_under_threshold_and_moves_the_effective_pool`,
   `a_pool_edit_that_would_strand_a_member_is_refused`)
+
+**Make-before-break (added 2026-08-09, found by a live E2E).** A pool edit
+whose new pool shares NO relay with the effective pool is refused at propose
+time. The committing block travels over the OLD pool, and every member that
+applies it rebuilds its runtime onto the new pool only — with zero overlap
+the members that have not yet applied keep listening where nobody publishes
+anymore, and the republic tears permanently at exactly that commit (a
+throwaway 2-of-2 split this way in the E2E; the per-member strand gate did
+not fire because founding-era seats carry no ledger declaration). A full
+migration is two votes: add the new relay, then drop the old.
+(`a_pool_edit_sharing_no_relay_with_the_current_pool_is_refused`)
+
+**UI (2026-08-09).** The edit modal lists the draft pool as rows (delete per
+row, validated add field — molt-core's own URL parser, so the field message
+and the engine gate can never disagree), and a pending `set_relays` renders
+as a DIFF vote card: the union of current and proposed pool, one row per
+relay, marked kept / + added / − removed
+(`a_pool_edit_proposal_carries_the_diff_rows`, `relay_pool_diff`).
 
 ## 6. Ordering against N4b
 

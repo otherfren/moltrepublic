@@ -357,6 +357,20 @@ impl State {
                     "{m} reaches only {named} - keep it or bridge it"
                 )));
             }
+            // make-before-break (found live 2026-08-09, AFTER the more
+            // specific per-member check): the committing block travels over
+            // the OLD pool, and members that applied it rebuild onto the
+            // new pool only — zero overlap tears the republic at exactly
+            // that commit (a member yet to apply keeps listening where
+            // nobody publishes anymore). A full migration is two votes:
+            // add the new relay, then drop the old.
+            let current = self.effective_relays();
+            if !current.is_empty() && !current.iter().any(|r| new_pool.contains(&r.as_str())) {
+                return Err(MoltError::BadPayload(format!(
+                    "no shared relay with the current pool - keep one (e.g. {}) and drop it in a second vote",
+                    current[0]
+                )));
+            }
         }
         let me = self.member();
         let id = ProposalId(self.next_id);

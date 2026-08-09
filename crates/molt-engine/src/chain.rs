@@ -5596,6 +5596,44 @@ mod tests {
         );
     }
 
+    /// R6 make-before-break (found LIVE 2026-08-09): a pool edit sharing NO
+    /// relay with the effective pool is refused outright. The commit that
+    /// moves the pool travels over the OLD pool; a member that has not
+    /// applied it yet keeps listening there while the members that have
+    /// rebuild onto the new pool only — with zero overlap the two sides can
+    /// never meet again (a throwaway republic split exactly this way).
+    /// A full migration is two votes: add the new relay, then drop the old.
+    #[test]
+    fn a_pool_edit_sharing_no_relay_with_the_current_pool_is_refused() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let err = walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://relay.two.example",
+                }),
+            )
+            .expect_err("a zero-overlap pool edit must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("wss://relay.one"),
+            "the refusal names a current relay to keep: {msg}"
+        );
+        // …and the same target relay passes as make-before-break step one
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://relay.one wss://relay.two.example",
+                }),
+            )
+            .expect("keeping one shared relay is the legal migration step");
+    }
+
     /// R6: an edit that would strand a member — a new pool sharing no relay
     /// with what that member is on record as reaching — is refused at
     /// propose time, naming the member and its relay (the R4 split it would
