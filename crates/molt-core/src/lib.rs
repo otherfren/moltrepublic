@@ -2207,6 +2207,23 @@ pub enum WorkspaceEvent {
         /// Hex of the requester's MLS-encrypted fetch request.
         ct: String,
     },
+    /// A member wants a share's bytes on the RELAY data plane
+    /// (`file_transfer_nostr.md`): publishing is lazy, so this asks the
+    /// SHARER to publish the chunk series. Rides the (encrypted) group log
+    /// — only members read it; no inner sealing needed, unlike the
+    /// queue-plane `FileRequested` whose reply-queue handover is secret.
+    FileWanted {
+        /// The share message's stable id.
+        id: MessageId,
+    },
+    /// The sharer published (or re-affirmed) a share's chunk series at
+    /// this stamp — what a fetcher needs to name the series' h-tag window.
+    FileServed {
+        /// The share message's stable id.
+        id: MessageId,
+        /// The series' one publish stamp (unix seconds).
+        at: u64,
+    },
     /// A **raw MLS re-key commit** to broadcast to the group (recovery: after a
     /// coordinator re-keys a returning member's seat, every OTHER member must
     /// apply the SAME commit to advance the epoch, or the group forks). It rides
@@ -4209,6 +4226,20 @@ pub enum Command {
         id: MessageId,
         /// The honest reason.
         reason: String,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The sharer's lazy chunk-series publish finished (engine-internal;
+    /// the off-actor publish task reports back, the actor records the
+    /// `FileServed` announcement). Never an MCP tool.
+    NetFileSeriesPublished {
+        /// The share message's stable id.
+        id: MessageId,
+        /// The series' publish stamp (0 = the publish FAILED — the sharer
+        /// clears its in-flight mark and the requester's fetch stays on
+        /// its honest miss).
+        at: u64,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,

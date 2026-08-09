@@ -877,6 +877,134 @@ pub(crate) fn spawn_send_refusal(
 /// Copy the node's OWN share to the destination (the sharer downloading
 /// its own file needs no network — but the same dest/collision/.part rules
 /// and the same completion commands apply, so the GUI flow is identical).
+/// Report a download verdict without any task work — the spawn-shaped
+/// failure path for "the plane cannot even start" (no relay, no ring).
+pub(crate) fn spawn_file_verdict(
+    id: MessageId,
+    result: Result<String, String>,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        let cmd = match result {
+            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
+            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
+        };
+        feed(&cmd_tx, cmd).await;
+    });
+}
+
+/// RELAY file plane: fetch a share's chunk series (`file_transfer_nostr.md`)
+/// and land it in the download dir — same completion path as every other
+/// download. The series verifies against the log-anchored checksum inside
+/// `fetch_series`; the landed file is NOT re-hashed (the bytes went
+/// straight from the verified buffer to disk).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_nostr_fetch(
+    channel: molt_net::ritual_net::GroupChannel,
+    ring: Vec<[u8; 32]>,
+    id: MessageId,
+    at: u64,
+    target: FetchTarget,
+    dest: DestSpec,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        let result: Result<String, String> = async {
+            let bytes = molt_net::file_plane::fetch_series(
+                &channel,
+                &ring,
+                &target.id_hex,
+                &target.checksum,
+                at,
+                molt_net::file_plane::FILE_CAP_DEFAULT_BYTES,
+                None,
+            )
+            .await
+            .map_err(|e| format!("fetching the chunk series: {e}"))?;
+            let id_hex = target.id_hex.clone();
+            let name = target.name.clone();
+            tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let resolved = dest.resolve(&name);
+                std::fs::create_dir_all(&resolved.dir)
+                    .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
+                let part = resolved.dir.join(format!(".molt-download-{id_hex}.part"));
+                if let Err(e) = std::fs::write(&part, &bytes) {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(format!("writing: {e}"));
+                }
+                let final_path = final_path(&resolved);
+                std::fs::rename(&part, &final_path).map_err(|e| {
+                    let _ = std::fs::remove_file(&part);
+                    format!("moving into place: {e}")
+                })?;
+                Ok(final_path.display().to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("write task failed: {e}")))
+        }
+        .await;
+        let cmd = match result {
+            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
+            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
+        };
+        feed(&cmd_tx, cmd).await;
+    });
+}
+
+/// RELAY file plane, sharer side: read the shared file and publish its
+/// chunk series (lazy — a `FileWanted` triggered this). Reports the stamp
+/// back as the internal `NetFileSeriesPublished` (0 = failed); the ACTOR
+/// records the group-visible `FileServed` announcement.
+pub(crate) fn spawn_series_publish(
+    channel: molt_net::ritual_net::GroupChannel,
+    exporter: [u8; 32],
+    id: MessageId,
+    path: PathBuf,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        let read = tokio::task::spawn_blocking(move || std::fs::read(&path)).await;
+        let at = match read {
+            Ok(Ok(bytes)) => {
+                match molt_net::file_plane::publish_series(
+                    &channel,
+                    &exporter,
+                    &id.to_string(),
+                    &bytes,
+                    molt_net::file_plane::FILE_CAP_DEFAULT_BYTES,
+                )
+                .await
+                {
+                    Ok((stamp, chunks)) => {
+                        tracing::debug!(%id, chunks, "file series published");
+                        stamp
+                    }
+                    Err(e) => {
+                        tracing::warn!(%id, error = %e, "file series publish failed");
+                        0
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%id, error = %e, "reading the shared file failed");
+                0
+            }
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "the read task failed");
+                0
+            }
+        };
+        feed(
+            &cmd_tx,
+            Command::NetFileSeriesPublished { id, at, generation: Some(scope) },
+        )
+        .await;
+    });
+}
+
 pub(crate) fn spawn_local_copy(
     source: PathBuf,
     id: MessageId,

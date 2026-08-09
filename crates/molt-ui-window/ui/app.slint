@@ -4944,18 +4944,13 @@ export component AppWindow inherits Window {
                                             font-size: 19px;
                                             x: (parent.width - self.width) / 2;
                                             y: (parent.height - self.height) / 2;
-                                            // §10.7: no file data plane over
-                                            // relays in V1 — dimmed, and the
-                                            // click says why
-                                            opacity: root.session-transport == "nostr" ? 0.35 : 1;
                                         }
+                                        // §10.7 re-decided 2026-08-09: the
+                                        // relay file plane shipped — sharing
+                                        // works on every transport
                                         at-ta := TouchArea {
                                             clicked => {
-                                                if (root.session-transport == "nostr") {
-                                                    root.show-toast(Strings.cs-files-off);
-                                                } else {
-                                                    root.share-pick();
-                                                }
+                                                root.share-pick();
                                             }
                                         }
                                     }

@@ -1469,7 +1469,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 51] = [
+        const INTERNAL: [&str; 52] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1493,6 +1493,9 @@ mod tests {
             "net_file_progress",
             "net_file_done",
             "net_file_failed",
+            // the sharer's off-actor lazy series publish reporting its
+            // stamp (relay file plane) — an agent must not forge one
+            "net_file_series_published",
             "net_delivered",
             "net_peer_seen",
             "net_send_failed",

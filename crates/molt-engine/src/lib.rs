@@ -606,6 +606,18 @@ pub(crate) struct State {
     /// the moment the proposal is known ([`State::register_decline`]).
     /// Ephemeral and bounded, like the signature collection above.
     pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64)>>,
+    /// RELAY file plane (`file_transfer_nostr.md`): the known publish stamp
+    /// per share — what a fetch names the series' h-tag window with.
+    /// Runtime-only; re-learned from `FileServed` announcements (a fetch
+    /// without a stamp asks via `FileWanted`).
+    pub(crate) file_series: HashMap<molt_core::MessageId, u64>,
+    /// Downloads waiting for a `FileServed` announcement: the fetch spawns
+    /// the moment the stamp arrives. Runtime-only.
+    pub(crate) file_pending:
+        HashMap<molt_core::MessageId, (crate::transfer::FetchTarget, crate::transfer::DestSpec)>,
+    /// Shares whose lazy series publish is in flight (sharer-side dedup —
+    /// a burst of `FileWanted`s must not publish the series N times).
+    pub(crate) file_serving: std::collections::HashSet<molt_core::MessageId>,
     /// The exact [`molt_core::ChainChange`] each open proposal is voting on
     /// (keyed by proposal id) — so approvers sign, and the committer seals, the
     /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
@@ -923,6 +935,9 @@ impl State {
             split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
             pending_declines: HashMap::new(),
+            file_series: HashMap::new(),
+            file_pending: HashMap::new(),
+            file_serving: std::collections::HashSet::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
@@ -1146,6 +1161,9 @@ impl State {
                 }
                 self.set_download_phase(id, molt_core::TransferPhase::Failed { reason });
                 Ok(Reply::Ack)
+            }
+            Command::NetFileSeriesPublished { id, at, generation } => {
+                self.cmd_net_file_series_published(id, at, generation)
             }
 
             // proposals.rs

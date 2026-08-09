@@ -373,7 +373,9 @@ impl State {
             | WorkspaceEvent::CheckpointServed { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
-            | WorkspaceEvent::FileRequested { .. } => {
+            | WorkspaceEvent::FileRequested { .. }
+            | WorkspaceEvent::FileWanted { .. }
+            | WorkspaceEvent::FileServed { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
                 // catch-up request, a raw MLS re-key commit, a relayed mesh
                 // announce, a file fetch request) ride the log only to reach
@@ -655,6 +657,9 @@ impl State {
         self.chain_applied.clear();
         self.pending_sigs.clear();
         self.pending_declines.clear();
+        self.file_series.clear();
+        self.file_pending.clear();
+        self.file_serving.clear();
         self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;

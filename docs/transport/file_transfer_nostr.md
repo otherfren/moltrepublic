@@ -1,9 +1,16 @@
 # File transfer over the Nostr transport — the 445-chunk data plane
 
-Status: **SPEC FROZEN 2026-08-09 — ready to build (F2).** Direction and
-both product forks are user-decided: build the 445-chunk data plane
-(§10.7 lifted), cap 4 MiB (config key), chunks publish LAZILY on the
-first download request. §5 records the decisions.
+Status: **F1–F3 BUILT (2026-08-09/10); F4 partial.** The chunk plane
+(kind 447, `molt-net/src/file_plane.rs`) and the engine wiring
+(`FileWanted`/`FileServed` lazy round, share admitted on relays, GUI
+un-dimmed) are on master — keystones
+`molt-net/tests/file_plane.rs` and
+`molt-engine/tests/file_over_relays.rs::a_shared_file_downloads_over_the_relay`.
+Of F4, the re-publish loop ships (a stale stamp re-publishes on the next
+`FileWanted`; a removed share stops serving via `available`). STILL OPEN:
+the cap as a config key (the constant is
+`file_plane::FILE_CAP_DEFAULT_BYTES`) and the share card's one-word
+relay-held/sharer-only status.
 
 ## 1. What exists, and what the gate is
 
@@ -57,16 +64,18 @@ plane limit is 65535 chunks; the REAL cap must come from relay behaviour
 ## 4. Etappen
 
 - **F1** — ✅ spec frozen (this document; decisions in §5).
-- **F2** — the chunk plane: publish/reassemble a sealed byte series over
-  `MockRelay`, cap enforcement, disk cache with bounds; keystone tests
-  red-first.
-- **F3** — engine wiring: `cmd_share_file` over nostr admits the share
-  (metadata only — lazy plane); `DownloadFile` reads cache-or-relay and
-  fires `FileRequested` when neither holds the series; GUI un-dim +
-  progress.
-- **F4** — the fallback loop: re-publish past retention, RemoveFile
-  semantics (sharer deletes → series never re-published), docs + status
-  lines.
+- **F2** — ✅ the chunk plane (kind 447, sized chunker, cap + checksum
+  refusals, honest miss) — `molt-net/src/file_plane.rs`, keystones in
+  `molt-net/tests/file_plane.rs`.
+- **F3** — ✅ engine wiring: the share is admitted on relays (metadata
+  only), `DownloadFile` fetches a known series or parks on a `FileWanted`
+  round; the sharer publishes lazily and announces via `FileServed`; the
+  GUI share button un-dimmed. Keystone `file_over_relays.rs`. (No disk
+  chunk cache in this cut: a fetch streams straight to the download dir —
+  the cache bound of §5.3 becomes relevant only with previews/re-serves.)
+- **F4** — partial: the stale-stamp re-publish loop and the RemoveFile
+  stop (`available` gates serving) ship with F3. OPEN: the cap config
+  key (§5.1) and the share card's one-word availability status (§5.5).
 
 ## 5. Decisions (user-ratified 2026-08-09)
 

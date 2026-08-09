@@ -258,14 +258,10 @@ impl State {
         path: String,
         channel: ChannelRef,
     ) -> Result<Reply, MoltError> {
-        // §10.7 (DECIDED — OFF in V1): the file data plane is a dedicated
-        // queue pair, and a relay republic has none — refuse by name
-        // instead of queueing bytes into nowhere
-        if self.nostr.is_some() {
-            return Err(MoltError::BadPayload(
-                "file sharing is not available over relays yet".into(),
-            ));
-        }
+        // §10.7 re-decided 2026-08-09: a relay republic shares over the
+        // kind-447 chunk data plane (`file_transfer_nostr.md`) — the share
+        // itself stays metadata-only on every transport, the bytes publish
+        // lazily on the first download request
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
         self.ensure_channel_writable(&channel)?;
@@ -405,6 +401,12 @@ impl State {
                 self.net_scope,
                 cmd_tx,
             );
+        } else if self.nostr.is_some() {
+            // a peer's share on the RELAY data plane: fetch the chunk
+            // series when its publish stamp is known, else ask the sharer
+            // to publish (lazy — `file_transfer_nostr.md`) and fetch when
+            // the FileServed announcement lands
+            self.nostr_download(id, target, dest);
         } else {
             // a peer's share: the transfer needs the real mesh
             let (Some(transport), Some(group)) = (
@@ -985,24 +987,40 @@ mod tests {
         );
     }
 
-    /// §10.7 (DECIDED — OFF in V1): the file data plane is queue pairs, and
-    /// a relay republic has none. A share is refused with the named reason,
-    /// never a silent queue-send into nowhere.
+    /// §10.7 re-decided 2026-08-09: a relay republic HAS a file data plane
+    /// (the kind-447 chunk series, `file_transfer_nostr.md`) — the share is
+    /// admitted, metadata-only like on every transport. The e2e proof is
+    /// `file_over_relays.rs`; this pins the gate's removal.
     #[test]
-    fn sharing_a_file_on_a_relay_republic_is_refused_by_name() {
-        let mut st = plain_state();
+    fn sharing_a_file_on_a_relay_republic_is_admitted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        // plain_state drops its command receiver — the share path needs a
+        // live one for the off-actor hash task's report
+        let (ev_tx, _keep) = tokio::sync::broadcast::channel(8);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(8);
+        // the engine actor holds the strong sender in production — the
+        // state keeps only a weak one, so hold a strong clone here
+        let _keep_tx = cmd_tx.clone();
+        let mut st = crate::State::new(
+            molt_core::GroupConfig::demo(),
+            molt_core::SessionView::default(),
+            ev_tx,
+            cmd_tx,
+            None,
+            false,
+            None,
+        );
         st.nostr = Some(crate::NostrTransport {
             sk: zeroize::Zeroizing::new(vec![7u8; 32]),
             relays: vec!["ws://relay.example".to_string()],
             rotation_seed: [0u8; 32],
         });
-        let err = st
-            .cmd_share_file("/tmp/x.pdf".to_string(), molt_core::ChannelRef::Group)
-            .expect_err("a relay republic has no file data plane");
-        assert!(
-            format!("{err:?}").contains("relays"),
-            "the refusal names the transport, not a phantom IO error: {err:?}"
-        );
+        st.cmd_share_file("/tmp/x.pdf".to_string(), molt_core::ChannelRef::Group)
+            .expect("the share is admitted — the hash task reports any IO truth");
     }
 
     /// G7's fresh-incarnation rule (N4b §3.1a): an envelope from a sender we

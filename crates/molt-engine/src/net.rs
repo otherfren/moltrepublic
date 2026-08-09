@@ -406,6 +406,8 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }
+            | WorkspaceEvent::FileWanted { .. }
+            | WorkspaceEvent::FileServed { .. }
     )
 }
 
@@ -1517,6 +1519,19 @@ impl State {
             // the SHARER acts — everyone else in the group decrypts the
             // broadcast and drops it silently. The bytes then flow over the
             // advertised dedicated queue, never through this log.
+            // RELAY file plane (`file_transfer_nostr.md`): a member asks
+            // the sharer to publish a share's chunk series (lazy), and the
+            // sharer's announcement names the series' publish stamp. Both
+            // ride the encrypted group log — the link is the authenticator.
+            WorkspaceEvent::FileWanted { id } if self.nostr.is_some() => {
+                self.serve_file_wanted(id);
+            }
+            WorkspaceEvent::FileServed { id, at } if self.nostr.is_some() => {
+                self.file_series.insert(id, at);
+                if let Some((target, dest)) = self.file_pending.remove(&id) {
+                    self.spawn_nostr_fetch(id, at, target, dest);
+                }
+            }
             WorkspaceEvent::FileRequested { ct } => {
                 let me = self.member();
                 if let Ok(raw) = hex::decode(&ct) {
@@ -1537,6 +1552,169 @@ impl State {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
             }
         }
+        Ok(Reply::Ack)
+    }
+
+    /// The RELAY file plane's channel + exporter material, if this
+    /// workspace can carry one (`file_transfer_nostr.md`): the same dial
+    /// list and rotation seed the group runtime uses, plus the MLS
+    /// exporter ring (open) and its head (seal).
+    fn nostr_file_context(
+        &self,
+    ) -> Option<(molt_net::ritual_net::GroupChannel, Vec<[u8; 32]>)> {
+        let nostr = self.nostr.as_ref()?;
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            return None;
+        }
+        let dialer = self.dialer_for().ok()?;
+        let channel =
+            molt_net::ritual_net::GroupChannel::new(dialer, relays, nostr.rotation_seed);
+        // the CURRENT epoch's secret leads (it seals new series), the ring
+        // follows (it opens series sealed before a re-key) — a fresh seat's
+        // ring is empty until the first rotation, so the current secret is
+        // what makes the plane work at all
+        let (ring, current) = {
+            let g = self.group_net.as_ref()?;
+            let m = g.mls.lock().ok()?;
+            (m.exporter_ring().to_vec(), m.exporter_secret().ok())
+        };
+        let mut secrets: Vec<[u8; 32]> = Vec::with_capacity(ring.len() + 1);
+        if let Some(c) = current {
+            secrets.push(c);
+        }
+        for s in ring {
+            if !secrets.contains(&s) {
+                secrets.push(s);
+            }
+        }
+        if secrets.is_empty() {
+            return None;
+        }
+        Some((channel, secrets))
+    }
+
+    /// Download a peer's share over the relay plane: fetch when the
+    /// series' publish stamp is known, else park the download and ask the
+    /// sharer to publish (lazy) — the `FileServed` announcement resumes it.
+    pub(crate) fn nostr_download(
+        &mut self,
+        id: MessageId,
+        target: crate::transfer::FetchTarget,
+        dest: crate::transfer::DestSpec,
+    ) {
+        if let Some(at) = self.file_series.get(&id).copied() {
+            self.spawn_nostr_fetch(id, at, target, dest);
+        } else {
+            self.file_pending.insert(id, (target, dest));
+            let me = self.member();
+            let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
+            self.record(env);
+        }
+    }
+
+    /// Spawn the off-actor series fetch (reports back over the same
+    /// `NetFileDone`/`NetFileFailed` path the queue-plane download uses).
+    fn spawn_nostr_fetch(
+        &mut self,
+        id: MessageId,
+        at: u64,
+        target: crate::transfer::FetchTarget,
+        dest: crate::transfer::DestSpec,
+    ) {
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        let Some((channel, ring)) = self.nostr_file_context() else {
+            crate::transfer::spawn_file_verdict(
+                id,
+                Err("no dialable relay or group ring for the file plane".to_string()),
+                self.net_scope,
+                cmd_tx,
+            );
+            return;
+        };
+        crate::transfer::spawn_nostr_fetch(
+            channel,
+            ring,
+            id,
+            at,
+            target,
+            dest,
+            self.net_scope,
+            cmd_tx,
+        );
+    }
+
+    /// A `FileWanted` broadcast landed: ONLY the sharer answers (every
+    /// member receives it), by lazily publishing the chunk series — or by
+    /// re-announcing a fresh enough stamp, so a burst of requests does not
+    /// publish the series N times.
+    fn serve_file_wanted(&mut self, id: MessageId) {
+        let me = self.member();
+        let (is_mine, ts) = match self.chat_by_id(&id) {
+            Ok((_, msg)) => (
+                msg.from == me && msg.file.as_ref().is_some_and(|f| f.available),
+                msg.ts,
+            ),
+            Err(_) => return,
+        };
+        if !is_mine || self.chat_ts_aged_out(ts) || self.file_serving.contains(&id) {
+            return;
+        }
+        let now = crate::now_secs();
+        if let Some(at) = self.file_series.get(&id).copied() {
+            // a fresh series stands on the relays — re-announce, not re-publish
+            if now.saturating_sub(at) < 600 {
+                let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
+                self.record(env);
+                return;
+            }
+        }
+        let Some(path) = self.share_paths.get(&id).cloned() else {
+            return;
+        };
+        let Some((channel, ring)) = self.nostr_file_context() else {
+            return;
+        };
+        let Some(exporter) = ring.first().copied() else {
+            return;
+        };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        self.file_serving.insert(id);
+        crate::transfer::spawn_series_publish(
+            channel,
+            exporter,
+            id,
+            path,
+            self.net_scope,
+            cmd_tx,
+        );
+    }
+
+    /// The off-actor series publish reported back: clear the in-flight
+    /// mark and, on success, announce the stamp to the group (that
+    /// announcement is what resumes the requesters' parked fetches).
+    pub(crate) fn cmd_net_file_series_published(
+        &mut self,
+        id: MessageId,
+        at: u64,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        self.file_serving.remove(&id);
+        if at == 0 {
+            return Ok(Reply::Ack); // the publish failed — honest silence, the
+                                   // requester's fetch stays on its miss
+        }
+        self.file_series.insert(id, at);
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
+        self.record(env);
         Ok(Reply::Ack)
     }
 
