@@ -595,12 +595,15 @@ export component ChatRow inherits Rectangle {
         // paint over the pills. Rows without a real id (legacy entries,
         // system lines) never offer the "+" — reacting addresses by id and
         // the UI must not fake success (existing pills still display).
+        // The read receipts share this band's RIGHT edge: on their own row
+        // below they changed the "+"'s distance to the card edge between
+        // own and foreign messages (the band is the card's LAST line, so
+        // the "+" hangs at a constant offset from the bottom everywhere).
         if root.line.deleted-by == "" && !root.line.system && (root.line.reactions.length > 0 || (root.line.mine-emoji == "" && root.line.id != "")): HorizontalLayout {
             height: 26px;
             padding-top: 2px;
             padding-bottom: 2px;
             spacing: 4px;
-            alignment: start;
             for r in root.line.reactions: ReactionPill {
                 r: r;
                 clicked => {
@@ -638,35 +641,47 @@ export component ChatRow inherits Rectangle {
                     }
                 }
             }
-        }
-        // read receipts (Lesebestätigung): a small row in the BOTTOM-RIGHT
-        // corner — one dot per member except the author, green once they read
-        // it (in read_by), yellow until then. It rides the content flow (grows
-        // the card, never overlaps, unlike the top-right action buttons) and
-        // hides entirely when the local read-receipts switch is off, on legacy
-        // rows without an id, on system lines, and on tombstones.
-        if root.receipts-on && root.line.receipts.length > 0 && !root.line.system && root.line.id != "" && root.line.deleted-by == "": HorizontalLayout {
-            height: 14px;
-            padding-top: 3px;
-            spacing: 3px;
-            alignment: end;
-            for rc in root.line.receipts: Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                // green = read, yellow/amber = not yet (the presence-dot idiom)
-                background: rc.read ? Theme.good : Theme.warn;
-                dot-ta := TouchArea {
-                    // the member name goes through the window-topmost HintTip
-                    // overlay (never clipped, grabs no input, so no strobe)
-                    changed has-hover => {
-                        if (self.has-hover) {
-                            HintTip.label = rc.name;
-                            HintTip.ax = self.absolute-position.x;
-                            HintTip.ay = self.absolute-position.y + self.height + 6px;
-                        } else if (HintTip.ax == self.absolute-position.x
-                            && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                            HintTip.label = "";
+            // the surplus width sits between pills and receipts, so the
+            // pills stay left and the receipts right (no alignment: the
+            // spacer is what pins both sides)
+            Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+            }
+            // read receipts (Lesebestätigung): one dot per member except the
+            // author, green once they read it (in read_by), yellow until
+            // then — right edge of the band, vertically centred. Hidden when
+            // the local read-receipts switch is off and on legacy rows
+            // without an id (system lines and tombstones never reach here —
+            // the band's own condition excludes them). A receipts row can
+            // never appear without this band: receipts imply a real id, and
+            // either nobody reacted yet (the "+" shows) or a reaction pill
+            // exists.
+            if root.receipts-on && root.line.receipts.length > 0 && root.line.id != "": HorizontalLayout {
+                spacing: 3px;
+                for rc in root.line.receipts: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        // green = read, yellow/amber = not yet (the
+                        // presence-dot idiom)
+                        background: rc.read ? Theme.good : Theme.warn;
+                        dot-ta := TouchArea {
+                            // the member name goes through the window-topmost
+                            // HintTip overlay (never clipped, grabs no input,
+                            // so no strobe)
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    HintTip.label = rc.name;
+                                    HintTip.ax = self.absolute-position.x;
+                                    HintTip.ay = self.absolute-position.y + self.height + 6px;
+                                } else if (HintTip.ax == self.absolute-position.x
+                                    && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                                    HintTip.label = "";
+                                }
+                            }
                         }
                     }
                 }
@@ -1038,6 +1053,168 @@ component CappedStateRow inherits HorizontalLayout {
 // Pending. Image changes render the current image and link the proposed
 // one like a chat file share: the image bytes rode the proposal payload
 // (sign-what-you-see), so a click decodes and shows them locally.
+// The decided-votes table (Accepted/Declined overviews, story 2026-08-09):
+// one row per decision — its localized title, the decided value, one stance
+// dot per member (an accepted row's voters are the sealed block's), the
+// decline stamp (Declined only) and the discussion jump. Replaced the gray
+// prose list: a decided vote is a record, and records read as rows.
+export component DecisionTable inherits Rectangle {
+    in property <[ProposalRow]> rows;
+    // Declined shows the veto stamp column; Accepted hides it
+    in property <bool> with-when: false;
+    callback discuss(int);
+    // column geometry, shared by header and rows so the cells align; the
+    // value column takes the surplus and elides — the window never has to
+    // scroll horizontally
+    property <length> col-title: max(120px, self.width * 0.24);
+    property <length> col-votes: 110px;
+    property <length> col-when: 108px;
+    property <length> col-jump: 92px;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    // EXPLICIT height: repeated fixed-height rows don't reliably feed a
+    // layout's preferred height (the ChatRow lesson)
+    height: 34px + rows.length * 40px;
+    VerticalLayout {
+        Rectangle {
+            height: 34px;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    text: Strings.dt-col-decision;
+                    width: root.col-title;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: Strings.dt-col-value;
+                    horizontal-stretch: 1;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: Strings.dt-col-votes;
+                    width: root.col-votes;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.with-when: Text {
+                    text: Strings.dt-col-when;
+                    width: root.col-when;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: root.col-jump;
+                }
+            }
+        }
+        for r[i] in root.rows: Rectangle {
+            height: 40px;
+            background: Math.mod(i, 2) == 1 ? Theme.zebra : transparent;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    text: r.text;
+                    width: root.col-title;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: r.proposed != "" ? r.proposed : r.current;
+                    horizontal-stretch: 1;
+                    color: Theme.dim;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: root.col-votes;
+                    clip: true;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+                        for v in r.votes: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 12px;
+                                height: 12px;
+                                border-radius: 6px;
+                                // green = approved, red = declined, hollow =
+                                // open (the vote-pill palette, dot-compact)
+                                background: v.vote == 1 ? Theme.good
+                                    : (v.vote == 2 ? Theme.bad : Theme.panel);
+                                border-width: 1px;
+                                border-color: v.vote == 1 ? Theme.good
+                                    : (v.vote == 2 ? Theme.bad : Theme.line);
+                                vd-ta := TouchArea {
+                                    // the member name goes through the
+                                    // window-topmost HintTip overlay (never
+                                    // clipped, grabs no input, so no strobe)
+                                    changed has-hover => {
+                                        if (self.has-hover) {
+                                            HintTip.label = v.member;
+                                            HintTip.ax = self.absolute-position.x;
+                                            HintTip.ay = self.absolute-position.y + self.height + 6px;
+                                        } else if (HintTip.ax == self.absolute-position.x
+                                            && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                                            HintTip.label = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.with-when: Text {
+                    text: r.declined-when;
+                    width: root.col-when;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: root.col-jump;
+                    if r.id >= 0: AppButton {
+                        height: 28px;
+                        y: 6px;
+                        pad: 8px;
+                        emoji: "💬";
+                        label: Strings.pc-discuss;
+                        clicked => {
+                            root.discuss(r.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component ProposalCard inherits Rectangle {
     in property <ProposalRow> p;
     // the republic's CURRENT image, when one is set and locally loadable —

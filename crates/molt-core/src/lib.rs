@@ -4539,6 +4539,13 @@ pub struct SurfaceSnapshot {
     /// writer's snapshot stays deserializable.
     #[serde(default)]
     pub declined: Vec<ProposalView>,
+    /// The APPLIED proposals (highest id first): the Accepted table's row
+    /// data — each view carries the voters a sealed block proves, which the
+    /// raw `applied` payloads cannot. Join to the log via `applied_ids`.
+    /// Additive with a default, so an older writer's snapshot stays
+    /// deserializable.
+    #[serde(default)]
+    pub accepted: Vec<ProposalView>,
     /// Chat only: every channel in the log (always the full list, even on
     /// a filtered read; `Group` is always present). Empty on other surfaces.
     #[serde(default)]

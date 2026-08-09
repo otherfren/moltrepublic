@@ -2159,7 +2159,7 @@ fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) {
 
 /// Rows per page of the proposal-outcome lists (Organization → Declined
 /// and the gated surfaces' applied log). Below this the pager row hides.
-const LIST_PAGE_SIZE: usize = 20;
+const LIST_PAGE_SIZE: usize = 15;
 
 /// The pure paging window: `(start, end, page, page_count)` over a list of
 /// `len` rows, `size` per page. The requested 0-based `page` clamps into
@@ -3496,6 +3496,10 @@ struct SurfaceData {
     /// The declined proposals still inside the display-retention window —
     /// the Declined view empties on the same rhythm as the group chat.
     declined: Vec<ProposalRowData>,
+    /// The applied history as decision rows (newest first): the Accepted
+    /// table — proposal-backed rows carry their sealed block's voters,
+    /// legacy rows (id -1) only their title. Parallel to the gated `log`.
+    accepted: Vec<ProposalRowData>,
 }
 struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
@@ -4108,6 +4112,16 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 page_slice(s.declined.len(), d_page, LIST_PAGE_SIZE);
             let declined: Vec<ProposalRow> =
                 s.declined[d_start..d_end].iter().map(to_row).collect();
+            // the Accepted table pages in lockstep with the applied log
+            // (same source list, same length — `accepted` is its
+            // newest-first projection)
+            let (ac_start, ac_end, _, _) = if s.gated {
+                page_slice(s.accepted.len(), a_page, LIST_PAGE_SIZE)
+            } else {
+                (0, 0, 0, 1)
+            };
+            let accepted: Vec<ProposalRow> =
+                s.accepted[ac_start..ac_end].iter().map(to_row).collect();
             // the surface's sub-views come straight from the shared
             // molt-core vocabulary (same list select_view validates against)
             let views: Vec<ViewItem> = Surface::parse(&s.key)
@@ -4140,6 +4154,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
                 declined: ModelRc::new(VecModel::from(declined)),
+                accepted: ModelRc::new(VecModel::from(accepted)),
                 views: ModelRc::new(VecModel::from(views)),
             }
         })
@@ -4419,6 +4434,43 @@ fn surface_data(
     // semantics too (the read arrives pre-filtered on declined_at)
     let declined: Vec<ProposalRowData> =
         snap.declined.iter().map(|p| proposal_row(lang, p)).collect();
+    // the Accepted table: the applied history in apply order (newest
+    // first), each proposal-backed row carrying the voters its sealed
+    // block proves; a row of unknown origin (legacy dump) still shows,
+    // just without votes or a discussion jump. Gated surfaces only — a
+    // chat surface's applied entries are its messages, never table rows.
+    let accepted: Vec<ProposalRowData> = if snap.gated {
+        let by_id: HashMap<u64, &molt_core::ProposalView> =
+            snap.accepted.iter().map(|p| (p.id.0, p)).collect();
+        snap.applied
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, payload)| {
+                match snap
+                    .applied_ids
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| by_id.get(&id))
+                {
+                    Some(p) => proposal_row(lang, p),
+                    None => ProposalRowData {
+                        id: -1,
+                        text: display_title(lang, payload),
+                        proposed: payload
+                            .get("value")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        ..ProposalRowData::default()
+                    },
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     SurfaceData {
         key: sf.as_str().to_string(),
         name: surface_name(lang, sf).to_string(),
@@ -4428,6 +4480,7 @@ fn surface_data(
         pending_voted: snap.pending.iter().filter(|p| p.approved_by_me).count(),
         denied: snap.denied,
         declined,
+        accepted,
     }
 }
 
@@ -6362,6 +6415,11 @@ lexicon! {
     pc_declined_by: "Declined by", "Abgelehnt von";
     mv_applied: "Applied", "Angewandt";
     mv_accepted: "Accepted changes", "Angenommene Änderungen";
+    // the decided-votes table (Accepted/Declined overviews)
+    dt_col_decision: "Decision", "Entscheidung";
+    dt_col_value: "Value", "Wert";
+    dt_col_votes: "Votes", "Stimmen";
+    dt_col_when: "When", "Wann";
     toast_checkpoint_sealed: "Checkpoint sealed", "Checkpoint besiegelt";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
@@ -6912,6 +6970,29 @@ mod tests {
             pending: Vec::new(),
             denied: 0,
             declined: Vec::new(),
+            accepted: vec![ProposalView {
+                id: ProposalId(7),
+                surface: Surface::Memory,
+                payload: serde_json::json!({"op": "add_note", "title": "a"}),
+                approvals: 2,
+                threshold: 2,
+                state: molt_core::ProposalState::Applied,
+                approved_by_me: true,
+                current: String::new(),
+                proposed: String::new(),
+                votes: vec![
+                    molt_core::MemberVote {
+                        member: "petra".to_string(),
+                        vote: molt_core::VoteState::Approved,
+                    },
+                    molt_core::MemberVote {
+                        member: "walter".to_string(),
+                        vote: molt_core::VoteState::Approved,
+                    },
+                ],
+                declined_at: 0,
+                declined_by: String::new(),
+            }],
             channels: Vec::new(),
             has_archive: false,
         };
@@ -6919,6 +7000,12 @@ mod tests {
         assert_eq!(data.log.len(), 2);
         assert_eq!(data.log[0].proposal_id, Some(7));
         assert_eq!(data.log[1].proposal_id, None);
+        // the Accepted table: newest first, the proposal-backed row carries
+        // its voters, the legacy row (unknown origin) only its title
+        assert_eq!(data.accepted.len(), 2);
+        assert_eq!(data.accepted[0].id, -1, "legacy row, no discussion jump");
+        assert_eq!(data.accepted[1].id, 7);
+        assert_eq!(data.accepted[1].votes.len(), 2, "the block-proven voters");
     }
 
     #[test]

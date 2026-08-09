@@ -4163,6 +4163,12 @@ mod tests {
         assert_eq!(vote_of("dora"), molt_core::VoteState::Approved);
         assert_eq!(vote_of("walter"), molt_core::VoteState::Open);
         assert!(!v.approved_by_me, "walter did not sign");
+        // the read contract serves the applied proposals too (the Accepted
+        // table renders from the snapshot, co-equal for every frontend)
+        let snap = peer.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.accepted.len(), 1, "the applied card is in the snapshot");
+        assert_eq!(snap.accepted[0].id, ProposalId(1));
+        assert_eq!(snap.accepted[0].approvals, 2, "with its block-sourced voters");
     }
 
     /// WP4b stage 2, full holders: a committed checkpoint block verifies

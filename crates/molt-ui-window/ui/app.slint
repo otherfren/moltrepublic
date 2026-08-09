@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, Spinner
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, DecisionTable, Spinner
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -6056,37 +6056,28 @@ export component AppWindow inherits Window {
                                     od-list := VerticalLayout {
                                         padding: 4px;
                                         padding-right: 14px;
-                                        spacing: 16px;
+                                        spacing: 8px;
                                         alignment: start;
                                         if s.declined-count == 0: Text {
                                             text: Strings.mv-empty-declined;
                                             color: Theme.faint;
                                             font-size: Theme.fs-cap;
                                         }
-                                        for p in s.declined: ProposalCard {
-                                            p: p;
-                                            org-img: root.org-img;
-                                            org-img-set: root.org-img-set;
-                                            read-only: true;
-                                            discuss => {
-                                                // the decided vote's discussion
-                                                // stays linked — it reopens
-                                                // read-only. The jump lands on
-                                                // the "today" sub-view; an old
-                                                // discussion's messages may sit
-                                                // in Archive (acceptable — the
-                                                // second filter axis is a click
-                                                // away)
+                                        // the decided-votes table (story
+                                        // 2026-08-09) — the full card detail
+                                        // stays one 💬 away: the discussion
+                                        // reopens read-only with the card as
+                                        // its header. The jump lands on the
+                                        // "today" sub-view; an old
+                                        // discussion's messages may sit in
+                                        // Archive (acceptable — the second
+                                        // filter axis is a click away)
+                                        if s.declined-count > 0: DecisionTable {
+                                            rows: s.declined;
+                                            with-when: true;
+                                            discuss(id) => {
                                                 root.select-view("chat", "today");
-                                                root.select-channel("patch:\{p.id}");
-                                            }
-                                            inline-open: root.img-inline-id == p.id;
-                                            inline-img: root.img-inline-src;
-                                            view-image => {
-                                                root.view-proposal-image(p.id, p.img-b64);
-                                            }
-                                            save-image => {
-                                                root.save-proposal-image(p.img-b64, p.proposed);
+                                                root.select-channel("patch:\{id}");
                                             }
                                         }
                                     }
@@ -6099,7 +6090,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // more than one page of retained declines (page
-                            // size 20, Rust-side): the cards above hold only
+                            // size 15, Rust-side): the cards above hold only
                             // the current page, this row steps through them
                             if s.declined-pages > 1: PagerRow {
                                 page: s.declined-page;
@@ -6144,28 +6135,18 @@ export component AppWindow inherits Window {
                                             color: Theme.faint;
                                             font-size: Theme.fs-cap;
                                         }
-                                        for l in s.log: HorizontalLayout {
-                                            spacing: 8px;
-                                            Text {
-                                                text: l.text;
-                                                color: Theme.dim;
-                                                font-size: Theme.fs-body;
-                                                wrap: word-wrap;
-                                                horizontal-stretch: 1;
-                                                vertical-alignment: center;
-                                            }
-                                            if l.patch-id >= 0: AppButton {
-                                                height: 26px;
-                                                pad: 8px;
-                                                emoji: "💬";
-                                                label: Strings.pc-discuss;
-                                                clicked => {
-                                                    // the vote's discussion is its
-                                                    // patch channel on the chat bus
-                                                    // — same jump as ProposalCard
-                                                    root.select-view("chat", "today");
-                                                    root.select-channel("patch:\{l.patch-id}");
-                                                }
+                                        // the decided-votes table (story
+                                        // 2026-08-09): newest first, each
+                                        // proposal-backed row with the voters
+                                        // its sealed block proves; the vote's
+                                        // discussion is its patch channel on
+                                        // the chat bus — same jump as
+                                        // ProposalCard
+                                        if s.applied-count > 0: DecisionTable {
+                                            rows: s.accepted;
+                                            discuss(id) => {
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{id}");
                                             }
                                         }
                                     }
@@ -6177,7 +6158,7 @@ export component AppWindow inherits Window {
                                     scroll-y: oa-fl.viewport-y;
                                 }
                             }
-                            // beyond one page (size 20, Rust-side) this row
+                            // beyond one page (size 15, Rust-side) this row
                             // steps through the accepted history
                             if s.applied-pages > 1: PagerRow {
                                 page: s.applied-page;
@@ -6270,15 +6251,50 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // the applied log: memory shows it under its own
-                            // Accepted sub-view; the other surfaces keep it
-                            // inline under Proposals (resp. wallet Status)
+                            // Accepted sub-view (as the decided-votes table);
+                            // the other surfaces keep the inline prose list
+                            // under Proposals (resp. wallet Status)
                             if s.key != "memory" || root.selected-view == "accepted": Text {
                                 text: Strings.mv-applied;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 font-weight: 600;
                             }
-                            if s.key != "memory" || root.selected-view == "accepted": Rectangle {
+                            if s.key == "memory" && root.selected-view == "accepted": Rectangle {
+                                vertical-stretch: 1;
+                                clip: true;
+                                ma-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: ma-list.preferred-height + 8px;
+                                    ma-list := VerticalLayout {
+                                        padding: 4px;
+                                        padding-right: 14px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        if s.applied-count == 0: Text {
+                                            text: Strings.mv-empty-applied;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
+                                        }
+                                        if s.applied-count > 0: DecisionTable {
+                                            rows: s.accepted;
+                                            discuss(id) => {
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{id}");
+                                            }
+                                        }
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: ma-fl.height;
+                                    content-h: ma-fl.viewport-height;
+                                    scroll-y: ma-fl.viewport-y;
+                                }
+                            }
+                            if s.key != "memory": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
                                 VerticalLayout {
@@ -6317,7 +6333,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // the applied history holds the ACCEPTED votes —
-                            // beyond one page (page size 20, Rust-side) the
+                            // beyond one page (page size 15, Rust-side) the
                             // log above shows only the current page and this
                             // row steps through them
                             if s.applied-pages > 1 && (s.key != "memory" || root.selected-view == "accepted"): PagerRow {
@@ -6340,22 +6356,23 @@ export component AppWindow inherits Window {
                                     md-list := VerticalLayout {
                                         padding: 4px;
                                         padding-right: 14px;
-                                        spacing: 16px;
+                                        spacing: 8px;
                                         alignment: start;
                                         if s.declined-count == 0: Text {
                                             text: Strings.mv-empty-declined;
                                             color: Theme.faint;
                                             font-size: Theme.fs-cap;
                                         }
-                                        for p in s.declined: ProposalCard {
-                                            p: p;
-                                            read-only: true;
-                                            discuss => {
-                                                // the decided vote's discussion
-                                                // reopens read-only, like the
-                                                // organization outcomes
+                                        // the decided-votes table — the
+                                        // vote's discussion reopens
+                                        // read-only, like the organization
+                                        // outcomes
+                                        if s.declined-count > 0: DecisionTable {
+                                            rows: s.declined;
+                                            with-when: true;
+                                            discuss(id) => {
                                                 root.select-view("chat", "today");
-                                                root.select-channel("patch:\{p.id}");
+                                                root.select-channel("patch:\{id}");
                                             }
                                         }
                                     }

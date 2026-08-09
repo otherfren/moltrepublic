@@ -257,7 +257,7 @@ export struct SurfaceTab {
     pending-my-vote-count: int,
     denied-count: int, // ALL declines (status strip)
     declined-count: int, // declines inside the display-retention window
-    // the paged outcome lists' echo (page size 20, Rust-side slice):
+    // the paged outcome lists' echo (page size 15, Rust-side slice):
     // 1-based current page + page count for the "page x of y" pager row.
     // `log`/`declined` below hold ONLY the current page; the counts above
     // stay full-list.
@@ -268,6 +268,10 @@ export struct SurfaceTab {
     log: [LogLine],
     pending: [ProposalRow],
     declined: [ProposalRow], // the retained declines (Declined view)
+    // the applied history as decision rows, newest first (Accepted table):
+    // proposal-backed rows carry their sealed block's voters, legacy rows
+    // (id -1) only their title — paged in lockstep with `log`
+    accepted: [ProposalRow],
     views: [ViewItem], // its nav sub-views, default first
 }
 
@@ -869,6 +873,11 @@ export global Strings {
     in property <string> mv-pending;
     in property <string> mv-applied;
     in property <string> mv-accepted;
+    // the decided-votes table (Accepted/Declined overviews)
+    in property <string> dt-col-decision;
+    in property <string> dt-col-value;
+    in property <string> dt-col-votes;
+    in property <string> dt-col-when;
     in property <string> toast-checkpoint-sealed;
     in property <string> mv-chat-ph;
     in property <string> mv-propose-ph;

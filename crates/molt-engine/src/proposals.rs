@@ -1136,6 +1136,17 @@ impl State {
             .map(|(id, p)| self.view(*id, p))
             .collect();
         declined.sort_by(|a, b| b.declined_at.cmp(&a.declined_at).then(b.id.0.cmp(&a.id.0)));
+        // the applied projection (Organization → Accepted): each view names
+        // the voters its sealed block proves — display data the raw applied
+        // payloads cannot carry. Highest id first (blocks carry no time);
+        // readers join to the log's order via `applied_ids` anyway.
+        let mut accepted: Vec<ProposalView> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.surface == surface && p.state == ProposalState::Applied)
+            .map(|(id, p)| self.view(*id, p))
+            .collect();
+        accepted.sort_by_key(|v| std::cmp::Reverse(v.id.0));
         let (applied_ids, applied) = self
             .applied_values(surface, channel.as_ref(), view)
             .into_iter()
@@ -1148,6 +1159,7 @@ impl State {
             pending,
             denied: declined.len(),
             declined,
+            accepted,
             channels: if surface == Surface::Chat {
                 self.chat_channels()
             } else {
