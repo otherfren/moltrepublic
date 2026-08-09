@@ -1,9 +1,9 @@
 # File transfer over the Nostr transport — the 445-chunk data plane
 
-Status: **DESIGN — direction ratified, details open.** The user decided
-2026-08-09: build the 445-chunk data plane (§10.7 lifts "OFF in V1").
-**The open questions in §5 must be discussed before the build starts** —
-this document is the discussion basis, not a finished spec.
+Status: **SPEC FROZEN 2026-08-09 — ready to build (F2).** Direction and
+both product forks are user-decided: build the 445-chunk data plane
+(§10.7 lifted), cap 4 MiB (config key), chunks publish LAZILY on the
+first download request. §5 records the decisions.
 
 ## 1. What exists, and what the gate is
 
@@ -35,11 +35,14 @@ this document is the discussion basis, not a finished spec.
   published under the file's own deterministic msg id — receivers
   reassemble to a bounded disk cache keyed by the share's `MessageId`.
   The log stays state-sized; compaction (WP4a) never sees file bytes.
-- **Store-and-forward within relay retention:** while the relays hold the
-  chunk events, a downloader needs no live sharer. Past retention the
-  existing `FileRequested` broadcast asks the SHARER to re-publish the
-  series (same authenticate-by-MLS pattern as today) — availability
-  honestly degrades to "sharer online", never silently.
+- **Lazy publish, then store-and-forward:** the share itself moves no
+  bytes. The FIRST `FileRequested` makes the sharer publish the chunk
+  series (so the first download needs the sharer online and waits out
+  the upload); from then on the relays hold the events and every further
+  download needs no live sharer — until relay retention prunes them, at
+  which point the next `FileRequested` triggers a re-publish. The same
+  authenticate-by-MLS request pattern as today; availability degrades
+  honestly to "sharer online", never silently.
 - **The GUI un-dims** share/download on relay republics once the plane
   ships; every refusal keeps naming its reason (cap, aged out, sharer
   gone).
@@ -53,27 +56,32 @@ plane limit is 65535 chunks; the REAL cap must come from relay behaviour
 
 ## 4. Etappen
 
-- **F1** — discuss §5, freeze the spec in this doc (status flip).
+- **F1** — ✅ spec frozen (this document; decisions in §5).
 - **F2** — the chunk plane: publish/reassemble a sealed byte series over
   `MockRelay`, cap enforcement, disk cache with bounds; keystone tests
   red-first.
-- **F3** — engine wiring: `cmd_share_file` over nostr publishes the
-  series; `DownloadFile` reads cache-or-relay; GUI un-dim + progress.
-- **F4** — the fallback: `FileRequested` re-publish past retention,
-  RemoveFile semantics (sharer deletes → series never re-published),
-  docs + status lines.
+- **F3** — engine wiring: `cmd_share_file` over nostr admits the share
+  (metadata only — lazy plane); `DownloadFile` reads cache-or-relay and
+  fires `FileRequested` when neither holds the series; GUI un-dim +
+  progress.
+- **F4** — the fallback loop: re-publish past retention, RemoveFile
+  semantics (sharer deletes → series never re-published), docs + status
+  lines.
 
-## 5. OPEN — decide before F2
+## 5. Decisions (user-ratified 2026-08-09)
 
-1. **Size cap.** Proposal: 4 MiB default (≈70 chunks at ~60 KiB), config
-   key for operators. Bigger files = out of scope V2?
-2. **Publish timing.** Chunks published eagerly at share time (costs
-   upload even if nobody downloads) or lazily on first `FileRequested`
-   (first download waits for the sharer's upload)? Eager matches
-   store-and-forward; lazy spares the pool.
-3. **Cache bounds.** Per-workspace disk budget for reassembled files and
-   fetched chunks; eviction order.
-4. **Pool courtesy.** Rate-limit chunk publishes against the same hourly
-   budget machinery the resends use, or a dedicated file budget?
-5. **Retention honesty in the UI.** How the share card states "relay-held
-   vs. sharer-only" without a wall of text (compact-text rule).
+1. **Size cap: 4 MiB** (≈70 chunks at ~60 KiB), as a config key so
+   operators can raise it deliberately. Bigger files are out of scope
+   until the plane has field mileage.
+2. **Publish timing: LAZY.** The first `FileRequested` triggers the
+   sharer's chunk upload; nothing is published for a share nobody
+   downloads. The first downloader waits out the upload — the share card
+   says so (compact).
+3. **Cache bounds (default, not user-asked):** 256 MiB per workspace,
+   LRU eviction of fetched series; reassembled downloads land in the
+   session download directory and leave the cache accounting.
+4. **Pool courtesy (default):** chunk publishes ride the same hourly
+   publish budget machinery as resends — no second budget to reason
+   about; a spent budget holds the upload and says so.
+5. **Retention honesty (default):** one status word on the share card —
+   relay-held / sharer-only / gone — mapped from the last fetch outcome.
