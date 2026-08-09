@@ -1125,22 +1125,34 @@ impl State {
         let mut pool = self.ratified_relays();
         for v in self.applied_org_entries() {
             if v.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
-                let parsed: Vec<String> = v
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect();
-                // wire arrivals are not re-validated, so the fold is
-                // defensive (the org_effective rule): an empty edit keeps
-                // the previous pool
-                if !parsed.is_empty() {
-                    pool = parsed;
-                }
+                Self::fold_pool_edit(
+                    &mut pool,
+                    v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                );
             }
         }
         pool
+    }
+
+    /// The R6 fold rule both effective views share (`effective_relays` and
+    /// `org_effective`): an applied `set_relays` entry replaces the pool
+    /// only if it is non-empty AND shares a relay with the pool accumulated
+    /// so far — make-before-break at the FOLD, the only place every holder
+    /// passes deterministically. The propose-time gates are local courtesy;
+    /// a peer on another build (or a hand-crafted payload) bypasses them,
+    /// and two individually-legal pending edits can compose into a
+    /// zero-overlap transition (review 2026-08-09). A zero-overlap
+    /// transition applied for real would tear the republic at that commit,
+    /// so it deterministically becomes a no-op instead.
+    pub(crate) fn fold_pool_edit(pool: &mut Vec<String>, value: &str) {
+        let parsed: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+        if parsed.is_empty() {
+            return;
+        }
+        if !pool.is_empty() && !pool.iter().any(|r| parsed.contains(r)) {
+            return;
+        }
+        *pool = parsed;
     }
 
     /// R6: the governed pool moved — carry it into the LIVE transport. The
@@ -5632,6 +5644,44 @@ mod tests {
                 }),
             )
             .expect("keeping one shared relay is the legal migration step");
+    }
+
+    /// Make-before-break holds at the FOLD, not only at propose (review
+    /// 2026-08-09): the propose gate is local courtesy — a peer on another
+    /// build can gossip a zero-overlap edit, and two individually-legal
+    /// pending edits can compose into one. The fold is the only place every
+    /// node passes deterministically, so an applied `set_relays` sharing no
+    /// relay with the pool accumulated SO FAR is a no-op — a pure function
+    /// of chain content, identical on every holder.
+    #[test]
+    fn a_zero_overlap_pool_block_folds_as_a_no_op() {
+        let r_a = "wss://relay.one".to_string();
+        let r_b = "wss://relay.two.example".to_string();
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, vec![r_a.clone()]);
+        let block = |b: &Builder, h, value: &str| {
+            b.seal(
+                h,
+                ChainChange::Applied {
+                    proposal_id: h,
+                    surface: Surface::Organization,
+                    payload: serde_json::json!({ "op": "set_relays", "value": value }),
+                },
+                &["petra", "walter"],
+            )
+        };
+        // height 1: zero overlap with [A] — must keep [A]
+        let zero = block(&b, 1, &r_b);
+        b.push(zero);
+        let walter = chain_signer("walter", &b, b.blocks.clone());
+        assert_eq!(walter.effective_relays(), vec![r_a.clone()], "zero overlap folds as no-op");
+        // height 2: [A B] overlaps via A — applies; height 3: [B] overlaps
+        // via B — applies. The legal two-vote migration lands on [B].
+        let step = block(&b, 2, &format!("{r_a} {r_b}"));
+        b.push(step);
+        let done = block(&b, 3, &r_b);
+        b.push(done);
+        let walter = chain_signer("walter", &b, b.blocks.clone());
+        assert_eq!(walter.effective_relays(), vec![r_b], "the two-vote migration applies");
     }
 
     /// R6: an edit that would strand a member — a new pool sharing no relay

@@ -439,7 +439,7 @@ pub fn run_app(
                 .iter()
                 .map(|r| r.url.to_string())
                 .collect();
-            if let Some(msg) = relay_add_error(ui.get_lang_index(), url.as_str(), &pool) {
+            if let Err(msg) = relay_add_check(ui.get_lang_index(), url.as_str(), &pool) {
                 ui.set_relay_error(msg.into());
                 return;
             }
@@ -1429,17 +1429,15 @@ pub fn run_app(
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-            if let Some(msg) = relay_add_error(ui.get_lang_index(), url.as_str(), &rows) {
-                ui.set_org_relay_add_error(msg.into());
-                return;
+            match relay_add_check(ui.get_lang_index(), url.as_str(), &rows) {
+                Err(msg) => ui.set_org_relay_add_error(msg.into()),
+                Ok(canon) => {
+                    rows.push(canon);
+                    set_relay_draft_rows(&ui, &rows);
+                    ui.set_org_relay_add_draft("".into());
+                    ui.set_org_relay_add_error("".into());
+                }
             }
-            let Ok(canon) = molt_core::relay::normalize_relay_url(url.as_str()) else {
-                return; // unreachable: relay_add_error covered every Err
-            };
-            rows.push(canon);
-            set_relay_draft_rows(&ui, &rows);
-            ui.set_org_relay_add_draft("".into());
-            ui.set_org_relay_add_error("".into());
         });
         let weak = ui.as_weak();
         ui.on_relays_draft_remove(move |i| {
@@ -1453,6 +1451,8 @@ pub fn run_app(
             if i < rows.len() {
                 rows.remove(i);
                 set_relay_draft_rows(&ui, &rows);
+                // a removed row may end the condition an add error named
+                ui.set_org_relay_add_error("".into());
             }
         });
     }
@@ -2842,31 +2842,38 @@ fn apply_relays(ui: &AppWindow, sv: &SessionView) {
 
 /// The R6 pool-edit modal's one draft setter: rows are the editing truth,
 /// the space-joined string is the org-propose payload — set together so the
-/// two can never disagree.
+/// two can never disagree. The overlap flag mirrors the engine's
+/// make-before-break gate into `confirm-enabled`, so the modal never sends
+/// a draft the engine would refuse after the rows are already gone.
 fn set_relay_draft_rows(ui: &AppWindow, rows: &[String]) {
+    let current: Vec<String> = ui.get_org_relays().iter().map(|s| s.to_string()).collect();
+    let overlap = current.is_empty() || rows.iter().any(|r| current.contains(r));
+    ui.set_org_relays_draft_overlap(overlap);
     ui.set_org_relays_draft(rows.join(" ").into());
     sync_strings(&ui.get_org_relays_draft_rows(), rows, |m| {
         ui.set_org_relays_draft_rows(m)
     });
 }
 
-/// The localized reason the pool would refuse this URL — `None` when it is
-/// acceptable. Validation runs through molt-core's OWN parser (the very
-/// function the engine gates on, so the field message and the gate can never
-/// disagree); the engine still re-validates and stays the authority.
-fn relay_add_error(lang: i32, raw: &str, pool: &[String]) -> Option<&'static str> {
+/// Validate a pool-add URL: `Ok` carries the CANONICAL spelling to store,
+/// `Err` the localized reason the pool refuses it. Validation runs through
+/// molt-core's OWN parser (the very function the engine gates on, so the
+/// field message and the gate can never disagree); the engine still
+/// re-validates and stays the authority.
+fn relay_add_check(lang: i32, raw: &str, pool: &[String]) -> Result<String, &'static str> {
     let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
     match molt_core::relay::normalize_relay_url(raw) {
-        Err(RelayUrlError::Scheme) => Some(l.rp_err_scheme),
-        Err(RelayUrlError::Host) => Some(l.rp_err_host),
-        Err(RelayUrlError::PlaintextClearnet) => Some(l.rp_err_plain),
-        Err(RelayUrlError::Junk) => Some(l.rp_err_junk),
-        Err(RelayUrlError::OnionAddress) => Some(l.rp_err_onion),
-        Err(RelayUrlError::Userinfo) => Some(l.rp_err_userinfo),
-        Err(RelayUrlError::Fragment) => Some(l.rp_err_fragment),
-        Err(RelayUrlError::TooLong) => Some(l.rp_err_toolong),
-        Err(RelayUrlError::NonCanonical) => Some(l.rp_err_noncanon),
-        Ok(url) => pool.contains(&url).then_some(l.rp_err_dup),
+        Err(RelayUrlError::Scheme) => Err(l.rp_err_scheme),
+        Err(RelayUrlError::Host) => Err(l.rp_err_host),
+        Err(RelayUrlError::PlaintextClearnet) => Err(l.rp_err_plain),
+        Err(RelayUrlError::Junk) => Err(l.rp_err_junk),
+        Err(RelayUrlError::OnionAddress) => Err(l.rp_err_onion),
+        Err(RelayUrlError::Userinfo) => Err(l.rp_err_userinfo),
+        Err(RelayUrlError::Fragment) => Err(l.rp_err_fragment),
+        Err(RelayUrlError::TooLong) => Err(l.rp_err_toolong),
+        Err(RelayUrlError::NonCanonical) => Err(l.rp_err_noncanon),
+        Ok(url) if pool.contains(&url) => Err(l.rp_err_dup),
+        Ok(url) => Ok(url),
     }
 }
 
@@ -4507,10 +4514,17 @@ const RELAY_ROW_ADDED: i32 = 1;
 const RELAY_ROW_REMOVED: i32 = 2;
 
 /// The set_relays vote card's diff: both pools are space-separated URL
-/// lists (the op's wire format), the rows are the union — current pool in
-/// its own order marked kept/removed, then the additions in proposal
-/// order. Duplicates collapse; the strings stay verbatim (the engine
-/// already refused non-canonical URLs at propose).
+/// lists, the rows are the union — current pool in its own order marked
+/// kept/removed, then the additions in proposal order. Duplicates
+/// collapse; the strings stay verbatim (the engine canonicalizes at
+/// propose). An EMPTY proposed pool yields no rows — the engine folds such
+/// an edit as a no-op, so a diff promising removals would be a
+/// sign-what-you-see lie; the card falls back to the generic pair.
+///
+/// Format coupling, deliberate: `proposed` is the op's wire format, but
+/// `current` re-splits `change_summary`'s space-joined DISPLAY string
+/// (`ProposalView.current`) — if that join ever changes shape, these rows
+/// silently go bogus. The gui test pins the wiring.
 fn relay_pool_diff(current: &str, proposed: &str) -> Vec<(i32, String)> {
     let cur: Vec<&str> = {
         let mut seen = std::collections::HashSet::new();
@@ -4526,6 +4540,9 @@ fn relay_pool_diff(current: &str, proposed: &str) -> Vec<(i32, String)> {
             .filter(|u| seen.insert(*u))
             .collect()
     };
+    if new.is_empty() {
+        return Vec::new();
+    }
     let mut rows: Vec<(i32, String)> = cur
         .iter()
         .map(|u| {
@@ -6469,6 +6486,9 @@ mod tests {
             relay_pool_diff("", "wss://x wss://x"),
             vec![(RELAY_ROW_ADDED, "wss://x".to_string())]
         );
+        // an empty proposed pool folds as a no-op engine-side, so the card
+        // must NOT promise removals — no rows, generic fallback
+        assert_eq!(relay_pool_diff("wss://a", ""), Vec::<(i32, String)>::new());
     }
 
     fn line(lead: &str, text: &str) -> LogLineData {
@@ -8128,14 +8148,17 @@ mod tests {
     fn a_refused_relay_url_gets_a_localized_message_under_the_field() {
         let pool = vec!["wss://relay.example.org".to_string()];
         for lang in [0, 1] {
-            assert_eq!(relay_add_error(lang, "wss://fresh.example.org", &pool), None);
             assert_eq!(
-                relay_add_error(
+                relay_add_check(lang, "wss://fresh.example.org", &pool).as_deref(),
+                Ok("wss://fresh.example.org")
+            );
+            assert!(
+                relay_add_check(
                     lang,
                     "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
                     &pool
-                ),
-                None,
+                )
+                .is_ok(),
                 "plaintext to an onion service is fine - Tor encrypts it"
             );
             // …and every refusal names its reason
@@ -8150,7 +8173,8 @@ mod tests {
                 // already in the pool (normalized: same relay, other spelling)
                 "WSS://Relay.Example.ORG/",
             ] {
-                let msg = relay_add_error(lang, bad, &pool)
+                let msg = relay_add_check(lang, bad, &pool)
+                    .err()
                     .unwrap_or_else(|| panic!("{bad:?} must be refused with a message"));
                 assert!(!msg.is_empty());
             }
@@ -8158,12 +8182,12 @@ mod tests {
         // the five parser verdicts and the duplicate are DISTINCT messages,
         // so the user learns what to fix
         let msgs = [
-            relay_add_error(0, "https://relay.example.org", &pool),
-            relay_add_error(0, "wss://", &pool),
-            relay_add_error(0, "ws://relay.example.org", &pool),
-            relay_add_error(0, "wss://relay example.org", &pool),
-            relay_add_error(0, "wss://aaa.onion", &pool),
-            relay_add_error(0, "wss://relay.example.org", &pool),
+            relay_add_check(0, "https://relay.example.org", &pool).err(),
+            relay_add_check(0, "wss://", &pool).err(),
+            relay_add_check(0, "ws://relay.example.org", &pool).err(),
+            relay_add_check(0, "wss://relay example.org", &pool).err(),
+            relay_add_check(0, "wss://aaa.onion", &pool).err(),
+            relay_add_check(0, "wss://relay.example.org", &pool).err(),
         ];
         for (i, a) in msgs.iter().enumerate() {
             for b in msgs.iter().skip(i + 1) {
@@ -8172,8 +8196,8 @@ mod tests {
         }
         // German is a real translation, not the English string
         assert_ne!(
-            relay_add_error(0, "wss://", &pool),
-            relay_add_error(1, "wss://", &pool),
+            relay_add_check(0, "wss://", &pool).err(),
+            relay_add_check(1, "wss://", &pool).err(),
         );
     }
 
@@ -8403,6 +8427,57 @@ mod gui_tests {
             .map_or(0, |s| s.log.row_count())
     }
 
+    /// A sealed workspace ON DISK, demo-grade (empty identities and
+    /// attestations), plus the unix `now` its appended events should stamp
+    /// — NOW, not a fixed stamp: chat older than the retention window is
+    /// correctly invisible, and a fixture from last year would "reproduce"
+    /// a bug that is the product working as specified.
+    fn workspace_on_disk(
+        root: &std::path::Path,
+        rule_m: u8,
+        roster: &[&str],
+        agenda: &str,
+    ) -> (molt_storage::OpenedWorkspace, u64) {
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let sealed = molt_core::SealedRoster {
+            name: "DevTest".to_string(),
+            republic_id: "d0".repeat(32),
+            rule_m,
+            rule_n: u8::try_from(roster.len()).expect("roster fits u8"),
+            roster: roster.iter().map(|s| (*s).to_string()).collect(),
+            identities: Vec::new(),
+            attestations: Vec::new(),
+            relays: Vec::new(),
+            agenda: agenda.to_string(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let genesis = sealed.into_genesis(roster[0], now);
+        let ws = molt_storage::create_workspace(root, &seed, &genesis).expect("create");
+        (ws, now)
+    }
+
+    /// The live-mirror's own two steps (session push, then surfaces
+    /// gather + apply), in its own order. The apply runs DIRECTLY rather
+    /// than through `invoke_from_event_loop`: the headless backend never
+    /// drains that queue, and the hop onto the UI thread is Slint's
+    /// business, not this layer's.
+    async fn mirror(
+        w: &WalletHandle,
+        ui: &AppWindow,
+        last: &Arc<Mutex<Option<SessionSettings>>>,
+        chat_ui: &Arc<Mutex<ChatUiState>>,
+    ) {
+        let weak = ui.as_weak();
+        push_session(w, &weak, last, SessionScope::Full, chat_ui).await;
+        if let Some((_, b)) = gather_surfaces(w, chat_ui).await {
+            apply_surfaces(ui, &b);
+        }
+    }
+
     /// **THE reported sequence: a cold start, then OPEN a workspace that is
     /// already on disk.**
     ///
@@ -8418,28 +8493,7 @@ mod gui_tests {
         let _guard = rt.enter();
 
         // --- a workspace ON DISK, the way a previous run left one behind
-        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
-        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
-        let roster = molt_core::SealedRoster {
-            name: "DevTest".to_string(),
-            republic_id: "d0".repeat(32),
-            rule_m: 1,
-            rule_n: 1,
-            roster: vec!["walter".to_string()],
-            identities: Vec::new(),
-            attestations: Vec::new(),
-            relays: Vec::new(),
-            agenda: "test the chat".to_string(),
-        };
-        // NOW, not a fixed stamp: chat older than the retention window is
-        // correctly invisible, and a fixture from last year would "reproduce"
-        // a bug that is the product working as specified
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let genesis = roster.into_genesis("walter", now);
-        let mut ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        let (mut ws, now) = workspace_on_disk(&root, 1, &["walter"], "test the chat");
         // …with a message in it
         ws.append(&molt_core::EventEnvelope {
             prev_seq: 1,
@@ -8463,12 +8517,8 @@ mod gui_tests {
         let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
         let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
         rt.block_on(async {
-            let weak = ui.as_weak();
             // the app comes up on the Choice screen and mirrors once
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
             assert_eq!(
                 chat_rows(&ui),
                 0,
@@ -8500,10 +8550,7 @@ mod gui_tests {
             };
             assert_eq!(engine_rows, 1, "the engine holds the stored message");
 
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
         });
 
         assert!(
@@ -8548,15 +8595,7 @@ mod gui_tests {
             .await
             .ok();
 
-            // the live-mirror's own two steps, in its own order. The apply
-            // runs DIRECTLY rather than through `invoke_from_event_loop`:
-            // the headless backend never drains that queue, and the hop
-            // onto the UI thread is Slint's business, not this layer's.
-            let weak = ui.as_weak();
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, bundle)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &bundle);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
         });
 
         assert!(
@@ -8586,25 +8625,7 @@ mod gui_tests {
         let rt = rt();
         let _guard = rt.enter();
 
-        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
-        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
-        let roster = molt_core::SealedRoster {
-            name: "DevTest".to_string(),
-            republic_id: "d0".repeat(32),
-            rule_m: 2,
-            rule_n: 2,
-            roster: vec!["walter".to_string(), "ingrid".to_string()],
-            identities: Vec::new(),
-            attestations: Vec::new(),
-            relays: Vec::new(),
-            agenda: "test the chat".to_string(),
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let genesis = roster.into_genesis("walter", now);
-        let mut ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        let (mut ws, now) = workspace_on_disk(&root, 2, &["walter", "ingrid"], "test the chat");
         ws.append(&molt_core::EventEnvelope {
             prev_seq: 1,
             seq: 2,
@@ -8645,11 +8666,7 @@ mod gui_tests {
         let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
         let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
         rt.block_on(async {
-            let weak = ui.as_weak();
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
 
             let stored = molt_storage::scan_workspaces(&root)
                 .first()
@@ -8660,10 +8677,7 @@ mod gui_tests {
                 .expect("the stored workspace opens");
             // the mirror push that follows the delivery — the receivers
             // froze HERE if this layer chokes on the topic state
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
             assert!(
                 chat_rows(&ui) > 0,
                 "the group log must still show after a topic message arrived"
@@ -8679,10 +8693,7 @@ mod gui_tests {
             })
             .await
             .expect("the chat click reaches the engine");
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
         });
 
         assert!(
@@ -8704,30 +8715,12 @@ mod gui_tests {
         let rt = rt();
         let _guard = rt.enter();
 
-        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
-        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
         // one seat cannot drive an edit to applied at m=2 (the proposer
         // already counts as approver), so the effective pool stays empty
         // here and every proposed relay renders as ADDED — the
         // kept/removed semantics are pinned by `relay_pool_diff`'s unit
         // test against a non-empty Ist-Stand
-        let roster = molt_core::SealedRoster {
-            name: "DevTest".to_string(),
-            republic_id: "d0".repeat(32),
-            rule_m: 2,
-            rule_n: 2,
-            roster: vec!["walter".to_string(), "ingrid".to_string()],
-            identities: Vec::new(),
-            attestations: Vec::new(),
-            relays: Vec::new(),
-            agenda: "test the pool".to_string(),
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let genesis = roster.into_genesis("walter", now);
-        let ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        let (ws, _now) = workspace_on_disk(&root, 2, &["walter", "ingrid"], "test the pool");
         drop(ws);
 
         let (w, _) = node_with_chat(&root);
@@ -8753,11 +8746,7 @@ mod gui_tests {
             .await
             .expect("the pool edit proposes");
 
-            let weak = ui.as_weak();
-            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
-            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
-                apply_surfaces(&ui, &b);
-            }
+            mirror(&w, &ui, &last, &chat_ui).await;
         });
 
         let org = ui

@@ -1371,6 +1371,23 @@ impl State {
                     tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes");
                     return Ok(Reply::Ack);
                 }
+                // (3) a set_relays with no relay at all could only ever fold
+                // as a no-op (the pool must never empty) — also
+                // node-independent, so peers agree. The make-before-break
+                // overlap rule deliberately does NOT sit here: its verdict
+                // depends on this node's fold-state at ingest time, so it is
+                // enforced where every holder passes deterministically — the
+                // effective-pool fold itself (`fold_pool_edit`).
+                if surface == molt_core::Surface::Organization
+                    && payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays")
+                    && payload
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or(true, |v| v.split_whitespace().next().is_none())
+                {
+                    tracing::warn!(from = %from, "dropping a set_relays proposal with an empty pool");
+                    return Ok(Reply::Ack);
+                }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload) {

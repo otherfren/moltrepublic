@@ -1,8 +1,8 @@
 # Relay topology — the group shares its relays, and says so
 
-**Status: R2b–R6 BUILT (R3/R3b/R4/R5/R6 landed 2026-08-02..04, the R6
-make-before-break gate and the pool-edit UI 2026-08-09); R1, R2 and R2c still
-open.** Rules ratified by the user 2026-08-02; recorded in
+**Status: R2b, R3, R3b, R4, R5 and R6 are BUILT (landed 2026-08-02..04; the
+R6 make-before-break rule and the pool-edit UI 2026-08-09); R1, R2 and R2c
+are still open.** Rules ratified by the user 2026-08-02; recorded in
 `nostr_transport_marmot.md` §10.15. This document is the execution plan.
 
 Read first: `relay_pool.md` (relays do not federate; the confirmation gate),

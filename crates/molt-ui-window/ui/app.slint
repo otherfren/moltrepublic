@@ -1408,6 +1408,10 @@ export component AppWindow inherits Window {
     in-out property <[string]> org-relays-draft-rows: [];
     in-out property <string> org-relay-add-draft;
     in-out property <string> org-relay-add-error;
+    // mirrors the engine's make-before-break gate (Rust-computed): the
+    // draft keeps at least one relay of the effective pool, so Propose
+    // never sends what the engine would refuse after the modal closed
+    in-out property <bool> org-relays-draft-overlap: true;
     // the pool, space-joined by Rust — the pencil's draft prefill
     in property <string> org-relays-joined;
     // the OPEN workspace's transport kind ("nostr" on a relay republic) —
@@ -7921,7 +7925,12 @@ export component AppWindow inherits Window {
         title: Strings.ocr2-title;
         body: Strings.ocr2-body;
         confirm-label: Strings.oc-propose;
-        confirm-enabled: root.org-relays-draft-rows.length > 0 && root.org-relays-draft != root.org-relays-joined;
+        // a URL still sitting in the add field blocks Propose (it would be
+        // silently dropped otherwise); overlap mirrors the engine gate
+        confirm-enabled: root.org-relays-draft-rows.length > 0
+            && root.org-relays-draft != root.org-relays-joined
+            && root.org-relay-add-draft == ""
+            && root.org-relays-draft-overlap;
         dismissed => {
             root.org-relays-modal-open = false;
         }
@@ -7931,32 +7940,41 @@ export component AppWindow inherits Window {
         }
         VerticalLayout {
             spacing: 5px;
-            for r[i] in root.org-relays-draft-rows: Rectangle {
-                height: 32px;
-                border-radius: Theme.win95 ? 0px : 6px;
-                background: Theme.panel-2;
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 3px;
-                    spacing: 8px;
-                    Text {
-                        text: r;
-                        color: Theme.text;
-                        font-size: Theme.fs-body;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                    }
-                    AppButton {
-                        width: 26px;
-                        height: 26px;
-                        y: (parent.height - self.height) / 2;
-                        pad: 0px;
-                        label: "✕";
-                        tooltip: Strings.ocr2-remove;
-                        tooltip-left: true;
-                        clicked => {
-                            root.relays-draft-remove(i);
+            // capped + scrollable so a long pool can never push the modal's
+            // buttons off-window (the dialog centers on preferred height)
+            Flickable {
+                height: min(260px, root.org-relays-draft-rows.length * 37px);
+                viewport-height: root.org-relays-draft-rows.length * 37px;
+                VerticalLayout {
+                    spacing: 5px;
+                    for r[i] in root.org-relays-draft-rows: Rectangle {
+                        height: 32px;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        background: Theme.panel-2;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 3px;
+                            spacing: 8px;
+                            Text {
+                                text: r;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            AppButton {
+                                width: 26px;
+                                height: 26px;
+                                y: (parent.height - self.height) / 2;
+                                pad: 0px;
+                                label: "✕";
+                                tooltip: Strings.ocr2-remove;
+                                tooltip-left: true;
+                                clicked => {
+                                    root.relays-draft-remove(i);
+                                }
+                            }
                         }
                     }
                 }
@@ -7967,7 +7985,9 @@ export component AppWindow inherits Window {
                     text <=> root.org-relay-add-draft;
                     placeholder: "wss://relay.example";
                     accepted => {
-                        root.relays-draft-add(root.org-relay-add-draft);
+                        if (root.org-relay-add-draft != "") {
+                            root.relays-draft-add(root.org-relay-add-draft);
+                        }
                     }
                 }
                 AppButton {

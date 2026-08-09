@@ -313,10 +313,29 @@ impl State {
     pub(crate) fn cmd_propose(
         &mut self,
         surface: Surface,
-        payload: Value,
+        mut payload: Value,
     ) -> Result<Reply, MoltError> {
         if !surface.is_gated() {
             return Err(MoltError::ChatNotGated);
+        }
+        // set_relays: store the CANONICAL spelling (review 2026-08-09). The
+        // parser accepts-and-rewrites ":443", a trailing "/" and uppercase;
+        // recording the raw token instead would poison every later
+        // exact-string compare (the overlap gate refusing a legal
+        // migration, relay_splits phantom splits, the diff card marking one
+        // relay as remove+add). A token that does not parse stays as typed —
+        // validate_org_payload names it in the refusal.
+        if surface == Surface::Organization
+            && payload.get("op").and_then(Value::as_str) == Some("set_relays")
+        {
+            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            let canon: Result<Vec<String>, ()> = raw
+                .split_whitespace()
+                .map(|t| molt_core::relay::normalize_relay_url(t).map_err(|_| ()))
+                .collect();
+            if let Ok(tokens) = canon {
+                payload["value"] = Value::String(tokens.join(" "));
+            }
         }
         if !payload.is_object() {
             return Err(MoltError::BadPayload(
@@ -714,9 +733,13 @@ impl State {
                     };
                 }
                 Some("remove_image") => eff.image.clear(),
-                // defensive like the rest: an empty edit keeps the pool
-                Some("set_relays") if value.split_whitespace().next().is_some() => {
-                    eff.relays = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                // the shared R6 fold rule: an empty OR zero-overlap edit
+                // keeps the pool (make-before-break at the fold)
+                Some("set_relays") => {
+                    let mut pool: Vec<String> =
+                        eff.relays.split_whitespace().map(str::to_string).collect();
+                    Self::fold_pool_edit(&mut pool, value);
+                    eff.relays = pool.join(" ");
                 }
                 _ => {}
             }
