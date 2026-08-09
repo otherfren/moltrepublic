@@ -648,20 +648,9 @@ component OrgSettingsCard inherits DetailGroup {
                 }
             }
         }
-        for r in root.relays: Text {
-            text: r;
-            color: Theme.faint;
-            font-size: Theme.fs-cap;
-            overflow: elide;
-        }
-        // relays do not federate: a member who cannot reach one of these is
-        // partitioned, so the pool is the first thing to look at
-        Text {
-            text: Strings.ocs-relays-hint;
-            color: Theme.faint;
-            font-size: Theme.fs-cap;
-            wrap: word-wrap;
-        }
+        // deliberately no URL list here (2026-08-09): the real addresses
+        // are the modal's business — Status shows the count, the pencil
+        // opens the editable table
     }
     HorizontalLayout {
         spacing: 8px;
@@ -856,6 +845,10 @@ export component AppWindow inherits Window {
     // (op, value) — the op is the language-neutral title placeholder;
     // the Rust side never bakes a rendered title into the payload
     callback org-propose(string, string);
+    // R6 pool-edit modal draft ops (rows live Rust-side, see above)
+    callback relays-draft-seed();
+    callback relays-draft-add(string);
+    callback relays-draft-remove(int);
     callback approve(int);
     callback decline(int);
     // select the main-view surface (routed to a SelectSurface command; the
@@ -1409,7 +1402,12 @@ export component AppWindow inherits Window {
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
     property <bool> org-relays-modal-open: false;
-    property <string> org-relays-draft;
+    // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
+    // string — the Rust side keeps the two in step (set-relay-draft-rows)
+    in-out property <string> org-relays-draft;
+    in-out property <[string]> org-relays-draft-rows: [];
+    in-out property <string> org-relay-add-draft;
+    in-out property <string> org-relay-add-error;
     // the pool, space-joined by Rust — the pencil's draft prefill
     in property <string> org-relays-joined;
     // the OPEN workspace's transport kind ("nostr" on a relay republic) —
@@ -5180,7 +5178,7 @@ export component AppWindow inherits Window {
                                             root.org-retention-modal-open = true;
                                         }
                                         edit-relays => {
-                                            root.org-relays-draft = root.org-relays-joined;
+                                            root.relays-draft-seed();
                                             root.org-relays-modal-open = true;
                                         }
                                     }
@@ -5246,7 +5244,7 @@ export component AppWindow inherits Window {
                                         root.org-retention-modal-open = true;
                                     }
                                     edit-relays => {
-                                        root.org-relays-draft = root.org-relays-joined;
+                                        root.relays-draft-seed();
                                         root.org-relays-modal-open = true;
                                     }
                                 }
@@ -7915,13 +7913,15 @@ export component AppWindow inherits Window {
     // Settings). A gated change like the other organization edits: the
     // drafted period becomes a real proposal.
     // =================================================================
-    // R6: the pool edit — a gated proposal like the retention next to it
+    // R6: the pool edit — a gated proposal like the retention next to it.
+    // The draft is a ROW TABLE (delete per row, add below); the rows and
+    // the space-joined payload string are kept in step Rust-side.
     if root.org-relays-modal-open: ConfirmModal {
-        dialog-width: 520px;
+        dialog-width: 560px;
         title: Strings.ocr2-title;
         body: Strings.ocr2-body;
         confirm-label: Strings.oc-propose;
-        confirm-enabled: root.org-relays-draft != "" && root.org-relays-draft != root.org-relays-joined;
+        confirm-enabled: root.org-relays-draft-rows.length > 0 && root.org-relays-draft != root.org-relays-joined;
         dismissed => {
             root.org-relays-modal-open = false;
         }
@@ -7929,9 +7929,62 @@ export component AppWindow inherits Window {
             root.org-relays-modal-open = false;
             root.org-propose("set_relays", root.org-relays-draft);
         }
-        AppField {
-            text <=> root.org-relays-draft;
-            placeholder: "wss://relay-a.example wss://relay-b.example";
+        VerticalLayout {
+            spacing: 5px;
+            for r[i] in root.org-relays-draft-rows: Rectangle {
+                height: 32px;
+                border-radius: Theme.win95 ? 0px : 6px;
+                background: Theme.panel-2;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 3px;
+                    spacing: 8px;
+                    Text {
+                        text: r;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    AppButton {
+                        width: 26px;
+                        height: 26px;
+                        y: (parent.height - self.height) / 2;
+                        pad: 0px;
+                        label: "✕";
+                        tooltip: Strings.ocr2-remove;
+                        tooltip-left: true;
+                        clicked => {
+                            root.relays-draft-remove(i);
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                add-field := AppField {
+                    text <=> root.org-relay-add-draft;
+                    placeholder: "wss://relay.example";
+                    accepted => {
+                        root.relays-draft-add(root.org-relay-add-draft);
+                    }
+                }
+                AppButton {
+                    label: "+";
+                    tooltip: Strings.ocr2-add;
+                    enabled: root.org-relay-add-draft != "";
+                    clicked => {
+                        root.relays-draft-add(root.org-relay-add-draft);
+                    }
+                }
+            }
+            if root.org-relay-add-error != "": Text {
+                text: root.org-relay-add-error;
+                color: Theme.bad;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
         }
     }
 

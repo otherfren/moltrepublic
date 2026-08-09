@@ -103,6 +103,13 @@ export struct MemberVoteMark {
     vote: int, // 0 = not voted yet, 1 = approved, 2 = declined
 }
 
+// One row of a set_relays vote card's pool diff (the union of current and
+// proposed pool, each member marked).
+export struct RelayChange {
+    sign: int, // 0 = kept, 1 = added, 2 = removed
+    url: string,
+}
+
 // A pending proposal on a gated surface, with its approval progress.
 export struct ProposalRow {
     id: int,
@@ -114,6 +121,8 @@ export struct ProposalRow {
     image-op: bool, // set_image / remove_image → picture + preview link
     img-b64: string, // a pending set_image's embedded bytes (base64; "" else)
     charter-op: bool, // set_charter → long text, capped + scrollable
+    relay-op: bool, // set_relays → the card renders the pool diff rows
+    relay-changes: [RelayChange], // union of current+proposed pool, marked
     votes: [MemberVoteMark], // per-member stance, roster order
     declined-by: string, // "" = not declined (the Declined view fills it)
     declined-when: string, // human "when" label of the decline
@@ -574,9 +583,10 @@ export global Strings {
     in property <string> ocs-title;
     in property <string> ocs-chat-retention;
     in property <string> ocs-relays;
-    in property <string> ocs-relays-hint;
     in property <string> ocr2-title;
     in property <string> ocr2-body;
+    in property <string> ocr2-add;
+    in property <string> ocr2-remove;
     in property <string> om-coarse;
     in property <string> cs-files-off;
     in property <string> ocs-days;

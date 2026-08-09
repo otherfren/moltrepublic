@@ -1138,7 +1138,7 @@ export component ProposalCard inherits Rectangle {
         // Organization edit ops fill both; a plain proposal shows neither).
         // Short values sit inline; the charter pair is capped + scrollable;
         // an image change renders the Ist image and links the Soll file.
-        if root.p.current != "" && !root.p.charter-op && !root.p.image-op: HorizontalLayout {
+        if root.p.current != "" && !root.p.charter-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-current;
@@ -1154,7 +1154,7 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        if root.p.proposed != "" && !root.p.charter-op && !root.p.image-op: HorizontalLayout {
+        if root.p.proposed != "" && !root.p.charter-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-proposed;
@@ -1168,6 +1168,29 @@ export component ProposalCard inherits Rectangle {
                 font-size: Theme.fs-cap;
                 wrap: word-wrap;
                 horizontal-stretch: 1;
+            }
+        }
+        // set_relays: the pool diff — one row per relay of the union,
+        // + added (good) / - removed (bad) / kept unmarked
+        if root.p.relay-op: VerticalLayout {
+            spacing: 3px;
+            for c in root.p.relay-changes: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: c.sign == 1 ? "+" : c.sign == 2 ? "-" : "";
+                    color: c.sign == 1 ? Theme.good : Theme.bad;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    width: 76px;
+                    horizontal-alignment: right;
+                }
+                Text {
+                    text: c.url;
+                    color: c.sign == 2 ? Theme.faint : Theme.text;
+                    font-size: Theme.fs-cap;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
             }
         }
         if root.p.charter-op && root.p.current != "": CappedStateRow {

@@ -1406,6 +1406,56 @@ pub fn run_app(
             issue(&rt, &w, &weak, Command::Propose { surface, payload });
         });
     }
+    // R6 pool-edit modal: the draft is a row table. Seed copies the
+    // effective pool, add validates through molt-core's own parser (the
+    // same gate the engine applies — and against the DRAFT, so a queued
+    // duplicate is caught too), remove drops a row. The space-joined
+    // `org-relays-draft` string stays the org-propose payload, so the
+    // propose path below is untouched.
+    {
+        let weak = ui.as_weak();
+        ui.on_relays_draft_seed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let rows: Vec<String> = ui.get_org_relays().iter().map(|s| s.to_string()).collect();
+            set_relay_draft_rows(&ui, &rows);
+            ui.set_org_relay_add_draft("".into());
+            ui.set_org_relay_add_error("".into());
+        });
+        let weak = ui.as_weak();
+        ui.on_relays_draft_add(move |url| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut rows: Vec<String> = ui
+                .get_org_relays_draft_rows()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if let Some(msg) = relay_add_error(ui.get_lang_index(), url.as_str(), &rows) {
+                ui.set_org_relay_add_error(msg.into());
+                return;
+            }
+            let Ok(canon) = molt_core::relay::normalize_relay_url(url.as_str()) else {
+                return; // unreachable: relay_add_error covered every Err
+            };
+            rows.push(canon);
+            set_relay_draft_rows(&ui, &rows);
+            ui.set_org_relay_add_draft("".into());
+            ui.set_org_relay_add_error("".into());
+        });
+        let weak = ui.as_weak();
+        ui.on_relays_draft_remove(move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut rows: Vec<String> = ui
+                .get_org_relays_draft_rows()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let Ok(i) = usize::try_from(i) else { return };
+            if i < rows.len() {
+                rows.remove(i);
+                set_relay_draft_rows(&ui, &rows);
+            }
+        });
+    }
     // an Organization change from the status screen's edit modals (charter /
     // image): the same Command::Propose the MCP propose tool drives — the
     // drafted value rides along under "value", the display title under
@@ -2790,6 +2840,16 @@ fn apply_relays(ui: &AppWindow, sv: &SessionView) {
     ui.set_net_tor_active(sv.settings.anonymity == "tor");
 }
 
+/// The R6 pool-edit modal's one draft setter: rows are the editing truth,
+/// the space-joined string is the org-propose payload — set together so the
+/// two can never disagree.
+fn set_relay_draft_rows(ui: &AppWindow, rows: &[String]) {
+    ui.set_org_relays_draft(rows.join(" ").into());
+    sync_strings(&ui.get_org_relays_draft_rows(), rows, |m| {
+        ui.set_org_relays_draft_rows(m)
+    });
+}
+
 /// The localized reason the pool would refuse this URL — `None` when it is
 /// acceptable. Validation runs through molt-core's OWN parser (the very
 /// function the engine gates on, so the field message and the gate can never
@@ -3502,6 +3562,10 @@ struct ProposalRowData {
     img_b64: String,
     /// set_charter: long Ist/Soll texts render capped + scrollable.
     charter_op: bool,
+    /// set_relays: the vote card renders the pool DIFF instead of the
+    /// generic Ist/Soll pair — one row per union member, marked
+    /// kept/added/removed (`RELAY_ROW_*`). Empty = not a relay op.
+    relay_changes: Vec<(i32, String)>,
     /// Per-member stance in roster order (0 open · 1 approved · 2 declined).
     votes: Vec<(String, i32)>,
     /// Who declined it ("" = not declined) + the human "when" label.
@@ -4413,6 +4477,16 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         image_op: p.image_op,
         img_b64: p.img_b64.as_str().into(),
         charter_op: p.charter_op,
+        relay_op: !p.relay_changes.is_empty(),
+        relay_changes: ModelRc::new(VecModel::from(
+            p.relay_changes
+                .iter()
+                .map(|(sign, url)| RelayChange {
+                    sign: *sign,
+                    url: url.as_str().into(),
+                })
+                .collect::<Vec<_>>(),
+        )),
         votes: ModelRc::new(VecModel::from(
             p.votes
                 .iter()
@@ -4425,6 +4499,50 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         declined_by: p.declined_by.clone().into(),
         declined_when: p.declined_when.clone().into(),
     }
+}
+
+/// Row markers of the set_relays vote card (`RelayChange.sign`).
+const RELAY_ROW_KEPT: i32 = 0;
+const RELAY_ROW_ADDED: i32 = 1;
+const RELAY_ROW_REMOVED: i32 = 2;
+
+/// The set_relays vote card's diff: both pools are space-separated URL
+/// lists (the op's wire format), the rows are the union — current pool in
+/// its own order marked kept/removed, then the additions in proposal
+/// order. Duplicates collapse; the strings stay verbatim (the engine
+/// already refused non-canonical URLs at propose).
+fn relay_pool_diff(current: &str, proposed: &str) -> Vec<(i32, String)> {
+    let cur: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        current
+            .split_whitespace()
+            .filter(|u| seen.insert(*u))
+            .collect()
+    };
+    let new: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        proposed
+            .split_whitespace()
+            .filter(|u| seen.insert(*u))
+            .collect()
+    };
+    let mut rows: Vec<(i32, String)> = cur
+        .iter()
+        .map(|u| {
+            let sign = if new.contains(u) {
+                RELAY_ROW_KEPT
+            } else {
+                RELAY_ROW_REMOVED
+            };
+            (sign, (*u).to_string())
+        })
+        .collect();
+    rows.extend(
+        new.iter()
+            .filter(|u| !cur.contains(*u))
+            .map(|u| (RELAY_ROW_ADDED, (*u).to_string())),
+    );
+    rows
 }
 
 fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
@@ -4448,6 +4566,11 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             .unwrap_or_default()
             .to_string(),
         charter_op: op == "set_charter",
+        relay_changes: if op == "set_relays" {
+            relay_pool_diff(&p.current, &p.proposed)
+        } else {
+            Vec::new()
+        },
         votes: p
             .votes
             .iter()
@@ -5924,12 +6047,11 @@ lexicon! {
     ocs_title: "Settings", "Einstellungen";
     ocs_chat_retention: "Delete chat after", "Chat löschen nach";
     ocs_relays: "Relays", "Relays";
-    // relays do not federate — a member who cannot reach one of these is
-    // partitioned, so the pool is the first thing to look at (§10.15)
-    ocs_relays_hint: "Every member must reach one of these.", "Jedes Mitglied muss einen davon erreichen.";
     ocs_days: "days", "Tage";
     ocr2_title: "Change relay pool", "Relay-Pool ändern";
-    ocr2_body: "Space-separated relay URLs. A pool change is a gated change - the draft becomes a proposal the members approve by threshold. Every member must reach at least one of these.", "Relay-URLs, durch Leerzeichen getrennt. Eine Pool-Änderung ist eine geschützte Änderung - der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Jedes Mitglied muss mindestens einen davon erreichen.";
+    ocr2_body: "Every member must reach at least one of these. The change becomes a threshold vote.", "Jedes Mitglied muss mindestens eines davon erreichen. Die Änderung wird eine Schwellen-Abstimmung.";
+    ocr2_add: "Add relay", "Relay hinzufügen";
+    ocr2_remove: "Remove", "Entfernen";
     om_coarse: "Presence over relays is coarse: last seen at the last message, not pinged live.", "Präsenz über Relays ist grob: zuletzt gesehen bei der letzten Nachricht, kein Live-Ping.";
     cs_files_off: "File sharing is not available over relays yet", "Dateifreigabe über Relays gibt es noch nicht";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
@@ -6323,6 +6445,31 @@ lexicon! {
 mod tests {
     use super::*;
     use molt_core::ProposalState;
+
+    /// The set_relays vote card shows the CHANGES: every pool member of the
+    /// union, marked kept / added / removed, in current-then-added order.
+    #[test]
+    fn relay_pool_diff_marks_added_removed_kept() {
+        let rows = relay_pool_diff("wss://a wss://b", "wss://b wss://c");
+        assert_eq!(
+            rows,
+            vec![
+                (RELAY_ROW_REMOVED, "wss://a".to_string()),
+                (RELAY_ROW_KEPT, "wss://b".to_string()),
+                (RELAY_ROW_ADDED, "wss://c".to_string()),
+            ]
+        );
+        // identical pools: everything kept, nothing invented
+        assert_eq!(
+            relay_pool_diff("wss://a", "wss://a"),
+            vec![(RELAY_ROW_KEPT, "wss://a".to_string())]
+        );
+        // duplicates in a hand-written proposal collapse
+        assert_eq!(
+            relay_pool_diff("", "wss://x wss://x"),
+            vec![(RELAY_ROW_ADDED, "wss://x".to_string())]
+        );
+    }
 
     fn line(lead: &str, text: &str) -> LogLineData {
         LogLineData {
@@ -8444,7 +8591,7 @@ mod gui_tests {
         let roster = molt_core::SealedRoster {
             name: "DevTest".to_string(),
             republic_id: "d0".repeat(32),
-            rule_m: 1,
+            rule_m: 2,
             rule_n: 2,
             roster: vec!["walter".to_string(), "ingrid".to_string()],
             identities: Vec::new(),
@@ -8542,6 +8689,97 @@ mod gui_tests {
             chat_rows(&ui) > 0,
             "after clicking Chat the pane must keep its rows - a dead pane \
              IS the reported bug"
+        );
+    }
+
+    /// **The set_relays vote card shows the CHANGES** (relay story,
+    /// 2026-08-09): a pending pool edit reaches the window as a relay-op
+    /// card carrying the diff rows — kept, added, removed — instead of the
+    /// generic Ist/Soll text pair.
+    #[test]
+    fn a_pool_edit_proposal_carries_the_diff_rows() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let rt = rt();
+        let _guard = rt.enter();
+
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let seed = molt_storage::seed_entropy(&phrase).expect("entropy");
+        // one seat cannot drive an edit to applied at m=2 (the proposer
+        // already counts as approver), so the effective pool stays empty
+        // here and every proposed relay renders as ADDED — the
+        // kept/removed semantics are pinned by `relay_pool_diff`'s unit
+        // test against a non-empty Ist-Stand
+        let roster = molt_core::SealedRoster {
+            name: "DevTest".to_string(),
+            republic_id: "d0".repeat(32),
+            rule_m: 2,
+            rule_n: 2,
+            roster: vec!["walter".to_string(), "ingrid".to_string()],
+            identities: Vec::new(),
+            attestations: Vec::new(),
+            relays: Vec::new(),
+            agenda: "test the pool".to_string(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let genesis = roster.into_genesis("walter", now);
+        let ws = molt_storage::create_workspace(&root, &seed, &genesis).expect("create");
+        drop(ws);
+
+        let (w, _) = node_with_chat(&root);
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        rt.block_on(async {
+            let stored = molt_storage::scan_workspaces(&root)
+                .first()
+                .map(|e| e.info().id)
+                .expect("the workspace is on disk");
+            w.execute(Command::OpenWorkspace { id: stored })
+                .await
+                .expect("the stored workspace opens");
+            // the pool edit stays pending at m=2 — the vote card under test
+            w.execute(Command::Propose {
+                surface: Surface::Organization,
+                payload: serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://kept.example wss://new.example",
+                }),
+            })
+            .await
+            .expect("the pool edit proposes");
+
+            let weak = ui.as_weak();
+            push_session(&w, &weak, &last, SessionScope::Full, &chat_ui).await;
+            if let Some((_, b)) = gather_surfaces(&w, &chat_ui).await {
+                apply_surfaces(&ui, &b);
+            }
+        });
+
+        let org = ui
+            .get_surfaces()
+            .iter()
+            .find(|s| s.key == "organization")
+            .expect("org surface present");
+        assert_eq!(org.pending.row_count(), 1, "the pool edit is pending");
+        let card = org.pending.row_data(0).expect("card row");
+        assert!(card.relay_op, "the card knows it is a pool edit");
+        let rows: Vec<(i32, String)> = card
+            .relay_changes
+            .iter()
+            .map(|c| (c.sign, c.url.to_string()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (RELAY_ROW_ADDED, "wss://kept.example".to_string()),
+                (RELAY_ROW_ADDED, "wss://new.example".to_string()),
+            ],
+            "the card carries the pool diff (empty Ist-Stand: all added)"
         );
     }
 }
