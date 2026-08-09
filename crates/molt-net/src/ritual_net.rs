@@ -258,7 +258,7 @@ pub fn shift_window_clock_for_tests(secs: i64) {
 }
 
 /// Wall-clock seconds as the h-window logic sees them.
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     Timestamp::now()
         .as_secs()
         .saturating_add_signed(WINDOW_CLOCK_SHIFT.load(std::sync::atomic::Ordering::SeqCst))
@@ -431,18 +431,42 @@ impl GroupChannel {
         mls_ciphertext: &[u8],
         created_at: u64,
     ) -> Result<(u64, PublishReport), NetError> {
-        let sealed = envelope::seal_outer(exporter, mls_ciphertext)
-            .map_err(|e| NetError::Crypto(format!("sealing the 445 frame: {e}")))?;
+        self.publish_kind_at(crate::kinds::KIND_GROUP, exporter, mls_ciphertext, created_at)
+            .await
+    }
+
+    /// A FILE CHUNK (kind 447, `file_plane.rs`): sealed and tagged exactly
+    /// like a 445 frame, at the series' one shared stamp so every chunk of
+    /// a series sits under one window's tag.
+    pub async fn publish_file_chunk_at(
+        &self,
+        exporter: &[u8; 32],
+        chunk: &[u8],
+        created_at: u64,
+    ) -> Result<(u64, PublishReport), NetError> {
+        self.publish_kind_at(crate::kinds::KIND_FILE_CHUNK, exporter, chunk, created_at)
+            .await
+    }
+
+    async fn publish_kind_at(
+        &self,
+        kind: u16,
+        exporter: &[u8; 32],
+        plaintext: &[u8],
+        created_at: u64,
+    ) -> Result<(u64, PublishReport), NetError> {
+        let sealed = envelope::seal_outer(exporter, plaintext)
+            .map_err(|e| NetError::Crypto(format!("sealing the {kind} frame: {e}")))?;
         // one value for tag and stamp — see the doc above
         let now = Timestamp::from_secs(created_at);
         let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
         let h = Tag::parse(["h", tag.as_str()])
             .map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
-        let event = EventBuilder::new(Kind::Custom(crate::kinds::KIND_GROUP), sealed)
+        let event = EventBuilder::new(Kind::Custom(kind), sealed)
             .tag(h)
             .custom_created_at(now)
             .sign_with_keys(&Keys::generate())
-            .map_err(|e| NetError::Crypto(format!("signing the 445 frame: {e}")))?;
+            .map_err(|e| NetError::Crypto(format!("signing the {kind} frame: {e}")))?;
         let stamp = event.created_at.as_secs();
         let report = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
             .publish(&event)
@@ -498,10 +522,32 @@ impl GroupChannel {
         Ok(CatchupSub { sub, tags })
     }
 
+    /// The file chunks of a series published at `at_secs`: a fixed-tag
+    /// catch-up subscription (kind 447) over that stamp's window tags —
+    /// [`window_tags`] includes the skew-adjacent one, so a series
+    /// straddling a UTC boundary stays reachable.
+    pub async fn subscribe_files_at(&self, at_secs: u64) -> Result<CatchupSub, NetError> {
+        let tags = window_tags(&self.rotation_seed, at_secs);
+        let sub = self
+            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags)
+            .await?;
+        Ok(CatchupSub { sub, tags })
+    }
+
     /// Place one pooled 445 subscription over exactly `tags`.
     async fn subscribe_tags(&self, tags: &[String]) -> Result<Subscription, NetError> {
+        self.subscribe_tags_kind(crate::kinds::KIND_GROUP, tags).await
+    }
+
+    /// [`Self::subscribe_tags`] for a caller-chosen kind (445 group frames,
+    /// 447 file chunks — same anonymous h-tag filter shape).
+    async fn subscribe_tags_kind(
+        &self,
+        kind: u16,
+        tags: &[String],
+    ) -> Result<Subscription, NetError> {
         let filter = Filter::new()
-            .kind(Kind::Custom(crate::kinds::KIND_GROUP))
+            .kind(Kind::Custom(kind))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), tags.iter().cloned());
         // A FRESH ephemeral key per placement (and per window-roll
         // re-placement) — NOT the roster anchor. The 445 filter names only an

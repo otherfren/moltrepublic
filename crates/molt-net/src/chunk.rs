@@ -79,7 +79,33 @@ pub fn msg_id_epoch(sender: &str, recipient: &str, wire_seq: u64, resend_epoch: 
 /// [`CHUNK_PLAIN_LEN`], zero-padded after the payload). An empty message
 /// still yields one chunk — a message always has at least one block.
 pub fn chunk_message(id: MsgId, payload: &[u8]) -> Result<Vec<Vec<u8>>, NetError> {
-    let count = payload.len().div_ceil(CHUNK_PAYLOAD_BUDGET).max(1);
+    chunk_message_sized(id, payload, CHUNK_PLAIN_LEN)
+}
+
+/// [`chunk_message`] at a caller-chosen uniform chunk size (the file plane
+/// sizes its chunks to the RELAY publish budget, not to the SMP block).
+/// Same header layout, same padding-to-size (every chunk of a series is
+/// one size — the relay sees uniform blocks), same reassembler.
+pub fn chunk_message_sized(
+    id: MsgId,
+    payload: &[u8],
+    plain_len: usize,
+) -> Result<Vec<Vec<u8>>, NetError> {
+    let Some(budget) = plain_len.checked_sub(CHUNK_HEADER_LEN).filter(|b| *b > 0) else {
+        return Err(NetError::Framing(format!(
+            "chunk size {plain_len} leaves no payload room (header {CHUNK_HEADER_LEN})"
+        )));
+    };
+    chunk_message_budgeted(id, payload, budget, plain_len)
+}
+
+fn chunk_message_budgeted(
+    id: MsgId,
+    payload: &[u8],
+    budget: usize,
+    plain_len: usize,
+) -> Result<Vec<Vec<u8>>, NetError> {
+    let count = payload.len().div_ceil(budget).max(1);
     let count_u16 = u16::try_from(count).map_err(|_| {
         NetError::Framing(format!(
             "message of {} bytes needs {count} chunks (max {})",
@@ -91,20 +117,20 @@ pub fn chunk_message(id: MsgId, payload: &[u8]) -> Result<Vec<Vec<u8>>, NetError
     for index in 0..count {
         // `count` is `max(1)`, so an empty payload still yields one
         // (empty) chunk — a message always has at least one block
-        let start = index * CHUNK_PAYLOAD_BUDGET;
-        let end = payload.len().min(start + CHUNK_PAYLOAD_BUDGET);
+        let start = index * budget;
+        let end = payload.len().min(start + budget);
         let part = &payload[start.min(payload.len())..end];
         let index_u16 = u16::try_from(index)
             .map_err(|_| NetError::Framing("chunk index overflow".to_string()))?;
         let len_u16 = u16::try_from(part.len())
             .map_err(|_| NetError::Framing("chunk payload overflow".to_string()))?;
-        let mut chunk = Vec::with_capacity(CHUNK_PLAIN_LEN);
+        let mut chunk = Vec::with_capacity(plain_len);
         chunk.extend_from_slice(&id.0);
         chunk.extend_from_slice(&index_u16.to_le_bytes());
         chunk.extend_from_slice(&count_u16.to_le_bytes());
         chunk.extend_from_slice(&len_u16.to_le_bytes());
         chunk.extend_from_slice(part);
-        chunk.resize(CHUNK_PLAIN_LEN, 0);
+        chunk.resize(plain_len, 0);
         out.push(chunk);
     }
     Ok(out)
@@ -135,6 +161,8 @@ struct Partial {
 /// `(message id, chunk index)`. Bounded: at most [`MAX_PARTIALS`] open
 /// messages, the oldest evicted first.
 pub struct Reassembler {
+    /// The uniform chunk plaintext size this instance accepts (hard bound).
+    plain_len: usize,
     partial: HashMap<MsgId, Partial>,
     /// Insertion order of `partial`, for eviction.
     order: VecDeque<MsgId>,
@@ -151,7 +179,15 @@ impl Default for Reassembler {
 impl Reassembler {
     /// An empty reassembler.
     pub fn new() -> Reassembler {
+        Reassembler::new_sized(CHUNK_PLAIN_LEN)
+    }
+
+    /// A reassembler for a context whose uniform chunk size is not the SMP
+    /// block — the file plane sizes chunks to the relay publish budget.
+    /// The size stays a hard per-instance bound (hostile input).
+    pub fn new_sized(plain_len: usize) -> Reassembler {
         Reassembler {
+            plain_len,
             partial: HashMap::new(),
             order: VecDeque::new(),
             completed: VecDeque::new(),
@@ -160,9 +196,10 @@ impl Reassembler {
 
     /// Feed one chunk plaintext (untrusted — header fields are validated).
     pub fn push(&mut self, chunk: &[u8]) -> Result<PushOutcome, NetError> {
-        if chunk.len() != CHUNK_PLAIN_LEN {
+        if chunk.len() != self.plain_len {
             return Err(NetError::Framing(format!(
-                "chunk must be {CHUNK_PLAIN_LEN} bytes, got {}",
+                "chunk must be {} bytes, got {}",
+                self.plain_len,
                 chunk.len()
             )));
         }
@@ -173,7 +210,10 @@ impl Reassembler {
         let index = word(MSG_ID_LEN);
         let count = word(MSG_ID_LEN + 2);
         let len = word(MSG_ID_LEN + 4);
-        if count == 0 || index >= count || usize::from(len) > CHUNK_PAYLOAD_BUDGET {
+        if count == 0
+            || index >= count
+            || usize::from(len) > self.plain_len.saturating_sub(CHUNK_HEADER_LEN)
+        {
             return Err(NetError::Framing(format!(
                 "chunk header out of bounds (index {index}, count {count}, len {len})"
             )));
@@ -279,6 +319,35 @@ mod tests {
                 assert_eq!(c.len(), CHUNK_PLAIN_LEN);
             }
         }
+    }
+
+    /// The file plane (F2) sizes its chunks to the RELAY publish budget, not
+    /// to the SMP block: the sized chunker keeps the header layout and the
+    /// uniform-block property (every chunk of a series is one size), and
+    /// the reassembler takes the sized chunks unchanged.
+    #[test]
+    fn the_sized_chunker_roundtrips_at_a_relay_budget() {
+        let id = msg_id("a", "b", 4);
+        let plain_len = 60_000;
+        let budget = plain_len - CHUNK_HEADER_LEN;
+        let payload: Vec<u8> = (0..(2 * budget + 123))
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let chunks = chunk_message_sized(id, &payload, plain_len).expect("chunk");
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert_eq!(c.len(), plain_len, "uniform blocks at the sized budget");
+        }
+        let mut r = Reassembler::new_sized(plain_len);
+        let mut out = None;
+        for c in chunks {
+            if let PushOutcome::Complete(_, m) = r.push(&c).expect("push") {
+                out = Some(m);
+            }
+        }
+        assert_eq!(out.expect("completes"), payload);
+        // a plain length that leaves no payload room is refused, not looped
+        assert!(chunk_message_sized(id, b"x", CHUNK_HEADER_LEN).is_err());
     }
 
     #[test]

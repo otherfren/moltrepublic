@@ -32,6 +32,12 @@ pub const KIND_GROUP: u16 = 445;
 /// choreography that runs BEFORE the group exists, wrapped in a 1059.
 pub const KIND_RITUAL: u16 = 446;
 
+/// **447** — a file chunk (ours): one sealed block of a shared file's
+/// chunk series (`file_plane.rs`). Separate from 445 so the group-log
+/// subscription never drains file bytes and a download can ask for exactly
+/// the series' publish window.
+pub const KIND_FILE_CHUNK: u16 = 447;
+
 /// **1059** — NIP-59 gift wrap: the sealed envelope every ritual message
 /// travels in, authored by a fresh ephemeral key.
 pub const KIND_GIFT_WRAP: u16 = 1_059;
@@ -43,6 +49,7 @@ pub const ALL: &[(u16, &str)] = &[
     (KIND_WELCOME, "Welcome"),
     (KIND_GROUP, "group message"),
     (KIND_RITUAL, "ritual message"),
+    (KIND_FILE_CHUNK, "file chunk"),
     (KIND_GIFT_WRAP, "gift wrap"),
 ];
 
@@ -70,11 +77,12 @@ mod tests {
             KIND_WELCOME,
             KIND_GROUP,
             KIND_RITUAL,
+            KIND_FILE_CHUNK,
             KIND_GIFT_WRAP,
         ] {
             assert!(seen.contains(&k), "kind {k} is not registered in ALL");
         }
-        assert_eq!(seen.len(), 5, "a kind was added without a test update");
+        assert_eq!(seen.len(), 6, "a kind was added without a test update");
     }
 
     /// The spec-fixed numbers are what the spec says. A typo here is not a
