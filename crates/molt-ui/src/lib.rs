@@ -1513,10 +1513,15 @@ pub fn run_app(
                                     base64::engine::general_purpose::STANDARD.encode(bytes),
                             })
                         }
-                        other => {
-                            let msg = format!("\u{26a0} {path}: {other:?}");
+                        _ => {
+                            // no Debug dump at the user: the one important
+                            // thing is WHICH file did not read
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
+                                    let msg = format!(
+                                        "\u{26a0} {} {path}",
+                                        ui.global::<Strings>().get_toast_file_unreadable()
+                                    );
                                     ui.invoke_show_toast_error(msg.into());
                                 }
                             });
@@ -2700,11 +2705,11 @@ fn apply_session(
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
         } else if let Some(rest) = sv.notice.strip_prefix("relay-refused:") {
             // B4: the probe's one-line verdict — the entry stays unconfirmed
-            ui.invoke_show_toast_error(rest.into());
+            ui.invoke_show_toast_error(format!("{} {rest}", s.get_toast_relay_refused()).into());
         } else if let Some(rest) = sv.notice.strip_prefix("relay-unverified:") {
             // …and the honest middle class: confirmed on the operator's
             // consent, but the relay could not be judged right now
-            ui.invoke_show_toast(rest.into());
+            ui.invoke_show_toast(format!("{} {rest}", s.get_toast_relay_unverified()).into());
         } else if let Some(err) = sv.notice.strip_prefix("genesis-undelivered:") {
             // The republic EXISTS here but its members were never told: the
             // genesis 445 reached no relay. Copy lives Rust-side (the
@@ -2973,7 +2978,14 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
             } else {
                 String::new()
             };
-            (format!("Invite {}", i + 1), detail)
+            (
+                if lang == 1 {
+                    format!("Einladung {}", i + 1)
+                } else {
+                    format!("Invite {}", i + 1)
+                },
+                detail,
+            )
         } else {
             (s.member.clone(), seat_state_label(lang, s.state))
         };
@@ -6420,6 +6432,10 @@ lexicon! {
     dt_col_value: "Value", "Wert";
     dt_col_votes: "Votes", "Stimmen";
     dt_col_when: "When", "Wann";
+    // error-toast prefixes (i18n audit 2026-08-09)
+    toast_file_unreadable: "Cannot read:", "Nicht lesbar:";
+    toast_relay_refused: "Relay refused:", "Relay abgelehnt:";
+    toast_relay_unverified: "Relay not verifiable right now:", "Relay derzeit nicht prüfbar:";
     toast_checkpoint_sealed: "Checkpoint sealed", "Checkpoint besiegelt";
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
