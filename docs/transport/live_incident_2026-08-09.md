@@ -1,7 +1,7 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **one defect fixed on master** (proposal-card resurrect), **three open**
-(each with evidence below). Source: the user's real three-node setup (Albert =
+Status: **two defects fixed on master** (proposal-card resurrect, chat-nav
+pin deadlock), **two open** (each with evidence below). Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
 Tor). All findings were taken from the LIVE engines over MCP and from headless
@@ -79,22 +79,31 @@ instead of a fresh runtime per publish, or (b) at least de-prioritize resend
 rounds behind fresh sends; plus the §2 budget fix so a deaf peer cannot
 starve the group.
 
-## 4. OPEN — the GUI freezes while the engine stays healthy (recurring)
+## 4. FIXED — the "GUI freeze" was a chat-nav pin deadlock
 
-**Symptom:** "UI bleibt hängen und bleibt unbenutzbar" (5+ occurrences);
-headless via MCP keeps working. During the frozen state every thread of all
-three GUI processes idled normally (main loop in `ep_poll`, no spinner, no
-futex deadlock) — so the window still pumps events but stops reflecting
-state.
+**Symptom:** "UI bleibt hängen und bleibt unbenutzbar" (5+ occurrences),
+reliably after an approval arrived and was accepted; headless via MCP kept
+working. Alert sounds still played — which proved the Slint event loop AND
+the engine-event mirror task alive, so this was never a frozen window.
 
-**Lead:** both SURVIVOR GUI processes (and only they) grew a second, idle
-4-worker tokio runtime at ~15:33 — the moment of the first recovery — which
-the restarted Eduard GUI lacked. Whatever spawned it runs in the
-recovery/notification path of a GUI process and is the best marker for where
-the state-push pipeline died. ptrace is blocked on this host (Yama scope 1),
-so the next freeze needs either `sudo gdb -p` or a debug build with the
-push-loop instrumented (log every `upgrade_in_event_loop` failure instead of
-discarding it).
+**Root cause:** accepting an approval selects the decision's discussion, an
+Organization patch channel. `nav-expanded` (app.slint) then deliberately
+pins the Organization section open while the surface is "chat" — but
+clicking the "Chat" nav row only re-selects the already-selected chat
+surface, so nothing changes and the chat section can never be expanded
+again. A navigation deadlock, not a freeze; every thread idled normally in
+`ep_poll` the whole time.
+
+**Fix (master):** the "Chat" surface-row click resets the channel filter to
+the group channel when an Organization decision discussion is the active
+filter — the click IS the way out of the pin. Slint-side handler; not
+reachable from a Rust test (inline .slint), validated by the compile plus
+the live setup.
+
+**Open footnote:** the accepting node's GUI process grows a second, idle
+4-worker tokio runtime at approval time (0 CPU forever, seen twice on
+`config.toml`'s node, absent on the others). Harmless so far but
+unexplained — worth identifying the spawner when next in that code path.
 
 ## Repro assets
 

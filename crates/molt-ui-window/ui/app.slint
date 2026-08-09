@@ -1942,6 +1942,16 @@ export component AppWindow inherits Window {
                             enabled: s.key != "quests" && s.key != "vault" && s.key != "wallet";
                             chosen => {
                                 root.mv-draft = "";
+                                // clicking "Chat" while an Organization
+                                // decision's discussion is the filter is the
+                                // way OUT of the nav-expanded pin: the surface
+                                // is already "chat", so without resetting the
+                                // channel the click changes nothing and the
+                                // chat section can never be expanded again
+                                // (live incident 2026-08-09, every approval)
+                                if (s.key == "chat" && root.selected-channel-org) {
+                                    root.select-channel("group");
+                                }
                                 root.select-surface(s.key);
                             }
                         }
