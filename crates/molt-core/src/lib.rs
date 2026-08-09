@@ -4244,6 +4244,16 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A parked relay download's watchdog fired (engine-internal): if the
+    /// sharer's `FileServed` never came, the download fails honestly
+    /// instead of parking forever. Never an MCP tool.
+    NetFileWantedTimeout {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Workspace-net incarnation (stale watchdogs are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The sharer's lazy chunk-series publish finished (engine-internal;
     /// the off-actor publish task reports back, the actor records the
     /// `FileServed` announcement). Never an MCP tool.

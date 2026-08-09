@@ -433,6 +433,16 @@ type MlsRekey = Result<(Vec<u8>, Vec<u8>), String>;
 /// What a clean close persists: `(MLS snapshot, transport queue-credential bytes)`.
 type CloseCrypto = (Option<Vec<u8>>, Option<Vec<u8>>);
 
+/// The relay file plane's working set: `(channel, secrets-to-OPEN,
+/// current-secret-to-SEAL)` — the seal half is `None` when the current
+/// epoch's exporter is unavailable (a serve must then refuse, never fall
+/// back to a stale ring secret).
+type FilePlaneContext = (
+    molt_net::ritual_net::GroupChannel,
+    Vec<[u8; 32]>,
+    Option<[u8; 32]>,
+);
+
 /// The engine's transport runtime: the outbox feed + wakeup on the engine
 /// side, the supervisor and (for the demo mesh) the peer nodes — each
 /// kept alive by holding its engine's command sender (the peer actor
@@ -1527,9 +1537,23 @@ impl State {
                 self.serve_file_wanted(id);
             }
             WorkspaceEvent::FileServed { id, at } if self.nostr.is_some() => {
-                self.file_series.insert(id, at);
-                if let Some((target, dest)) = self.file_pending.remove(&id) {
-                    self.spawn_nostr_fetch(id, at, target, dest);
+                // trust gates (review 2026-08-10): only the SHARER's own
+                // announcement counts — any member could otherwise poison
+                // the group's stamp cache with one frame; a far-future
+                // stamp names an h-window that holds nothing (forever);
+                // and a redelivered OLD announcement must not regress a
+                // newer stamp (at-least-once delivery)
+                let from_sharer =
+                    matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == from);
+                let plausible = at <= crate::now_secs().saturating_add(900);
+                let newer = self.file_series.get(&id).map_or(true, |old| at > *old);
+                if from_sharer && plausible && newer {
+                    self.file_series.insert(id, at);
+                    if let Some((target, dest)) = self.file_pending.remove(&id) {
+                        self.spawn_nostr_fetch(id, at, target, dest);
+                    }
+                } else if !from_sharer {
+                    tracing::warn!(%from, %id, "dropping a FileServed not from the sharer");
                 }
             }
             WorkspaceEvent::FileRequested { ct } => {
@@ -1571,9 +1595,7 @@ impl State {
     /// workspace can carry one (`file_transfer_nostr.md`): the same dial
     /// list and rotation seed the group runtime uses, plus the MLS
     /// exporter ring (open) and its head (seal).
-    fn nostr_file_context(
-        &self,
-    ) -> Option<(molt_net::ritual_net::GroupChannel, Vec<[u8; 32]>)> {
+    fn nostr_file_context(&self) -> Option<FilePlaneContext> {
         let nostr = self.nostr.as_ref()?;
         let relays = self.dialable_group_relays();
         if relays.is_empty() {
@@ -1585,7 +1607,10 @@ impl State {
         // the CURRENT epoch's secret leads (it seals new series), the ring
         // follows (it opens series sealed before a re-key) — a fresh seat's
         // ring is empty until the first rotation, so the current secret is
-        // what makes the plane work at all
+        // what makes the plane work at all. The current secret travels
+        // SEPARATELY too: a serve must refuse when it is unavailable rather
+        // than seal a fresh series under a stale ring epoch nobody past the
+        // ring horizon could open (review 2026-08-10).
         let (ring, current) = {
             let g = self.group_net.as_ref()?;
             let m = g.mls.lock().ok()?;
@@ -1603,7 +1628,7 @@ impl State {
         if secrets.is_empty() {
             return None;
         }
-        Some((channel, secrets))
+        Some((channel, secrets, current))
     }
 
     /// Download a peer's share over the relay plane: fetch when the
@@ -1622,7 +1647,36 @@ impl State {
             let me = self.member();
             let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
             self.record(env);
+            // a parked download must not wait forever: if no FileServed
+            // drains it within the window, it fails honestly and the
+            // operator can retry (review 2026-08-10 — the park had no
+            // timeout and the phase guard blocked every retry)
+            if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+                crate::transfer::spawn_want_timeout(id, self.net_scope, cmd_tx);
+            }
         }
+    }
+
+    /// The parked download's watchdog fired: if the `FileServed` answer
+    /// never came (the id still parks), fail the download honestly — a
+    /// drained park means the fetch is running and the watchdog is stale.
+    pub(crate) fn cmd_net_file_wanted_timeout(
+        &mut self,
+        id: MessageId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        if self.file_pending.remove(&id).is_some() {
+            self.set_download_phase(
+                id,
+                molt_core::TransferPhase::Failed {
+                    reason: "the sharer did not answer".to_string(),
+                },
+            );
+        }
+        Ok(Reply::Ack)
     }
 
     /// Spawn the off-actor series fetch (reports back over the same
@@ -1637,7 +1691,7 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
-        let Some((channel, ring)) = self.nostr_file_context() else {
+        let Some((channel, ring, _)) = self.nostr_file_context() else {
             crate::transfer::spawn_file_verdict(
                 id,
                 Err("no dialable relay or group ring for the file plane".to_string()),
@@ -1665,20 +1719,38 @@ impl State {
     /// publish the series N times.
     fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
-        let (is_mine, ts) = match self.chat_by_id(&id) {
+        let (is_mine, ts, size) = match self.chat_by_id(&id) {
             Ok((_, msg)) => (
                 msg.from == me && msg.file.as_ref().is_some_and(|f| f.available),
                 msg.ts,
+                msg.file.as_ref().map_or(0, |f| f.size),
             ),
             Err(_) => return,
         };
         if !is_mine || self.chat_ts_aged_out(ts) || self.file_serving.contains(&id) {
             return;
         }
+        // the size is known here — an over-cap share must not cost a full
+        // disk read per request only to be refused inside the publish
+        // (review 2026-08-10; the share-time gate makes this an edge)
+        if size > self.effective_file_cap() {
+            tracing::warn!(%id, size, "not serving a share beyond the file cap");
+            return;
+        }
         let now = crate::now_secs();
         if let Some(at) = self.file_series.get(&id).copied() {
-            // a fresh series stands on the relays — re-announce, not re-publish
-            if now.saturating_sub(at) < 600 {
+            // a standing series re-announces instead of re-publishing (one
+            // stored copy serves everyone within relay retention) — UNLESS
+            // this requester evidently just saw the stamp and still asks
+            // again: then the series is unfetchable for it (pruned, or
+            // sealed under an epoch it cannot open) and only a FRESH
+            // publish under the current secret converges (review 2026-08-10)
+            let recently_announced = self
+                .file_announced
+                .get(&id)
+                .is_some_and(|t| now.saturating_sub(*t) < 300);
+            if now.saturating_sub(at) < 86_400 && !recently_announced {
+                self.file_announced.insert(id, now);
                 let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
                 self.record(env);
                 return;
@@ -1687,10 +1759,14 @@ impl State {
         let Some(path) = self.share_paths.get(&id).cloned() else {
             return;
         };
-        let Some((channel, ring)) = self.nostr_file_context() else {
+        let Some((channel, _, current)) = self.nostr_file_context() else {
             return;
         };
-        let Some(exporter) = ring.first().copied() else {
+        // a fresh series seals under the CURRENT epoch only — publishing
+        // under a stale ring secret would hand out a series fresh seats
+        // and post-re-key members can never open
+        let Some(exporter) = current else {
+            tracing::warn!(%id, "no current exporter secret — not publishing the series");
             return;
         };
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -1723,9 +1799,10 @@ impl State {
         self.file_serving.remove(&id);
         if at == 0 {
             return Ok(Reply::Ack); // the publish failed — honest silence, the
-                                   // requester's fetch stays on its miss
+                                   // requester's park runs into its watchdog
         }
         self.file_series.insert(id, at);
+        self.file_announced.insert(id, crate::now_secs());
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
         self.record(env);
@@ -3258,6 +3335,74 @@ mod tests {
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&(u64::try_from(n).expect("small")).to_le_bytes());
         MessageId(b)
+    }
+
+    /// RELAY file plane trust gates (review 2026-08-10): a `FileServed`
+    /// counts only from the SHARER's own mouth, only with a plausible
+    /// stamp, and an old redelivery never regresses a newer one — one
+    /// crafted frame from any member must not poison the group's stamp
+    /// cache (a future stamp names an h-window that holds nothing, so a
+    /// poisoned cache bricks the share's downloads for good).
+    #[test]
+    fn a_file_served_counts_only_from_the_sharer() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        st.nostr = Some(crate::NostrTransport {
+            sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            relays: vec!["ws://relay.example".to_string()],
+            rotation_seed: [0u8; 32],
+        });
+        // peer-1's share message lands over the wire
+        let sid = id(9);
+        let mut msg = ChatMessage::text(sid, "peer-1", "der bericht", 100);
+        msg.file = Some(molt_core::FileMeta {
+            name: "bericht.bin".to_string(),
+            size: 4,
+            kind: "File".to_string(),
+            modified: 100,
+            available: true,
+            checksum: "aa".repeat(32),
+        });
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope {
+                prev_seq: 0,
+                seq: 1,
+                ts: 100,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("share lands");
+        let served = |from: &str, seq: u64, at: u64| EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts: 100 + seq,
+            by: from.to_string(),
+            body: WorkspaceEvent::FileServed { id: sid, at },
+        };
+        // another member announcing the sharer's series: dropped
+        st.cmd_net_delivered("peer-2".to_string(), served("peer-2", 1, 1_000), None)
+            .expect("ack");
+        assert!(st.file_series.is_empty(), "a non-sharer's announcement must not count");
+        // the sharer with an absurd future stamp: dropped
+        let future = crate::now_secs() + 1_000_000;
+        st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 2, future), None)
+            .expect("ack");
+        assert!(st.file_series.is_empty(), "a far-future stamp must not count");
+        // the sharer's plausible stamp lands…
+        st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 3, 5_000), None)
+            .expect("ack");
+        assert_eq!(st.file_series.get(&sid), Some(&5_000));
+        // …and an older redelivery does not regress it
+        st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 4, 4_000), None)
+            .expect("ack");
+        assert_eq!(st.file_series.get(&sid), Some(&5_000), "at-least-once must not rewind");
     }
 
     // --- real presence: numeric stamps, aging, the activity trio -----------

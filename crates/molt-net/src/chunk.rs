@@ -184,10 +184,13 @@ impl Reassembler {
 
     /// A reassembler for a context whose uniform chunk size is not the SMP
     /// block — the file plane sizes chunks to the relay publish budget.
-    /// The size stays a hard per-instance bound (hostile input).
+    /// The size stays a hard per-instance bound (hostile input); a size
+    /// without header room is clamped so `push` can never index past a
+    /// matching-length chunk (the sized chunker refuses such sizes — this
+    /// half must not panic instead, review 2026-08-10).
     pub fn new_sized(plain_len: usize) -> Reassembler {
         Reassembler {
-            plain_len,
+            plain_len: plain_len.max(CHUNK_HEADER_LEN + 1),
             partial: HashMap::new(),
             order: VecDeque::new(),
             completed: VecDeque::new(),

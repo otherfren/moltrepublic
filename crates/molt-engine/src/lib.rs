@@ -618,6 +618,10 @@ pub(crate) struct State {
     /// Shares whose lazy series publish is in flight (sharer-side dedup —
     /// a burst of `FileWanted`s must not publish the series N times).
     pub(crate) file_serving: std::collections::HashSet<molt_core::MessageId>,
+    /// Sharer-side: when this node last ANNOUNCED each share's stamp — a
+    /// `FileWanted` right after an announce means the requester cannot use
+    /// that series (pruned/foreign epoch) and a fresh publish is due.
+    pub(crate) file_announced: HashMap<molt_core::MessageId, u64>,
     /// The exact [`molt_core::ChainChange`] each open proposal is voting on
     /// (keyed by proposal id) — so approvers sign, and the committer seals, the
     /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
@@ -938,6 +942,7 @@ impl State {
             file_series: HashMap::new(),
             file_pending: HashMap::new(),
             file_serving: std::collections::HashSet::new(),
+            file_announced: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
@@ -1159,11 +1164,22 @@ impl State {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
+                // relay plane: a failed fetch invalidates the cached stamp
+                // (the series may be pruned or sealed under a foreign
+                // epoch) — the NEXT attempt asks fresh via FileWanted and
+                // the sharer's repeated-want rule re-publishes (review
+                // 2026-08-10: the stale stamp made every retry replay the
+                // same dead window)
+                self.file_series.remove(&id);
+                self.file_pending.remove(&id);
                 self.set_download_phase(id, molt_core::TransferPhase::Failed { reason });
                 Ok(Reply::Ack)
             }
             Command::NetFileSeriesPublished { id, at, generation } => {
                 self.cmd_net_file_series_published(id, at, generation)
+            }
+            Command::NetFileWantedTimeout { id, generation } => {
+                self.cmd_net_file_wanted_timeout(id, generation)
             }
 
             // proposals.rs

@@ -277,6 +277,24 @@ impl State {
                 "{path:?} has no file name component"
             )));
         }
+        // relay plane: an over-cap file is refused where the human who
+        // picked it can act — admitting it would mint a share nobody can
+        // ever download (the lazy publish refuses on the cap, silently for
+        // the group; review 2026-08-10). Metadata only, no read.
+        if self.nostr.is_some() {
+            let cap = {
+                let c = self.session.settings.file_cap_bytes;
+                if c == 0 { molt_core::default_file_cap_bytes() } else { c }
+            };
+            if let Ok(meta) = std::fs::metadata(&p) {
+                if meta.len() > cap {
+                    return Err(MoltError::BadPayload(format!(
+                        "file is {} bytes — the share cap is {cap}",
+                        meta.len()
+                    )));
+                }
+            }
+        }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("the engine is shutting down".into()));
         };

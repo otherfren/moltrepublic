@@ -1,3 +1,31 @@
+# Review follow-ups: decline convergence (2026-08-09) + file plane (2026-08-10)
+
+## File-plane review, deferred (2026-08-10)
+
+The correctness findings of the file-plane review were fixed in-session
+(FileServed trust gates, share-time cap, park watchdog, fetch deadline +
+claimed-count bound, current-epoch-only sealing, stamp invalidation on
+failure, fsync, reassembler size clamp). Deferred with fix directions:
+
+- **FP1 — publish-budget metering (§5.4, ratified).** Chunk publishes ride
+  no budget today; wire them through the same hourly machinery the resends
+  use (`group_runtime`'s consumed-budget persistence) so a spent budget
+  holds the upload and says so.
+- **FP2 — transport-vs-miss signal.** `CatchupSub::recv` returns `Idle`
+  both on quiet and on a closed subscription and never `Deaf`; a fetch
+  cannot tell "not stored" from "no relay reachable" (the miss message
+  names both). Fix in `ritual_net.rs`: surface the closed state, then let
+  `fetch_series` report a transport error distinctly.
+- **FP3 — fetch-task cancellation.** The fetch loop is bounded by the
+  overall deadline but holds its subscription across a workspace close
+  until then; a cancellation token (or a generation check inside the loop)
+  would end it at close.
+- **FP4 — cap semantics.** `file_cap_bytes = 0` is "keep current" on the
+  settings surface and "default" in `effective_file_cap`, so a cap of 0
+  (sharing off) is unrepresentable and settings cannot RESET to default —
+  config.toml stays the one door for both. Decide whether that needs a
+  distinct sentinel.
+
 # Decline-convergence review — deferred findings (2026-08-09)
 
 Source: the high-effort review over the defect-6/7 fix wave

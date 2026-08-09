@@ -877,6 +877,23 @@ pub(crate) fn spawn_send_refusal(
 /// Copy the node's OWN share to the destination (the sharer downloading
 /// its own file needs no network — but the same dest/collision/.part rules
 /// and the same completion commands apply, so the GUI flow is identical).
+/// How long a parked relay download waits for the sharer's `FileServed`
+/// before its watchdog fails it (the operator can then retry).
+const WANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The parked download's watchdog: fires `NetFileWantedTimeout` after the
+/// window — the actor ignores it when the park has drained (fetch running).
+pub(crate) fn spawn_want_timeout(id: MessageId, scope: u64, cmd_tx: mpsc::Sender<Envelope>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(WANT_TIMEOUT).await;
+        feed(
+            &cmd_tx,
+            Command::NetFileWantedTimeout { id, generation: Some(scope) },
+        )
+        .await;
+    });
+}
+
 /// Report a download verdict without any task work — the spawn-shaped
 /// failure path for "the plane cannot even start" (no relay, no ring).
 pub(crate) fn spawn_file_verdict(
@@ -934,6 +951,10 @@ pub(crate) fn spawn_nostr_fetch(
                 if let Err(e) = std::fs::write(&part, &bytes) {
                     let _ = std::fs::remove_file(&part);
                     return Err(format!("writing: {e}"));
+                }
+                // durable before the rename, like the queue-plane landing
+                if let Ok(f) = std::fs::File::open(&part) {
+                    let _ = f.sync_all();
                 }
                 let final_path = final_path(&resolved);
                 std::fs::rename(&part, &final_path).map_err(|e| {

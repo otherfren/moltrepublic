@@ -37,6 +37,11 @@ pub const FILE_CHUNK_PLAIN_LEN: usize = 44_000;
 /// replay history fast; a gap this long means the series is not there.
 const FETCH_QUIET: Duration = Duration::from_secs(10);
 
+/// The fetch's OVERALL deadline: a hostile relay trickling matching
+/// events must not reset the quiet window forever (review 2026-08-10) —
+/// past this budget the fetch ends honestly, whatever arrived.
+const FETCH_TOTAL: Duration = Duration::from_secs(300);
+
 /// The chunk-series message id for a share: derived from the share's
 /// STABLE chat message id (32-char hex), domain-tagged — deterministic, so
 /// a re-publish dedups and two shares never collide.
@@ -101,7 +106,17 @@ pub async fn fetch_series(
     let mut sub = chan.subscribe_files_at(published_at).await?;
     let mut reassembler = Reassembler::new_sized(FILE_CHUNK_PLAIN_LEN);
     let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
+    // the per-chunk payload budget bounds what a claimed `count` may total —
+    // rejected on the FIRST chunk, so a forged count=65535 header cannot
+    // make this fetcher buffer gigabytes before the cap fires
+    let chunk_budget = FILE_CHUNK_PLAIN_LEN - crate::chunk::CHUNK_HEADER_LEN;
+    let deadline = tokio::time::Instant::now() + FETCH_TOTAL;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(NetError::Framing(
+                "the fetch budget is spent — the series did not complete".to_string(),
+            ));
+        }
         match sub.recv(quiet).await {
             GroupRecv::Frame { content, .. } => {
                 let Ok(plain) = open_outer(exporters, &content) else {
@@ -112,6 +127,19 @@ pub async fn fetch_series(
                 // the header names its series — foreign series just pass by
                 if plain.len() < MSG_ID_LEN || plain[..MSG_ID_LEN] != want.0 {
                     continue;
+                }
+                // header peek: a series whose claimed chunk count could not
+                // fit the cap is refused before anything buffers
+                if plain.len() >= MSG_ID_LEN + 4 {
+                    let count =
+                        u16::from_le_bytes([plain[MSG_ID_LEN + 2], plain[MSG_ID_LEN + 3]]);
+                    if usize::from(count).saturating_mul(chunk_budget)
+                        > cap_usize.saturating_add(chunk_budget)
+                    {
+                        return Err(NetError::Framing(format!(
+                            "series claims {count} chunks — beyond the {cap}-byte cap"
+                        )));
+                    }
                 }
                 match reassembler.push(&plain) {
                     Ok(PushOutcome::Complete(_, bytes)) => {
@@ -138,8 +166,12 @@ pub async fn fetch_series(
                 }
             }
             GroupRecv::Idle => {
+                // Idle covers BOTH "nothing stored" and "no relay reachable"
+                // (the subscription's recv cannot tell them apart today), so
+                // the message must not claim to know which
                 return Err(NetError::Framing(
-                    "the relays do not hold this file's chunk series".to_string(),
+                    "no chunk of this series arrived — not on the relays, or no relay reachable"
+                        .to_string(),
                 ));
             }
             GroupRecv::Deaf(why) => {

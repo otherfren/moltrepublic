@@ -660,6 +660,7 @@ impl State {
         self.file_series.clear();
         self.file_pending.clear();
         self.file_serving.clear();
+        self.file_announced.clear();
         self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;

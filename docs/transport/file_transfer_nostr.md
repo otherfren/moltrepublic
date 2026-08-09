@@ -6,11 +6,15 @@ Status: **F1–F3 BUILT (2026-08-09/10); F4 partial.** The chunk plane
 un-dimmed) are on master — keystones
 `molt-net/tests/file_plane.rs` and
 `molt-engine/tests/file_over_relays.rs::a_shared_file_downloads_over_the_relay`.
-Of F4, the re-publish loop ships (a stale stamp re-publishes on the next
-`FileWanted`; a removed share stops serving via `available`), and the cap
-is the `[storage] file_cap_bytes` config key (keep-live on wholesale
-saves; default 4 MiB). STILL OPEN: the share card's one-word
-relay-held/sharer-only status (§5.5).
+Of F4, the re-publish loop ships (a failed fetch invalidates the cached
+stamp, the next request re-publishes; a removed share stops serving via
+`available`), and the cap is the `[storage] file_cap_bytes` config key
+(keep-live on wholesale saves; default 4 MiB). The 2026-08-10 review's
+correctness findings are fixed (sharer-only `FileServed` trust, share-time
+cap, park watchdog, fetch deadline + count bound, current-epoch sealing).
+STILL OPEN: §5.4's publish-budget metering (chunk publishes are unmetered
+today), the §5.5 share-card status word, and a real transport-vs-miss
+signal in the fetch (Idle conflates both; the miss message says so).
 
 ## 1. What exists, and what the gate is
 
