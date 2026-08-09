@@ -283,19 +283,21 @@ impl State {
                 surface,
                 payload,
             } => {
-                self.proposals.insert(
-                    id.0,
-                    ProposalRecord {
-                        surface: *surface,
-                        payload: payload.clone(),
-                        approvals: 0,
-                        state: ProposalState::Proposed,
-                        declined_at: 0,
-                        declined_by: MemberId::new(),
-                        decliners: Vec::new(),
-                    },
-                );
-                self.next_id = self.next_id.max(id.0 + 1);
+                // OR-insert, like `receive_proposed`: a re-serve of an id
+                // this node already tracks (WP2 answers RECORD the served
+                // Proposed envelopes) must not clobber the live record —
+                // an unconditional insert wiped the collected decliners on
+                // every answered ChainRequest (review 2026-08-09)
+                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord {
+                    surface: *surface,
+                    payload: payload.clone(),
+                    approvals: 0,
+                    state: ProposalState::Proposed,
+                    declined_at: 0,
+                    declined_by: MemberId::new(),
+                    decliners: Vec::new(),
+                });
+                self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
             }
             WorkspaceEvent::Approved { id, .. } => {
@@ -362,7 +364,7 @@ impl State {
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
                 });
-                self.next_id = self.next_id.max(id.0 + 1);
+                self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
             }
             WorkspaceEvent::Committed(_)
@@ -652,6 +654,7 @@ impl State {
         self.pending_served_blob = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();
+        self.pending_declines.clear();
         self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;

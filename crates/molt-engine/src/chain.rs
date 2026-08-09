@@ -3038,12 +3038,27 @@ impl State {
         // (the own log replayed a decline whose proposal is not back yet).
         // A receiver without the card parks the voice symmetrically.
         let me = self.member();
+        let cutoff = self.chat_retention_cutoff();
         let mut declined: Vec<u64> = self
             .proposals
             .iter()
-            .filter(|(_, p)| {
-                matches!(p.state, ProposalState::Proposed | ProposalState::Rejected)
-                    && p.decliners.iter().any(|d| d == &me)
+            .filter(|(id, p)| {
+                // the same Membership exclusion as the Proposed loop above —
+                // a membership id must never re-serve, in any clothing
+                !matches!(
+                    self.proposal_changes.get(id),
+                    Some(ChainChange::Membership { .. })
+                ) && p.decliners.iter().any(|d| d == &me)
+                    && match p.state {
+                        ProposalState::Proposed => true,
+                        // a rejected card re-serves only while some view
+                        // still shows it: past the display retention it has
+                        // no convergence audience, and the batch stays
+                        // bounded instead of growing with the republic's
+                        // whole rejected history
+                        ProposalState::Rejected => !Self::aged_out_at(cutoff, p.declined_at),
+                        _ => false,
+                    }
             })
             .map(|(id, _)| *id)
             .chain(
@@ -4105,6 +4120,9 @@ mod tests {
             peer.proposals.get(&8).expect("card").state,
             ProposalState::Rejected
         );
+        // the fixture's wire ts is historic — stamp the decline fresh, or
+        // the retention gate below would age the card out immediately
+        peer.proposals.get_mut(&8).expect("card").declined_at = crate::now_secs();
         // a parked own decline (own-log replay raced a re-served proposal)
         peer.register_decline(11, "walter", 1_751_000_000);
         let events = peer.open_governance_events();
@@ -4124,6 +4142,154 @@ mod tests {
             ),
             "a foreign decline is never re-attested"
         );
+        // a rejected card past the display retention has no convergence
+        // audience — its voice leaves the batch (review 2026-08-09,
+        // finding 12), so the re-serve stays bounded
+        peer.proposals.get_mut(&8).expect("card").declined_at = 1;
+        let aged: Vec<u64> = peer
+            .open_governance_events()
+            .iter()
+            .filter_map(|e| match e {
+                WorkspaceEvent::Declined { id, by } if by == "walter" => Some(id.0),
+                _ => None,
+            })
+            .collect();
+        assert!(!aged.contains(&8), "an aged-out rejected voice stops re-serving");
+        assert!(aged.contains(&7), "the open card's voice stays");
+    }
+
+    /// Answering a ChainRequest re-records the served Proposed envelopes
+    /// through the applier — that must not clobber the live card: an
+    /// unconditional insert wiped every collected foreign decline on the
+    /// SERVING node (review 2026-08-09, finding 1).
+    #[test]
+    fn serving_open_governance_keeps_the_own_cards_decliners() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Kept" }),
+            },
+        );
+        wire(
+            &mut peer,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+        );
+        peer.serve_open_governance();
+        assert_eq!(
+            peer.proposals.get(&9).expect("card").decliners,
+            vec!["dora".to_string()],
+            "serving must not wipe the collected voices"
+        );
+    }
+
+    /// A decline referencing an id far past the mint counter is garbage —
+    /// parking it would poison `next_id` (one u64::MAX frame froze every
+    /// later local mint; review 2026-08-09, finding 2).
+    #[test]
+    fn a_decline_for_an_implausible_id_is_dropped() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        let before = peer.next_id;
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string() },
+        );
+        assert!(peer.pending_declines.is_empty(), "garbage never parks");
+        assert_eq!(peer.next_id, before, "and never moves the mint counter");
+    }
+
+    /// A standing decline is a cast vote: approving on top of it would let
+    /// one member hold both stances at once (a decline does not retract a
+    /// collected signature — review 2026-08-09, finding 3).
+    #[test]
+    fn an_own_decline_blocks_a_later_approve() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Beides?" }),
+            },
+        );
+        peer.cmd_decline(ProposalId(9)).expect("decline");
+        assert!(
+            matches!(
+                peer.cmd_approve(ProposalId(9)),
+                Err(molt_core::MoltError::AlreadyDeclined(ProposalId(9)))
+            ),
+            "an approve over the own standing decline must refuse"
+        );
+    }
+
+    /// An applied MEMBERSHIP card reads its voters from the sealed block
+    /// too — matched by content (op + member), since a Membership block
+    /// carries no proposal id (review 2026-08-09, finding 7).
+    #[test]
+    fn an_applied_membership_card_reports_the_block_signers() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        let block = b.seal(
+            1,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b
+                    .keys
+                    .iter()
+                    .find(|(m, _)| m == "dora")
+                    .map(|(_, sk)| hex::encode(sk.verifying_key().to_bytes()))
+                    .expect("dora's key"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: None,
+            },
+            &["petra", "walter"],
+        );
+        b.push(block);
+        let mut peer = chain_peer_3("walter", &b);
+        assert_eq!(
+            peer.chain_head.as_ref().map(|h| h.height),
+            Some(1),
+            "the membership block adopted"
+        );
+        peer.proposals.insert(
+            4,
+            molt_core::ProposalRecord {
+                surface: Surface::Organization,
+                payload: json!({ "op": "restore_member", "member": "dora" }),
+                approvals: 0,
+                state: ProposalState::Applied,
+                declined_at: 0,
+                declined_by: String::new(),
+                decliners: Vec::new(),
+            },
+        );
+        let p = peer.proposals.get(&4).cloned().expect("card");
+        let v = peer.view(4, &p);
+        assert_eq!(v.approvals, 2, "the membership block's signature count");
     }
 
     /// An APPLIED card keeps naming its voters: the sealed block carries

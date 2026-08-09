@@ -28,6 +28,18 @@ use crate::State;
 /// declines for invented ids, and the park must not grow with them.
 const PARKED_DECLINE_IDS_MAX: usize = 1024;
 
+/// Per-member ceiling on parked decline ids: a single member wedging the
+/// park with invented ids must not evict or block the other members'
+/// honest out-of-order voices (the frames are acked at the accept point,
+/// so a shed voice would be gone for good — review 2026-08-09).
+const PARKED_DECLINES_PER_MEMBER_MAX: usize = 64;
+
+/// How far beyond the highest known proposal id a decline may point and
+/// still park: a real decline references an id some proposer minted and
+/// gossiped, so anything far past `next_id` is garbage — and bounding it
+/// keeps a hostile id (u64::MAX) from poisoning the mint counter.
+const PARKED_DECLINE_ID_WINDOW: u64 = 1024;
+
 /// What registering a decline did. The wire ingest emits from this; the log
 /// applier ignores it (replay must not ring frontends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,12 +478,20 @@ impl State {
 
     pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
         let operator_already_voted = {
+            let me = self.member();
             let p = self
                 .proposals
                 .get(&proposal.0)
                 .ok_or(MoltError::UnknownProposal(proposal))?;
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
+            }
+            // a standing decline is a cast vote: signing on top of it would
+            // let one member hold both stances at once (and a decline does
+            // not retract a collected signature — review 2026-08-09).
+            // Changing one's mind is cancel-and-re-propose territory.
+            if p.decliners.iter().any(|d| d == &me) {
+                return Err(MoltError::AlreadyDeclined(proposal));
             }
             Self::operator_approved(p)
         };
@@ -575,17 +595,31 @@ impl State {
     /// before a re-served proposal returns). Emit-free: the applier
     /// replays through here, callers on live paths emit from the outcome.
     pub(crate) fn register_decline(&mut self, id: u64, by: &str, ts: u64) -> DeclineOutcome {
-        // a decline references an id SOME proposer minted — treat it as
-        // taken, or a later local mint could collide with the parked voice
-        self.next_id = self.next_id.max(id.saturating_add(1));
         let veto_room = self
             .replica
             .as_ref()
             .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
             .unwrap_or(0);
         let Some(p) = self.proposals.get_mut(&id) else {
-            if self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
-                && !self.pending_declines.contains_key(&id)
+            // a real decline references an id SOME proposer minted and
+            // gossiped — one absurdly far past the mint counter is garbage,
+            // and letting it bump `next_id` would poison every later local
+            // mint (a u64::MAX decline froze proposing for good)
+            if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
+                tracing::warn!(%id, %by, "dropping a decline for an implausible proposal id");
+                return DeclineOutcome::Known;
+            }
+            // treat the id as taken, or a later local mint could collide
+            // with the parked voice
+            self.next_id = self.next_id.max(id.saturating_add(1));
+            let member_parked = self
+                .pending_declines
+                .values()
+                .filter(|p| p.iter().any(|(m, _)| m == by))
+                .count();
+            if !self.pending_declines.contains_key(&id)
+                && (self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
+                    || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX)
             {
                 tracing::warn!(%id, %by, "decline park full — dropping");
                 return DeclineOutcome::Known;
@@ -829,8 +863,23 @@ impl State {
         // block (WP4) simply leaves the pills open: only chain-provable
         // votes are shown.
         if self.is_chain_governed() && p.state == ProposalState::Applied {
-            let sealed = self.chain.iter().find_map(|blk| match &blk.change {
+            // a Membership block carries no proposal id — match it by
+            // content (op + member), like `settle_membership_records`; the
+            // NEWEST matching block wins (a seat can be restored again)
+            let op = p.payload.get("op").and_then(Value::as_str).unwrap_or("");
+            let seat = p.payload.get("member").and_then(Value::as_str);
+            let sealed = self.chain.iter().rev().find_map(|blk| match &blk.change {
                 molt_core::ChainChange::Applied { proposal_id, .. } if *proposal_id == id => {
+                    Some(&blk.sigs)
+                }
+                molt_core::ChainChange::Membership { op: bop, member, .. }
+                    if seat == Some(member.as_str())
+                        && matches!(
+                            (op, bop),
+                            ("restore_member", molt_core::MembershipOp::Restored)
+                                | ("add_member", molt_core::MembershipOp::Joined)
+                        ) =>
+                {
                     Some(&blk.sigs)
                 }
                 _ => None,
