@@ -770,7 +770,7 @@ impl State {
         // collected signatures; the single-operator path counts the recorded
         // approval events (live: at most this node's own — a legacy log
         // replays what it recorded)
-        let approvals = if self.is_chain_governed() {
+        let mut approvals = if self.is_chain_governed() {
             self.chain_approval_count(id)
         } else {
             p.approvals
@@ -778,7 +778,7 @@ impl State {
         // reader-relative: chain governance knows exactly who signed; on the
         // single-operator path the ONLY approval this node can ever record
         // is its own (self-cosign or the one explicit approve)
-        let approved_by_me = if self.is_chain_governed() {
+        let mut approved_by_me = if self.is_chain_governed() {
             let me = self.member();
             self.pending_sigs
                 .get(&id)
@@ -823,6 +823,28 @@ impl State {
                 })
                 .collect()
         };
+        // an APPLIED card's voters live in its sealed block — the ephemeral
+        // signature collection is cleared at commit, the chain is the
+        // durable record (live incident 2026-08-09, defect 7). A pruned
+        // block (WP4) simply leaves the pills open: only chain-provable
+        // votes are shown.
+        if self.is_chain_governed() && p.state == ProposalState::Applied {
+            let sealed = self.chain.iter().find_map(|blk| match &blk.change {
+                molt_core::ChainChange::Applied { proposal_id, .. } if *proposal_id == id => {
+                    Some(&blk.sigs)
+                }
+                _ => None,
+            });
+            if let Some(sigs) = sealed {
+                approvals = sigs.len();
+                approved_by_me = sigs.iter().any(|a| a.member == me);
+                for v in &mut votes {
+                    if sigs.iter().any(|a| a.member == v.member) {
+                        v.vote = VoteState::Approved;
+                    }
+                }
+            }
+        }
         // every recorded decline shows on its roster row — on a PENDING
         // proposal too (a decline is a visible voice against, not a silent
         // wait); the terminal Rejected keeps naming its tipping decliner

@@ -4126,6 +4126,45 @@ mod tests {
         );
     }
 
+    /// An APPLIED card keeps naming its voters: the sealed block carries
+    /// the signatures (the ephemeral collection is cleared at commit), so
+    /// the view reads them from the chain — live incident 2026-08-09,
+    /// defect 7: the applied history showed "0 approvals, every pill open".
+    #[test]
+    fn an_applied_card_reports_the_block_signers() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        // the card arrives as gossip; the sealed block (signed by petra and
+        // dora) commits it — walter himself never collected a signature
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 1 }),
+            },
+        );
+        b.commit_applied(1, &["petra", "dora"]);
+        peer.receive_block(b.blocks[1].clone());
+        let p = peer.proposals.get(&1).cloned().expect("card");
+        assert_eq!(p.state, ProposalState::Applied);
+        let v = peer.view(1, &p);
+        assert_eq!(v.approvals, 2, "the block's signature count");
+        let vote_of = |m: &str| {
+            v.votes
+                .iter()
+                .find(|mv| mv.member == m)
+                .map(|mv| mv.vote)
+                .expect("roster row")
+        };
+        assert_eq!(vote_of("petra"), molt_core::VoteState::Approved);
+        assert_eq!(vote_of("dora"), molt_core::VoteState::Approved);
+        assert_eq!(vote_of("walter"), molt_core::VoteState::Open);
+        assert!(!v.approved_by_me, "walter did not sign");
+    }
+
     /// WP4b stage 2, full holders: a committed checkpoint block verifies
     /// only when its `state_hash` matches THIS chain's own recomputed
     /// projection — a forged or drifted summary is hard-rejected with the
