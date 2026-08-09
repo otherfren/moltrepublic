@@ -1041,6 +1041,11 @@ impl State {
         // one broadcast channel, no queues, no NetRuntime. Everything it needs
         // came off the sealed transport state via `adopt_nostr_transport`.
         if nostr_kind {
+            // R6 at reopen: the chain-ratified pool outranks the persisted
+            // transport copy — a pool vote sealed in an earlier session must
+            // survive the restart. No runtime is up yet, so this only adopts
+            // the list; the build below dials it.
+            self.adopt_pool_change();
             if let Some(blob) = transport_state.mls.as_deref() {
                 self.group_net = self.build_group_net(blob);
             }

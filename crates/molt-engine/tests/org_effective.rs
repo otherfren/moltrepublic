@@ -85,11 +85,13 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
 /// Found a real 2-of-2 republic over the relay; both engines end up entered.
 async fn found_pair(
     root: &std::path::Path,
-    url: &str,
+    urls: &[&str],
     name: &str,
 ) -> (WalletHandle, WalletHandle) {
     let a = engine(&root.join("founder"));
-    adopt_relay(&a, url).await;
+    for url in urls {
+        adopt_relay(&a, url).await;
+    }
     a.execute(Command::CreateStart {
         name: name.to_string(),
         member: "petra".to_string(),
@@ -107,7 +109,9 @@ async fn found_pair(
     let link = s.create.seats[0].link.clone();
 
     let b = engine(&root.join("member"));
-    adopt_relay(&b, url).await;
+    for url in urls {
+        adopt_relay(&b, url).await;
+    }
     b.execute(Command::JoinStart {
         invite: link,
         member: "walter".to_string(),
@@ -171,7 +175,7 @@ async fn an_applied_set_name_renames_the_session_entry_and_the_manifest() {
     let root = tmp.path().join("workspaces");
     let founder_root = root.join("founder");
 
-    let (a, b) = found_pair(&root, &url, "Alte Gilde").await;
+    let (a, b) = found_pair(&root, &[&url], "Alte Gilde").await;
     let id = read_session(&a).await.active_workspace.clone();
 
     // the ratified founding name is what every view shows before the change
@@ -243,7 +247,7 @@ async fn an_applied_set_image_materializes_the_logo_file() {
     let root = tmp.path().join("workspaces");
     let founder_root = root.join("founder");
 
-    let (a, b) = found_pair(&root, &url, "Logo Club").await;
+    let (a, b) = found_pair(&root, &[&url], "Logo Club").await;
     let id = read_session(&a).await.active_workspace.clone();
     let dir = molt_storage::find_workspace_dir(&founder_root, &id).expect("workspace dir");
 
@@ -311,4 +315,71 @@ async fn an_applied_set_image_materializes_the_logo_file() {
         Reply::Status(st) => assert_eq!(st.image, ""),
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// The group pool the Status view serves, trailing-slash-normalized (relay
+/// URLs canonicalize with one).
+async fn status_pool(w: &WalletHandle) -> Vec<String> {
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => {
+            st.relays.iter().map(|u| u.trim_end_matches('/').to_string()).collect()
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// R6 across a restart: a sealed pool edit must survive the reopen — the
+/// chain-ratified pool outranks the persisted transport copy. Live incident
+/// 2026-08-09: a 2→1 pool vote sealed and applied live, but the reopen
+/// dialed (and showed) the original two relays again, so the vote read as
+/// having had no effect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sealed_pool_edit_survives_the_reopen() {
+    let relay1 = MockRelay::run().await.expect("relay 1");
+    let relay2 = MockRelay::run().await.expect("relay 2");
+    let url1 = relay1.url().await.to_string();
+    let url2 = relay2.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+
+    let (a, b) = found_pair(&root, &[&url1, &url2], "Pool Gilde").await;
+    let id = read_session(&a).await.active_workspace.clone();
+    assert_eq!(status_pool(&a).await.len(), 2, "the genesis pool is both relays");
+
+    // the vote: reduce the pool to relay 1 (the overlap keeps the fold legal)
+    a.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({
+            "op": "set_relays",
+            "title": "Pool verkleinern",
+            "value": url1.clone(),
+        }),
+    })
+    .await
+    .expect("propose set_relays");
+    approve_op(&b, "set_relays").await;
+
+    // the LIVE effect (R6): the founder's group pool follows the seal
+    let want = vec![url1.trim_end_matches('/').to_string()];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if status_pool(&a).await == want {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the live pool never followed the sealed edit"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // close + reopen: the chain still says one relay, and the reopened
+    // transport must follow the CHAIN, not the stale persisted copy
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    a.execute(Command::OpenWorkspace { id: id.clone() }).await.expect("reopen");
+    assert_eq!(
+        status_pool(&a).await,
+        want,
+        "the reopened pool is the chain-ratified one"
+    );
 }

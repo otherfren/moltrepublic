@@ -1,7 +1,8 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **two defects fixed on master** (proposal-card resurrect, chat-nav
-pin deadlock), **two open** (each with evidence below). Source: the user's real three-node setup (Albert =
+Status: **three defects fixed on master** (proposal-card resurrect, chat-nav
+pin deadlock, pool edit lost on reopen), **two open** (each with evidence
+below). Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
 Tor). All findings were taken from the LIVE engines over MCP and from headless
@@ -104,6 +105,25 @@ the live setup.
 4-worker tokio runtime at approval time (0 CPU forever, seen twice on
 `config.toml`'s node, absent on the others). Harmless so far but
 unexplained — worth identifying the spawner when next in that code path.
+
+## 5. FIXED — a sealed pool edit did not survive the reopen
+
+**Symptom:** the 2→1 `set_relays` vote sealed (h=2, Albert+Veronica; one
+decline does not block 2-of-3) and applied live — but after closing and
+reopening the workspaces every node dialed and showed the original
+two-relay pool again: "the vote had no effect".
+
+**Root cause:** the reopen adopts the chain, then overwrites `nostr.relays`
+from the persisted `transport.state` copy and builds the group runtime from
+that; `adopt_pool_change` (R6) ran only on the live append path, and the
+Status view serves `nostr.relays` — so both the dialed pool and the UI
+regressed on every restart.
+
+**Fix (master):** `cmd_open_workspace` runs `adopt_pool_change` before
+building the group runtime — the chain-ratified pool outranks the persisted
+copy on every open (no runtime is up yet, so it only adopts the list).
+Keystone: `org_effective.rs::a_sealed_pool_edit_survives_the_reopen`, red at
+the reopen assert before the fix.
 
 ## Repro assets
 

@@ -4215,7 +4215,7 @@ mod tests {
             !live.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 })),
             "a consumed id must not open a fresh card"
         );
-        assert!(live.proposals.get(&7).is_none(), "no resurrected card");
+        assert!(!live.proposals.contains_key(&7), "no resurrected card");
     }
 
     /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
