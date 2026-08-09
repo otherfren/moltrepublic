@@ -482,6 +482,13 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         // the one optional field, and only because it postdates the tool's
         // schema: an agent that never set it keeps the default rather than
         // being refused for a key it has never heard of
+        // absent = 0 = "keep the current cap" (the engine's keep-live
+        // posture, like the relay pool) — an agent omitting the field must
+        // not reset an operator's deliberately raised cap
+        file_cap_bytes: args
+            .get("file_cap_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         download_dir: args
             .get("download_dir")
             .and_then(Value::as_str)
@@ -934,6 +941,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "download_dir": { "type": "string" },
+                    "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays (absent = keep current)" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "read_receipts": { "type": "boolean" },

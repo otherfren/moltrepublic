@@ -279,6 +279,12 @@ pub struct SessionSettings {
     /// given (`~` expands).
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
+    /// Per-file byte cap for the relay file plane
+    /// (`file_transfer_nostr.md` §5.1) — raise deliberately, chunk
+    /// publishes load the relay pool. 0 = "keep the current value" on a
+    /// wholesale settings save (readers fall back to the default).
+    #[serde(default = "default_file_cap_bytes")]
+    pub file_cap_bytes: u64,
     /// Alert sound for an incoming chat message:
     /// `"none" | "bell" | "chime" | "pop"`.
     #[serde(default = "default_sound")]
@@ -358,6 +364,7 @@ impl Default for SessionSettings {
             tor_mode: "local".to_string(),
             tor_port: 9050,
             download_dir: default_download_dir(),
+            file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
@@ -376,6 +383,13 @@ fn default_s3_bucket() -> String {
 /// The default download destination.
 fn default_download_dir() -> String {
     "~/Downloads".to_string()
+}
+
+/// Default per-file byte cap for the relay file plane (4 MiB — user
+/// decision 2026-08-09, `file_transfer_nostr.md` §5.1). Public: readers
+/// fall back here when the setting is 0/absent.
+pub fn default_file_cap_bytes() -> u64 {
+    4 * 1024 * 1024
 }
 
 /// Default automatic-backup interval (minutes).

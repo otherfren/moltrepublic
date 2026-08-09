@@ -87,6 +87,10 @@ pub struct StorageConfig {
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
+    /// Per-file byte cap for the relay file plane. Raise deliberately —
+    /// chunk publishes load the relay pool.
+    #[serde(default = "default_file_cap_bytes")]
+    pub file_cap_bytes: u64,
     /// Alert sound for an incoming chat message ("none"|"bell"|"chime"|"pop").
     #[serde(default = "default_sound")]
     pub sound_message: String,
@@ -102,6 +106,12 @@ pub struct StorageConfig {
 /// Default alert sound — silent. Mirrors `molt_core::SessionSettings`.
 pub fn default_sound() -> String {
     "none".to_string()
+}
+
+/// Default per-file byte cap for the relay file plane (4 MiB). Mirrors
+/// `molt_core::default_file_cap_bytes`.
+pub fn default_file_cap_bytes() -> u64 {
+    4 * 1024 * 1024
 }
 
 /// Default for an opt-out boolean — on unless the operator disables it (and
@@ -122,6 +132,7 @@ impl Default for StorageConfig {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
+            file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
@@ -392,6 +403,8 @@ pub struct Settings {
     pub s3_keep_copies: u16,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
+    /// Per-file byte cap for the relay file plane.
+    pub file_cap_bytes: u64,
     /// Alert sound for an incoming chat message.
     pub sound_message: String,
     /// Alert sound for a new incoming vote.
@@ -434,6 +447,7 @@ impl Default for Settings {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             download_dir: default_download_dir(),
+            file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
@@ -487,6 +501,7 @@ impl From<&Config> for Settings {
             s3_interval_min: c.storage.s3_interval_min,
             s3_keep_copies: c.storage.s3_keep_copies,
             download_dir: c.storage.download_dir.clone(),
+            file_cap_bytes: c.storage.file_cap_bytes,
             sound_message: c.storage.sound_message.clone(),
             sound_vote: c.storage.sound_vote.clone(),
             read_receipts: c.storage.read_receipts,
@@ -534,6 +549,8 @@ s3_interval_min = {s3_interval_min}
 s3_keep_copies = {s3_keep_copies}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
+# Per-file byte cap for sharing over relays (chunk publishes load the pool).
+file_cap_bytes = {file_cap_bytes}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}
 sound_vote = {sound_vote}
@@ -591,6 +608,7 @@ theme = {theme}
         s3_interval_min = settings.s3_interval_min,
         s3_keep_copies = settings.s3_keep_copies,
         download_dir = toml_str(&settings.download_dir),
+        file_cap_bytes = settings.file_cap_bytes,
         sound_message = toml_str(&settings.sound_message),
         sound_vote = toml_str(&settings.sound_vote),
         read_receipts = settings.read_receipts,
@@ -651,6 +669,9 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(v) = storage.get("download_dir").and_then(toml::Value::as_str) {
             s.download_dir = v.to_string();
+        }
+        if let Some(v) = storage.get("file_cap_bytes").and_then(toml::Value::as_integer) {
+            s.file_cap_bytes = u64::try_from(v).unwrap_or_else(|_| default_file_cap_bytes());
         }
         if let Some(v) = storage.get("s3_endpoint").and_then(toml::Value::as_str) {
             s.s3_endpoint = v.to_string();
@@ -927,6 +948,11 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         i64::from(settings.s3_keep_copies),
     );
     set_str(storage, "download_dir", &settings.download_dir);
+    set_int(
+        storage,
+        "file_cap_bytes",
+        i64::try_from(settings.file_cap_bytes).unwrap_or(i64::MAX),
+    );
     set_str(storage, "sound_message", &settings.sound_message);
     set_str(storage, "sound_vote", &settings.sound_vote);
     set_bool(storage, "read_receipts", settings.read_receipts);
@@ -1174,6 +1200,7 @@ mod tests {
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
             download_dir: "/srv/molt/downloads".to_string(),
+            file_cap_bytes: 8 * 1024 * 1024,
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),

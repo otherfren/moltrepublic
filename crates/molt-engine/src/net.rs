@@ -1555,6 +1555,18 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The operative per-file cap: the operator's configured value, or the
+    /// spec default where the setting is 0/unset (`file_transfer_nostr.md`
+    /// §5.1).
+    fn effective_file_cap(&self) -> u64 {
+        let cap = self.session.settings.file_cap_bytes;
+        if cap == 0 {
+            molt_core::default_file_cap_bytes()
+        } else {
+            cap
+        }
+    }
+
     /// The RELAY file plane's channel + exporter material, if this
     /// workspace can carry one (`file_transfer_nostr.md`): the same dial
     /// list and rotation seed the group runtime uses, plus the MLS
@@ -1641,6 +1653,7 @@ impl State {
             at,
             target,
             dest,
+            self.effective_file_cap(),
             self.net_scope,
             cmd_tx,
         );
@@ -1689,6 +1702,7 @@ impl State {
             exporter,
             id,
             path,
+            self.effective_file_cap(),
             self.net_scope,
             cmd_tx,
         );

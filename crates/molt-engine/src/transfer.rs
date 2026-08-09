@@ -907,6 +907,7 @@ pub(crate) fn spawn_nostr_fetch(
     at: u64,
     target: FetchTarget,
     dest: DestSpec,
+    cap: u64,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
@@ -918,7 +919,7 @@ pub(crate) fn spawn_nostr_fetch(
                 &target.id_hex,
                 &target.checksum,
                 at,
-                molt_net::file_plane::FILE_CAP_DEFAULT_BYTES,
+                cap,
                 None,
             )
             .await
@@ -962,6 +963,7 @@ pub(crate) fn spawn_series_publish(
     exporter: [u8; 32],
     id: MessageId,
     path: PathBuf,
+    cap: u64,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
@@ -974,7 +976,7 @@ pub(crate) fn spawn_series_publish(
                     &exporter,
                     &id.to_string(),
                     &bytes,
-                    molt_net::file_plane::FILE_CAP_DEFAULT_BYTES,
+                    cap,
                 )
                 .await
                 {

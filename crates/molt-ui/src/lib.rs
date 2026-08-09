@@ -2341,6 +2341,9 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         // Carried as false here and re-merged by the engine, exactly like
         // `relays` below (save_settings can neither inject nor wipe them).
         clearnet_relays_enabled: false,
+        // not a config-tab field either: 0 = "keep the current cap" (the
+        // engine's keep-live posture) — config.toml is the cap's one door
+        file_cap_bytes: 0,
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),

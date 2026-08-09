@@ -266,6 +266,7 @@ fn main() -> anyhow::Result<()> {
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
             download_dir: config.storage.download_dir.clone(),
+            file_cap_bytes: config.storage.file_cap_bytes,
             // the operator's PERSISTED clearnet decision (ADR-0004
             // amendment): a node that was told "yes, use non-onion relays"
             // starts that way instead of asking again after every restart.

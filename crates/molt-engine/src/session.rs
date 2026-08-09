@@ -417,6 +417,12 @@ impl State {
         // grant non-onion dialing, or silently revoke it, as a side effect of
         // changing an unrelated field).
         settings.clearnet_relays_enabled = self.session.settings.clearnet_relays_enabled;
+        // 0 = "keep the current cap": a wholesale save from a frontend that
+        // does not carry the field must not silently reset an operator's
+        // deliberately raised file cap (the relays-keep-live posture)
+        if settings.file_cap_bytes == 0 {
+            settings.file_cap_bytes = self.session.settings.file_cap_bytes;
+        }
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
