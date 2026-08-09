@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **N4b step 5** (`docs/transport/nostr_n4_plan.md` §8.8): the coordinator
+//! **N4b step 5** (`docs_archive/transport/nostr_n4_plan.md` §8.8): the coordinator
 //! mints a recovery link over RELAYS.
 //!
 //! The recovery twin of `nostr_founding.rs`. Both engines are storage-backed

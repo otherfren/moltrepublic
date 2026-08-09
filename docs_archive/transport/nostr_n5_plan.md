@@ -1,6 +1,8 @@
 # N5 — the group runtime, the guarantee, presence
 
-**Status: PLANNED.** Anchors verified 2026-08-02 against HEAD. Spec:
+**Status: COMPLETE (N5.1–N5.5 ✅ built; N5.6 landed via N4b step 6 —
+`NO_TRANSPORT_YET` is gone from the tree; the §6.5 GUI copy shipped with
+N6).** Anchors were verified 2026-08-02 against HEAD. Spec:
 `nostr_transport_marmot.md` §4.1 (runtime shape), §4.3 (cursors), §4.4
 (rotation grace), §6 (guarantee), §6.5 (presence), §11 (the etappe entry).
 

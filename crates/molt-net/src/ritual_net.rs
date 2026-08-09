@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N4a (`docs/transport/nostr_n4_plan.md` §5): the engine-facing **Nostr
+//! N4a (`docs_archive/transport/nostr_n4_plan.md` §5): the engine-facing **Nostr
 //! ritual facade** — the one place the founding/join ritual touches relays.
 //! The engine stays free of `nostr` crate types: everything on this surface
 //! speaks hex anchors, [`RitualMsg`], [`WelcomePayload`] and raw bytes.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! N3 step 6 + N4a step 2 (`docs/transport/nostr_n4_plan.md` §4): the
+//! N3 step 6 + N4a step 2 (`docs_archive/transport/nostr_n4_plan.md` §4): the
 //! kind-444 Welcome, NIP-59 gift-wrapped to the invitee's transport anchor.
 //! Since N4 the rumor content is the VERSIONED payload v2 — the MLS Welcome
 //! plus the group's `rotation_seed` and relay list, "delivered only inside

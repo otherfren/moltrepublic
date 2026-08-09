@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N3 (`docs/transport/nostr_n3_plan.md` §2): the OUTER layer of a kind-445
+//! N3 (`docs_archive/transport/nostr_n3_plan.md` §2): the OUTER layer of a kind-445
 //! group event — the wrapper that hides the MLS frames from relays.
 //!
 //! Shape, decided in concept §10.11 (the CURRENT Marmot form, not the older

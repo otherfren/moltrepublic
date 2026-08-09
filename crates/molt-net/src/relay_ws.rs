@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N2 (`docs/transport/nostr_n2_plan.md` §2): ONE relay connection — dial
+//! N2 (`docs_archive/transport/nostr_n2_plan.md` §2): ONE relay connection — dial
 //! through the T4 fail-closed dialer, WebSocket upgrade, typed NIP-01
 //! message I/O (`nostr::ClientMessage` / `nostr::RelayMessage` — never
 //! hand-rolled JSON framing). A dumb pipe with a typed edge: no policy, no

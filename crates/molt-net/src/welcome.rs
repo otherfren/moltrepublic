@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N3 (`docs/transport/nostr_n3_plan.md` §4) + N4a (`nostr_n4_plan.md` §4):
+//! N3 (`docs_archive/transport/nostr_n3_plan.md` §4) + N4a (`nostr_n4_plan.md` §4):
 //! the kind-444 **Welcome** — the MLS Welcome carried to one invitee,
 //! NIP-59 gift-wrapped to its transport anchor. Since N4 the rumor content
 //! is the versioned **payload v2**: beside the MLS Welcome it carries the

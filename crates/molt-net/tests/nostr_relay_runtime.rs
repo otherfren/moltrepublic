@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! N2 relay-runtime keystones (`docs/transport/nostr_n2_plan.md` §3), driven
+//! N2 relay-runtime keystones (`docs_archive/transport/nostr_n2_plan.md` §3), driven
 //! against the in-process relay — the Nostr twin of the loopback hub. Steps
 //! land here one by one, red first.
 
@@ -815,7 +815,7 @@ async fn probe_relay_direct() {
 }
 
 // ======================================================================
-// B4 — the add-time relay probe (`docs/reviews/buzz_followups.md`): four
+// B4 — the add-time relay probe (`docs_archive/reviews/buzz_followups.md`): four
 // questions, one verdict, ONE reason. An unusable relay never enters the
 // pool, so the probe's honesty is the pool's hygiene.
 // ======================================================================

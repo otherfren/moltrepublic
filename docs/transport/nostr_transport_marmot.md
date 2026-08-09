@@ -690,7 +690,7 @@ prohibition.
   but `tests/nostr_vectors.rs` pins the boundary as a canary that flips on an
   upstream fix.
 - **MDK / White Noise — RE-EVALUATED 2026-07-31, see
-  `docs/transport/mdk_evaluation.md`.** The old one-line dismissal below was
+  `docs_archive/transport/mdk_evaluation.md`.** The old one-line dismissal below was
   written without reading the code and is WRONG for part of the kit: it is
   true of `marmot-account`/`marmot-app`/`storage-sqlite`/`cgka-session`, but
   `transport-nostr-peeler` (2.2k LOC) has no account model, no storage, no
@@ -931,7 +931,7 @@ once. So:
   pins, the ratified-vs-sealed byte-comparison pin, the sk↔anchored-pk
   persistence pins (unit + `two_instances`).
 - **N2 — NostrTransport core — ✅ CORE BUILT (2026-07-31,
-  `docs/transport/nostr_n2_plan.md`; engine wiring rides N4/N5):** the relay
+  `docs_archive/transport/nostr_n2_plan.md`; engine wiring rides N4/N5):** the relay
   POOL/policy already exists
   (`molt_core::relay`, ADR-0004 — N2 MUST dial through
   `relay::dialable(...)`, never read the pool directly, and must stay silent
@@ -953,7 +953,7 @@ once. So:
   (outer-strips/inner-rejects asymmetry); a concurrent-commit tiebreak heals.
 - **N4 — Ritual over Nostr (bigger than it looks, finding II-3).** Split into
   **N4a (founding+join) — ✅ BUILT 2026-07-31** and **N4b (recovery) — OPEN**;
-  execution map + landed-state in `docs/transport/nostr_n4_plan.md`.
+  execution map + landed-state in `docs_archive/transport/nostr_n4_plan.md`.
   - **N4a:** invite-link v2 (full ticket + founder npub + gated relay list);
     the §4.2 restructured flow (gift-wrapped JoinRequest with nostr-key
     proof-of-possession, the MLS group BORN at all-joined, payload-v2 444

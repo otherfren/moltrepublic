@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **buzz B3 steps 1 and 3** — the two hostile-relay bounds that already
-//! existed but nothing observed (`docs/reviews/buzz_followups.md` §B3).
+//! existed but nothing observed (`docs_archive/reviews/buzz_followups.md` §B3).
 //!
 //! We are the client against relays we do not control, which is buzz's problem
 //! mirrored. Two of their four bounds were already in the code when B3 was

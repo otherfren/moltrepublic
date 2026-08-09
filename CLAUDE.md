@@ -65,7 +65,7 @@ user could mistake for real.
   - A design doc dismissing an obvious candidate in one line ("overlaps our
     engine entirely") is NOT research. If a reference implementation exists
     for the protocol being built (for Nostr/NIP-EE: the Marmot MDK,
-    `docs/transport/mdk_evaluation.md`), it must be read and evaluated in the
+    `docs_archive/transport/mdk_evaluation.md`), it must be read and evaluated in the
     plan, with the take/leave decision recorded per component.
 - **Prefer asking and researching over starting.** During planning it is
   cheaper to look again, research, think, and ask a question than to begin

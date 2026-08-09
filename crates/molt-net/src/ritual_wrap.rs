@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N4a (`docs/transport/nostr_n4_plan.md` §2): the kind-446 **ritual
+//! N4a (`docs_archive/transport/nostr_n4_plan.md` §2): the kind-446 **ritual
 //! rumor** — every founder↔joiner pre-group ritual leg (JoinRequest,
 //! JoinAccepted, LinkSpent) carries the existing [`RitualMsg`] JSON
 //! vocabulary verbatim inside a NIP-59 gift wrap. Kind 446 is ours (no

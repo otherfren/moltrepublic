@@ -195,7 +195,7 @@ pub enum GroupDataRefused {
 pub const NO_CARRIER_STAMP: u64 = 0;
 
 /// The deterministic total order over commits of the SAME epoch
-/// (`docs/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
+/// (`docs_archive/transport/nostr_n3_plan.md` §1, after MDK's `CommitOrderingKey`).
 /// Every node computes it identically from the commit's own bytes and the
 /// timestamp its sender stamped, so all of them pick the same winner without
 /// talking: **lowest key wins**.

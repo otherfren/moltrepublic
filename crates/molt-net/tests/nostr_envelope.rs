@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! N3 envelope keystones (`docs/transport/nostr_n3_plan.md` §2/§3): the
+//! N3 envelope keystones (`docs_archive/transport/nostr_n3_plan.md` §2/§3): the
 //! outer sealing of a kind-445 event under the epoch's exporter secret, and
 //! its opening across the bounded exporter ring.
 

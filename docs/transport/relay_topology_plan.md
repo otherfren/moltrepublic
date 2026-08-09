@@ -248,3 +248,12 @@ N4b steps 6–12 are in flight and touch the same files (`net.rs`,
 beside it. R3–R6 must wait for N4b to finish, or they will collide in
 `ChainChange::Membership` (step 2's layout) and in the Welcome payload
 (step 10's open size decision).
+
+## 7. Carried obligations (from the archived `nostr_n2_plan.md` §3.5)
+
+Two relay-behaviour recommendations were never actioned and stay open here:
+
+- `probe_nip11_max_message` needs sanity bounds before a probed cap may
+  veto publishing — a lying relay must not zero the publish budget.
+- NIP-42 AUTH should default to an ephemeral per-relay key, not the
+  member's transport key (linkability across relays).

@@ -2,7 +2,7 @@
 
 //! `molt-storage`: the on-disk reality of a workspace.
 //!
-//! Implements `docs/storage/concept-workspace-storage.md`: a workspace directory
+//! Implements `docs_archive/storage/concept-workspace-storage.md`: a workspace directory
 //! holds a plaintext `manifest.toml` (the identity card the Open screen lists
 //! without decrypting), local `prefs.toml`, a sealed workspace key, an
 //! **encrypted, append-only event log** in framed segments, and state

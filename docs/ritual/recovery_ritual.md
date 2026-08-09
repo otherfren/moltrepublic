@@ -1,12 +1,20 @@
 # The Recovery Ritual
 
-> **Scope note (2026-07-30, etappe N-demo):** the SMP transport was removed in
-> the Nostr transport replacement (`docs/transport/nostr_transport_marmot.md`).
-> The recovery ritual itself stays LIVE over the loopback transport (the
-> `two_instances.rs` recovery suite is the keystone); the over-SMP drivers
-> named in the status sections below (`rejoin_over_smp`, the SMP queue
-> provisioning and its failure pin) were deleted — production `RecoverStart`
-> fails honestly until N4 re-implements the provisioning over Nostr.
+> **Scope note (2026-07-30, etappe N-demo; updated 2026-08-09):** the SMP
+> transport was removed in the Nostr transport replacement
+> (`docs/transport/nostr_transport_marmot.md`); the over-SMP drivers named
+> in the status sections below were deleted with it. Since N4b (2026-08-04)
+> production `RecoverStart` runs the full rejoin OVER RELAYS — keystone
+> `nostr_recovery.rs::a_lost_seat_rejoins_the_republic_over_relays` — and
+> the loopback `two_instances.rs` recovery suite stays the fast twin. The
+> recovery UI shipped on both sides (§8).
+>
+> **Open ritual question (carried from `welcome_rework.md`, undecided):**
+> `cmd_recover_start` has no `guard_idle` — a second start supersedes the
+> run (generation bump drops the stale task's results) but the superseded
+> task holds its relay subscriptions until its own timeout. Whether the
+> right shape is a guard or the deliberate replace-the-run touches the
+> re-mint failover semantics; decide it there, not in passing.
 
 How a member who lost **everything but its recovery phrase** returns to a
 republic: re-authenticated, re-admitted to the encrypted group, and caught up to
@@ -18,11 +26,11 @@ It is the total-loss twin of `founding_ritual.md` (a member *joins* a new
 republic) and the recovery half of `persistent_chain.md` (a member *catches up*
 the chain). Read both first.
 
-> **Status (2026-07-11).** Implemented and proven end to end (§8). The one
-> remaining open surface is the **recovery UI** (in progress). Ticket
-> persistence and coordinator failover are **decided**, not open work: the
-> ticket set stays deliberately in-memory (fail-closed, §6) and failover is
-> re-mint — any survivor runs a fresh round (§6).
+> **Status (2026-07-11; UI closed since).** Implemented and proven end to
+> end (§8), recovery UI included (§8 marks it ✅). Ticket persistence and
+> coordinator failover are **decided**, not open work: the ticket set stays
+> deliberately in-memory (fail-closed, §6) and failover is re-mint — any
+> survivor runs a fresh round (§6).
 
 ---
 

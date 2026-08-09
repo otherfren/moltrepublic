@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! N4a keystones for the engine-facing ritual facade
-//! (`docs/transport/nostr_n4_plan.md` §2/§4/§5): gift-wrapped ritual legs
+//! (`docs_archive/transport/nostr_n4_plan.md` §2/§4/§5): gift-wrapped ritual legs
 //! and the kind-445 group channel, driven against the in-process relay.
 
 use std::time::Duration;

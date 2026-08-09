@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N4a (`docs/transport/nostr_n4_plan.md` §7): the engine-side Nostr ritual
+//! N4a (`docs_archive/transport/nostr_n4_plan.md` §7): the engine-side Nostr ritual
 //! tasks — the founder's 1059 inbox loop, the founder's 445 group recv, the
 //! shared 445 publish leg, and the whole off-actor **member join task** that
 //! finally emits the long-dormant `NetJoin*` commands.

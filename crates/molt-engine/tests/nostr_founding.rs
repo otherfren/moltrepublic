@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **The N4a capstone** (`docs/transport/nostr_n4_plan.md` §9 step 7): two
+//! **The N4a capstone** (`docs_archive/transport/nostr_n4_plan.md` §9 step 7): two
 //! REAL engines found and join a republic over one in-process Nostr relay —
 //! the first engine-level test to drive the relay runtime at all, and the
 //! path that lights the long-dark actor-level `NetJoinSealed` lane (dispatch

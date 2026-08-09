@@ -170,13 +170,6 @@ same three flows, reached through one fewer decision.
 
 ## One thing this could not fix from the GUI
 
-`Command::RecoverStart` has **no re-entrancy guard**. `cmd_join_start` and
-`cmd_create_start` both run `guard_idle`; the recovery arm does not, so a
-second start overwrites `recover_ctx` and raises a second off-actor task
-holding its own relay subscriptions. The GUI stopped offering it (a running
-recovery disables every start and gets its own banner), but a co-equal MCP
-agent can still issue it.
-
-Whether the right answer is a guard or a deliberate replace-the-run is a
-ritual question, not a GUI one — it touches the re-mint failover that
-`recovery-next-steps` pinned. Recorded here rather than decided in passing.
+The `RecoverStart` re-entrancy question moved to the recovery spec where
+it belongs: see the "Open ritual question" note at the top of
+`docs/ritual/recovery_ritual.md`. Nothing else here is open.

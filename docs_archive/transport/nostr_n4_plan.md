@@ -1,13 +1,12 @@
 # N4 execution plan — the ritual over Nostr
 
-Status: **N4a BUILT (2026-07-31); N4b BUILT (2026-08-03/04) except one
-verified race.** A totally lost seat really comes back over relays —
-capstone `nostr_recovery.rs::a_lost_seat_rejoins_the_republic_over_relays`,
+Status: **N4a BUILT (2026-07-31); N4b BUILT (2026-08-03/04) — COMPLETE,
+including the §3.1a catch-up race (RESOLVED 2026-08-04: an ack-deaf
+outbox; the capstone asserts the catch-up now).** A totally lost seat
+really comes back over relays — capstone
+`nostr_recovery.rs::a_lost_seat_rejoins_the_republic_over_relays`,
 steps 1–12 landed (step 6's own sub-plan is
-`nostr_n4b_step6_design.md`). What is NOT closed: the catch-up above the
-anchor loses its blocks in roughly one run in four (§3.1a there carries the
-diagnosis and the two remaining suspects), so the capstone deliberately
-does not assert it. Executes the N4 etappe of
+`nostr_n4b_step6_design.md`). Executes the N4 etappe of
 `nostr_transport_marmot.md` §11 on top of the N2 relay runtime
 (`nostr_n2_plan.md`) and the N3 wire edge (`nostr_n3_plan.md`). Every design
 input is ratified (§4.2, §10.11–10.14, ADR-0004/0005/0006); this is the

@@ -3027,7 +3027,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 }
 
 /// What a `molt://…` link in the Restore wizard's one link field turns out
-/// to be — the whole of the Join/Restore merge (`docs/ui/welcome_rework.md`).
+/// to be — the whole of the Join/Restore merge (`docs_archive/ui/welcome_rework.md`).
 ///
 /// The two shapes are unambiguous by prefix and both already have a parser in
 /// `molt-engine`; the panel just asks which one it is holding, because that

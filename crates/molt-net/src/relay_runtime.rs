@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! N2 (`docs/transport/nostr_n2_plan.md` §2): the pool runtime over
+//! N2 (`docs_archive/transport/nostr_n2_plan.md` §2): the pool runtime over
 //! [`RelayWs`] — publish with ≥1-OK semantics today; subscriptions, cursors,
 //! dedup, the EOSE gate and connection supervision land with the later plan
 //! steps. The relay list ALWAYS arrives from `molt_core::relay::dialable`
@@ -917,7 +917,7 @@ pub enum ProbeVerdict {
     Unusable(String),
 }
 
-/// B4 — the relay probe (`docs/reviews/buzz_followups.md`): the four
+/// B4 — the relay probe (`docs_archive/reviews/buzz_followups.md`): the four
 /// questions a relay must answer before it may be trusted, ONE verdict,
 /// one reason. Every phase is bounded.
 ///

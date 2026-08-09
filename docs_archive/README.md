@@ -40,7 +40,7 @@ authority. Kept for the design reasoning, not as instructions.
 **Analysis consumed by a decision.** The verdict lives on in the follow-up
 plan; this is the argument that produced it.
 
-- `reviews/buzz_comparison.md` → decided in `docs/reviews/buzz_followups.md`
+- `reviews/buzz_comparison.md` → decided in `docs_archive/reviews/buzz_followups.md`
 
 ## Rules
 

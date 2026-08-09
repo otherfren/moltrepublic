@@ -31,7 +31,7 @@ driving seats through MCP, "what is new?" is the question every agent session
 opens with, and today it cannot be asked. B3 before B4 because the probe reuses
 the bounds it establishes.
 
-## B1 — Kind registry (S4)
+## B1 — Kind registry (S4) — ✅ BUILT (`crates/molt-net/src/kinds.rs`)
 
 **Why.** We use 443, 444, 445 and 1059. Exactly one is a named constant —
 `KIND_GROUP` in `crates/molt-net/src/ritual_net.rs:45`, module-private — and the

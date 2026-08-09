@@ -411,7 +411,13 @@ there would let m-of-n survivors hijack the seat), so the re-anchored
 transport key is a projection ALONGSIDE the roster. That fold now lives in
 one place, `chain::working_anchors`.
 
-#### VERIFIED DEFECT, found here, still open: a compaction loses the working anchor
+#### VERIFIED DEFECT, found here — RESOLVED: a compaction kept losing the working anchor
+
+> Resolution (shipped): `CheckpointState.anchors` carries the working
+> transport anchors across the cut (the tag moved on to
+> `molt-chain-checkpoint-v6`), `chain::working_anchors` folds them, and
+> `a_compaction_keeps_the_working_anchor_of_a_recovered_seat` pins it.
+> The analysis below is the historical record.
 
 `CheckpointState.roster` is built by the same `apply_membership`, so it
 carries the **founding** anchor. The `Restored` block that re-anchored a seat

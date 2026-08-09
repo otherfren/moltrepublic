@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! N4a step 2 (`docs/transport/nostr_n4_plan.md` §2): the kind-446 ritual
+//! N4a step 2 (`docs_archive/transport/nostr_n4_plan.md` §2): the kind-446 ritual
 //! rumor — every founder↔joiner pre-group leg (JoinRequest, JoinAccepted,
 //! LinkSpent) rides the existing `RitualMsg` JSON vocabulary inside a NIP-59
 //! gift wrap. The peel chain is fail-closed like the 444's, and — §2.1 —

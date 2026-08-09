@@ -922,7 +922,7 @@ export component AppWindow inherits Window {
     pure callback parse-invite(string) -> InvitePreview;
     // the Restore wizard's one link field: is this an invite or a recovery
     // link? The answer decides which FIELD is required and which command the
-    // continue button issues (`docs/ui/welcome_rework.md`).
+    // continue button issues (`docs_archive/ui/welcome_rework.md`).
     pure callback classify-link(string) -> LinkPreview;
     // live folder preview for the create wizard: (workspace dir, typed
     // name) → the on-disk path, from the same molt-core slug rule the
@@ -3927,7 +3927,7 @@ export component AppWindow inherits Window {
             // Step 1 asks the way in, step 2 the recovery phrase - and ONLY
             // when the way in needs one, which a founding invite does not
             // (joining is where a phrase comes from). Step 3 is the run.
-            // See docs/ui/welcome_rework.md. ----
+            // See docs_archive/ui/welcome_rework.md. ----
             if root.screen == AppScreen.restore: VerticalLayout {
                 padding: 24px;
                 padding-left: 16px;
