@@ -3030,6 +3030,37 @@ impl State {
                 }
             }
         }
+        // the OWN declines, and only those: a decline carries no signature,
+        // so the link identity is the only mouth it may come out of — a
+        // foreign decline is never re-attested. Served for open cards, for
+        // REJECTED cards (the terminal state is gossip-derived; a peer that
+        // missed the vote would keep it open forever) and for parked voices
+        // (the own log replayed a decline whose proposal is not back yet).
+        // A receiver without the card parks the voice symmetrically.
+        let me = self.member();
+        let mut declined: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| {
+                matches!(p.state, ProposalState::Proposed | ProposalState::Rejected)
+                    && p.decliners.iter().any(|d| d == &me)
+            })
+            .map(|(id, _)| *id)
+            .chain(
+                self.pending_declines
+                    .iter()
+                    .filter(|(_, parked)| parked.iter().any(|(m, _)| m == &me))
+                    .map(|(id, _)| *id),
+            )
+            .collect();
+        declined.sort_unstable();
+        declined.dedup();
+        for id in declined {
+            events.push(WorkspaceEvent::Declined {
+                id: ProposalId(id),
+                by: me.clone(),
+            });
+        }
         events
     }
 
@@ -3897,6 +3928,201 @@ mod tests {
         assert!(
             peer.proposals.contains_key(&10),
             "a decodable peer set_image is recorded as pending"
+        );
+    }
+
+    /// A 2-of-3 chain peer holding the FULL three-member roster (the shared
+    /// `chain_peer` pins the founding pair).
+    fn chain_peer_3(member: &str, b: &Builder) -> crate::State {
+        let mut peer = crate::tests::plain_state();
+        peer.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: member.to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string(), "dora".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: "play chess".to_string(),
+            republic_id: b.republic_id.clone(),
+            founded_ts: 0,
+        });
+        peer.adopt_chain(b.blocks.clone());
+        peer
+    }
+
+    /// One wire envelope from `from` (per-sender seq; prev_seq 0 = unordered).
+    fn wire(peer: &mut crate::State, from: &str, seq: u64, body: WorkspaceEvent) {
+        let env = molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts: 1_751_000_000 + seq,
+            by: from.to_string(),
+            body,
+        };
+        peer.cmd_net_delivered(from.to_string(), env, None)
+            .expect("a wire delivery acks, never errors");
+    }
+
+    /// Live incident 2026-08-09 (defect 6): a decline is a VOTE — it must
+    /// converge like an approval. Two wire declines in a 2-of-3 kill the
+    /// proposal on every node; before the receive arm existed they were
+    /// acked and DROPPED, so a majority-declined vote stayed pending forever
+    /// on every node but the decliner's own.
+    #[test]
+    fn wire_declines_converge_and_reject_at_the_veto_threshold() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "New Name" }),
+            },
+        );
+        wire(
+            &mut peer,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+        );
+        let p = peer.proposals.get(&9).expect("registered");
+        assert_eq!(p.decliners, vec!["dora".to_string()], "the wire decline counts");
+        assert_eq!(p.state, ProposalState::Proposed, "one decline in 2-of-3 leaves room");
+        // forgery: the body claims dora again, but the link says petra — dropped,
+        // a peer can only ever decline as itself
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+        );
+        let p = peer.proposals.get(&9).expect("still there");
+        assert_eq!(p.decliners.len(), 1, "a decline must carry its link identity");
+        // a duplicate of dora's decline (resend) stays ONE voice
+        wire(
+            &mut peer,
+            "dora",
+            2,
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+        );
+        assert_eq!(peer.proposals.get(&9).expect("still there").decliners.len(), 1);
+        // petra's real decline tips it: 2 > n − m = 1 → Rejected
+        wire(
+            &mut peer,
+            "petra",
+            3,
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "petra".to_string() },
+        );
+        let p = peer.proposals.get(&9).expect("still there");
+        assert_eq!(p.state, ProposalState::Rejected, "a majority decline is terminal");
+        assert_eq!(p.declined_by, "petra", "the tipping decliner is named");
+        assert!(p.declined_at > 0, "the decline timestamp is the envelope's");
+    }
+
+    /// A decline can outrun its proposal on the wire (G7 orders per sender
+    /// only) and it replays from the own log before a re-served proposal
+    /// returns: either way it PARKS and registers the moment the proposal
+    /// is known — a vote must never be lost to arrival order.
+    #[test]
+    fn a_decline_ahead_of_its_proposal_parks_and_registers() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "dora".to_string() },
+        );
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "petra".to_string() },
+        );
+        assert!(peer.proposals.is_empty(), "no card yet — the declines wait");
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(4),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Late" }),
+            },
+        );
+        let p = peer.proposals.get(&4).expect("registered");
+        assert_eq!(p.decliners.len(), 2, "both parked declines registered");
+        assert_eq!(p.state, ProposalState::Rejected, "and they tip it immediately");
+    }
+
+    /// WP2 re-serve carries the OWN decline: a vote against survives RAM
+    /// loss like a collected signature does, so a rejoiner (or a node whose
+    /// pre-fix engine dropped the gossip) can still converge. Foreign
+    /// declines are NOT re-attested — only the link identity vouches a
+    /// decline — and a REJECTED card still serves the own voice.
+    #[test]
+    fn open_governance_reserves_the_own_decline() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        // an open card walter declined (1 ≤ veto room → still Proposed)
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(7),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Open" }),
+            },
+        );
+        peer.cmd_decline(ProposalId(7)).expect("decline");
+        // a card that went Rejected (petra's wire decline tips it)
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(8),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Dead" }),
+            },
+        );
+        peer.cmd_decline(ProposalId(8)).expect("decline");
+        wire(
+            &mut peer,
+            "petra",
+            3,
+            WorkspaceEvent::Declined { id: ProposalId(8), by: "petra".to_string() },
+        );
+        assert_eq!(
+            peer.proposals.get(&8).expect("card").state,
+            ProposalState::Rejected
+        );
+        // a parked own decline (own-log replay raced a re-served proposal)
+        peer.register_decline(11, "walter", 1_751_000_000);
+        let events = peer.open_governance_events();
+        let own_declines: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                WorkspaceEvent::Declined { id, by } if by == "walter" => Some(id.0),
+                _ => None,
+            })
+            .collect();
+        assert!(own_declines.contains(&7), "the open card's own decline re-serves");
+        assert!(own_declines.contains(&8), "the rejected card's own decline re-serves");
+        assert!(own_declines.contains(&11), "the parked own decline re-serves");
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, WorkspaceEvent::Declined { by, .. } if by == "petra")
+            ),
+            "a foreign decline is never re-attested"
         );
     }
 

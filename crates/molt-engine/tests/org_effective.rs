@@ -383,3 +383,100 @@ async fn a_sealed_pool_edit_survives_the_reopen() {
         "the reopened pool is the chain-ratified one"
     );
 }
+
+/// The state a node's card for `op` currently shows, if it has one.
+async fn card_state(w: &WalletHandle, op: &str) -> Option<molt_core::ProposalState> {
+    match w.execute(Command::ListProposals).await.expect("list proposals") {
+        Reply::Proposals { proposals } => proposals
+            .iter()
+            .find(|p| p.payload.get("op").and_then(|v| v.as_str()) == Some(op))
+            .map(|p| p.state),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Wait until the node's card for `op` reads `want`.
+async fn wait_for_card(w: &WalletHandle, op: &str, want: molt_core::ProposalState) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if card_state(w, op).await == Some(want) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the {op} card never reached {want:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Decline the pending `op` proposal once it is visible on this node.
+async fn decline_op(w: &WalletHandle, op: &str) {
+    wait_for_card(w, op, molt_core::ProposalState::Proposed).await;
+    match w.execute(Command::ListProposals).await.expect("list proposals") {
+        Reply::Proposals { proposals } => {
+            let p = proposals
+                .iter()
+                .find(|p| p.payload.get("op").and_then(|v| v.as_str()) == Some(op))
+                .expect("just waited for it");
+            w.execute(Command::Decline { proposal: p.id }).await.expect("decline");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Live incident 2026-08-09 (defect 6), the user-visible keystone: a
+/// declined vote DIES on every node. In a 2-of-2 the member's single
+/// decline is terminal — and the proposer's node must learn that over the
+/// wire; before the fix the decline was acked and dropped, so the card
+/// stayed pending on the proposer forever, un-endable by any click.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declined_vote_dies_on_every_node() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+
+    let (a, b) = found_pair(&root, &[&url], "Veto Gilde").await;
+    a.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({ "op": "set_name", "value": "Neuer Name" }),
+    })
+    .await
+    .expect("propose set_name");
+
+    decline_op(&b, "set_name").await;
+    wait_for_card(&b, "set_name", molt_core::ProposalState::Rejected).await;
+    // the proposer's node converges on the SAME terminal verdict
+    wait_for_card(&a, "set_name", molt_core::ProposalState::Rejected).await;
+}
+
+/// The rejected verdict reaches even a node that was CLOSED while the vote
+/// died: the reopen probe pulls the survivor's open-governance set, which
+/// re-serves the own decline for a rejected card too — nobody is left
+/// holding a majority-declined vote open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_verdict_reaches_a_reopened_node() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+
+    let (a, b) = found_pair(&root, &[&url], "Späte Gilde").await;
+    let id = read_session(&a).await.active_workspace.clone();
+    a.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({ "op": "set_name", "value": "Zu spät" }),
+    })
+    .await
+    .expect("propose set_name");
+    // b holds the card before a goes away
+    wait_for_card(&b, "set_name", molt_core::ProposalState::Proposed).await;
+
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    decline_op(&b, "set_name").await;
+    wait_for_card(&b, "set_name", molt_core::ProposalState::Rejected).await;
+
+    a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+    wait_for_card(&a, "set_name", molt_core::ProposalState::Rejected).await;
+}

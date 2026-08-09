@@ -23,6 +23,25 @@ use serde_json::Value;
 
 use crate::State;
 
+/// Parked declines: at most this many proposal ids wait for their proposal
+/// (each id holds at most one voice per member) — a roster member can spam
+/// declines for invented ids, and the park must not grow with them.
+const PARKED_DECLINE_IDS_MAX: usize = 1024;
+
+/// What registering a decline did. The wire ingest emits from this; the log
+/// applier ignores it (replay must not ring frontends).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclineOutcome {
+    /// A fresh voice against; the proposal stays open.
+    Voice,
+    /// A fresh voice, and it tipped the proposal terminal.
+    Rejected,
+    /// Nothing new (duplicate voice, or the proposal is already terminal).
+    Known,
+    /// The proposal is unknown here — the voice parked for its arrival.
+    Parked,
+}
+
 /// The republic's EFFECTIVE display state: the ratified genesis folded
 /// with the applied Organization ops (last write wins per op). This is
 /// what every reader shows — the genesis itself stays immutable history,
@@ -543,6 +562,75 @@ impl State {
             });
         }
         Ok(Reply::Ack)
+    }
+
+    /// The one decline-bookkeeping choke point (log applier, wire ingest,
+    /// park drain): a decline is ONE member's voice, not a veto — deduped
+    /// per member, the proposal turns Rejected only when approval can no
+    /// longer reach the threshold (declines > n − m). A decline for a
+    /// proposal this node does not know yet PARKS (bounded) and registers
+    /// when the proposal arrives: votes must never be lost to arrival
+    /// order — G7 orders per sender, and a decline travels on a different
+    /// sender's chain than its proposal (or replays from the own log
+    /// before a re-served proposal returns). Emit-free: the applier
+    /// replays through here, callers on live paths emit from the outcome.
+    pub(crate) fn register_decline(&mut self, id: u64, by: &str, ts: u64) -> DeclineOutcome {
+        // a decline references an id SOME proposer minted — treat it as
+        // taken, or a later local mint could collide with the parked voice
+        self.next_id = self.next_id.max(id.saturating_add(1));
+        let veto_room = self
+            .replica
+            .as_ref()
+            .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
+            .unwrap_or(0);
+        let Some(p) = self.proposals.get_mut(&id) else {
+            if self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
+                && !self.pending_declines.contains_key(&id)
+            {
+                tracing::warn!(%id, %by, "decline park full — dropping");
+                return DeclineOutcome::Known;
+            }
+            let parked = self.pending_declines.entry(id).or_default();
+            if !parked.iter().any(|(m, _)| m == by) {
+                parked.push((by.to_string(), ts));
+            }
+            return DeclineOutcome::Parked;
+        };
+        if p.state != ProposalState::Proposed || p.decliners.iter().any(|d| d == by) {
+            return DeclineOutcome::Known;
+        }
+        p.decliners.push(by.to_string());
+        if p.decliners.len() > veto_room {
+            p.state = ProposalState::Rejected;
+            // envelope data only (replay determinism): when and by whom
+            // (the TIPPING decliner) — the Declined read view renders both
+            p.declined_at = ts;
+            p.declined_by = by.to_string();
+            DeclineOutcome::Rejected
+        } else {
+            DeclineOutcome::Voice
+        }
+    }
+
+    /// Register every parked decline for a proposal that just became known.
+    /// Returns the strongest outcome (Rejected > Voice > Known) so a live
+    /// caller can ring frontends; replay callers ignore it. Idempotent —
+    /// the park entry is consumed.
+    pub(crate) fn register_parked_declines(&mut self, id: u64) -> DeclineOutcome {
+        let Some(parked) = self.pending_declines.remove(&id) else {
+            return DeclineOutcome::Known;
+        };
+        let mut strongest = DeclineOutcome::Known;
+        for (by, ts) in parked {
+            match self.register_decline(id, &by, ts) {
+                DeclineOutcome::Rejected => strongest = DeclineOutcome::Rejected,
+                DeclineOutcome::Voice if strongest != DeclineOutcome::Rejected => {
+                    strongest = DeclineOutcome::Voice;
+                }
+                _ => {}
+            }
+        }
+        strongest
     }
 
     /// The one-line summary a DECIDED vote posts into its own discussion

@@ -599,6 +599,13 @@ pub(crate) struct State {
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
     pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
+    /// Declines waiting for their proposal (keyed by proposal id, one entry
+    /// per member with the decline's ts): a decline travels on a different
+    /// sender's G7 chain than its proposal, and an own-log decline replays
+    /// before a re-served foreign proposal returns — parked votes register
+    /// the moment the proposal is known ([`State::register_decline`]).
+    /// Ephemeral and bounded, like the signature collection above.
+    pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64)>>,
     /// The exact [`molt_core::ChainChange`] each open proposal is voting on
     /// (keyed by proposal id) — so approvers sign, and the committer seals, the
     /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
@@ -915,6 +922,7 @@ impl State {
             chain_member_relays: HashMap::new(),
             split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
+            pending_declines: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,

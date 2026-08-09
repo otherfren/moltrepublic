@@ -1392,6 +1392,21 @@ impl State {
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload) {
                     self.emit(molt_core::Event::Proposed { id, surface, by: from });
+                    // votes that outran the card (parked declines) stand now
+                    match self.register_parked_declines(id.0) {
+                        crate::proposals::DeclineOutcome::Rejected => {
+                            self.emit(molt_core::Event::Rejected { id });
+                        }
+                        crate::proposals::DeclineOutcome::Voice => {
+                            let by = self
+                                .proposals
+                                .get(&id.0)
+                                .and_then(|p| p.decliners.last().cloned())
+                                .unwrap_or_default();
+                            self.emit(molt_core::Event::Declined { id, by });
+                        }
+                        _ => {}
+                    }
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
@@ -1401,6 +1416,31 @@ impl State {
                     have: self.chain_approval_count(id.0),
                     need: self.threshold(),
                 });
+            }
+            // a decline is a VOTE and crosses the wire like one (see
+            // `crosses_wire`) — without this arm it was acked and DROPPED,
+            // so a majority-declined proposal stayed pending forever on
+            // every node but the decliner's own (live incident 2026-08-09,
+            // defect 6). Unlike an approval it carries no signature, so the
+            // link identity is the only proof of authorship (`ChatRead`
+            // posture): it counts for `from`, and a body claiming another
+            // member is dropped, never re-attributed.
+            WorkspaceEvent::Declined { id, by } if self.is_chain_governed() => {
+                if by != from {
+                    tracing::warn!(%from, claimed = %by, "dropping a decline claiming another member");
+                    return Ok(Reply::Ack);
+                }
+                match self.register_decline(id.0, &from, envelope.ts) {
+                    crate::proposals::DeclineOutcome::Rejected => {
+                        // silent on the summary: the node whose LOCAL
+                        // decline tips the vote posts it, exactly once
+                        self.emit(molt_core::Event::Rejected { id });
+                    }
+                    crate::proposals::DeclineOutcome::Voice => {
+                        self.emit(molt_core::Event::Declined { id, by: from });
+                    }
+                    _ => {}
+                }
             }
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
                 self.receive_block(block);

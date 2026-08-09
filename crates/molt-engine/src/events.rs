@@ -296,6 +296,7 @@ impl State {
                     },
                 );
                 self.next_id = self.next_id.max(id.0 + 1);
+                let _ = self.register_parked_declines(id.0);
             }
             WorkspaceEvent::Approved { id, .. } => {
                 // Replay projection, deliberately a plain count: live
@@ -313,28 +314,14 @@ impl State {
             WorkspaceEvent::Declined { id, by } => {
                 // a decline is ONE member's voice, not a veto: the proposal
                 // turns Rejected only when approval can no longer reach the
-                // threshold (declines > n − m). A pre-ritual context (no
-                // replica) keeps the single-operator semantics — my own
-                // decline is the exit, one decline rejects. Deduplicated per
-                // member: a redelivered/repeated decline is one voice.
-                let veto_room = self
-                    .replica
-                    .as_ref()
-                    .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
-                    .unwrap_or(0);
-                if let Some(p) = self.proposals.get_mut(&id.0) {
-                    if p.state == ProposalState::Proposed && !p.decliners.contains(by) {
-                        p.decliners.push(by.clone());
-                        if p.decliners.len() > veto_room {
-                            p.state = ProposalState::Rejected;
-                            // envelope data only (replay determinism): when
-                            // and by whom (the TIPPING decliner) — the
-                            // Declined read view renders both
-                            p.declined_at = env.ts;
-                            p.declined_by = by.clone();
-                        }
-                    }
-                }
+                // threshold (declines > n − m; pre-ritual keeps the
+                // single-operator semantics — one decline is the exit). An
+                // own-log decline whose FOREIGN proposal is not registered
+                // yet parks instead of vanishing — the WP2 re-serve brings
+                // the proposal back, and the vote must still be standing.
+                // All in [`State::register_decline`]; the outcome is
+                // ignored here, replay must not ring frontends.
+                let _ = self.register_decline(id.0, by, env.ts);
             }
             WorkspaceEvent::Applied { id } => {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
@@ -376,6 +363,7 @@ impl State {
                     decliners: Vec::new(),
                 });
                 self.next_id = self.next_id.max(id.0 + 1);
+                let _ = self.register_parked_declines(id.0);
             }
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
