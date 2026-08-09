@@ -7,10 +7,10 @@ un-dimmed) are on master — keystones
 `molt-net/tests/file_plane.rs` and
 `molt-engine/tests/file_over_relays.rs::a_shared_file_downloads_over_the_relay`.
 Of F4, the re-publish loop ships (a stale stamp re-publishes on the next
-`FileWanted`; a removed share stops serving via `available`). STILL OPEN:
-the cap as a config key (the constant is
-`file_plane::FILE_CAP_DEFAULT_BYTES`) and the share card's one-word
-relay-held/sharer-only status.
+`FileWanted`; a removed share stops serving via `available`), and the cap
+is the `[storage] file_cap_bytes` config key (keep-live on wholesale
+saves; default 4 MiB). STILL OPEN: the share card's one-word
+relay-held/sharer-only status (§5.5).
 
 ## 1. What exists, and what the gate is
 
@@ -73,9 +73,9 @@ plane limit is 65535 chunks; the REAL cap must come from relay behaviour
   GUI share button un-dimmed. Keystone `file_over_relays.rs`. (No disk
   chunk cache in this cut: a fetch streams straight to the download dir —
   the cache bound of §5.3 becomes relevant only with previews/re-serves.)
-- **F4** — partial: the stale-stamp re-publish loop and the RemoveFile
-  stop (`available` gates serving) ship with F3. OPEN: the cap config
-  key (§5.1) and the share card's one-word availability status (§5.5).
+- **F4** — partial: the stale-stamp re-publish loop, the RemoveFile stop
+  (`available` gates serving) and the `file_cap_bytes` config key (§5.1)
+  ship. OPEN: the share card's one-word availability status (§5.5).
 
 ## 5. Decisions (user-ratified 2026-08-09)
 
