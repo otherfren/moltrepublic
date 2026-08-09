@@ -450,11 +450,19 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         "a committed vote's discussion must be read-only"
     );
     // … while the channel stays readable: the deliberation is still there
-    // (two chats + the file offer)
+    // (two chats + the file offer), PLUS the sealer's decision summary —
+    // the engine-authored System line every decided vote appends
+    // (2026-08-09), which is why the read-only gate is send-side only
+    let decided = read_chat_snap(&a, Some(patch.clone())).await.applied;
     assert_eq!(
-        read_chat_snap(&a, Some(patch.clone())).await.applied.len(),
-        3,
-        "the decided discussion keeps its history readable"
+        decided.len(),
+        4,
+        "the decided discussion keeps its history readable, plus the summary"
+    );
+    assert!(
+        decided.last().and_then(|m| m.get("body")).and_then(|b| b.as_str())
+            .is_some_and(|b| b.contains('✓')),
+        "the last line is the decision summary"
     );
 
     // (g) of §5.2 — the MCP-tool-built read equality — lives in

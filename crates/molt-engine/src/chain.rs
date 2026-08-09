@@ -1757,6 +1757,15 @@ impl State {
         // no proposal id for after_block_applied to key on, so drop it here
         self.pending_sigs.remove(&proposal_id);
         self.proposal_changes.remove(&proposal_id);
+        // an accepted VOTE posts its summary into its discussion (story
+        // 2026-08-09) — minted exactly once, by the sealer (a passively
+        // applied broadcast/catch-up block receives this message over the
+        // wire instead); sequenced AFTER the Committed envelope, so
+        // receivers fold the decision before its notice
+        if let ChainChange::Applied { payload, .. } = &block.change {
+            let payload = payload.clone();
+            self.post_decision_summary(proposal_id, &payload, None);
+        }
         tracing::debug!(height = block.height, %proposal_id, "sealed and broadcast a chain block");
         // WP4b automation (2026-07-18): checkpoints trigger themselves —
         // HERE and only here, because reaching adopt_committed_block means
@@ -5644,6 +5653,98 @@ mod tests {
                 }),
             )
             .expect("keeping one shared relay is the legal migration step");
+    }
+
+    /// A DECIDED vote appends its summary to its discussion (story
+    /// 2026-08-09): the SEALER posts one System message into the patch
+    /// channel — so "Discussion" on an accepted vote says what exactly was
+    /// decided, and the notice replicates like any chat message instead of
+    /// being minted once per node.
+    #[test]
+    fn a_sealed_vote_appends_its_summary_to_the_discussion() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_relays",
+                    "value": "wss://relay.one wss://relay.three.example",
+                }),
+            )
+            .expect("proposes");
+        let (id, surface, payload) = {
+            let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+            (*id, rec.surface, rec.payload.clone())
+        };
+        petra.receive_proposed(id, surface, payload);
+        let walter_sig = walter
+            .pending_sigs
+            .get(&id)
+            .expect("walter's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "walter")
+            .expect("walter signed")
+            .sig
+            .clone();
+        petra.receive_approval(id, "walter", 1, &walter_sig);
+        petra.chain_sign_and_gossip_approval(id);
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+        // the SEALER's log carries the summary, in the vote's own channel
+        let sum = petra
+            .chat_visible()
+            .find(|m| {
+                m.kind == molt_core::ChatKind::System
+                    && matches!(&m.channel, molt_core::ChannelRef::Patch { id: p } if p.0 == id)
+            })
+            .expect("the sealed vote posts its summary into the discussion")
+            .clone();
+        assert!(
+            sum.body.contains('✓') && sum.body.contains("relay.three.example"),
+            "the summary names the outcome and the decided content: {}",
+            sum.body
+        );
+        // …and the proposer does NOT mint its own copy (it receives the
+        // sealer's message over the wire like any chat)
+        assert!(
+            walter.chat_visible().all(|m| m.kind != molt_core::ChatKind::System),
+            "only the sealer appends"
+        );
+    }
+
+    /// The negative outcome gets the same treatment: the decline that makes
+    /// approval unreachable posts the summary, naming the decliner.
+    #[test]
+    fn a_terminal_decline_appends_its_summary_to_the_discussion() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({ "op": "set_name", "value": "NewName" }),
+            )
+            .expect("proposes");
+        // n = 2, m = 2: one decline makes the threshold unreachable
+        walter.cmd_decline(ProposalId(1)).expect("declines");
+        let sum = walter
+            .chat_visible()
+            .find(|m| {
+                m.kind == molt_core::ChatKind::System
+                    && matches!(&m.channel, molt_core::ChannelRef::Patch { id: p } if p.0 == 1)
+            })
+            .expect("the terminal decline posts its summary")
+            .clone();
+        assert!(
+            sum.body.contains('⊘')
+                && sum.body.contains("walter")
+                && sum.body.contains("NewName"),
+            "the summary names the outcome, the decliner and the content: {}",
+            sum.body
+        );
     }
 
     /// Make-before-break holds at the FOLD, not only at propose (review

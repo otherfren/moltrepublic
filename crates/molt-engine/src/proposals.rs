@@ -528,6 +528,14 @@ impl State {
             .is_some_and(|p| p.state == ProposalState::Rejected)
         {
             self.emit(Event::Rejected { id: proposal });
+            // the negative decision gets its summary too, minted exactly
+            // once — on the node whose decline tipped the vote terminal
+            // (wire-received declines flip the state elsewhere and stay
+            // silent; they receive this message instead)
+            if let Some(payload) = self.proposals.get(&proposal.0).map(|p| p.payload.clone()) {
+                let who = me.to_string();
+                self.post_decision_summary(proposal.0, &payload, Some(&who));
+            }
         } else {
             self.emit(Event::Declined {
                 id: proposal,
@@ -535,6 +543,76 @@ impl State {
             });
         }
         Ok(Reply::Ack)
+    }
+
+    /// The one-line summary a DECIDED vote posts into its own discussion
+    /// (story 2026-08-09): outcome mark, human label, the decided content,
+    /// and for the negative outcome the decliner — so "Discussion" on an
+    /// accepted or declined vote says what exactly was decided. English
+    /// like every engine-authored notice; NEVER the image bytes.
+    pub(crate) fn decision_summary(
+        id: u64,
+        payload: &Value,
+        decliner: Option<&str>,
+    ) -> String {
+        let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+        let label = match op {
+            "set_name" => "Name",
+            "set_charter" => "Charter",
+            "set_chat_retention" => "Chat retention",
+            "set_image" => "Logo",
+            "remove_image" => "Logo removed",
+            "set_relays" => "Relay pool",
+            other => other,
+        };
+        // the decided content, capped — a charter is long, and the image
+        // ops carry base64 that must never reach a chat line
+        let content = match op {
+            "set_image" | "remove_image" => String::new(),
+            _ => {
+                let v = payload.get("value").and_then(Value::as_str).unwrap_or("");
+                let mut c: String = v.chars().take(160).collect();
+                if v.chars().count() > 160 {
+                    c.push('…');
+                }
+                c
+            }
+        };
+        let head = if decliner.is_none() {
+            format!("⚖ #{id} ✓ {label}")
+        } else {
+            format!("⚖ #{id} ⊘ {label}")
+        };
+        let mut line = if content.is_empty() {
+            head
+        } else {
+            format!("{head}: {content}")
+        };
+        if let Some(who) = decliner {
+            line.push_str(&format!(" · declined by {who}"));
+        }
+        line
+    }
+
+    /// Post a decided vote's summary into its discussion — best-effort like
+    /// all chat (a failed mint must never block the decision itself).
+    pub(crate) fn post_decision_summary(
+        &mut self,
+        id: u64,
+        payload: &Value,
+        decliner: Option<&str>,
+    ) {
+        let me = self.member();
+        let body = Self::decision_summary(id, payload, decliner);
+        if let Err(e) = self.post_message_with_kind(
+            me,
+            body,
+            None,
+            molt_core::ChannelRef::Patch { id: ProposalId(id) },
+            molt_core::ChatKind::System,
+        ) {
+            tracing::warn!(error = %e, id, "could not post the decision summary");
+        }
     }
 
     /// Record the `Applied` event once a proposal has reached the threshold.
@@ -556,6 +634,14 @@ impl State {
             self.emit(Event::Applied { id, surface });
             if surface == Surface::Organization {
                 self.after_org_applied();
+            }
+        }
+        // the decision's summary goes to ITS discussion, minted exactly
+        // where the Applied event is born (the chain path posts at the
+        // sealer instead — `adopt_committed_block`)
+        if !self.is_chain_governed() {
+            if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
+                self.post_decision_summary(id.0, &payload, None);
             }
         }
     }

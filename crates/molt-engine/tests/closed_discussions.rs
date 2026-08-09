@@ -101,12 +101,18 @@ async fn chat_into_a_declined_discussion_is_refused() {
         ProposalState::Rejected,
     );
     // …and the earlier message is still readable: the channel closed for
-    // writes, not for reads
+    // writes, not for reads — plus the decliner's decision summary, the
+    // engine-authored System line every decided vote appends (2026-08-09)
     let snap = read_chat(&w).await;
     assert_eq!(
         snap.applied.len(),
-        1,
-        "the pre-decline message stays in the log"
+        2,
+        "the pre-decline message stays in the log, plus the summary"
+    );
+    assert!(
+        snap.applied.last().and_then(|m| m.get("body")).and_then(|b| b.as_str())
+            .is_some_and(|b| b.contains('⊘')),
+        "the last line is the decline summary"
     );
 }
 
