@@ -549,6 +549,12 @@ impl State {
             if p.decliners.contains(&me) {
                 return Err(MoltError::AlreadyDeclined(proposal));
             }
+            // deliberately NO mirror guard against an own collected
+            // signature: decline-after-approve is how a proposer WITHDRAWS
+            // (the auto-cosign would otherwise lock every proposal open),
+            // and the sealed-summary test pins it. The signature itself
+            // still stands — retraction semantics are the D2 follow-up
+            // (docs/reviews/decline_convergence_review_followups.md).
         }
         let env = self.make_env(
             me.clone(),
@@ -918,6 +924,7 @@ impl State {
             threshold: self.threshold(),
             state: p.state,
             approved_by_me,
+            declined_by_me: p.decliners.iter().any(|d| d == &me),
             current,
             proposed,
             votes,

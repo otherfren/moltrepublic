@@ -1069,7 +1069,8 @@ export component DecisionTable inherits Rectangle {
     property <length> col-title: max(120px, self.width * 0.24);
     property <length> col-votes: 110px;
     property <length> col-when: 108px;
-    property <length> col-jump: 92px;
+    // emoji-only jump button (a localized label overflowed the cell)
+    property <length> col-jump: 48px;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
@@ -1199,12 +1200,15 @@ export component DecisionTable inherits Rectangle {
                 }
                 Rectangle {
                     width: root.col-jump;
+                    // emoji-only: any localized label is wider than a table
+                    // cell wants to be — the hover tip names the action
                     if r.id >= 0: AppButton {
                         height: 28px;
                         y: 6px;
                         pad: 8px;
                         emoji: "💬";
-                        label: Strings.pc-discuss;
+                        tooltip: Strings.pc-discuss;
+                        tooltip-left: true;
                         clicked => {
                             root.discuss(r.id);
                         }
@@ -1577,15 +1581,20 @@ export component ProposalCard inherits Rectangle {
             }
         }
         // approve/decline only while the vote is open (`read-only` gates
-        // them) — the discussion link ALWAYS shows: a decided vote's
-        // discussion stays linked and re-openable (read-only, the engine
-        // refuses new writes there)
+        // them), and each GRAYED exactly where the engine would refuse the
+        // click (clickable OR grayed, never click-then-refusal — story
+        // 2026-08-09): a cast stance disables approve; a standing decline
+        // disables both; decline stays live after the own approval, which
+        // is the proposer's withdrawal path. The discussion link ALWAYS
+        // shows: a decided vote's discussion stays linked and re-openable
+        // (read-only, the engine refuses new writes there)
         HorizontalLayout {
             spacing: 8px;
             if !root.read-only: AppButton {
                 emoji: "👍";
                 label: Strings.mv-approve;
                 primary: true;
+                enabled: root.p.my-vote == 0;
                 clicked => {
                     root.approve();
                 }
@@ -1593,6 +1602,7 @@ export component ProposalCard inherits Rectangle {
             if !root.read-only: AppButton {
                 emoji: "👎";
                 label: Strings.mv-decline;
+                enabled: root.p.my-vote != 2;
                 clicked => {
                     root.decline();
                 }

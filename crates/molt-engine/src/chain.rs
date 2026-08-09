@@ -4213,6 +4213,44 @@ mod tests {
         assert_eq!(peer.next_id, before, "and never moves the mint counter");
     }
 
+    /// Decline-after-approve stays ALLOWED — it is how a proposer
+    /// withdraws (the auto-cosign would otherwise lock every proposal
+    /// open); the summary test pins the terminal effect. The view still
+    /// reports the own stance so frontends can gray per what the engine
+    /// actually refuses (approve-after-decline, re-decline).
+    #[test]
+    fn a_decline_after_the_own_approval_still_works() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        peer.identity_sk = b
+            .keys
+            .iter()
+            .find(|(m, _)| m == "walter")
+            .map(|(_, sk)| sk.clone());
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Erst ja" }),
+            },
+        );
+        peer.cmd_approve(ProposalId(9)).expect("approve signs");
+        let p = peer.proposals.get(&9).cloned().expect("card");
+        assert!(peer.view(9, &p).approved_by_me, "the signature is collected");
+        peer.cmd_decline(ProposalId(9)).expect("the withdrawal path stays open");
+        let p = peer.proposals.get(&9).cloned().expect("card");
+        let v = peer.view(9, &p);
+        assert!(v.declined_by_me, "the stance the frontend grays on");
+    }
+
     /// A standing decline is a cast vote: approving on top of it would let
     /// one member hold both stances at once (a decline does not retract a
     /// collected signature — review 2026-08-09, finding 3).
@@ -4243,6 +4281,10 @@ mod tests {
             ),
             "an approve over the own standing decline must refuse"
         );
+        // …and the view names the own stance, so frontends gray instead
+        // of letting the click run into that refusal
+        let p = peer.proposals.get(&9).cloned().expect("card");
+        assert!(peer.view(9, &p).declined_by_me);
     }
 
     /// An applied MEMBERSHIP card reads its voters from the sealed block

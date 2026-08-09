@@ -3594,6 +3594,10 @@ struct ProposalRowData {
     /// Who declined it ("" = not declined) + the human "when" label.
     declined_by: String,
     declined_when: String,
+    /// The READING member's own stance (0 open · 1 approved · 2 declined):
+    /// a cast stance grays the vote buttons — clickable OR grayed, never
+    /// click-then-refusal (story 2026-08-09).
+    my_vote: i32,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -4586,6 +4590,7 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         )),
         declined_by: p.declined_by.clone().into(),
         declined_when: p.declined_when.clone().into(),
+        my_vote: p.my_vote,
     }
 }
 
@@ -4686,6 +4691,13 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             when_label(lang, p.declined_at)
         } else {
             String::new()
+        },
+        my_vote: if p.declined_by_me {
+            2
+        } else if p.approved_by_me {
+            1
+        } else {
+            0
         },
     }
 }
@@ -6994,6 +7006,7 @@ mod tests {
                 threshold: 2,
                 state: molt_core::ProposalState::Applied,
                 approved_by_me: true,
+                declined_by_me: false,
                 current: String::new(),
                 proposed: String::new(),
                 votes: vec![
@@ -7034,6 +7047,7 @@ mod tests {
             threshold: 3,
             state: ProposalState::Proposed,
             approved_by_me: false,
+            declined_by_me: false,
             current: String::new(),
             proposed: String::new(),
             votes: Vec::new(),
@@ -7092,6 +7106,7 @@ mod tests {
             threshold: 3,
             state: ProposalState::Proposed,
             approved_by_me: false,
+            declined_by_me: false,
             current: String::new(),
             proposed: String::new(),
             votes: Vec::new(),
@@ -7174,6 +7189,7 @@ mod tests {
             threshold: 3,
             state,
             approved_by_me: false,
+            declined_by_me: false,
             current: String::new(),
             proposed: String::new(),
             votes: Vec::new(),

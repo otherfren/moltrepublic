@@ -4378,6 +4378,12 @@ pub struct ProposalView {
     /// default, so an older writer's view stays deserializable.
     #[serde(default)]
     pub approved_by_me: bool,
+    /// Whether the READING node already declined — with `approved_by_me`
+    /// this is the frontends' "my stance is cast" signal: gray the vote
+    /// buttons instead of letting a click run into the engine's refusal
+    /// (one member, one stance). Additive with a default.
+    #[serde(default)]
+    pub declined_by_me: bool,
     /// Ist-Stand: what the targeted state is NOW (engine-derived for the
     /// Organization edit ops, e.g. the ratified charter before a
     /// `set_charter`). Display data, never consensus input; "" = unknown.
