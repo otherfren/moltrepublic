@@ -2667,12 +2667,14 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                 }
 
-                // step 2: the founding ritual lobby — the live member list
-                // (rows turn green as members activate their link and sign
-                // the roster) and the real ritual event log. The founder's
-                // phrase is NOT here: it appears in its own step after the
-                // republic exists, like every other member's.
-                if root.cw-step == 1 && root.cw-outcome != 1: VerticalLayout {
+                // step 2 AND the seed step share this branch: the founding
+                // ritual lobby — the live member list (rows turn green as
+                // members activate their link and sign the roster) and the
+                // real ritual event log. Once the republic exists
+                // (outcome 1) the phrase step replaces the lobby panels but
+                // KEEPS the log: the post-seal lines (mesh bootstrap) land
+                // there, and hiding them looked like a dead node.
+                if root.cw-step == 1: VerticalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
 
@@ -2766,8 +2768,9 @@ export component AppWindow inherits Window {
                     // its CONTENT (capped, the Flickable scrolls beyond the
                     // cap — a member is never cut off), never stretched; the
                     // log below takes the leftover height. Hidden during the
-                    // charter step — one thing at a time.
-                    if !(root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0): Rectangle {
+                    // charter step and the seed step — one thing at a time.
+                    if root.cw-outcome != 1
+                        && !(root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0): Rectangle {
                         height: min(340px, 84px + root.cw-seats.length * 49px);
                         background: Theme.panel-2;
                         border-radius: Theme.win95 ? 0px : 8px;
@@ -2997,6 +3000,26 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // the seed step (outcome 1): the republic EXISTS — the
+                    // phrase, its re-typed backup proof, and below it the
+                    // still-live ritual log. Compact (stretch 0): the log
+                    // keeps the leftover height.
+                    if root.cw-outcome == 1: SeedConfirmStep {
+                        vertical-stretch: 0;
+                        seed: root.cw-seed;
+                        icon: @image-url("assets/create.svg");
+                        armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
+                        check <=> root.cw-seed-check;
+                        enter => {
+                            root.cw-seed-check = "";
+                            root.create-finish();
+                        }
+                        copy-requested => {
+                            root.copy-text(root.cw-seed);
+                            root.show-toast(Strings.toast-copied);
+                        }
+                    }
+
                     // the live ritual log: real events (activated · key
                     // received · signed · workspace created). It owns the
                     // leftover height, on the base background so the text
@@ -3071,23 +3094,6 @@ export component AppWindow inherits Window {
 
                 }
 
-                // step 4: the republic EXISTS — now the phrase, alone on its
-                // own step. Re-typing it is the proof it was backed up;
-                // only that unlocks the door (CreateFinish enters).
-                if root.cw-step == 1 && root.cw-outcome == 1: SeedConfirmStep {
-                    seed: root.cw-seed;
-                    icon: @image-url("assets/create.svg");
-                    armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
-                    check <=> root.cw-seed-check;
-                    enter => {
-                        root.cw-seed-check = "";
-                        root.create-finish();
-                    }
-                    copy-requested => {
-                        root.copy-text(root.cw-seed);
-                        root.show-toast(Strings.toast-copied);
-                    }
-                }
             }
 
             // ---- open (mock empty list) ----
