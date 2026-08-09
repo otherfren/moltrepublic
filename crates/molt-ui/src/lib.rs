@@ -3899,14 +3899,30 @@ async fn gather_surfaces(
     let selected_closed = selected_channel_closed(&selected, &infos, &known);
     let selected_org = selected_channel_org(&selected, &known);
     // the panel renders from the SAME projection the Organization pane uses,
-    // so the two can never drift apart
+    // so the two can never drift apart. A DECIDED vote is in neither the
+    // pending nor the declined read, but its discussion stays a selectable
+    // read-only view — the header must carry the decided card, so the
+    // lookup falls back to the full proposal list (an empty default card
+    // here was the reported half-page "Proposal:" wreck, 2026-08-09)
     let selected_decision = match &selected {
-        ChannelRef::Patch { id } => all_pending
-            .iter()
-            .chain(all_declined.iter())
-            .find(|p| p.id == *id)
-            .map(|p| proposal_row(lang, p))
-            .unwrap_or_default(),
+        ChannelRef::Patch { id } => {
+            let live = all_pending
+                .iter()
+                .chain(all_declined.iter())
+                .find(|p| p.id == *id)
+                .map(|p| proposal_row(lang, p));
+            match live {
+                Some(row) => row,
+                None => match wallet.execute(Command::ListProposals).await {
+                    Ok(Reply::Proposals { proposals }) => proposals
+                        .iter()
+                        .find(|p| p.id == *id)
+                        .map(|p| proposal_row(lang, p))
+                        .unwrap_or_default(),
+                    _ => ProposalRowData::default(),
+                },
+            }
+        }
         _ => ProposalRowData::default(),
     };
     let ctx = ChatViewCtx {
@@ -8769,6 +8785,66 @@ mod gui_tests {
                 (RELAY_ROW_ADDED, "wss://new.example".to_string()),
             ],
             "the card carries the pool diff (empty Ist-Stand: all added)"
+        );
+    }
+
+    /// **The reported bug (2026-08-09): after an approval elsewhere applied
+    /// the vote, clicking Chat showed "ein kaputtes Panel mit leerem
+    /// 'Proposal:', das die Hälfte der Seite einnimmt".**
+    ///
+    /// A decided vote's discussion stays a selectable read-only view, but
+    /// the decision header's lookup chained only pending + declined — an
+    /// APPLIED proposal is in neither list, so the card above the chat
+    /// rendered from `ProposalRow::default()`: the empty wreck. The header
+    /// must carry the decided card.
+    #[test]
+    fn a_decided_votes_discussion_keeps_its_decision_card() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let rt = rt();
+        let _guard = rt.enter();
+        let (ws, _now) = workspace_on_disk(&root, 1, &["walter"], "test the header");
+        drop(ws);
+
+        let (w, _) = node_with_chat(&root);
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        rt.block_on(async {
+            let stored = molt_storage::scan_workspaces(&root)
+                .first()
+                .map(|e| e.info().id)
+                .expect("the workspace is on disk");
+            w.execute(Command::OpenWorkspace { id: stored })
+                .await
+                .expect("the stored workspace opens");
+            mirror(&w, &ui, &last, &chat_ui).await;
+            // the vote APPLIES instantly at m=1 — the state right after
+            // the approval sound on the reporting client
+            w.execute(Command::Propose {
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_name", "value": "NewName" }),
+            })
+            .await
+            .expect("the vote proposes and applies");
+            // …and the user opens the decision's discussion
+            chat_ui
+                .lock()
+                .expect("ui state")
+                .select(ChannelRef::Patch {
+                    id: molt_core::ProposalId(1),
+                });
+            mirror(&w, &ui, &last, &chat_ui).await;
+        });
+
+        let card = ui.get_selected_decision();
+        assert!(
+            card.id == 1 && !card.text.is_empty(),
+            "a decided vote's discussion must head with ITS card, never an \
+             empty one (id={}, text={:?})",
+            card.id,
+            card.text
         );
     }
 }

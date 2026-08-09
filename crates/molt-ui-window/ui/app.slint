@@ -4504,7 +4504,10 @@ export component AppWindow inherits Window {
                             // shows, compact. Opening a decision's chat then
                             // always says which decision, and what it is
                             // waiting for, without scrolling anywhere.
-                            if root.selected-channel-org: ProposalCard {
+                            // id > 0 = the card is real: a default row (id 0)
+                            // must never render — an empty card here was the
+                            // reported half-page "Proposal:" wreck
+                            if root.selected-channel-org && root.selected-decision.id > 0: ProposalCard {
                                 p: root.selected-decision;
                                 compact: true;
                                 org-img: root.org-img;
