@@ -1,8 +1,8 @@
 # i18n audit: error messages and other non-lexicon user-facing text
 
-Status: audit complete (2026-08-09), cheap fixes landed, the structural fix
-is an OPEN DESIGN DECISION (see §3) — do not start it without the user's
-call on the architecture.
+Status: audit complete (2026-08-09), cheap fixes landed. The structural
+fix is DECIDED (2026-08-09): error codes, full scope — the execution plan
+is `i18n_error_codes_plan.md`.
 
 The GUI's localization runs through one lexicon (`molt-ui` `lexicon!` →
 the Slint `Strings` global). This audit swept everything a user reads that

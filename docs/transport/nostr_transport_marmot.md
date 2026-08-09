@@ -755,8 +755,9 @@ decided any time before ship.
   removed there is only one founding path (Nostr), so every roster carries a
   `nostr_pk`; roster-v3 is a single canonical-bytes layout, no per-transport
   fork.
-- **§10.7 → N6 — File transfer on Nostr: DECIDED — OFF in V1**, surfaced
-  honestly in the GUI (the 445-chunk data plane is a separate later project).
+- **§10.7 → N6 — File transfer on Nostr: RE-DECIDED 2026-08-09 — BUILD the
+  445-chunk data plane** (lifts "OFF in V1"; design + open questions in
+  `file_transfer_nostr.md`). The GUI gate stays until it ships.
 - **§10.9 → N6 — Migration: DECIDED — archive + fresh start, and existing SMP
   republics become UNOPENABLE** once SMP code is removed (not read-only — the
   demolition deletes the opener). Export before removal if any data matters;
