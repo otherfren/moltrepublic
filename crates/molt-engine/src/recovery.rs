@@ -252,6 +252,7 @@ pub(crate) fn sealed_roster_from_genesis(
         identities,
         agenda,
         relays,
+        features,
     } = &block.change
     else {
         return None;
@@ -270,6 +271,9 @@ pub(crate) fn sealed_roster_from_genesis(
         // would hand a recovered node an empty pool — and no way to reach the
         // republic it just proved it belongs to
         relays: relays.clone(),
+        // same for the ratified feature set (roster-v5): dropping it here
+        // would make the recomputed bytes v4-shaped and fail every signature
+        features: features.clone(),
     })
 }
 
@@ -773,6 +777,8 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
         // into the signed summary exactly so a rejoiner arriving after a
         // compaction still learns which relays the republic agreed on
         relays: blob.relays.clone(),
+        // the ratified feature set survives the cut the same way (v7)
+        features: blob.founding_features.clone(),
     }
 }
 
@@ -1198,6 +1204,7 @@ mod tests {
                 identities: ids.clone(),
                 agenda: "play chess".to_string(),
                 relays: vec!["wss://relay.one".to_string(), "wss://relay.two".to_string()],
+                features: None,
             },
             sigs: vec![
                 RosterAttestation {
@@ -1262,6 +1269,7 @@ mod tests {
             founding_identities: ids.clone(),
             agenda: "play chess".to_string(),
             relays: vec!["wss://relay.one".to_string()],
+            founding_features: None,
             republic_id: "f00".to_string(),
             roster: ids,
             applied: Vec::new(),
@@ -1307,6 +1315,7 @@ mod tests {
             identities,
             agenda: "found it".to_string(),
             relays: Vec::new(),
+            features: None,
         };
         let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
         let sigs = members

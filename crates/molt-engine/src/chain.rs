@@ -314,6 +314,7 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
         identities,
         agenda: _,
         relays: _,
+        features: _,
     } = &block.change
     else {
         return Err("block 0 is not a genesis".to_string());
@@ -591,18 +592,29 @@ pub(crate) fn checkpoint_state(
                 identities,
                 agenda,
                 relays,
+                features,
             },
         ..
     }) = blocks.first()
     else {
         return Err("chain does not start with a genesis".to_string());
     };
-    let base = genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays);
+    let base = genesis_base(
+        name,
+        *rule_m,
+        *rule_n,
+        identities,
+        agenda,
+        republic_id,
+        relays,
+        features.as_deref(),
+    );
     fold_state(base, &blocks[1..], upto)
 }
 
 /// The empty state a genesis roots — the base every full-holder fold and
 /// walk starts from.
+#[allow(clippy::too_many_arguments)] // the genesis facts are one unit
 fn genesis_base(
     name: &str,
     rule_m: u8,
@@ -611,6 +623,7 @@ fn genesis_base(
     agenda: &str,
     republic_id: &str,
     relays: &[String],
+    features: Option<&[String]>,
 ) -> molt_core::CheckpointState {
     molt_core::CheckpointState {
         founding_name: name.to_string(),
@@ -620,6 +633,7 @@ fn genesis_base(
         agenda: agenda.to_string(),
         republic_id: republic_id.to_string(),
         relays: relays.to_vec(),
+        founding_features: features.map(<[String]>::to_vec),
         roster: identities.to_vec(),
         applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
         consumed_ids: Vec::new(),
@@ -777,6 +791,7 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         identities,
         agenda,
         relays,
+        features,
     } = &genesis.change
     else {
         unreachable!("verify_genesis accepted a non-genesis block 0");
@@ -786,7 +801,16 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
     let mut walk = ChainWalk {
         head,
         seen: BTreeSet::new(),
-        running: genesis_base(name, *rule_m, *rule_n, identities, agenda, republic_id, relays),
+        running: genesis_base(
+            name,
+            *rule_m,
+            *rule_n,
+            identities,
+            agenda,
+            republic_id,
+            relays,
+            features.as_deref(),
+        ),
         floor: None,
         folded: 1,
     };
@@ -994,6 +1018,9 @@ impl State {
                 // roster_canonical_bytes, so this must be exactly what the
                 // attestations below were made over
                 relays: sealed.relays.clone(),
+                // same rule for the ratified feature set (roster-v5):
+                // presence decides the tag the verifier recomputes under
+                features: sealed.features.clone(),
             },
             sigs: sealed.attestations.clone(),
         }]
@@ -3186,6 +3213,7 @@ mod tests {
                 rule_n,
                 identities: identities.clone(),
                 agenda: "play chess".to_string(),
+                features: None,
                 relays,
             };
             let mut b = Builder {
@@ -3422,6 +3450,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(),
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: b.republic_id.clone(),
             founded_ts: 0,
         });
@@ -3519,6 +3548,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(),
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: b.republic_id.clone(),
             founded_ts: 0,
         });
@@ -3551,6 +3581,7 @@ mod tests {
                 rule_m: 2,
                 identities: Vec::new(),
                 agenda: "play chess".to_string(),
+                features: None,
                 republic_id: rid.clone(),
                 founded_ts: 0,
             })
@@ -3630,6 +3661,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(),
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: rid,
             founded_ts: 0,
         });
@@ -3716,6 +3748,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(), // adopt_chain fills these from the verified head
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: b.republic_id.clone(),
             founded_ts: 0,
         });
@@ -3762,6 +3795,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(),
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: b.republic_id.clone(),
             founded_ts: 0,
         });
@@ -3957,6 +3991,7 @@ mod tests {
             rule_m: 2,
             identities: Vec::new(),
             agenda: "play chess".to_string(),
+            features: None,
             republic_id: b.republic_id.clone(),
             founded_ts: 0,
         });

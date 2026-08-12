@@ -269,6 +269,7 @@ mod tests {
                 republic_id: String::new(),
                 agenda: String::new(),
                 relays: Vec::new(),
+                features: None,
             },
         };
         let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");

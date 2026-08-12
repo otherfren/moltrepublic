@@ -153,6 +153,7 @@ impl State {
                 // read by verifiers recomputing the signed bytes from the log,
                 // not by the applier — the live pool comes from transport.state
                 relays: _,
+                features,
             } => {
                 self.replica = Some(ReplicaState {
                     name: name.clone(),
@@ -161,6 +162,7 @@ impl State {
                     rule_m: *rule_m,
                     identities: identities.clone(),
                     agenda: agenda.clone(),
+                    features: features.clone(),
                     republic_id: republic_id.clone(),
                     founded_ts: env.ts,
                 });
@@ -450,6 +452,7 @@ impl State {
             roster: replica.roster,
             identities: replica.identities,
             agenda: replica.agenda,
+            features: replica.features,
             republic_id: replica.republic_id,
             founded_ts: replica.founded_ts,
             chat: self.chat.clone(),
@@ -513,6 +516,7 @@ impl State {
             rule_m: dump.rule_m,
             identities: dump.identities,
             agenda: dump.agenda,
+            features: dump.features,
             republic_id: dump.republic_id,
             founded_ts: dump.founded_ts,
         });
@@ -736,6 +740,7 @@ mod tests {
                     republic_id: String::new(),
                     agenda: String::new(),
                     relays: Vec::new(),
+                    features: None,
                 },
             ),
             e(2, "petra", WorkspaceEvent::Chat(msg("petra", "gm", 102))),
@@ -842,6 +847,7 @@ mod tests {
                 republic_id: String::new(),
                 agenda: String::new(),
                 relays: Vec::new(),
+                features: None,
             },
         ));
         st.apply(&e(

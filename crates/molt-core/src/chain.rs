@@ -89,6 +89,12 @@ pub enum ChainChange {
         /// cannot recompute what the founders signed.
         #[serde(default)]
         relays: Vec<String>,
+        /// The ratified feature set (roster-v5), carried for the same
+        /// recompute reason. `None` on every pre-v5 genesis — presence
+        /// decides the tag [`roster_canonical_bytes`] emits, which is what
+        /// keeps live v4 republics verifying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<Vec<String>>,
     },
     /// A gated surface transition that reached threshold and is applied.
     Applied {
@@ -193,7 +199,16 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             identities,
             agenda,
             relays,
-        } => roster_canonical_bytes(rid, *rule_m, *rule_n, identities, agenda, relays),
+            features,
+        } => roster_canonical_bytes(
+            rid,
+            *rule_m,
+            *rule_n,
+            identities,
+            agenda,
+            relays,
+            features.as_deref(),
+        ),
         ChainChange::Applied {
             proposal_id,
             surface,
@@ -330,6 +345,12 @@ pub struct CheckpointState {
     /// without changing any hash.
     #[serde(default)]
     pub relays: Vec<String>,
+    /// The ratified founding feature set (genesis, roster-v5). Carried for
+    /// the same reason as `relays` — and the suffix walk needs it to
+    /// recompute the v5 founding bytes at all. `None` on a republic founded
+    /// pre-v5; presence decides the checkpoint tag (v6 stays byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub founding_features: Option<Vec<String>>,
     /// The content-derived republic id (must equal the recomputation).
     pub republic_id: String,
     /// The CURRENT roster after every membership block `<= upto`, in
@@ -412,7 +433,9 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v6` — v6
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v7` — v7
+/// carries the ratified founding FEATURE SET (roster-v5), conditionally:
+/// a state without one hashes byte-identically to v6; v6
 /// carries the relay LEDGER, without which a cut forgets every declared
 /// reachability and split detection runs on stale data; v5
 /// carries the WORKING transport anchors, without which a cut strands every
@@ -431,7 +454,14 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-chain-checkpoint-v6\0");
+    // v7 carries the ratified founding FEATURE SET — conditionally, like
+    // roster-v5 itself: a state without one (every pre-v5 republic) hashes
+    // byte-identically to v6, so existing checkpoints keep verifying.
+    out.extend_from_slice(if s.founding_features.is_some() {
+        b"molt-chain-checkpoint-v7\0".as_slice()
+    } else {
+        b"molt-chain-checkpoint-v6\0".as_slice()
+    });
     put_bytes(&mut out, s.republic_id.as_bytes());
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
@@ -450,6 +480,14 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     out.extend_from_slice(&u64::try_from(s.relays.len()).unwrap_or(0).to_le_bytes());
     for r in &s.relays {
         put_bytes(&mut out, r.as_bytes());
+    }
+    // v7: the ratified founding feature set (see the field's own doc).
+    // Written only when present, so a v6 state stays byte-identical.
+    if let Some(features) = &s.founding_features {
+        out.extend_from_slice(&u64::try_from(features.len()).unwrap_or(0).to_le_bytes());
+        for f in features {
+            put_bytes(&mut out, f.as_bytes());
+        }
     }
     out.extend_from_slice(&u64::try_from(s.roster.len()).unwrap_or(0).to_le_bytes());
     for i in &s.roster {
@@ -568,6 +606,7 @@ mod tests {
             founding_identities: vec![ident("petra", "aa"), ident("walter", "bb")],
             agenda: "play chess".to_string(),
             relays: vec!["wss://relay.example".to_string()],
+            founding_features: None,
             republic_id: "f00".to_string(),
             roster: vec![ident("petra", "aa"), ident("walter", "bb")],
             applied: vec![(
@@ -647,10 +686,87 @@ mod tests {
 
     /// The tag itself, called out separately: a layout change that forgets
     /// the bump is the failure mode the whole versioning rule exists for.
+    /// A state WITHOUT a founding feature set stays v6 byte-for-byte (that
+    /// is what keeps every existing checkpoint verifying); one WITH a set
+    /// carries v7.
     #[test]
     fn the_checkpoint_layout_carries_its_version() {
         assert!(checkpoint_canonical_bytes(&pinned_state())
             .starts_with(b"molt-chain-checkpoint-v6\0"));
+        let mut with = pinned_state();
+        with.founding_features = Some(vec!["wallet".to_string()]);
+        assert!(checkpoint_canonical_bytes(&with).starts_with(b"molt-chain-checkpoint-v7\0"));
+    }
+
+    /// **The `-v7` byte pin** — the ratified founding FEATURE SET rides the
+    /// checkpoint (`charter_features.md` D4): the suffix walk recomputes the
+    /// v5 founding bytes from the blob, and a pruned republic must not lose
+    /// what the founders ratified. Independent recomputation, like the v6
+    /// pin above; `Some([])` and `None` must never share a byte form.
+    #[test]
+    fn checkpoint_canonical_bytes_are_pinned_at_v7() {
+        let mut s = pinned_state();
+        s.founding_features = Some(vec!["memory".to_string(), "wallet".to_string()]);
+
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-chain-checkpoint-v7\0");
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        put(&mut want, b"f00");
+        put(&mut want, b"Chess Club");
+        want.push(2);
+        want.push(2);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        put(&mut want, b"play chess");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://relay.example");
+        // v7: the founding feature run, right after the founding relay pool
+        want.extend_from_slice(&2u64.to_le_bytes());
+        put(&mut want, b"memory");
+        put(&mut want, b"wallet");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        put(&mut want, b"organization");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        put(&mut want, br#"{"op":"set_name","value":"Chess Club Reloaded"}"#);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(&3u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        put(&mut want, "ab".repeat(32).as_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://other.example");
+        want.extend_from_slice(&9u64.to_le_bytes());
+
+        assert_eq!(
+            checkpoint_canonical_bytes(&s),
+            want,
+            "the v7 layout moved — bump the version tag and move this pin with it"
+        );
+
+        // an explicitly empty selection is NOT the legacy absence
+        let mut empty = pinned_state();
+        empty.founding_features = Some(Vec::new());
+        assert_ne!(
+            checkpoint_canonical_bytes(&empty),
+            checkpoint_canonical_bytes(&pinned_state()),
+            "Some([]) and None must never share a byte form"
+        );
     }
 
     /// R3b's relay declaration is CONDITIONALLY signed: an empty declaration
@@ -764,10 +880,11 @@ mod tests {
             identities: identities.clone(),
             agenda: "play".to_string(),
             relays: Vec::new(),
+            features: None,
         };
         assert_eq!(
             approval_bytes("f00", 0, &change),
-            roster_canonical_bytes("f00", 2, 2, &identities, "play", &[]),
+            roster_canonical_bytes("f00", 2, 2, &identities, "play", &[], None),
         );
     }
 

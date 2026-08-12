@@ -583,6 +583,7 @@ fn genesis_from_snapshot(
                 republic_id: st.republic_id,
                 agenda: st.agenda,
                 relays: Vec::new(),
+                features: st.features,
             },
         });
     }
@@ -3060,6 +3061,7 @@ mod tests {
                 republic_id: String::new(),
                 agenda: String::new(),
                 relays: Vec::new(),
+                features: None,
             },
         }
     }
@@ -3613,6 +3615,7 @@ mod tests {
             rule_n: 1,
             founding_identities: Vec::new(),
             agenda: String::new(),
+            founding_features: None,
             republic_id: String::new(),
             roster: Vec::new(),
             applied: Vec::new(),

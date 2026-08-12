@@ -1850,6 +1850,12 @@ pub struct SealedRoster {
     /// The deliberated free-text charter every member ratified (concept §3.3).
     #[serde(default)]
     pub agenda: String,
+    /// The ratified feature set (roster-v5, `charter_features.md`): the
+    /// optional surfaces this republic activates, sorted + deduped. `None`
+    /// on every pre-v5 roster — and `None` is what keeps those verifying
+    /// (the canonical bytes stay v4). `Some([])` = deliberately none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
 }
 
 impl SealedRoster {
@@ -1874,6 +1880,7 @@ impl SealedRoster {
                 republic_id: self.republic_id.clone(),
                 agenda: self.agenda.clone(),
                 relays: self.relays.clone(),
+                features: self.features.clone(),
             },
         }
     }
@@ -1904,6 +1911,14 @@ impl SealedRoster {
 /// `molt-republic-id-v2` was length-prefixed for exactly this class after a
 /// forged larger founding table collided, and an unframed field in a hash
 /// preimage should not survive a version bump that is already rewriting it.
+///
+/// **v5 binds the ratified FEATURE SET** (`docs/ritual/charter_features.md`
+/// D2, user-decided 2026-08-11) — and it is **conditional on presence**,
+/// the [`ChainChange::Membership`](crate::chain::ChainChange) precedent
+/// lifted to the tag: `features: None` emits bytes **identical to v4** (tag
+/// included), so every live v4 republic's genesis keeps verifying; `Some`
+/// emits the v5 tag plus the feature run as the final field. `Some([])` is
+/// a real, distinct value — a founder that deselected everything.
 pub fn roster_canonical_bytes(
     ws_id: &str,
     rule_m: u8,
@@ -1911,9 +1926,14 @@ pub fn roster_canonical_bytes(
     members: &[MemberIdentity],
     agenda: &str,
     relays: &[String],
+    features: Option<&[String]>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"molt-roster-v4\0");
+    out.extend_from_slice(if features.is_some() {
+        b"molt-roster-v5\0".as_slice()
+    } else {
+        b"molt-roster-v4\0".as_slice()
+    });
     let id = ws_id.as_bytes();
     out.extend_from_slice(&u32::try_from(id.len()).unwrap_or(0).to_le_bytes());
     out.extend_from_slice(id);
@@ -1954,6 +1974,17 @@ pub fn roster_canonical_bytes(
         let b = r.as_bytes();
         out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(b);
+    }
+    // v5: the ratified feature set — entry-COUNTED then each key
+    // length-prefixed, like the relay run. Written only when present, so a
+    // legacy (None) table stays byte-identical to v4.
+    if let Some(f) = features {
+        out.extend_from_slice(&u32::try_from(f.len()).unwrap_or(0).to_le_bytes());
+        for k in f {
+            let b = k.as_bytes();
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        }
     }
     out
 }
@@ -2025,6 +2056,11 @@ pub enum WorkspaceEvent {
         /// recompute the exact bytes the attestations above were signed over.
         #[serde(default)]
         relays: Vec<String>,
+        /// The ratified feature set (roster-v5). Stored for the same
+        /// recompute reason as `relays`; `None` on every pre-v5 genesis,
+        /// and presence decides the tag the verifier recomputes under.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<Vec<String>>,
     },
     /// A seat filled via invite.
     MemberJoined {
@@ -2340,6 +2376,10 @@ pub struct EngineStateDump {
     /// workspace keeps it (the genesis is before the snapshot and not replayed).
     #[serde(default)]
     pub agenda: String,
+    /// The ratified feature set (roster-v5), carried for the same
+    /// snapshot-restore reason as `agenda`. `None` = pre-v5 founding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
     /// The neutral, content-derived republic id (the genesis' value). Kept at
     /// runtime so the persistent-chain path can recompute `approval_bytes`
     /// without re-deriving it; a snapshot-restored open keeps it too (the
@@ -5449,7 +5489,7 @@ mod tests {
                 nostr_pk: "dd".repeat(32),
             },
         ];
-        let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]);
+        let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
         assert!(bytes.starts_with(b"molt-roster-v4\0"), "version tag bumped");
         assert_eq!(bytes.len(), 329, "fixture length");
         assert_eq!(
@@ -5466,6 +5506,7 @@ mod tests {
             &table,
             "charter",
             &["wss://a.example".to_string(), "wss://b.example".to_string()],
+            None,
         );
         assert_ne!(pooled, bytes, "the pool changes what every member signs");
         assert_eq!(pooled.len(), 367, "fixture length with two relays");
@@ -5485,6 +5526,7 @@ mod tests {
                 &table,
                 "charter",
                 &["wss://b.example".to_string(), "wss://a.example".to_string()],
+                None,
             ),
             "relay order is signed, not normalized away"
         );
@@ -5503,28 +5545,103 @@ mod tests {
                 }],
                 "",
                 &[],
+                None,
             ),
-            roster_canonical_bytes("f00", 2, 3, &[], "ada", &["\0\0\0\0\0\0\0\0\0".to_string()]),
+            roster_canonical_bytes("f00", 2, 3, &[], "ada", &["\0\0\0\0\0\0\0\0\0".to_string()], None),
         );
         // v4 also length-prefixes ws_id, so the id/rule boundary is
         // self-delimiting: these two differ, and under v3 their prefixes
         // overlapped
         assert_ne!(
-            roster_canonical_bytes("ab", 1, 2, &table, "charter", &[]),
-            roster_canonical_bytes("a", b'b', 1, &table, "charter", &[]),
+            roster_canonical_bytes("ab", 1, 2, &table, "charter", &[], None),
+            roster_canonical_bytes("a", b'b', 1, &table, "charter", &[], None),
         );
         // the third anchor is inside the signed bytes: changing ONLY a
         // nostr_pk changes what every member signs
         let mut changed = table.clone();
         changed[0].nostr_pk = "dd".repeat(32);
-        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter", &[]));
+        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter", &[], None));
         // a legacy (empty) nostr_pk still length-prefixes as 0 — no special
         // casing that could collide two different rosters onto one byte form
         let mut legacy = table.clone();
         legacy[0].nostr_pk = String::new();
-        let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[]);
+        let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[], None);
         assert_eq!(legacy_bytes.len(), 329 - 64);
         assert_ne!(legacy_bytes, bytes);
+    }
+
+    /// BYTE-IDENTITY PIN — `molt-roster-v5`: the ratified FEATURE SET
+    /// (`charter_features.md` D2). The expected bytes are recomputed
+    /// INDEPENDENTLY, field by field — when this goes red the diff says
+    /// which field moved. The conditional rule is load-bearing: `None`
+    /// must stay byte-identical to v4 (the v4 pin above proves that), and
+    /// `Some([])` must be a DIFFERENT table than `None`.
+    #[test]
+    fn roster_canonical_bytes_v5_binds_the_feature_set() {
+        let table = vec![MemberIdentity {
+            member: "ada".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: "cc".repeat(32),
+        }];
+        let features = vec!["memory".to_string(), "wallet".to_string()];
+        let bytes =
+            roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&features));
+        assert!(bytes.starts_with(b"molt-roster-v5\0"), "presence bumps the tag");
+
+        // the independent recomputation
+        let mut want = Vec::new();
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        want.extend_from_slice(b"molt-roster-v5\0");
+        put(&mut want, b"f00");
+        want.push(1);
+        want.push(1);
+        want.extend_from_slice(&1u32.to_le_bytes());
+        put(&mut want, b"ada");
+        put(&mut want, "aa".repeat(32).as_bytes());
+        put(&mut want, "cc".repeat(32).as_bytes());
+        put(&mut want, b"charter");
+        want.extend_from_slice(&0u32.to_le_bytes()); // relay run, empty
+        want.extend_from_slice(&2u32.to_le_bytes()); // feature run
+        put(&mut want, b"memory");
+        put(&mut want, b"wallet");
+        assert_eq!(bytes, want, "independently recomputed v5 layout");
+
+        // the feature set changes what every member signs
+        let other = vec!["memory".to_string()];
+        assert_ne!(
+            bytes,
+            roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&other)),
+        );
+        // an explicitly empty selection is NOT the legacy absence
+        assert_ne!(
+            roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&[])),
+            roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], None),
+            "Some([]) and None must never share a byte form"
+        );
+        // and the feature run cannot be absorbed by the relay run (injectivity)
+        assert_ne!(
+            roster_canonical_bytes(
+                "f00",
+                1,
+                1,
+                &table,
+                "charter",
+                &["memory".to_string()],
+                Some(&[]),
+            ),
+            roster_canonical_bytes(
+                "f00",
+                1,
+                1,
+                &table,
+                "charter",
+                &[],
+                Some(&["memory".to_string()]),
+            ),
+        );
     }
 
     #[test]
@@ -5541,15 +5658,15 @@ mod tests {
                 nostr_pk: "dd".repeat(32),
             },
         ];
-        let a = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]);
-        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter", &[]));
+        let a = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
+        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None));
         // any changed field changes the bytes
-        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter", &[]));
-        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter", &[]));
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter", &[]));
+        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter", &[], None));
         // the ratified agenda is bound: a changed charter changes the bytes
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other", &[]));
-        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "", &[]));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "", &[], None));
         // length prefixes prevent name/pk boundary games
         let shifted = vec![MemberIdentity {
             member: "petraa".to_string(),
@@ -5562,8 +5679,8 @@ mod tests {
             nostr_pk: String::new(),
         }];
         assert_ne!(
-            roster_canonical_bytes("f00", 1, 1, &shifted, "", &[]),
-            roster_canonical_bytes("f00", 1, 1, &plain, "", &[])
+            roster_canonical_bytes("f00", 1, 1, &shifted, "", &[], None),
+            roster_canonical_bytes("f00", 1, 1, &plain, "", &[], None)
         );
     }
 

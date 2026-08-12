@@ -197,8 +197,15 @@ async fn founding_ritual_completes_across_two_instances() {
         "the republic id is the content-derived value"
     );
     // every attestation verifies against the anchored key over the table
-    let table =
-        molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda, &[]);
+    let table = molt_core::roster_canonical_bytes(
+        republic_id,
+        *rule_m,
+        *rule_n,
+        identities,
+        agenda,
+        &[],
+        None,
+    );
     for att in attestations {
         let identity = identities
             .iter()
@@ -1166,6 +1173,7 @@ async fn a_reaction_arriving_before_its_message_is_parked_and_applied() {
                 republic_id: String::new(),
                 agenda: String::new(),
                 relays: Vec::new(),
+                features: None,
             },
         };
         let ws_b =

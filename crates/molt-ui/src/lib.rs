@@ -8588,6 +8588,7 @@ mod gui_tests {
             attestations: Vec::new(),
             relays: Vec::new(),
             agenda: agenda.to_string(),
+            features: None,
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

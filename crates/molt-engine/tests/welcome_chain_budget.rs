@@ -136,6 +136,7 @@ fn a_pruned_republics_anchor_carries_every_applied_payload() {
         founding_identities: ids.clone(),
         agenda: "play chess".to_string(),
         relays: vec!["wss://relay.example".to_string()],
+        founding_features: None,
         republic_id: "ef".repeat(32),
         roster: ids,
         applied: vec![(

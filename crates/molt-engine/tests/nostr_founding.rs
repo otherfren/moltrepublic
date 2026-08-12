@@ -242,6 +242,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
         republic_id,
         agenda,
         relays,
+        features,
         ..
     } = &log[0].body
     else {
@@ -254,8 +255,15 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     // the ratified pool travels in the genesis frame, so a reader holding only
     // the log can recompute exactly what the attestations were signed over
     assert_eq!(relays, &vec![url.clone()]);
-    let table =
-        molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda, relays);
+    let table = molt_core::roster_canonical_bytes(
+        republic_id,
+        *rule_m,
+        *rule_n,
+        identities,
+        agenda,
+        relays,
+        features.as_deref(),
+    );
     for att in attestations {
         let identity = identities
             .iter()
@@ -929,7 +937,7 @@ fn injected_seal(member: &str) -> (String, String) {
         },
     ];
     let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-    let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[]);
+    let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[], None);
     let sealed = molt_core::SealedRoster {
         relays: Vec::new(),
         name: "R".to_string(),
@@ -949,6 +957,7 @@ fn injected_seal(member: &str) -> (String, String) {
             },
         ],
         agenda: String::new(),
+        features: None,
     };
     (
         serde_json::to_string(&sealed).expect("sealed json"),

@@ -126,6 +126,10 @@ pub(crate) struct RitualRuntime {
     /// members ratify a concrete charter, never an empty placeholder. The pure
     /// sim seam pre-proposes (its founder does not deliberate).
     charter_proposed: bool,
+    /// The proposed feature set (roster-v5, `charter_features.md`), set with
+    /// the charter proposal. `None` until proposed (and on the pre-v5 seams),
+    /// which keeps the canonical bytes v4-shaped.
+    features: Option<Vec<String>>,
     rule_m: u8,
     rule_n: u8,
     founder: MemberIdentity,
@@ -218,7 +222,14 @@ impl RitualRuntime {
             identities,
             &self.agenda,
             &self.group_relays(),
+            self.features.as_deref(),
         )
+    }
+
+    /// The proposed feature set the members ratified (`None` on the pre-v5
+    /// seams and until the founder proposes the charter).
+    pub(crate) fn features(&self) -> Option<Vec<String>> {
+        self.features.clone()
     }
 
     fn next_msg_id(&self, tag: &str) -> molt_net::MsgId {
@@ -606,6 +617,7 @@ impl State {
             // pre-proposes and seals on all-joined (its name, empty agenda);
             // every real founding waits for the founder's explicit charter
             charter_proposed: self.ritual_sim,
+            features: None,
             rule_m,
             rule_n,
             founder,
@@ -1142,6 +1154,12 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     if s.attestations.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
+    // one set, one byte form (same rule the ratifying member enforces)
+    if let Some(features) = &s.features {
+        if !features.windows(2).all(|w| w[0] < w[1]) {
+            return Err("the sealed feature set is not canonical".to_string());
+        }
+    }
     // recompute over the sealed charter too: if the founder put a different
     // name/agenda in the genesis than the members ratified, their signatures
     // (made over the Seal's table) fail here — the charter is tamper-evident
@@ -1153,6 +1171,7 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
             &s.identities,
             &s.agenda,
             &s.relays,
+            s.features.as_deref(),
         );
     for att in &s.attestations {
         let id = s
@@ -1299,6 +1318,13 @@ pub(crate) fn verify_seal_proposal(
                 .to_string(),
         );
     }
+    // one set, one byte form: a feature list that is not sorted + deduped
+    // would give the same selection two different signable encodings
+    if let Some(features) = &proposal.features {
+        if !features.windows(2).all(|w| w[0] < w[1]) {
+            return Err("the proposed feature set is not canonical".to_string());
+        }
+    }
     Ok(molt_core::roster_canonical_bytes(
         &proposal.republic_id,
         proposal.rule_m,
@@ -1306,6 +1332,7 @@ pub(crate) fn verify_seal_proposal(
         &proposal.identities,
         &proposal.agenda,
         &proposal.relays,
+        proposal.features.as_deref(),
     ))
 }
 
@@ -2985,6 +3012,7 @@ mod ritual_ops {
                 identities: identities.clone(),
                 attestations: Vec::new(),
                 agenda: ritual.agenda.clone(),
+                features: ritual.features.clone(),
             };
             let proposal_json = match serde_json::to_string(&proposal) {
                 Ok(j) => j,
@@ -3265,7 +3293,7 @@ mod tests {
             },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter", &[]);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter", &[], None);
         let attestations = vec![
             RosterAttestation { member: "founder".into(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "member".into(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -3280,6 +3308,7 @@ mod tests {
             attestations,
             agenda: "charter".into(),
             relays: Vec::new(),
+            features: None,
         }
     }
 
@@ -3512,6 +3541,30 @@ mod tests {
         assert!(verify_sealed_roster(&s).is_err());
     }
 
+    #[test]
+    fn verify_sealed_roster_rejects_a_tampered_feature_list() {
+        // roster-v5: the feature set sits inside the signed bytes exactly
+        // like the agenda — a genesis carrying features nobody ratified
+        // (here: signatures over None, sealed with Some) fails every
+        // attestation. Adding, dropping and swapping are all tampers.
+        let mut s = valid_roster();
+        s.features = Some(vec!["wallet".to_string()]);
+        assert!(verify_sealed_roster(&s).is_err());
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_non_canonical_feature_set() {
+        // one set, one byte form — an unsorted or duplicated list is refused
+        // outright, before any signature math
+        let mut s = valid_roster();
+        s.features = Some(vec!["wallet".to_string(), "memory".to_string()]);
+        assert!(verify_sealed_roster(&s)
+            .is_err_and(|e| e.contains("not canonical")));
+        s.features = Some(vec!["memory".to_string(), "memory".to_string()]);
+        assert!(verify_sealed_roster(&s)
+            .is_err_and(|e| e.contains("not canonical")));
+    }
+
     // --- the joiner's pre-signature verification (sign-what-you-see) ---------
 
     #[test]
@@ -3523,7 +3576,7 @@ mod tests {
         // the returned bytes are exactly the canonical table over the charter,
         // so a signature over them ratifies precisely this name + agenda + roster
         let expect =
-            molt_core::roster_canonical_bytes(&p.republic_id, p.rule_m, p.rule_n, &p.identities, &p.agenda, &[]);
+            molt_core::roster_canonical_bytes(&p.republic_id, p.rule_m, p.rule_n, &p.identities, &p.agenda, &[], None);
         assert_eq!(table, expect);
     }
 
@@ -3621,6 +3674,34 @@ mod tests {
         assert_ne!(before, after, "a changed agenda changes the bytes we sign");
     }
 
+    #[test]
+    fn verify_seal_proposal_binds_the_features() {
+        // sign-what-you-see covers the feature set: what the member ratifies
+        // is exactly the selection it was shown — None, Some([]) and every
+        // concrete set produce pairwise different bytes
+        let mut p = valid_roster();
+        let pk = p.identities[1].identity_pk.clone();
+        let npk = p.identities[1].nostr_pk.clone();
+        let legacy = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        p.features = Some(Vec::new());
+        let none_picked = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        p.features = Some(vec!["memory".to_string(), "wallet".to_string()]);
+        let picked = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        assert_ne!(legacy, none_picked, "Some([]) is not the legacy absence");
+        assert_ne!(none_picked, picked, "the selection changes the bytes we sign");
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_a_non_canonical_feature_set() {
+        // the member must never ratify a second byte encoding of one set
+        let mut p = valid_roster();
+        let pk = p.identities[1].identity_pk.clone();
+        let npk = p.identities[1].nostr_pk.clone();
+        p.features = Some(vec!["wallet".to_string(), "memory".to_string()]);
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+            .is_err_and(|e| e.contains("not canonical")));
+    }
+
     /// A bare, unactivated seat holding `ticket`.
     fn bare_seat(ticket: &str) -> SeatRuntime {
         SeatRuntime {
@@ -3656,6 +3737,7 @@ mod tests {
             name: "R".to_string(),
             agenda: String::new(),
             charter_proposed: false,
+            features: None,
             rule_m: 3,
             rule_n: 3,
             founder: MemberIdentity {
@@ -3867,6 +3949,7 @@ mod tests {
                 attestations: Vec::new(),
                 agenda: "the ratified charter".to_string(),
                 relays: Vec::new(),
+                features: None,
             };
             send(invite::RitualMsg::JoinAccepted { seat: 0 }, 1).await;
             send(
@@ -3913,6 +3996,7 @@ mod tests {
                 &evil_identities,
                 "a charter nobody ratified",
                 &[],
+                None,
             );
             let sealed = SealedRoster {
                 relays: Vec::new(),
@@ -3933,6 +4017,7 @@ mod tests {
                     },
                 ],
                 agenda: "a charter nobody ratified".to_string(),
+                features: None,
             };
             // The forgery must clear every OTHER gate on this path, or the
             // test pins the wrong one — which is exactly what it did before:

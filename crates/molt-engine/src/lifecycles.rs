@@ -78,6 +78,9 @@ impl State {
         attestations: Vec<molt_core::RosterAttestation>,
         republic_id: String,
         agenda: String,
+        // the ratified feature set (roster-v5); `None` on pre-v5 paths —
+        // it must reach the genesis exactly as signed, like `agenda`
+        features: Option<Vec<String>>,
         // which transport family this workspace runs on + its Nostr material
         // (relay list, rotation seed) — all persisted into the v4
         // `transport.state`. `TransportShape::default()` = the legacy
@@ -121,6 +124,7 @@ impl State {
             identities,
             attestations,
             agenda,
+            features,
             // the RATIFIED pool. `shape.relays` is the same list the founder
             // picked, the members signed and the genesis must carry — a
             // placeholder here writes a genesis whose own attestations do not
@@ -911,6 +915,9 @@ impl State {
         // took it before calling here, so reading the field would silently
         // seal an empty pool — which the R3 keystone caught.
         let pool: Vec<String> = ritual.group_relays();
+        // the ratified feature set travels the same way as the pool: from
+        // the ritual parameter, exactly as the members signed it
+        let features = ritual.features();
         let table = molt_core::roster_canonical_bytes(
             &republic_id,
             c.threshold,
@@ -918,6 +925,7 @@ impl State {
             &identities,
             &c.agenda,
             &pool,
+            features.as_deref(),
         );
         let founder_sig = molt_storage::identity_sign(ritual.founder_sk(), &table);
         let mut attestations = vec![molt_core::RosterAttestation {
@@ -937,6 +945,7 @@ impl State {
             identities: identities.clone(),
             attestations: attestations.clone(),
             agenda: c.agenda.clone(),
+            features: features.clone(),
         };
 
         // the founder's MLS group. On the Nostr path it was BORN at
@@ -1003,6 +1012,7 @@ impl State {
                 attestations,
                 republic_id.clone(),
                 c.agenda.clone(),
+                features.clone(),
                 ritual.transport_shape(),
                 // the founder's identity key, exactly as anchored in the roster
                 Some(ritual.founder_sk().clone()),
@@ -1380,6 +1390,7 @@ impl State {
                 sealed.attestations.clone(),
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
+                sealed.features.clone(),
                 shape,
                 joiner_sk,
                 joiner_nostr_sk,
@@ -1755,6 +1766,7 @@ impl State {
             sealed.attestations.clone(),
             sealed.republic_id.clone(),
             sealed.agenda.clone(),
+            sealed.features.clone(),
             shape,
             Some(sk),
             recovered_nostr_sk,

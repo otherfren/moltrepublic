@@ -381,6 +381,9 @@ pub(crate) struct ReplicaState {
     /// The ratified founding charter (free-text agenda) from the genesis
     /// (empty on pre-deliberation workspaces).
     pub(crate) agenda: String,
+    /// The ratified founding feature set (roster-v5) from the genesis.
+    /// `None` = founded pre-v5 (the legacy baseline applies).
+    pub(crate) features: Option<Vec<String>>,
     /// The neutral, content-derived republic id from the genesis — kept so the
     /// persistent chain can compute `approval_bytes` at runtime (empty on a
     /// pre-republic genesis).
@@ -4254,7 +4257,7 @@ mod tests {
             },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
-        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[]);
+        let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "", &[], None);
         let attestations = vec![
             RosterAttestation { member: "founder".to_string(), sig: molt_storage::identity_sign(&sk_a, &table) },
             RosterAttestation { member: "petra".to_string(), sig: molt_storage::identity_sign(&sk_b, &table) },
@@ -4269,6 +4272,7 @@ mod tests {
             attestations,
             agenda: String::new(),
             relays: Vec::new(),
+            features: None,
         }
     }
 
@@ -4538,6 +4542,7 @@ mod tests {
             identities,
             agenda: "survive total loss".to_string(),
             relays,
+            features: None,
         };
         let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
         let genesis = ChainBlock {

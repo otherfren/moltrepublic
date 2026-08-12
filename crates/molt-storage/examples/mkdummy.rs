@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             republic_id: String::new(),
             agenda: String::new(),
             relays: Vec::new(),
+            features: None,
         },
     };
     let mut ws = molt_storage::create_workspace(&root, &seed, &genesis)?;

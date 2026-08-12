@@ -317,6 +317,7 @@ mod tests {
                 republic_id: String::new(),
                 agenda: "keep secrets".to_string(),
                 relays: Vec::new(),
+                features: None,
             },
         }
     }
@@ -556,6 +557,7 @@ mod tests {
             rule_n: 1,
             founding_identities: Vec::new(),
             agenda: String::new(),
+            founding_features: None,
             republic_id: String::new(),
             roster: Vec::new(),
             applied: Vec::new(),
