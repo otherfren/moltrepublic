@@ -1332,6 +1332,7 @@ async fn member_join(
         Command::NetJoinCharterProposed {
             name: proposal.name.clone(),
             agenda: proposal.agenda.clone(),
+            features: proposal.features.clone(),
             generation,
         },
     )

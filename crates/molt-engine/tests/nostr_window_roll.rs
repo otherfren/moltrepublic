@@ -223,6 +223,7 @@ async fn a_deaf_group_channel_is_surfaced_to_both_wizards_and_heals() {
     a.execute(Command::CreatePropose {
         name: "Rolling".to_string(),
         agenda: "survive a window roll".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");

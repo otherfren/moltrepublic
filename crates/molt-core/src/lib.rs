@@ -95,6 +95,14 @@ impl Surface {
         Surface::ALL.into_iter().find(|x| x.as_str() == s)
     }
 
+    /// Whether this surface is an optional **charter feature**
+    /// (`docs/ritual/charter_features.md` D1): activated at founding or by a
+    /// later threshold vote, never deactivated. Chat and Organization are
+    /// core — always on, never in a feature set.
+    pub fn is_charter_feature(self) -> bool {
+        !matches!(self, Surface::Organization | Surface::Chat)
+    }
+
     /// The surface's sub-views as `(key, display label)` pairs, in navigation
     /// order. The first entry is the default view. Shared vocabulary: the GUI
     /// nav and the `select_view` command validate against this same list.
@@ -2650,6 +2658,10 @@ pub struct CreateState {
     /// members to ratify. Empty until proposed.
     #[serde(default)]
     pub agenda: String,
+    /// The proposed feature selection (canonicalized optional-surface
+    /// keys), set with the charter proposal. Empty until proposed.
+    #[serde(default)]
+    pub features: Vec<String>,
     /// Whether every seat has joined and the founder may now propose the
     /// charter (the deliberation step is unlocked). Set once, UI-driven.
     #[serde(default)]
@@ -2706,6 +2718,11 @@ pub struct JoinState {
     /// before ratifying (empty until the ratification step).
     #[serde(default)]
     pub proposed_agenda: String,
+    /// The founder's proposed feature selection, shown with the charter at
+    /// the ratification step. `None` until the step — and on a proposal
+    /// from a pre-v5 founder.
+    #[serde(default)]
+    pub proposed_features: Option<Vec<String>>,
     /// Whether the join is paused awaiting the joiner's ratification of the
     /// charter above — the wizard shows the charter + a confirm/decline choice,
     /// and the workspace opens only once confirmed.
@@ -3612,6 +3629,13 @@ pub enum Command {
         name: String,
         /// The free-text charter/agenda to ratify.
         agenda: String,
+        /// The feature selection to ratify with the charter
+        /// (`charter_features.md`): optional-surface keys, any order —
+        /// the engine canonicalizes (sort + dedup) and refuses unknown
+        /// keys. Every post-v5 founding carries a selection; empty = the
+        /// founder deselected everything optional.
+        #[serde(default)]
+        features: Vec<String>,
     },
     /// Abandon the founding ritual: distributed links become worthless,
     /// the disk stays untouched (unless the ritual already sealed — then
@@ -4325,6 +4349,9 @@ pub enum Command {
         name: String,
         /// The proposed free-text charter/agenda.
         agenda: String,
+        /// The proposed feature selection (`None` from a pre-v5 founder).
+        #[serde(default)]
+        features: Option<Vec<String>>,
         /// Join incarnation (a cancelled/restarted join drops stale results).
         #[serde(default)]
         generation: Option<u64>,

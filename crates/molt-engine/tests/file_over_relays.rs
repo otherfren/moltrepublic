@@ -106,6 +106,7 @@ async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletH
     a.execute(Command::CreatePropose {
         name: "Datei Gilde".to_string(),
         agenda: String::new(),
+        features: Vec::new(),
     })
     .await
     .expect("charter proposed");

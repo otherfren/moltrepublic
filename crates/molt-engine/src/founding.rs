@@ -1419,8 +1419,9 @@ pub struct Ratifier {
     /// joiner's wizard shows "you're in, waiting for the deliberation" instead of
     /// a silent wait. Best-effort (capacity 1; a resend is dropped).
     pub accepted: mpsc::Sender<()>,
-    /// The proposed `(final name, agenda)` surfaced for the human to review.
-    pub proposal: mpsc::Sender<(String, String)>,
+    /// The proposed `(final name, agenda, feature selection)` surfaced for
+    /// the human to review (`None` features = a pre-v5 founder).
+    pub proposal: mpsc::Sender<(String, String, Option<Vec<String>>)>,
     /// The human's decision: `true` ratifies (sign); `false` or a closed
     /// channel declines and aborts the join.
     pub confirm: mpsc::Receiver<bool>,
@@ -1761,7 +1762,14 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     // before signing. The non-interactive paths (sim members, CLI) pass None
     // and ratify once the proposal verified.
     if let Some(mut r) = ratify {
-        let _ = r.proposal.send((proposal.name.clone(), proposal.agenda.clone())).await;
+        let _ = r
+            .proposal
+            .send((
+                proposal.name.clone(),
+                proposal.agenda.clone(),
+                proposal.features.clone(),
+            ))
+            .await;
         match r.confirm.recv().await {
             Some(true) => {}
             Some(false) => {
@@ -2850,6 +2858,7 @@ mod ritual_ops {
             &mut self,
             name: String,
             agenda: String,
+            features: Vec<String>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             let name = name.trim().to_string();
             if name.is_empty() {
@@ -2872,6 +2881,21 @@ mod ritual_ops {
                     "the agenda is too long (max {AGENDA_MAX} characters)"
                 )));
             }
+            // the feature selection: known optional-surface keys only, then
+            // canonicalized (sort + dedup) — one set, one byte form, so every
+            // member verifies and signs the identical v5 table
+            for key in &features {
+                let known = molt_core::Surface::parse(key)
+                    .is_some_and(molt_core::Surface::is_charter_feature);
+                if !known {
+                    return Err(molt_core::MoltError::Create(format!(
+                        "unknown feature: {key}"
+                    )));
+                }
+            }
+            let mut features = features;
+            features.sort_unstable();
+            features.dedup();
             let Some(ritual) = &mut self.net_ritual else {
                 return Err(molt_core::MoltError::Create(
                     "no founding is in progress".to_string(),
@@ -2897,9 +2921,11 @@ mod ritual_ops {
             // reads the session's create state) signs exactly what was proposed
             ritual.name = name.clone();
             ritual.agenda = agenda.clone();
+            ritual.features = Some(features.clone());
             ritual.charter_proposed = true;
             self.session.create.name = name;
             self.session.create.agenda = agenda;
+            self.session.create.features = features;
             self.session
                 .create
                 .run

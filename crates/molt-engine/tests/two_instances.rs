@@ -117,6 +117,8 @@ async fn founding_ritual_completes_across_two_instances() {
     a.execute(Command::CreatePropose {
         name: "Duet".to_string(),
         agenda: "hold the line".to_string(),
+        // deliberately unsorted — the engine canonicalizes before sealing
+        features: vec!["wallet".to_string(), "memory".to_string()],
     })
     .await
     .expect("founder proposes the charter");
@@ -173,6 +175,7 @@ async fn founding_ritual_completes_across_two_instances() {
         attestations,
         republic_id,
         agenda,
+        features,
         ..
     } = &log[0].body
     else {
@@ -180,6 +183,11 @@ async fn founding_ritual_completes_across_two_instances() {
     };
     assert_eq!((*rule_m, *rule_n), (2, 2));
     assert_eq!(agenda, "hold the line", "the ratified charter is in the genesis");
+    assert_eq!(
+        features.as_deref(),
+        Some(["memory".to_string(), "wallet".to_string()].as_slice()),
+        "the ratified feature selection is in the genesis, canonicalized"
+    );
     assert_eq!(identities.len(), 2, "founder + member-b");
     assert_eq!(attestations.len(), 2, "both signed");
 
@@ -204,7 +212,7 @@ async fn founding_ritual_completes_across_two_instances() {
         identities,
         agenda,
         &[],
-        None,
+        features.as_deref(),
     );
     for att in attestations {
         let identity = identities
@@ -299,7 +307,7 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     // B runs the real member side behind a ratification gate; the test is the
     // human on the other end of the channels
     let (acc_tx, mut acc_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String, Option<Vec<String>>)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
         accepted: acc_tx,
@@ -332,6 +340,7 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     a.execute(Command::CreatePropose {
         name: "Pact".to_string(),
         agenda: "the pact: tend the commons, share the harvest".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -343,6 +352,7 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
             a.execute(Command::CreatePropose {
                 name: "Pact".to_string(),
                 agenda: "a sneaky replacement".to_string(),
+                features: Vec::new(),
             })
             .await,
             Err(molt_core::MoltError::Create(_))
@@ -350,10 +360,12 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
         "re-proposing the charter must be refused"
     );
 
-    // B surfaces the proposed charter for the human to review
-    let (name, agenda) = prop_rx.recv().await.expect("charter surfaced to the joiner");
+    // B surfaces the proposed charter for the human to review — the feature
+    // selection included (an empty one is a real, shown selection)
+    let (name, agenda, features) = prop_rx.recv().await.expect("charter surfaced to the joiner");
     assert_eq!(name, "Pact");
     assert_eq!(agenda, "the pact: tend the commons, share the harvest");
+    assert_eq!(features.as_deref(), Some([].as_slice()));
 
     // the gate holds: with B not yet confirmed, the founding has not sealed
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -429,7 +441,7 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     let seat = materials.into_iter().next().expect("seat material");
 
     let (acc_tx, _acc_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String, Option<Vec<String>>)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
         accepted: acc_tx,
@@ -453,6 +465,7 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     a.execute(Command::CreatePropose {
         name: "Nope".to_string(),
         agenda: "you will not agree to this".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("propose");
@@ -563,6 +576,7 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "keep the roads clear".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -682,6 +696,7 @@ async fn founding_bootstraps_a_direct_mesh_across_two_instances() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "hold the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -831,6 +846,7 @@ async fn founding_chats_over_the_direct_mesh() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "chat over the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -971,6 +987,7 @@ async fn reactions_and_deletes_converge_across_two_instances() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "react over the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -1362,6 +1379,7 @@ async fn founding_governs_over_the_direct_mesh() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "govern over the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -1566,6 +1584,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "recover open votes".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -1805,6 +1824,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "carry the image over the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -2091,6 +2111,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "recover over the mesh".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -2282,6 +2303,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "survive total loss".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -2615,6 +2637,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "survive a dead recovery round".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -2889,6 +2912,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "survive together".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -3126,6 +3150,7 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "rotate the queues".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -3956,6 +3981,7 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "resilient windows".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -4133,6 +4159,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "outlive the rebuild".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");
@@ -4631,6 +4658,7 @@ async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring()
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "mint links for the absent".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("founder proposes the charter");

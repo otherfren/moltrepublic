@@ -1342,7 +1342,11 @@ impl State {
                 members,
                 relays,
             } => self.cmd_create_start(name, member, threshold, members, relays),
-            Command::CreatePropose { name, agenda } => self.cmd_create_propose(name, agenda),
+            Command::CreatePropose {
+                name,
+                agenda,
+                features,
+            } => self.cmd_create_propose(name, agenda, features),
             Command::CreateCancel => self.cmd_create_cancel(),
             Command::CreateFinish => self.cmd_create_finish(),
             Command::NetJoinRequested {
@@ -1475,8 +1479,9 @@ impl State {
             Command::NetJoinCharterProposed {
                 name,
                 agenda,
+                features,
                 generation,
-            } => self.cmd_net_join_charter_proposed(name, agenda, generation),
+            } => self.cmd_net_join_charter_proposed(name, agenda, features, generation),
             Command::JoinCancel => self.cmd_join_cancel(),
             Command::NetRitualNote { note, generation } => {
                 self.cmd_net_ritual_note(note, generation)

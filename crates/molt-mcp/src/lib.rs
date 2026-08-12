@@ -1337,18 +1337,29 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_propose",
             command: "create_propose",
-            description: "Propose the deliberated charter — the final republic name and a free-text agenda — once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda with their signature, and only then does the workspace open.",
+            description: "Propose the deliberated charter — the final republic name, a free-text agenda, and the feature selection — once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda+features with their signature, and only then does the workspace open.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
-                    "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" }
+                    "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
+                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none" }
                 },
                 "required": ["name"]
             }),
             build: |args| Ok(Command::CreatePropose {
                 name: str_arg(args, "name")?,
                 agenda: args.get("agenda").and_then(Value::as_str).unwrap_or_default().to_string(),
+                features: args
+                    .get("features")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }),
         },
         ToolDef {

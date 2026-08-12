@@ -795,6 +795,7 @@ impl State {
             run: RunCore::started(),
             name: name.clone(),
             agenda: String::new(),
+            features: Vec::new(),
             can_propose: false,
             member: member.clone(),
             threshold,
@@ -1168,6 +1169,7 @@ impl State {
             seed,
             proposed_name: String::new(),
             proposed_agenda: String::new(),
+            proposed_features: None,
             awaiting_ratify: false,
             sealed_id: String::new(),
         };
@@ -2040,6 +2042,7 @@ impl State {
         &mut self,
         name: String,
         agenda: String,
+        features: Option<Vec<String>>,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if generation != Some(self.join_generation) || self.session.join.run.outcome != 0 {
@@ -2047,6 +2050,7 @@ impl State {
         }
         self.session.join.proposed_name = name.clone();
         self.session.join.proposed_agenda = agenda;
+        self.session.join.proposed_features = features;
         self.session.join.awaiting_ratify = true;
         self.session.join.run.progress_pct = 70;
         self.session

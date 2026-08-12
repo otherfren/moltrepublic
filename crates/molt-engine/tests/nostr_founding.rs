@@ -175,6 +175,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     a.execute(Command::CreatePropose {
         name: "Chess Club".to_string(),
         agenda: "play chess, decide together".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("charter proposed");
@@ -432,6 +433,7 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
     a.execute(Command::CreatePropose {
         name: "Overlap".to_string(),
         agenda: "meet on the relay we share".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -717,6 +719,7 @@ async fn a_declined_charter_aborts_both_sides() {
     a.execute(Command::CreatePropose {
         name: "Nope".to_string(),
         agenda: "unacceptable terms".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -789,6 +792,7 @@ async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
     a.execute(Command::CreatePropose {
         name: "Nope".to_string(),
         agenda: "unacceptable terms".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -900,6 +904,7 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     a.execute(Command::CreatePropose {
         name: "Overflow".to_string(),
         agenda: "found over a pool bigger than a link".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -1217,6 +1222,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     a.execute(Command::CreatePropose {
         name: "Doomed".to_string(),
         agenda: "this seal will never land".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -1366,6 +1372,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     a.execute(Command::CreatePropose {
         name: "Retry".to_string(),
         agenda: "a hiccup must not cost the seat".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("proposed");
@@ -1798,6 +1805,7 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     a.execute(Command::CreatePropose {
         name: "Chess Club".to_string(),
         agenda: "play chess".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("charter");
@@ -1848,5 +1856,138 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     assert!(
         molt_engine::verify_chain(&forged).is_err(),
         "a pool nobody ratified must not verify"
+    );
+}
+
+/// Charter-features S2 keystone (`charter_features.md`): the feature
+/// selection travels the real Nostr ritual — proposed by the founder,
+/// recomputed and ratified by the member (sign-what-you-see on v5 bytes),
+/// sealed CANONICALIZED into both geneses — and a doctored selection breaks
+/// every attestation, exactly like the relay pool above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_feature_set_is_bound_into_what_every_member_signs() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let root_b = tmp.path().join("joiner");
+
+    let a = engine(&root_a);
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+        relays: vec![url.clone()],
+    })
+    .await
+    .expect("founding starts");
+
+    let s = wait_for(&a, "the seat link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+
+    let b = engine(&root_b);
+    adopt_relay(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    wait_for(&a, "the join", |s| s.create.can_propose).await;
+    // unknown keys are refused before anything reaches the members
+    let err = a
+        .execute(Command::CreatePropose {
+            name: "Chess Club".to_string(),
+            agenda: "play chess".to_string(),
+            features: vec!["kanban".to_string()],
+        })
+        .await
+        .expect_err("an unknown feature key must be refused");
+    assert!(err.to_string().contains("unknown feature"), "{err}");
+    // deliberately unsorted + duplicated — the engine canonicalizes
+    a.execute(Command::CreatePropose {
+        name: "Chess Club".to_string(),
+        agenda: "play chess".to_string(),
+        features: vec![
+            "wallet".to_string(),
+            "memory".to_string(),
+            "wallet".to_string(),
+        ],
+    })
+    .await
+    .expect("charter");
+    let s = wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
+    assert_eq!(
+        s.join.proposed_features.as_deref(),
+        Some(["memory".to_string(), "wallet".to_string()].as_slice()),
+        "the joiner reviews the canonicalized selection it will sign"
+    );
+    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    let s = wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
+    let ws_id = s.active_workspace.clone();
+    a.execute(Command::CreateFinish).await.expect("create finish");
+    let s = wait_for(&b, "the join seal", |s| {
+        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+    })
+    .await;
+    let b_ws_id = s.join.sealed_id.clone();
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
+        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+    })
+    .await;
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+
+    // BOTH geneses carry the canonicalized selection and verify over v5 bytes
+    let want = vec!["memory".to_string(), "wallet".to_string()];
+    for (root, ws_id, who) in [(&root_a, &ws_id, "founder"), (&root_b, &b_ws_id, "joiner")] {
+        let dir = molt_storage::find_workspace_dir(root, ws_id).expect("dir");
+        let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+        let (_blob, chain) = ws.read_chain();
+        let genesis = chain.first().expect("a genesis block");
+        let molt_core::chain::ChainChange::Genesis { features, .. } = &genesis.change else {
+            panic!("block 0 is not a genesis");
+        };
+        assert_eq!(
+            features.as_deref(),
+            Some(want.as_slice()),
+            "the ratified selection must be in the {who}'s genesis"
+        );
+        molt_engine::verify_chain(&chain).expect("the signed chain verifies over v5 bytes");
+    }
+
+    // …and a doctored selection breaks every attestation — enable-by-forgery
+    // is dead on arrival
+    let dir = molt_storage::find_workspace_dir(&root_a, &ws_id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    let (_blob, chain) = ws.read_chain();
+    let mut forged = chain.clone();
+    let molt_core::chain::ChainChange::Genesis { features, .. } = &mut forged[0].change else {
+        unreachable!()
+    };
+    *features = Some(vec![
+        "memory".to_string(),
+        "quests".to_string(),
+        "wallet".to_string(),
+    ]);
+    assert!(
+        molt_engine::verify_chain(&forged).is_err(),
+        "a selection nobody ratified must not verify"
+    );
+    let molt_core::chain::ChainChange::Genesis { features, .. } = &mut forged[0].change else {
+        unreachable!()
+    };
+    *features = None;
+    assert!(
+        molt_engine::verify_chain(&forged).is_err(),
+        "stripping the selection down to the v4 shape must not verify either"
     );
 }

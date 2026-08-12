@@ -103,6 +103,7 @@ async fn a_2_of_3_republic_founds_and_applies_a_rename_at_threshold() {
     a.execute(Command::CreatePropose {
         name: "Drei Gilden".to_string(),
         agenda: "zu dritt regieren".to_string(),
+        features: Vec::new(),
     })
     .await
     .expect("propose charter");

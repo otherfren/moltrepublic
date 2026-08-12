@@ -1050,6 +1050,7 @@ pub fn run_app(
                 Command::CreatePropose {
                     name: name.to_string(),
                     agenda: agenda.to_string(),
+                    features: Vec::new(),
                 },
             );
         });
