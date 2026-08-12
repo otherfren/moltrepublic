@@ -28,6 +28,19 @@ Wallet) als klar gebadgte „Design-Mock"-Panes reaktiviert; das Memory-„Brain
 Datei-Navigator + Markdown-Content mit verschiebbarem Trenner; Settings→Netzwerk breiter
 gelegt und der SMP-Server als Auswahl mit einblendbarem Custom-Feld.
 
+**Wiki-UX-Runde (2026-08-12, Nutzer-Punchlist):** der Brain-Pane-Zustand lebt
+jetzt als unit-getestete Rust-State-Machine (`crates/molt-ui/src/wiki.rs`,
+`WikiState`-Global) statt fester .slint-Slots — Tabs in Öffnungs-Reihenfolge
+(⬅️/➡️, Ctrl+W, Kontextmenü „alle/rechts/links schließen"), Navigator mit
+Markieren≠Öffnen (Doppelklick/Enter/Menü öffnet, Entf löscht, Rechtsklick
+Öffnen/Umbenennen/Löschen, Drag verschiebt), und JEDE lokale Änderung wird
+farblich getrackt (Nav/Tabs/Preview-Blockdiff; Löschen = rote durchgestrichene
+Pending-Zeile) — die visuelle Vorstufe zum späteren „Änderungen als EIN Patch
+zur Abstimmung"-Schritt. Dazu app-weit einstellbare Schriftgrößen
+(App/Navigator/Editor, Zahnrad im Wiki-Toolstrip → Settings→General,
+`set_fonts`-Command + `[ui]`-Keys in config.toml, alte Configs behalten
+Defaults). Story 14 (echtes Backend + Patch-Vote) bleibt offen.
+
 **Abschluss-Review + Security-Analyse:** adversariales Multi-Agenten-Review über den
 gesamten Session-Diff (`86b72db..`, ~15,7k Zeilen, 10 Dimensionen, jedes Finding von
 3 perspektiv-diversen Skeptikern verifiziert). Ergebnis: **keine kritischen Bugs**;

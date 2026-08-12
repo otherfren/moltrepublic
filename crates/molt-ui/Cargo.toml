@@ -35,6 +35,9 @@ base64.workspace = true
 image.workspace = true
 chrono.workspace = true
 paste.workspace = true
+# wiki pane: markdown pseudo-render + block diffs for the pending-change view
+pulldown-cmark.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

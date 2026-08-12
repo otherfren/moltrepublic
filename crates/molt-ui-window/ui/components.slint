@@ -718,7 +718,9 @@ export component ConfirmModal inherits Rectangle {
         }
     }
     Rectangle {
-        width: min(root.dialog-width, root.width - 48px);
+        // never narrower than the content wants: a third button or a larger
+        // app font must widen the dialog, not poke out of it
+        width: min(max(root.dialog-width, dlg.preferred-width), root.width - 48px);
         height: dlg.preferred-height;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -786,6 +788,7 @@ export component ConfirmModal inherits Rectangle {
 export component AppArea inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
+    in property <length> font-size: Theme.fs-body;
     height: 240px;
     background: Theme.panel;
     border-radius: Theme.radius;
@@ -803,7 +806,7 @@ export component AppArea inherits Rectangle {
             width: 100%;
             text: root.placeholder;
             color: Theme.faint;
-            font-size: Theme.fs-body;
+            font-size: root.font-size;
             wrap: word-wrap;
         }
         input := TextInput {
@@ -811,7 +814,7 @@ export component AppArea inherits Rectangle {
             height: fl.viewport-height;
             text <=> root.text;
             color: Theme.text;
-            font-size: Theme.fs-body;
+            font-size: root.font-size;
             single-line: false;
             wrap: word-wrap;
         }

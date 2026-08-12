@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
@@ -32,7 +32,7 @@ import {
 // .slint-side only; the real governance views stay below in this file)
 import { MemoryPane, MockBadge, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
-export { Strings, Theme }
+export { Strings, Theme, WikiState }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -49,9 +49,52 @@ component FieldLabel inherits VerticalLayout {
 // Settings → General: the two form groups, factored into components so the
 // wide pane can seat them side by side and a narrow pane can stack the
 // SAME content — one set of bindings, two arrangements.
+// one font-size stepper row: -/value/+ — the value itself lives in the
+// Theme (session-synced, config.toml `[ui]`), the row only asks for the
+// change; 9..28 is the engine's accepted range
+component FontSizeRow inherits FieldLabel {
+    in property <length> value;
+    callback change(int /* new px */);
+    property <int> px: Math.round(root.value / 1px);
+    HorizontalLayout {
+        spacing: 8px;
+        AppButton {
+            width: 32px;
+            height: 32px;
+            pad: 0px;
+            label: "-";
+            clicked => {
+                root.change(max(9, root.px - 1));
+            }
+        }
+        Text {
+            text: "\{root.px}px";
+            width: 44px;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+        AppButton {
+            width: 32px;
+            height: 32px;
+            pad: 0px;
+            label: "+";
+            clicked => {
+                root.change(min(28, root.px + 1));
+            }
+        }
+    }
+}
+
 component LanguageAppearanceGroup inherits DetailGroup {
     in property <int> lang-index;
     callback set-language(int);
+    callback set-fonts(int, int, int);
+    // the current sizes, for re-sending the two the row does not change
+    property <int> px-app: Math.round(Theme.fs-app / 1px);
+    property <int> px-nav: Math.round(Theme.fs-nav / 1px);
+    property <int> px-editor: Math.round(Theme.fs-editor / 1px);
     title: Strings.set-panel-appearance;
     FieldLabel {
         label: Strings.field-language;
@@ -73,6 +116,27 @@ component LanguageAppearanceGroup inherits DetailGroup {
             changed(i) => {
                 Theme.picked(i);
             }
+        }
+    }
+    FontSizeRow {
+        label: Strings.field-font-app;
+        value: Theme.fs-app;
+        change(v) => {
+            root.set-fonts(v, root.px-nav, root.px-editor);
+        }
+    }
+    FontSizeRow {
+        label: Strings.field-font-nav;
+        value: Theme.fs-nav;
+        change(v) => {
+            root.set-fonts(root.px-app, v, root.px-editor);
+        }
+    }
+    FontSizeRow {
+        label: Strings.field-font-editor;
+        value: Theme.fs-editor;
+        change(v) => {
+            root.set-fonts(root.px-app, root.px-nav, v);
         }
     }
 }
@@ -913,6 +977,9 @@ export component AppWindow inherits Window {
     callback join-finish();
     // …or declines it (tells the founder, ends the join)
     callback join-decline-charter();
+    // the three GUI font sizes in px (app / navigator / editor) — routed
+    // to a SetFonts command, persisted in config.toml [ui]
+    callback set-fonts(int, int, int);
     // copy a text (seed / invite link) into the system clipboard, in Rust
     callback copy-text(string);
     // read the system clipboard (for the paste buttons), handled in Rust
@@ -1861,6 +1928,24 @@ export component AppWindow inherits Window {
                 }
                 if (event.text.to-lowercase() == Strings.choice-backup-key.to-lowercase()) {
                     root.choice-go(3);
+                    return accept;
+                }
+            }
+            // Multisig-Wiki keyboard routes (only while the brain view is
+            // on screen): Ctrl+W closes the active tab, Del deletes the
+            // marked file, Enter opens it. A focused text field consumes
+            // its keys before they bubble here, so typing stays safe.
+            if (root.screen == AppScreen.main && root.selected-surface == "memory" && root.selected-view == "brain") {
+                if (event.text == "w" && event.modifiers.control) {
+                    WikiState.close-active();
+                    return accept;
+                }
+                if (event.text == Key.Delete && WikiState.has-marked) {
+                    WikiState.delete-marked();
+                    return accept;
+                }
+                if (event.text == Key.Return && WikiState.has-marked) {
+                    WikiState.open-marked();
                     return accept;
                 }
             }
@@ -6333,9 +6418,15 @@ export component AppWindow inherits Window {
                             && root.selected-view != "accepted"
                             && root.selected-view != "denied": MemoryPane {
                             view: root.selected-view;
-                            copy-link(uri) => {
-                                root.copy-text(uri);
+                            copy-path(path) => {
+                                root.copy-text(path);
                                 root.show-toast(Strings.mem-toast-link);
+                            }
+                            open-settings => {
+                                if (root.screen != AppScreen.settings) {
+                                    root.settings-return = root.screen;
+                                }
+                                root.navigate(AppScreen.settings);
                             }
                         }
                         if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
@@ -6693,6 +6784,9 @@ export component AppWindow inherits Window {
                                     set-language(i) => {
                                         root.set-language(i);
                                     }
+                                    set-fonts(a, n, e) => {
+                                        root.set-fonts(a, n, e);
+                                    }
                                 }
                                 SoundAlertsGroup {
                                     horizontal-stretch: 1;
@@ -6710,6 +6804,9 @@ export component AppWindow inherits Window {
                                     lang-index: root.lang-index;
                                     set-language(i) => {
                                         root.set-language(i);
+                                    }
+                                    set-fonts(a, n, e) => {
+                                        root.set-fonts(a, n, e);
                                     }
                                 }
                                 SoundAlertsGroup {

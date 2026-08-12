@@ -53,6 +53,8 @@ use tokio::sync::broadcast::error::RecvError;
 // if the module were still injected here.
 pub use molt_ui_window::*;
 
+mod wiki;
+
 /// Open the GUI and run the Slint event loop on the calling (main) thread.
 ///
 /// `config_path` is shown in the settings panel as the location a real save
@@ -265,6 +267,10 @@ pub fn run_app(
     // first-seen times) — UI-local by design, see [`ChatUiState`].
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
+    // The Multisig-Wiki mock's state machine + its WikiState bridge —
+    // UI-local by design (a badged mock never touches the engine).
+    wire_wiki(&ui);
+
     // --- actions: each becomes a Command on the shared engine ---
     {
         let rt = rt.clone();
@@ -288,6 +294,23 @@ pub fn run_app(
         ui.on_set_language(move |idx| {
             let lang = if idx == 1 { "de" } else { "en" }.to_string();
             issue(&rt, &w, &weak, Command::SetLanguage { lang });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_set_fonts(move |app, nav, editor| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::SetFonts {
+                    app: u16::try_from(app).unwrap_or(14),
+                    nav: u16::try_from(nav).unwrap_or(13),
+                    editor: u16::try_from(editor).unwrap_or(14),
+                },
+            );
         });
     }
     {
@@ -2364,11 +2387,23 @@ fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
     // same reason as the pool: not a config-tab field, so comparing it would
     // make every clearnet-enabled node look permanently "dirty"
     stored.clearnet_relays_enabled = false;
+    // the font sizes are edited live through set_fonts, never the draft —
+    // neutralize them to the draft's carried constants for the same reason
+    let d = SessionSettings::default();
+    stored.font_app = d.font_app;
+    stored.font_nav = d.font_nav;
+    stored.font_editor = d.font_editor;
+    // the cap is not a config-tab field either (the draft carries the
+    // 0 = "keep" sentinel): comparing the stored value against that 0 made
+    // the guard cry "unsaved changes" on EVERY settings exit — right after
+    // a successful save included
+    stored.file_cap_bytes = 0;
     stored != read_settings_draft(ui)
 }
 
 /// Gather the config-tab draft properties into a [`SessionSettings`].
 fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
+    let d = SessionSettings::default();
     SessionSettings {
         headless: ui.get_cfg_headless(),
         // not a config-tab field: the relay pool and the clearnet decision
@@ -2376,6 +2411,11 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         // Carried as false here and re-merged by the engine, exactly like
         // `relays` below (save_settings can neither inject nor wipe them).
         clearnet_relays_enabled: false,
+        // edited live through set_fonts, never the draft; the engine
+        // re-merges the stored sizes on save
+        font_app: d.font_app,
+        font_nav: d.font_nav,
+        font_editor: d.font_editor,
         // not a config-tab field either: 0 = "keep the current cap" (the
         // engine's keep-live posture) — config.toml is the cap's one door
         file_cap_bytes: 0,
@@ -2649,6 +2689,12 @@ fn apply_session(
 
     apply_runs(ui, sv);
     ui.global::<Theme>().set_theme_index(theme_index(&sv.theme));
+    ui.global::<Theme>()
+        .set_fs_app(f32::from(sv.settings.font_app));
+    ui.global::<Theme>()
+        .set_fs_nav(f32::from(sv.settings.font_nav));
+    ui.global::<Theme>()
+        .set_fs_editor(f32::from(sv.settings.font_editor));
     ui.set_lang_index(lang);
     ui.set_notice(sv.notice.clone().into());
     // what §10.7 file gating and the §6.5 coarse-presence hint key on
@@ -6050,6 +6096,257 @@ fn net_health_pill(health: &NetHealth) -> (i32, String) {
     }
 }
 
+/// `WikiNavRow.status` / `WikiTabRow.status` code for a doc's
+/// pending-change state (0 unchanged · 1 added · 2 modified · 3 deleted —
+/// the tone mapping lives once in the pane's `tone()`).
+fn wiki_status_code(s: wiki::Status) -> i32 {
+    match s {
+        wiki::Status::Unchanged => 0,
+        wiki::Status::Added => 1,
+        wiki::Status::Modified => 2,
+        wiki::Status::Deleted => 3,
+    }
+}
+
+fn wiki_doc_id(id: i32) -> wiki::DocId {
+    u32::try_from(id).unwrap_or(0)
+}
+
+/// Update a `VecModel`-backed property IN PLACE: shrink, patch changed
+/// rows, grow. Wholesale `ModelRc` replacement re-creates every row
+/// element, which silently breaks anything stateful inside them — the
+/// double-click detector on a nav row died exactly that way (the first
+/// click of the pair marks, the sync then destroyed the TouchArea that
+/// was counting). Falls back to a fresh `VecModel` only on the first push
+/// (the property still holds its compile-time default model).
+fn sync_vec_model<T: Clone + PartialEq + 'static>(rc: &ModelRc<T>, new: Vec<T>) -> Option<ModelRc<T>> {
+    let Some(vm) = rc.as_any().downcast_ref::<VecModel<T>>() else {
+        return Some(ModelRc::new(VecModel::from(new)));
+    };
+    while vm.row_count() > new.len() {
+        vm.remove(vm.row_count() - 1);
+    }
+    for (i, row) in new.into_iter().enumerate() {
+        if i < vm.row_count() {
+            if vm.row_data(i).as_ref() != Some(&row) {
+                vm.set_row_data(i, row);
+            }
+        } else {
+            vm.push(row);
+        }
+    }
+    None
+}
+
+/// Push the wiki model into the `WikiState` global — the whole face, after
+/// every mutation (the models are small, and rows patch in place). EXCEPT
+/// the editor buffer: `raw` is rewritten only when the active doc or the
+/// edit mode changes (`last`), never on the keystroke echo — a mid-typing
+/// rewrite fights the caret.
+fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, bool)>) {
+    let s = ui.global::<WikiState>();
+    let nav: Vec<WikiNavRow> = w
+        .nav_rows()
+        .into_iter()
+        .map(|r| WikiNavRow {
+            is_folder: r.kind == wiki::RowKind::Folder,
+            id: i32::try_from(r.id).unwrap_or(0),
+            label: r.label.into(),
+            nested: r.nested,
+            open: r.open,
+            marked: r.marked,
+            status: wiki_status_code(r.status),
+            renaming: r.renaming,
+        })
+        .collect();
+    if let Some(fresh) = sync_vec_model(&s.get_nav_rows(), nav) {
+        s.set_nav_rows(fresh);
+    }
+    let tabs: Vec<WikiTabRow> = w
+        .tab_rows()
+        .into_iter()
+        .map(|t| WikiTabRow {
+            id: i32::try_from(t.id).unwrap_or(0),
+            label: t.label.into(),
+            active: t.active,
+            status: wiki_status_code(t.status),
+        })
+        .collect();
+    if let Some(fresh) = sync_vec_model(&s.get_tabs(), tabs) {
+        s.set_tabs(fresh);
+    }
+    s.set_has_marked(w.marked().is_some());
+    s.set_editing(w.editing);
+    s.set_can_reveal(w.active_id().is_some() && w.active_id() != w.marked());
+    let (added, modified, deleted) = w.change_counts();
+    let mut chip = String::new();
+    for (n, sign) in [(added, '+'), (modified, '~'), (deleted, '-')] {
+        if n > 0 {
+            if !chip.is_empty() {
+                chip.push(' ');
+            }
+            chip.push(sign);
+            chip.push_str(&n.to_string());
+        }
+    }
+    s.set_change_chip(chip.into());
+    if let Some(doc) = w.active() {
+        let id = doc.id;
+        s.set_doc_open(true);
+        s.set_doc_path(doc.path.clone().into());
+        s.set_doc_meta(format!("{} · {} · {}", doc.author, doc.ver, doc.when).into());
+        s.set_doc_status(wiki_status_code(doc.status()));
+        let blocks: Vec<WikiBlock> = w
+            .preview(id)
+            .into_iter()
+            .map(|(b, st)| WikiBlock {
+                kind: i32::from(b.kind),
+                text: b.text.into(),
+                status: match st {
+                    wiki::BlockStatus::Same => 0,
+                    wiki::BlockStatus::Added => 1,
+                    wiki::BlockStatus::Changed => 2,
+                    wiki::BlockStatus::Removed => 3,
+                },
+            })
+            .collect();
+        if let Some(fresh) = sync_vec_model(&s.get_blocks(), blocks) {
+            s.set_blocks(fresh);
+        }
+        let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
+        if let Some(fresh) = sync_vec_model(&s.get_links(), links) {
+            s.set_links(fresh);
+        }
+        if *last != Some((id, w.editing)) {
+            s.set_raw(doc.raw.clone().into());
+            *last = Some((id, w.editing));
+        }
+    } else {
+        s.set_doc_open(false);
+        s.set_doc_path("".into());
+        s.set_doc_meta("".into());
+        s.set_doc_status(0);
+        if let Some(fresh) = sync_vec_model(&s.get_blocks(), Vec::new()) {
+            s.set_blocks(fresh);
+        }
+        if let Some(fresh) = sync_vec_model(&s.get_links(), Vec::new()) {
+            s.set_links(fresh);
+        }
+        *last = None;
+    }
+}
+
+/// Wire the Multisig-Wiki's Rust state machine ([`wiki`]) to the
+/// `WikiState` global: every action callback mutates the model, then
+/// re-syncs the whole face. UI-local by design — the badged mock never
+/// touches the engine.
+fn wire_wiki(ui: &AppWindow) {
+    let model = Rc::new(RefCell::new(wiki::Wiki::sample()));
+    let last: Rc<RefCell<Option<(wiki::DocId, bool)>>> = Rc::new(RefCell::new(None));
+    sync_wiki(ui, &model.borrow(), &mut last.borrow_mut());
+    let g = ui.global::<WikiState>();
+
+    // one shape for every handler: mutate under the borrow, then push the
+    // new face (the toast-carrying handlers below spell it out instead)
+    macro_rules! act {
+        ($setter:ident, |$w:ident $(, $arg:ident : $ty:ty)*| $body:expr) => {{
+            let m = model.clone();
+            let la = last.clone();
+            let weak = ui.as_weak();
+            g.$setter(move |$($arg: $ty),*| {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut $w = m.borrow_mut();
+                    $body;
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        }};
+    }
+
+    act!(on_nav_mark, |w, id: i32| w.mark(wiki_doc_id(id)));
+    act!(on_nav_open, |w, id: i32| w.open(wiki_doc_id(id)));
+    act!(on_nav_toggle_folder, |w, name: slint::SharedString| w
+        .toggle_folder(&name));
+    act!(on_nav_rename_start, |w, id: i32| w.rename_start(wiki_doc_id(id)));
+    act!(on_nav_rename_cancel, |w| w.rename_cancel());
+    act!(on_nav_delete, |w, id: i32| w.delete(wiki_doc_id(id)));
+    act!(on_tab_focus, |w, id: i32| w.focus(wiki_doc_id(id)));
+    act!(on_tab_close, |w, id: i32| w.close_tab(wiki_doc_id(id)));
+    act!(on_tab_close_all, |w| w.close_all());
+    act!(on_tab_close_right, |w, id: i32| w
+        .close_right_of(wiki_doc_id(id)));
+    act!(on_tab_close_left, |w, id: i32| w.close_left_of(wiki_doc_id(id)));
+    act!(on_tab_step, |w, delta: i32| w.step_tab(delta));
+    act!(on_close_active, |w| w.close_active());
+    act!(on_new_file, |w| {
+        let _ = w.new_file();
+    });
+    act!(on_new_folder, |w| {
+        let _ = w.new_folder();
+    });
+    act!(on_fold_all, |w, open: bool| w.set_all_folders(open));
+    act!(on_reveal, |w| w.reveal());
+    act!(on_open_marked, |w| {
+        if let Some(id) = w.marked() {
+            w.open(id);
+        }
+    });
+    act!(on_delete_marked, |w| {
+        if let Some(id) = w.marked() {
+            w.delete(id);
+        }
+    });
+    act!(on_edit_toggle, |w| {
+        if w.active_id().is_some() {
+            w.editing = !w.editing;
+        }
+    });
+    act!(on_edited, |w, text: slint::SharedString| {
+        if let Some(id) = w.active_id() {
+            w.set_raw(id, &text);
+        }
+    });
+
+    // rename commit + drag drop carry a refusal the user must see
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_rename_commit(move |id, name| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut w = m.borrow_mut();
+                let id = wiki_doc_id(id);
+                // Enter-commit races the row teardown after an Escape
+                // cancel — only act while the model still renames this id
+                if w.renaming() == Some(id) {
+                    if let Err(e) = w.rename_commit(id, &name) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
+                }
+            }
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_drop(move |id, row| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut w = m.borrow_mut();
+                let row = usize::try_from(row).unwrap_or(usize::MAX);
+                if let Err(e) = w.drop_on_row(wiki_doc_id(id), row) {
+                    ui.invoke_show_toast_error(e.into());
+                }
+            }
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+}
+
 /// Declare the whole localized string table in ONE place: the macro
 /// generates the `Lexicon` struct, its English and German tables, and
 /// `apply_strings` (which pushes every entry into the Slint `Strings`
@@ -6111,6 +6408,9 @@ lexicon! {
     field_members: "Members", "Mitglieder";
     field_language: "Language", "Sprache";
     field_theme: "Theme", "Erscheinungsbild";
+    field_font_app: "App font size", "Schriftgröße App";
+    field_font_nav: "Navigator font size", "Schriftgröße Navigator";
+    field_font_editor: "Editor font size", "Schriftgröße Editor";
     field_workspace_dir: "Workspace directory", "Workspace-Verzeichnis";
     field_mcp_port: "MCP port", "MCP-Port";
     field_mcp_allow: "Allowed client IPs", "Erlaubte Client-IPs";
@@ -6588,12 +6888,17 @@ lexicon! {
     mem_tb_open_all: "Expand all", "Alles ausklappen";
     mem_tb_edit: "Edit as Markdown", "Als Markdown bearbeiten";
     mem_tb_preview: "Preview", "Vorschau";
-    mem_tb_link: "Copy link", "Link kopieren";
+    mem_tb_link: "Copy path", "Pfad kopieren";
     mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
-    mem_tb_prev: "Previous document", "Vorheriges Dokument";
-    mem_tb_next: "Next document", "Nächstes Dokument";
-    mem_toast_link: "Link copied - paste it in chat or another note", "Link kopiert - in Chat oder eine andere Notiz einfügen";
-    mem_empty_folder: "empty", "leer";
+    mem_tb_prev: "Previous tab", "Vorheriger Tab";
+    mem_tb_next: "Next tab", "Nächster Tab";
+    mem_toast_link: "Path copied", "Pfad kopiert";
+    mem_menu_open: "Open", "Öffnen";
+    mem_menu_rename: "Rename", "Umbenennen";
+    mem_menu_delete: "Delete", "Löschen";
+    mem_menu_close_all: "Close all", "Alle schließen";
+    mem_menu_close_right: "Close all to the right", "Alle rechts schließen";
+    mem_menu_close_left: "Close all to the left", "Alle links schließen";
     mem_empty: "Nothing here yet - create a new file.", "Noch nichts hier - lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
@@ -8664,6 +8969,82 @@ mod gui_tests {
 
     use super::*;
     use molt_core::{ChannelRef, GroupConfig, SessionView};
+
+    /// The wiki bridge drives the REAL generated `WikiState` face headless:
+    /// open → edit → close → delete through the same callbacks the pane
+    /// fires, asserting the models follow. This is the layer the unit tests
+    /// in `wiki.rs` cannot see (types, models, borrow discipline).
+    #[test]
+    fn wiki_bridge_opens_edits_closes_and_deletes_headless() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        wire_wiki(&ui);
+        let g = ui.global::<WikiState>();
+        // the sample opens with the charter as the only tab
+        assert_eq!(g.get_tabs().row_count(), 1);
+        assert!(g.get_doc_open());
+        assert_eq!(g.get_doc_path().as_str(), "charter.md");
+        assert_eq!(g.get_change_chip().as_str(), "", "a clean tree has no chip");
+        // open glossary.md via the open route
+        let rows = g.get_nav_rows();
+        let glossary = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == "glossary.md")
+            .expect("glossary row");
+        // a mark must PATCH the row model, never replace it: a swap
+        // re-creates the row elements mid-double-click, which is exactly
+        // how "double-click does not open" happened live
+        g.invoke_nav_mark(glossary.id);
+        let rows_after = g.get_nav_rows();
+        assert!(
+            std::ptr::eq(
+                rows.as_any()
+                    .downcast_ref::<VecModel<WikiNavRow>>()
+                    .expect("nav rows are a VecModel") as *const _,
+                rows_after
+                    .as_any()
+                    .downcast_ref::<VecModel<WikiNavRow>>()
+                    .expect("still a VecModel") as *const _,
+            ),
+            "the nav model must survive a mark (rows patch in place)"
+        );
+        g.invoke_nav_open(glossary.id);
+        assert_eq!(g.get_tabs().row_count(), 2);
+        assert_eq!(g.get_doc_path().as_str(), "glossary.md");
+        // an edit turns up in the chip, the tab status and the preview diff
+        g.invoke_edit_toggle();
+        let edited = format!("{}\n\nA new closing thought.", g.get_raw());
+        g.invoke_edited(edited.into());
+        assert_eq!(g.get_change_chip().as_str(), "~1");
+        let tabs = g.get_tabs();
+        let gtab = (0..tabs.row_count())
+            .filter_map(|i| tabs.row_data(i))
+            .find(|t| t.label.as_str() == "glossary.md")
+            .expect("glossary tab");
+        assert_eq!(gtab.status, 2, "the tab paints modified");
+        g.invoke_edit_toggle();
+        let blocks = g.get_blocks();
+        assert!(
+            (0..blocks.row_count())
+                .filter_map(|i| blocks.row_data(i))
+                .any(|b| b.status == 1 && b.text.as_str().contains("closing thought")),
+            "the appended paragraph previews as Added"
+        );
+        // Ctrl+W closes glossary; focus falls back to the charter tab
+        g.invoke_close_active();
+        assert_eq!(g.get_tabs().row_count(), 1);
+        assert_eq!(g.get_doc_path().as_str(), "charter.md");
+        // Del on the marked (still glossary) row: a pending deletion — the
+        // row stays, struck, and the chip carries both changes
+        g.invoke_delete_marked();
+        let rows = g.get_nav_rows();
+        let struck = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == "glossary.md")
+            .expect("the deleted row stays listed");
+        assert_eq!(struck.status, 3);
+        assert_eq!(g.get_change_chip().as_str(), "-1", "delete replaced the edit");
+    }
 
     /// A node with storage, a founded workspace, and chat in it — the state
     /// a user's second launch starts from.

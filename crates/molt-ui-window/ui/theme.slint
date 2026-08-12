@@ -279,6 +279,80 @@ export struct SurfaceTab {
     views: [ViewItem], // its nav sub-views, default first
 }
 
+// ---- the Multisig-Wiki mock's model face --------------------------------
+// Flat rows built by the Rust state machine (crates/molt-ui/src/wiki.rs);
+// the pane renders them and routes every action back through WikiState.
+
+// One navigator row, in display order.
+export struct WikiNavRow {
+    is-folder: bool,
+    id: int, // file rows only; 0 for folders
+    label: string,
+    nested: bool,
+    open: bool, // folder fold state
+    marked: bool,
+    status: int, // 0 unchanged · 1 added · 2 modified · 3 deleted
+    renaming: bool,
+}
+
+// One tab-strip row, in OPEN order (close-right/left and ⬅️/➡️ walk this).
+export struct WikiTabRow {
+    id: int,
+    label: string,
+    active: bool,
+    status: int,
+}
+
+// One pseudo-rendered block of the active doc, with its diff verdict.
+export struct WikiBlock {
+    kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code
+    text: string,
+    status: int, // 0 same · 1 added · 2 changed · 3 removed ghost
+}
+
+// The wiki pane's shared state + action bus: properties are pushed by the
+// Rust bridge after every mutation, callbacks are implemented there. The
+// app root also drives it (Ctrl+W / Del / Enter routing).
+export global WikiState {
+    in-out property <[WikiNavRow]> nav-rows;
+    in-out property <[WikiTabRow]> tabs;
+    // the active doc (empty state when doc-open is false)
+    in-out property <bool> doc-open;
+    in-out property <string> doc-path;
+    in-out property <string> doc-meta;
+    in-out property <int> doc-status;
+    in-out property <[WikiBlock]> blocks;
+    in-out property <[string]> links;
+    in-out property <string> raw; // the raw editor's buffer (two-way)
+    in-out property <bool> editing;
+    in-out property <bool> can-reveal;
+    in-out property <string> change-chip; // "+a ~m -d", empty when clean
+    in-out property <bool> has-marked;
+    callback nav-mark(int);
+    callback nav-open(int);
+    callback nav-toggle-folder(string);
+    callback nav-rename-start(int);
+    callback nav-rename-commit(int, string);
+    callback nav-rename-cancel();
+    callback nav-delete(int);
+    callback nav-drop(int, int); // dragged doc id, target row index
+    callback tab-focus(int);
+    callback tab-close(int);
+    callback tab-close-all();
+    callback tab-close-right(int);
+    callback tab-close-left(int);
+    callback tab-step(int); // ±1 over the OPEN tabs
+    callback close-active(); // Ctrl+W
+    callback new-file();
+    callback new-folder();
+    callback fold-all(bool);
+    callback edit-toggle();
+    callback edited(string);
+    callback reveal();
+    callback open-marked(); // Enter on the marked row
+    callback delete-marked(); // Del on the marked row
+}
+
 // A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
 export struct Palette {
     bg-base: color,
@@ -409,10 +483,17 @@ export global Theme {
     out property <length> radius: theme-index == 0 ? 4px : (win95 ? 0px : 8px);
     out property <length> border-w: win95 ? 2px : 1px;
     out property <length> pad: 18px;
-    out property <length> fs-h1: 26px;
-    out property <length> fs-h2: 18px;
-    out property <length> fs-body: 14px;
-    out property <length> fs-cap: 12px;
+    // GUI font sizes in px, set from the session (config.toml `[ui]`,
+    // the set_fonts command): the app size drives the shared tokens
+    // below (defaults keep the historical 26/18/14/12 ladder), nav and
+    // editor size the wiki navigator and the document area.
+    in-out property <length> fs-app: 14px;
+    in-out property <length> fs-nav: 13px;
+    in-out property <length> fs-editor: 14px;
+    out property <length> fs-h1: self.fs-app + 12px;
+    out property <length> fs-h2: self.fs-app + 4px;
+    out property <length> fs-body: self.fs-app;
+    out property <length> fs-cap: self.fs-app - 2px;
 }
 
 export global Strings {
@@ -446,6 +527,9 @@ export global Strings {
     in property <string> field-members;
     in property <string> field-language;
     in property <string> field-theme;
+    in property <string> field-font-app;
+    in property <string> field-font-nav;
+    in property <string> field-font-editor;
     in property <string> field-workspace-dir;
     in property <string> field-mcp-port;
     in property <string> field-mcp-allow;
@@ -946,7 +1030,12 @@ export global Strings {
     in property <string> mem-tb-prev;
     in property <string> mem-tb-next;
     in property <string> mem-toast-link;
-    in property <string> mem-empty-folder;
+    in property <string> mem-menu-open;
+    in property <string> mem-menu-rename;
+    in property <string> mem-menu-delete;
+    in property <string> mem-menu-close-all;
+    in property <string> mem-menu-close-right;
+    in property <string> mem-menu-close-left;
     in property <string> mem-empty;
     in property <string> mem-linked;
     in property <string> mem-title-archive;

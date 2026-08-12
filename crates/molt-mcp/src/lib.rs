@@ -295,6 +295,10 @@ fn u8_arg(args: &Value, key: &str) -> Result<u8, String> {
     u8::try_from(u64_arg(args, key)?).map_err(|_| format!("argument `{key}` out of range"))
 }
 
+fn font_arg(args: &Value, key: &str) -> Result<u16, String> {
+    u16::try_from(u64_arg(args, key)?).map_err(|_| format!("argument `{key}` out of range"))
+}
+
 fn surface_arg(args: &Value) -> Result<Surface, String> {
     let s = str_arg(args, "surface")?;
     Surface::parse(&s).ok_or_else(|| format!("unknown surface `{s}`"))
@@ -478,6 +482,11 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         // so an agent cannot grant itself non-onion dialing here. Carried
         // through unchanged; the engine re-merges the stored value.
         clearnet_relays_enabled: d.clearnet_relays_enabled,
+        // the font sizes' one door is `set_fonts` — carried through
+        // unchanged as well; the engine re-merges the stored values
+        font_app: d.font_app,
+        font_nav: d.font_nav,
+        font_editor: d.font_editor,
         workspace_dir: text("workspace_dir")?,
         // the one optional field, and only because it postdates the tool's
         // schema: an agent that never set it keeps the default rather than
@@ -870,6 +879,25 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             build: |args| Ok(Command::SetTheme {
                 theme: str_arg(args, "theme")?,
+            }),
+        },
+        ToolDef {
+            name: "set_fonts",
+            command: "set_fonts",
+            description: "Set the three GUI font sizes in px (app chrome / wiki navigator / editor+document), range 9-28. A local preference, persisted to config.toml.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "app": { "type": "integer", "minimum": 9, "maximum": 28 },
+                    "nav": { "type": "integer", "minimum": 9, "maximum": 28 },
+                    "editor": { "type": "integer", "minimum": 9, "maximum": 28 }
+                },
+                "required": ["app", "nav", "editor"]
+            }),
+            build: |args| Ok(Command::SetFonts {
+                app: font_arg(args, "app")?,
+                nav: font_arg(args, "nav")?,
+                editor: font_arg(args, "editor")?,
             }),
         },
         ToolDef {

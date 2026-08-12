@@ -100,6 +100,23 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Set the three GUI font sizes (px) — a hot local pref like the
+    /// theme: validate, silent persist, immediate re-emit.
+    pub(crate) fn cmd_set_fonts(
+        &mut self,
+        app: u16,
+        nav: u16,
+        editor: u16,
+    ) -> Result<Reply, MoltError> {
+        validate_fonts(app, nav, editor)?;
+        self.session.settings.font_app = app;
+        self.session.settings.font_nav = nav;
+        self.session.settings.font_editor = editor;
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Flip this node's read-receipts preference (a hot local pref — no
     /// restart). Silent persist to `config.toml`, then re-emit the session so
     /// the GUI reflects the new state (and, symmetrically, hides/shows others'
@@ -425,6 +442,12 @@ impl State {
         if settings.file_cap_bytes == 0 {
             settings.file_cap_bytes = self.session.settings.file_cap_bytes;
         }
+        // the font sizes have their own door too (`set_fonts`): a wholesale
+        // save from a frontend that predates them must not reset the
+        // operator's sizes as a side effect
+        settings.font_app = self.session.settings.font_app;
+        settings.font_nav = self.session.settings.font_nav;
+        settings.font_editor = self.session.settings.font_editor;
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
@@ -1940,6 +1963,19 @@ fn clamp_for_display(value: &str, max: usize) -> String {
     out
 }
 
+/// One range for every route a font size can arrive on (targeted command,
+/// wholesale save, config reload): 9–28 px keeps the layout renderable.
+fn validate_fonts(app: u16, nav: u16, editor: u16) -> Result<(), MoltError> {
+    for v in [app, nav, editor] {
+        if !(9..=28).contains(&v) {
+            return Err(MoltError::Settings(format!(
+                "font size {v}: out of range 9-28"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
     // "nym" is gone from the vocabulary on purpose: the mixnet was never
     // implemented, the dialer refuses every connection under it, and the
@@ -1971,6 +2007,7 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
             "workspace_dir must not be empty".to_string(),
         ));
     }
+    validate_fonts(s.font_app, s.font_nav, s.font_editor)?;
     Ok(())
 }
 
@@ -2019,6 +2056,37 @@ mod patch_tests {
         assert_eq!(s.s3_interval_min, 15, "the named field changed");
         assert_eq!(s.anonymity, "tor", "…and Tor stayed on");
         assert_eq!(s.mcp_token, "s3cret", "…and the token stayed in place");
+    }
+
+    /// `set_fonts` is the sizes' ONE door (item 11): it validates the
+    /// range, and a wholesale save — whose payload carries only defaults —
+    /// must not reset what the operator picked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_fonts_validates_and_survives_a_wholesale_save() {
+        let w = node();
+        w.execute(Command::SetFonts {
+            app: 16,
+            nav: 12,
+            editor: 15,
+        })
+        .await
+        .expect("set");
+        let err = w
+            .execute(Command::SetFonts {
+                app: 8,
+                nav: 12,
+                editor: 15,
+            })
+            .await
+            .expect_err("below the range");
+        assert!(matches!(err, molt_core::MoltError::Settings(_)), "{err:?}");
+        w.execute(Command::SaveSettings {
+            settings: molt_core::SessionSettings::default(),
+        })
+        .await
+        .expect("save");
+        let s = settings(&w).await;
+        assert_eq!((s.font_app, s.font_nav, s.font_editor), (16, 12, 15));
     }
 
     /// A typo must not read as "that setting did not take": an ignored key

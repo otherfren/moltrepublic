@@ -353,6 +353,9 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         mcp_token: s.mcp_token.clone(),
         lang: language.to_string(),
         theme: theme.to_string(),
+        font_app: s.font_app,
+        font_nav: s.font_nav,
+        font_editor: s.font_editor,
         relays: s
             .relays
             .iter()
@@ -382,6 +385,9 @@ fn session_settings(s: &Settings) -> SessionSettings {
         sound_message: s.sound_message.clone(),
         sound_vote: s.sound_vote.clone(),
         read_receipts: s.read_receipts,
+        font_app: s.font_app,
+        font_nav: s.font_nav,
+        font_editor: s.font_editor,
         mcp_port: s.mcp_port,
         mcp_allow: s.mcp_allow.clone(),
         mcp_token: s.mcp_token.clone(),

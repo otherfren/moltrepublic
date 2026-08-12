@@ -352,6 +352,15 @@ pub struct SessionSettings {
     /// receipts and hides others' from its chat view (symmetric).
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// App-chrome font size in px.
+    #[serde(default = "default_font_app")]
+    pub font_app: u16,
+    /// Wiki-navigator font size in px.
+    #[serde(default = "default_font_nav")]
+    pub font_nav: u16,
+    /// Editor/document font size in px.
+    #[serde(default = "default_font_editor")]
+    pub font_editor: u16,
     /// The Nostr relay pool, in priority order (position 0 is tried first).
     /// **Empty by default — nothing is pre-trusted.** Edited through the
     /// `Relay*` commands (never a free-form text field), because every entry
@@ -382,6 +391,18 @@ fn default_sound() -> String {
 
 /// Default for an opt-out boolean preference (on unless the operator
 /// disables it, and present-by-absence in an older `config.toml`).
+fn default_font_app() -> u16 {
+    14
+}
+
+fn default_font_nav() -> u16 {
+    13
+}
+
+fn default_font_editor() -> u16 {
+    14
+}
+
 fn default_true() -> bool {
     true
 }
@@ -423,6 +444,9 @@ impl Default for SessionSettings {
             sound_message: default_sound(),
             sound_vote: default_sound(),
             read_receipts: true,
+            font_app: default_font_app(),
+            font_nav: default_font_nav(),
+            font_editor: default_font_editor(),
             // no relay ships with the app: a fresh install connects nowhere
             relays: Vec::new(),
             clearnet_relays_enabled: false,
@@ -3330,6 +3354,16 @@ pub enum Command {
     SetTheme {
         /// The new theme name.
         theme: String,
+    },
+    /// Set the three GUI font sizes in px (app chrome / wiki navigator /
+    /// editor+document) — a local preference, persisted to `config.toml`.
+    SetFonts {
+        /// App-chrome font size in px.
+        app: u16,
+        /// Wiki-navigator font size in px.
+        nav: u16,
+        /// Editor/document font size in px.
+        editor: u16,
     },
     /// Turn this node's chat read receipts on or off (a local per-node
     /// preference, persisted to `config.toml` — never governance-gated, never

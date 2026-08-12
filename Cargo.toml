@@ -149,6 +149,12 @@ rfd         = { version = "0.15", default-features = false, features = ["xdg-por
 # load can never work). Exactly the raster formats the logo picker offers;
 # all pure-Rust decoders. Same crate+version Slint already compiles in.
 image       = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+# the wiki pane's markdown pseudo-render (molt-ui): same crate+version the
+# Slint text stack already compiles in; parser only, no html feature
+pulldown-cmark = { version = "0.13", default-features = false }
+# block-level diffs for the wiki's pending-change preview (molt-ui) — the
+# insta/cargo-insta diff engine, not a hand-rolled LCS
+similar     = "2"
 
 [workspace.package]
 version    = "0.0.1"

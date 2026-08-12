@@ -1278,6 +1278,7 @@ impl State {
             Command::SelectView { surface, view } => self.cmd_select_view(surface, view),
             Command::SetLanguage { lang } => self.cmd_set_language(lang),
             Command::SetTheme { theme } => self.cmd_set_theme(theme),
+            Command::SetFonts { app, nav, editor } => self.cmd_set_fonts(app, nav, editor),
             Command::SetReadReceipts { enabled } => self.cmd_set_read_receipts(enabled),
             Command::SaveSettings { settings } => self.cmd_save_settings(settings),
             Command::PatchSettings { patch } => self.cmd_patch_settings(patch),

@@ -284,6 +284,15 @@ pub struct UiConfig {
     /// Initial GUI theme (classic / dark / brutalism).
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// App-chrome font size in px.
+    #[serde(default = "default_font_app")]
+    pub font_app: u16,
+    /// Wiki-navigator font size in px.
+    #[serde(default = "default_font_nav")]
+    pub font_nav: u16,
+    /// Editor/document font size in px.
+    #[serde(default = "default_font_editor")]
+    pub font_editor: u16,
 }
 
 impl Default for UiConfig {
@@ -291,6 +300,9 @@ impl Default for UiConfig {
         UiConfig {
             lang: default_lang(),
             theme: default_theme(),
+            font_app: default_font_app(),
+            font_nav: default_font_nav(),
+            font_editor: default_font_editor(),
         }
     }
 }
@@ -340,6 +352,21 @@ pub fn default_lang() -> String {
 /// Default MCP client allowlist: loopback only.
 pub fn default_mcp_allow() -> String {
     "127.0.0.1".to_string()
+}
+
+/// The default app-chrome font size in px (the historical `fs-body`).
+pub fn default_font_app() -> u16 {
+    14
+}
+
+/// The default wiki-navigator font size in px (the historical row size).
+pub fn default_font_nav() -> u16 {
+    13
+}
+
+/// The default editor/document font size in px.
+pub fn default_font_editor() -> u16 {
+    14
 }
 
 /// Default GUI theme.
@@ -427,6 +454,12 @@ pub struct Settings {
     pub lang: String,
     /// GUI theme: `"classic" | "dark" | "brutalism"`.
     pub theme: String,
+    /// App-chrome font size in px.
+    pub font_app: u16,
+    /// Wiki-navigator font size in px.
+    pub font_nav: u16,
+    /// Editor/document font size in px.
+    pub font_editor: u16,
     /// The Nostr relay pool in dial-priority order. Empty by default — the
     /// node connects to no relay until its operator adds and confirms one.
     pub relays: Vec<RelayConfig>,
@@ -459,6 +492,9 @@ impl Default for Settings {
             mcp_token: String::new(),
             lang: default_lang(),
             theme: default_theme(),
+            font_app: default_font_app(),
+            font_nav: default_font_nav(),
+            font_editor: default_font_editor(),
             relays: Vec::new(),
             clearnet_relays_enabled: false,
         }
@@ -515,6 +551,9 @@ impl From<&Config> for Settings {
             mcp_token: c.mcp.token.clone(),
             lang: c.ui.lang.clone(),
             theme: c.ui.theme.clone(),
+            font_app: c.ui.font_app,
+            font_nav: c.ui.font_nav,
+            font_editor: c.ui.font_editor,
         }
     }
 }
@@ -597,6 +636,10 @@ clearnet_enabled = {clearnet_enabled}
 lang = {lang}
 # GUI theme: "classic" | "dark" | "brutalism".
 theme = {theme}
+# Font sizes in px: app chrome, wiki navigator, editor/document.
+font_app = {font_app}
+font_nav = {font_nav}
+font_editor = {font_editor}
 "#,
         headless = settings.headless,
         workspace_dir = toml_str(&settings.workspace_dir),
@@ -623,6 +666,9 @@ theme = {theme}
         clearnet_enabled = settings.clearnet_relays_enabled,
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
+        font_app = settings.font_app,
+        font_nav = settings.font_nav,
+        font_editor = settings.font_editor,
     )
 }
 
@@ -796,6 +842,15 @@ pub fn salvage(text: &str) -> Settings {
             if matches!(theme, "classic" | "dark" | "brutalism") {
                 s.theme = theme.to_string();
             }
+        }
+        if let Some(v) = ui.get("font_app").and_then(toml::Value::as_integer) {
+            s.font_app = u16::try_from(v).unwrap_or_else(|_| default_font_app());
+        }
+        if let Some(v) = ui.get("font_nav").and_then(toml::Value::as_integer) {
+            s.font_nav = u16::try_from(v).unwrap_or_else(|_| default_font_nav());
+        }
+        if let Some(v) = ui.get("font_editor").and_then(toml::Value::as_integer) {
+            s.font_editor = u16::try_from(v).unwrap_or_else(|_| default_font_editor());
         }
     }
     s
@@ -987,6 +1042,9 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     let ui = table_at(doc.as_table_mut(), &["ui"]);
     set_str(ui, "lang", &settings.lang);
     set_str(ui, "theme", &settings.theme);
+    set_int(ui, "font_app", i64::from(settings.font_app));
+    set_int(ui, "font_nav", i64::from(settings.font_nav));
+    set_int(ui, "font_editor", i64::from(settings.font_editor));
 }
 
 /// Write the relay pool as `[[transport.nostr.relay]]` tables in pool order.
@@ -1121,6 +1179,38 @@ mod tests {
         assert_eq!(config.storage.workspace_dir, default_workspace_dir());
     }
 
+    /// Item 11 (wiki UX round): a PRE-FONTS config.toml keeps parsing with
+    /// the shipped defaults, a runtime save carries changed sizes into the
+    /// `[ui]` table without touching hand-written keys, and render/salvage
+    /// round-trip them.
+    #[test]
+    fn font_sizes_default_and_round_trip() {
+        let old = "[ui]\nlang = \"de\"\n";
+        let config = parse(old).expect("a pre-fonts config still parses");
+        assert_eq!(config.ui.font_app, default_font_app());
+        assert_eq!(config.ui.font_nav, default_font_nav());
+        assert_eq!(config.ui.font_editor, default_font_editor());
+        let s = Settings {
+            font_app: 16,
+            font_nav: 12,
+            font_editor: 15,
+            // update() writes the WHOLE live session state — the file's
+            // hand-written language is in it, not clobbered by a default
+            lang: "de".to_string(),
+            ..Settings::default()
+        };
+        let updated = update(old, &s).expect("runtime save");
+        let back = parse(&updated).expect("updated file parses");
+        assert_eq!(back.ui.font_app, 16);
+        assert_eq!(back.ui.font_nav, 12);
+        assert_eq!(back.ui.font_editor, 15);
+        assert_eq!(back.ui.lang, "de", "the session's language survives");
+        let salvaged = salvage(&render(&s));
+        assert_eq!(salvaged.font_app, 16);
+        assert_eq!(salvaged.font_nav, 12);
+        assert_eq!(salvaged.font_editor, 15);
+    }
+
     #[test]
     fn unknown_field_is_rejected() {
         let text = format!("{}\nbogus_key = 1\n", render(&Settings::default()));
@@ -1206,6 +1296,9 @@ mod tests {
             mcp_token: "deadbeefcafef00d".to_string(),
             lang: "de".to_string(),
             theme: "brutalism".to_string(),
+            font_app: 16,
+            font_nav: 12,
+            font_editor: 15,
             // two relays in a deliberate order: the round-trip must preserve
             // BOTH the order (it is the dial priority) and each confirmation
             relays: vec![
