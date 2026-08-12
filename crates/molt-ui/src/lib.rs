@@ -1076,15 +1076,28 @@ pub fn run_app(
         let w = wallet.clone();
         let weak = ui.as_weak();
         ui.on_join_start(move |invite, member| {
-            issue(
-                &rt,
-                &w,
-                &weak,
-                Command::JoinStart {
-                    invite: invite.to_string(),
-                    member: member.to_string(),
-                },
-            );
+            // not the plain issue(): a REFUSED start (bad link, no relay,
+            // already running) must re-arm the optimistic jw-starting latch,
+            // or the join button stays dead with nothing running. An accepted
+            // start needs no reset here — the engine session flips jw-step
+            // and the form is gone.
+            let w = w.clone();
+            let weak = weak.clone();
+            let cmd = Command::JoinStart {
+                invite: invite.to_string(),
+                member: member.to_string(),
+            };
+            rt.spawn(async move {
+                if let Err(e) = w.execute(cmd).await {
+                    let msg = format!("⚠ {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_jw_starting(false);
+                            ui.invoke_show_toast_error(msg.into());
+                        }
+                    });
+                }
+            });
         });
     }
     {
@@ -1092,6 +1105,11 @@ pub fn run_app(
         let w = wallet.clone();
         let weak = ui.as_weak();
         ui.on_join_cancel(move || {
+            // leaving the run re-arms the start latch: the form comes back
+            // with a clickable button
+            if let Some(ui) = weak.upgrade() {
+                ui.set_jw_starting(false);
+            }
             issue(&rt, &w, &weak, Command::JoinCancel);
         });
     }

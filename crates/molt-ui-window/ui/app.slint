@@ -1195,6 +1195,11 @@ export component AppWindow inherits Window {
     // molt-core parser the engine runs) …
     property <string> jw-invite;
     property <string> jw-member;
+    // optimistic start latch (the cw-proposed twin): the join button dies on
+    // the FIRST click, before the engine round-trip flips jw-step. Cleared in
+    // Rust when the round-trip refuses (retry stays possible) or the join is
+    // cancelled - never by a timer.
+    in-out property <bool> jw-starting: false;
     property <InvitePreview> jw-preview: root.parse-invite(root.jw-invite);
     // … and the join lifecycle, mirrored from the engine session:
     // step 0 = invite form, 1 = run view
@@ -1250,6 +1255,7 @@ export component AppWindow inherits Window {
             // a JOIN needs no phrase at all - the ritual mints one and shows
             // it once, which is why this leg never reaches the phrase step
             root.jw-invite = root.rv-link;
+            root.jw-starting = true;
             root.join-start(root.rv-link, root.jw-member);
         } else {
             root.rw-pending = "recover";
@@ -3857,7 +3863,8 @@ export component AppWindow inherits Window {
                                     // a keystroke can never start a join the
                                     // button would have refused
                                     accepted => {
-                                        if (root.jw-invite != "" && root.jw-member != "") {
+                                        if (root.jw-invite != "" && root.jw-member != "" && !root.jw-starting) {
+                                            root.jw-starting = true;
                                             root.join-start(root.jw-invite, root.jw-member);
                                         }
                                     }
@@ -3877,9 +3884,10 @@ export component AppWindow inherits Window {
                                 AppButton {
                                     height: 38px;
                                     primary: true;
-                                    enabled: root.jw-invite != "" && root.jw-member != "";
+                                    enabled: root.jw-invite != "" && root.jw-member != "" && !root.jw-starting;
                                     label: Strings.jw-join;
                                     clicked => {
+                                        root.jw-starting = true;
                                         root.join-start(root.jw-invite, root.jw-member);
                                     }
                                 }
