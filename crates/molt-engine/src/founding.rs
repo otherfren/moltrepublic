@@ -1056,7 +1056,7 @@ impl FoundingInvite {
 /// A member can only compare its OWN seat's value against its derivation;
 /// format and uniqueness are the verifiable properties of the others'
 /// anchors, and threshold-signing a malformed, second-byte-form, or
-/// duplicated anchor would seal it into the roster-v3 bytes and the
+/// duplicated anchor would seal it into the signed roster bytes and the
 /// republic-id-v2 preimage forever. Empty is rejected too: the one
 /// founding path always fills the anchor, so an empty value on a founding
 /// seat is an attacker aliasing the legacy marker — the legitimately empty
@@ -1104,7 +1104,7 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
 ///
 /// `SealedRoster.roster` is CONSTITUTIONAL — it becomes the `Founded` event's
 /// member list and thus `State::roster()` — but it is covered by NO signature:
-/// it is absent from `roster_canonical_bytes` (molt-roster-v3) and from
+/// it is absent from `roster_canonical_bytes` (every version) and from
 /// `republic_id` (molt-republic-id-v2). Without this check every attestation
 /// can verify over an honest identity table while the member list a member
 /// actually reads names a different set.
@@ -3454,7 +3454,7 @@ mod tests {
 
     /// SECURITY — `SealedRoster.roster` is a CONSTITUTIONAL field that no
     /// signature covers: it is absent from `roster_canonical_bytes`
-    /// (molt-roster-v3) and from `republic_id` (molt-republic-id-v2), yet
+    /// (every version) and from `republic_id` (molt-republic-id-v2), yet
     /// `into_genesis` copies it off the wire into the `Founded` event, where
     /// it becomes `State::roster()` — the republic's member list.
     ///
@@ -3534,7 +3534,7 @@ mod tests {
 
     /// N1 PIN — a member must never trust a sealed roster carrying a
     /// malformed, non-canonical, or duplicated third anchor on ANY seat: the
-    /// value is threshold-signed forever-bytes (roster v3, republic id v2),
+    /// value is threshold-signed forever-bytes (the roster layout, republic id v2),
     /// and honest attestations over garbage would seal the garbage. Every
     /// forged roster here is SELF-CONSISTENT (honest signatures over exactly
     /// the identities shown), so only the anchor check can reject it.

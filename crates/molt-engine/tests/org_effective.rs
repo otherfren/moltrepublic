@@ -122,7 +122,7 @@ async fn found_pair(
     a.execute(Command::CreatePropose {
         name: name.to_string(),
         agenda: String::new(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("charter proposed");

@@ -1161,6 +1161,49 @@ impl State {
         pool
     }
 
+    /// The EFFECTIVE feature set (`charter_features.md` D5): the ratified
+    /// founding baseline unioned with every applied `set_features` edit,
+    /// sorted + deduped.
+    ///
+    /// **The fold is a UNION on purpose** — the deterministic twin of the
+    /// propose-time enable-only gate: a block that tried to drop a feature
+    /// folds as pure addition on every holder, so "features can never be
+    /// switched off" is a construction property, not a courtesy (the
+    /// `fold_pool_edit` lesson). Unknown keys are kept — an older build
+    /// must not un-enable what a newer one ratified; readers ignore keys
+    /// they cannot render.
+    ///
+    /// The baseline (D6, user-decided 2026-08-11): a republic founded
+    /// before roster-v5 (`features: None`) keeps exactly what was usable
+    /// before the gating existed — Shared Memory.
+    pub(crate) fn effective_features(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> =
+            match self.replica.as_ref().and_then(|r| r.features.clone()) {
+                Some(f) => f.into_iter().collect(),
+                None => std::iter::once("memory".to_string()).collect(),
+            };
+        for v in self.applied_org_entries() {
+            if v.get("op").and_then(serde_json::Value::as_str) == Some("set_features") {
+                let value =
+                    v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
+                set.extend(value.split_whitespace().map(str::to_string));
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// The D7 gate: refuse an optional surface the charter has not enabled.
+    /// The nav HIDES such a surface; this is the engine-side twin an MCP
+    /// agent meets (co-equality — clickable or refused must be one verdict).
+    pub(crate) fn require_feature(&self, surface: Surface) -> Result<(), molt_core::MoltError> {
+        if surface.is_charter_feature()
+            && !self.effective_features().iter().any(|f| f == surface.as_str())
+        {
+            return Err(molt_core::MoltError::FeatureDisabled(surface.as_str()));
+        }
+        Ok(())
+    }
+
     /// The R6 fold rule both effective views share (`effective_relays` and
     /// `org_effective`): an applied `set_relays` entry replaces the pool
     /// only if it is non-empty AND shares a relay with the pool accumulated
@@ -6412,6 +6455,230 @@ mod tests {
         b.push(done);
         let walter = chain_signer("walter", &b, b.blocks.clone());
         assert_eq!(walter.effective_relays(), vec![r_b], "the two-vote migration applies");
+    }
+
+    /// Charter features D5: a `set_features` edit is an ordinary gated
+    /// Organization proposal — below threshold the effective set does not
+    /// move, at m it does, for every member folding the same chain. The
+    /// legacy baseline (D6) is Shared Memory: this republic was founded
+    /// pre-v5 (`features: None`), so `memory` is on and everything else off
+    /// until voted in.
+    #[test]
+    fn a_feature_edit_commits_under_threshold_and_moves_the_effective_set() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        assert_eq!(
+            walter.effective_features(),
+            vec!["memory".to_string()],
+            "the legacy baseline is Shared Memory"
+        );
+        // WALTER — not the founder — raises the edit, deliberately unsorted
+        // with a duplicate: the proposal is stored canonicalized
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({
+                    "op": "set_features",
+                    "value": "quests memory quests",
+                }),
+            )
+            .expect("a member may propose a feature edit");
+        let (id, surface, payload) = {
+            let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+            (*id, rec.surface, rec.payload.clone())
+        };
+        assert_eq!(
+            payload.get("value").and_then(serde_json::Value::as_str),
+            Some("memory quests"),
+            "the proposal carries the canonical set"
+        );
+        assert_eq!(
+            walter.effective_features(),
+            vec!["memory".to_string()],
+            "below threshold the set must not move"
+        );
+        petra.receive_proposed(id, surface, payload);
+        let walter_sig = walter
+            .pending_sigs
+            .get(&id)
+            .expect("walter's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "walter")
+            .expect("walter signed")
+            .sig
+            .clone();
+        petra.receive_approval(id, "walter", 1, &walter_sig);
+        petra.chain_sign_and_gossip_approval(id);
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+        assert_eq!(
+            petra.effective_features(),
+            vec!["memory".to_string(), "quests".to_string()],
+            "at m the set moves"
+        );
+    }
+
+    /// Enable-only at propose time: dropping an enabled feature, re-enabling
+    /// the current set unchanged, and an unknown key are all refused before
+    /// anything reaches the members.
+    #[test]
+    fn a_feature_edit_that_shrinks_repeats_or_invents_is_refused() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let propose = |st: &mut crate::State, value: &str| {
+            st.cmd_propose(
+                Surface::Organization,
+                serde_json::json!({ "op": "set_features", "value": value }),
+            )
+        };
+        let err = propose(&mut walter, "quests").expect_err("dropping memory must be refused");
+        assert!(format!("{err:?}").contains("memory: cannot be disabled"), "{err:?}");
+        let err = propose(&mut walter, "memory").expect_err("a no-op must be refused");
+        assert!(format!("{err:?}").contains("already enabled"), "{err:?}");
+        let err = propose(&mut walter, "memory kanban").expect_err("an unknown key must be refused");
+        assert!(format!("{err:?}").contains("unknown feature: kanban"), "{err:?}");
+        let err = propose(&mut walter, "").expect_err("an empty edit must be refused");
+        assert!(format!("{err:?}").contains("nothing to enable"), "{err:?}");
+    }
+
+    /// Enable-only holds at the FOLD, not only at propose: the fold is a
+    /// UNION, so a hand-built block that "drops" a feature (bypassing every
+    /// propose-time gate) folds as pure addition on every holder. This is
+    /// the deterministic twin — without it, "features can never be switched
+    /// off" would be local courtesy.
+    #[test]
+    fn a_feature_dropping_block_folds_as_a_union() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        // height 1: "quests" alone — as a REPLACEMENT it would drop memory
+        let drop = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 1,
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": "quests" }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(drop);
+        let walter = chain_signer("walter", &b, b.blocks.clone());
+        assert_eq!(
+            walter.effective_features(),
+            vec!["memory".to_string(), "quests".to_string()],
+            "a dropping block folds as a union - nothing is ever disabled"
+        );
+    }
+
+    /// Two racing enables both survive a compaction cut: `set_features`
+    /// entries ACCUMULATE in the checkpoint summary (deliberately no
+    /// `applied_lww_slot` — an LWW summary would keep only the later value
+    /// and silently lose the other vote's addition across the cut).
+    #[test]
+    fn racing_feature_enables_both_survive_a_checkpoint_cut() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        // two independently-proposed enables, each a superset of the
+        // baseline but not of each other (the race)
+        for (h, value) in [(1, "memory quests"), (2, "memory vault")] {
+            let block = b.seal(
+                h,
+                ChainChange::Applied {
+                    proposal_id: h,
+                    surface: Surface::Organization,
+                    payload: serde_json::json!({ "op": "set_features", "value": value }),
+                },
+                &["petra", "walter"],
+            );
+            b.push(block);
+        }
+        let state = checkpoint_state(&b.blocks, 2).expect("summary");
+        let org = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .map(|(_, entries)| entries)
+            .expect("organization summary");
+        let kept: Vec<&str> = org
+            .iter()
+            .filter_map(|(_, p)| p.get("value").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["memory quests", "memory vault"],
+            "both racing enables survive the summary"
+        );
+        // …and the union over the summarized entries is the full set
+        let walter = chain_signer("walter", &b, b.blocks.clone());
+        assert_eq!(
+            walter.effective_features(),
+            vec!["memory".to_string(), "quests".to_string(), "vault".to_string()],
+        );
+    }
+
+    /// D7: the engine refuses selecting and proposing on a surface the
+    /// charter has not enabled — the co-equal twin of the nav hiding it —
+    /// and an enabling block opens the same gate for every holder.
+    #[test]
+    fn a_disabled_surface_refuses_select_and_propose_until_enabled() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // legacy baseline {memory}: memory passes, quests is refused
+        walter.cmd_select_surface(Surface::Memory).expect("memory is enabled");
+        let err = walter
+            .cmd_select_surface(Surface::Quests)
+            .expect_err("selecting a disabled surface must be refused");
+        assert_eq!(format!("{err}"), "quests: not enabled");
+        let err = walter
+            .cmd_select_view(Surface::Quests, "board".to_string())
+            .expect_err("selecting a disabled surface's view must be refused");
+        assert_eq!(format!("{err}"), "quests: not enabled");
+        let err = walter
+            .cmd_propose(Surface::Quests, serde_json::json!({ "op": "x", "value": "y" }))
+            .expect_err("proposing on a disabled surface must be refused");
+        assert_eq!(format!("{err}"), "quests: not enabled");
+        // the enabling block opens the gate
+        let enable = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 1,
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(enable);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter.cmd_select_surface(Surface::Quests).expect("an enabled surface passes");
+        // …and the effective set is on the status surface (co-equal read)
+        assert_eq!(
+            walter.status().features,
+            vec!["memory".to_string(), "quests".to_string()],
+        );
+    }
+
+    /// The baseline rule (D6): a v5 founding's ratified selection IS the
+    /// baseline — `Some([])` means "nothing optional", never the legacy
+    /// Shared-Memory grandfather, and an explicit selection replaces it.
+    #[test]
+    fn the_feature_baseline_follows_the_ratified_selection() {
+        let b = Builder::new_on_relays(&["petra", "walter"], 2, Vec::new());
+        let mut st = chain_signer("walter", &b, b.blocks.clone());
+        if let Some(r) = st.replica.as_mut() {
+            r.features = Some(Vec::new());
+        }
+        assert_eq!(
+            st.effective_features(),
+            Vec::<String>::new(),
+            "an explicitly empty selection enables nothing"
+        );
+        if let Some(r) = st.replica.as_mut() {
+            r.features = Some(vec!["wallet".to_string()]);
+        }
+        assert_eq!(st.effective_features(), vec!["wallet".to_string()]);
     }
 
     /// R6: an edit that would strand a member — a new pool sharing no relay

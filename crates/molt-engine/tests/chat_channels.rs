@@ -120,7 +120,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     a.execute(Command::CreatePropose {
         name: "Guild".to_string(),
         agenda: "deliberate per channel".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("founder proposes the charter");

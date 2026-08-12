@@ -71,6 +71,10 @@ pub(crate) struct OrgEffective {
     /// The effective governed pool (R6), space-joined for display — the
     /// ratified founding pool until a `set_relays` edit applies.
     pub relays: String,
+    /// The effective feature set (`charter_features.md`), space-joined for
+    /// display — the ratified founding selection unioned with every applied
+    /// `set_features` edit (enable-only by fold).
+    pub features: String,
 }
 
 /// Parse a retention window ("14 days" or a bare "14") into days.
@@ -286,6 +290,7 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
         // the image ops show what they change: the current image reference
         "set_image" | "remove_image" => eff.image.clone(),
         "set_relays" => eff.relays.clone(),
+        "set_features" => eff.features.clone(),
         // an op this build doesn't know (ops are free-form wire strings, so
         // an older log may carry one) — tolerated, nothing to show
         _ => String::new(),
@@ -323,6 +328,22 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
             // WP3: the bytes must also decode as a picture
             Some(bytes) => image_decodable(&bytes),
         },
+        // a feature edit — space-separated optional-surface keys, every one
+        // known (an applied entry is forever; the enable-only gate sits in
+        // cmd_propose, the union fold makes it deterministic)
+        "set_features" => {
+            let tokens: Vec<&str> = value.split_whitespace().collect();
+            if tokens.is_empty() {
+                return Err(MoltError::BadPayload("nothing to enable".into()));
+            }
+            for t in tokens {
+                let known = Surface::parse(t).is_some_and(Surface::is_charter_feature);
+                if !known {
+                    return Err(MoltError::BadPayload(format!("unknown feature: {t}")));
+                }
+            }
+            Ok(())
+        }
         // R6: a pool edit — space-separated relay URLs, each one canonical
         // (an applied entry is forever)
         "set_relays" => {
@@ -349,6 +370,9 @@ impl State {
         if !surface.is_gated() {
             return Err(MoltError::ChatNotGated);
         }
+        // D7: no governance on a surface the charter has not enabled
+        // (Organization itself always passes — set_features rides it)
+        self.require_feature(surface)?;
         // set_relays: store the CANONICAL spelling (review 2026-08-09). The
         // parser accepts-and-rewrites ":443", a trailing "/" and uppercase;
         // recording the raw token instead would poison every later
@@ -367,6 +391,17 @@ impl State {
             if let Ok(tokens) = canon {
                 payload["value"] = Value::String(tokens.join(" "));
             }
+        }
+        // set_features: store the CANONICAL set (sorted + deduped) — one
+        // set, one spelling, so the diff card and the union fold never meet
+        // two encodings of the same selection
+        if surface == Surface::Organization
+            && payload.get("op").and_then(Value::as_str) == Some("set_features")
+        {
+            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            let canon: std::collections::BTreeSet<&str> = raw.split_whitespace().collect();
+            payload["value"] =
+                Value::String(canon.into_iter().collect::<Vec<_>>().join(" "));
         }
         if !payload.is_object() {
             return Err(MoltError::BadPayload(
@@ -420,6 +455,28 @@ impl State {
                     "no shared relay with the current pool - keep one (e.g. {}) and drop it in a second vote",
                     current[0]
                 )));
+            }
+        }
+        // enable-only (`charter_features.md` D5): the proposed set must keep
+        // every effective feature and add at least one. The gate is local
+        // courtesy — the union fold is what makes the rule deterministic.
+        if surface == Surface::Organization
+            && payload.get("op").and_then(Value::as_str) == Some("set_features")
+        {
+            let proposed: Vec<&str> = payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect();
+            let current = self.effective_features();
+            for f in &current {
+                if !proposed.contains(&f.as_str()) {
+                    return Err(MoltError::BadPayload(format!("{f}: cannot be disabled")));
+                }
+            }
+            if proposed.len() == current.len() {
+                return Err(MoltError::BadPayload("already enabled".into()));
             }
         }
         let me = self.member();
@@ -691,6 +748,7 @@ impl State {
             "set_image" => "Logo",
             "remove_image" => "Logo removed",
             "set_relays" => "Relay pool",
+            "set_features" => "Features",
             other => other,
         };
         // the decided content, capped — a charter is long, and the image
@@ -946,6 +1004,9 @@ impl State {
             retention_days: molt_core::default_chat_retention_days(),
             image: String::new(),
             relays: self.ratified_relays().join(" "),
+            // the standalone union fold (baseline ∪ applied edits) — kept
+            // out of the entry loop below so gates and readers share ONE rule
+            features: self.effective_features().join(" "),
         };
         // fold over the BORROWED applied entries (never clone — a `set_image`
         // entry carries the base64 image, so cloning the log here would copy
@@ -1439,6 +1500,7 @@ impl State {
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
+            features: self.effective_features(),
         }
     }
 }

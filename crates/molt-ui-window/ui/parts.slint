@@ -1351,8 +1351,9 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        // set_relays: the pool diff — one row per relay of the union,
-        // + added (good) / - removed (bad) / kept unmarked
+        // set_relays / set_features: the set diff — one row per element of
+        // the union, + added (good) / - removed (bad) / kept unmarked
+        // (a feature diff can only ever show + and kept: enable-only)
         if root.p.relay-op: VerticalLayout {
             spacing: 3px;
             for c in root.p.relay-changes: HorizontalLayout {

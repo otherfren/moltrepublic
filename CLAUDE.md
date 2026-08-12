@@ -146,21 +146,25 @@ finding, the same as a bug.
 - **`WorkspaceEvent::Founded`, `SealedRoster`, and `roster_canonical_bytes`
   ripple widely.** Adding a field touches ~15 sites, many of them test harnesses
   that recompute the signed table. `roster_canonical_bytes` is versioned
-  (`molt-roster-v3` since N1 — it binds each member's `nostr_pk` third
-  anchor) — bump the tag if you change the byte layout, and update
+  (v3 bound each member's `nostr_pk` third anchor (N1), v4 the ratified
+  relay pool (R3), and `molt-roster-v5` the ratified FEATURE selection
+  (`docs/ritual/charter_features.md`) — **conditionally: `features: None`
+  emits v4 bytes byte-identically**, which is what keeps live republics
+  verifying) — bump the tag if you change the byte layout, and update
   every recompute site (founder canonical, `verify_sealed_roster`,
   `verify_seal_proposal`, the tests) together or signatures silently break.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
   (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
   preimage stays injective for arbitrary field content; never regress it to
-  separators) and `molt-chain-checkpoint-v6`
+  separators) and `molt-chain-checkpoint-v7`
   (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
   three anchors (v2), the ratified relay pool rides along (v3), the applied
   projection is SUMMARIZED rather than archived (v4, `applied_lww_slot`),
   the WORKING transport anchors ride along too (v5) — without them a cut
-  strands every seat that had recovered — and the relay LEDGER as well (v6,
-  R3b): a cut must not forget who declared which relays). Each has byte-pin
-  tests that go red on an unbumped change.
+  strands every seat that had recovered — the relay LEDGER as well (v6,
+  R3b): a cut must not forget who declared which relays — and the ratified
+  founding feature set (v7, conditional like roster-v5: a state without one
+  hashes as v6)). Each has byte-pin tests that go red on an unbumped change.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
 - **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat

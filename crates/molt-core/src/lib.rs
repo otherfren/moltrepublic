@@ -4880,6 +4880,13 @@ pub struct StatusView {
     /// and pre-chain workspaces have no chain for a rejoiner to verify).
     #[serde(default)]
     pub chain_governed: bool,
+    /// The EFFECTIVE feature set (`charter_features.md`): the ratified
+    /// founding selection unioned with every applied `set_features` edit,
+    /// sorted. Drives which optional surfaces the nav shows — and the
+    /// engine refuses selecting/proposing on a surface not in it, so an
+    /// MCP agent meets the same gate the nav renders (co-equality).
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// The chat-retention default: 7 days, the window every republic starts
@@ -5103,6 +5110,11 @@ pub enum MoltError {
     /// The proposal payload was malformed.
     #[error("bad payload: {0}")]
     BadPayload(String),
+    /// An optional surface the charter has not enabled
+    /// (`charter_features.md` D7) — selecting or proposing on it is
+    /// refused engine-side, the co-equal twin of the nav hiding it.
+    #[error("{0}: not enabled")]
+    FeatureDisabled(&'static str),
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),

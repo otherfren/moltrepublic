@@ -175,7 +175,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     a.execute(Command::CreatePropose {
         name: "Chess Club".to_string(),
         agenda: "play chess, decide together".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("charter proposed");
@@ -433,7 +433,7 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
     a.execute(Command::CreatePropose {
         name: "Overlap".to_string(),
         agenda: "meet on the relay we share".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -719,7 +719,7 @@ async fn a_declined_charter_aborts_both_sides() {
     a.execute(Command::CreatePropose {
         name: "Nope".to_string(),
         agenda: "unacceptable terms".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -792,7 +792,7 @@ async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
     a.execute(Command::CreatePropose {
         name: "Nope".to_string(),
         agenda: "unacceptable terms".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -904,7 +904,7 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     a.execute(Command::CreatePropose {
         name: "Overflow".to_string(),
         agenda: "found over a pool bigger than a link".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -1222,7 +1222,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     a.execute(Command::CreatePropose {
         name: "Doomed".to_string(),
         agenda: "this seal will never land".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -1372,7 +1372,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     a.execute(Command::CreatePropose {
         name: "Retry".to_string(),
         agenda: "a hiccup must not cost the seat".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("proposed");
@@ -1805,7 +1805,7 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     a.execute(Command::CreatePropose {
         name: "Chess Club".to_string(),
         agenda: "play chess".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("charter");

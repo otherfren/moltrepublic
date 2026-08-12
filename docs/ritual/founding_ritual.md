@@ -189,12 +189,15 @@ Only then does `F` spend the ticket, anchor `{name, pkᵢ, nostrpkᵢ}` and keep
 missing KeyPackage — is dropped without a trace.
 
 **❹ Deliberate & seal round.** Once *every* seat's key is in, the ritual does
-**not** auto-seal. `F` proposes the **final DAO name** and a free-text
-**agenda/charter**; `F` then freezes the **roster table** `T` — the one
-canonical serialization of `(republicId(name), m, n, identities, agenda)` — and
-sends `Seal{name, agenda, T}` to every member on its reply queue. Because the
-agenda is inside `T`, a signature over `T` is a ratification of exactly this
-charter (the name is bound too, via the republic id that salts `T`).
+**not** auto-seal. `F` proposes the **final DAO name**, a free-text
+**agenda/charter**, and the **feature selection** (which optional surfaces
+this republic activates — `charter_features.md`); `F` then freezes the
+**roster table** `T` — the one canonical serialization of
+`(republicId(name), m, n, identities, agenda, relays, features)` — and sends
+`Seal{name, agenda, features, T}` to every member on its reply queue. Because
+the agenda, the relay pool and the feature selection are inside `T`, a
+signature over `T` is a ratification of exactly this charter (the name is
+bound too, via the republic id that salts `T`).
 
 **❺–❻ Ratify.** Each `Mᵢ` sees the proposed name+agenda and — on an **explicit
 human confirm** — signs `T` with its identity key and returns the signature; `F`
@@ -317,9 +320,10 @@ When a member finishes, it has verified — not trusted — that:
    transport key it did not derive, is rejected and leaves it with no
    workspace.
 5. **The charter is the one it ratified.** The recomputed table binds the DAO
-   name and agenda, so a genesis whose charter differs from what the member
-   signed fails verification — the founder cannot swap in a different charter
-   after the fact.
+   name, the agenda, the relay pool and the feature selection, so a genesis
+   whose charter differs from what the member signed fails verification — the
+   founder cannot swap in a different charter (or quietly activate a feature
+   nobody ratified) after the fact.
 6. **The sealed table IS the ratified table — byte for byte.** At the genesis
    the member compares the distributed roster's canonical bytes against the
    exact bytes it signed at ratification, so a founder cannot substitute a
@@ -380,7 +384,7 @@ per-queue wrap; inside MLS ciphertext once MLS lands):
 | Message | Direction | Carries |
 |---|---|---|
 | `JoinRequest` | member → founder | seat, name, identity pk, nostr pk, **MLS KeyPackage**, ticket MAC (v2), reply-queue handover |
-| `Seal{ name, agenda, table }` | founder → member | the proposed charter (name + agenda) to review, and the canonical bytes to sign (hex) |
+| `Seal{ name, agenda, features, table }` | founder → member | the proposed charter (name + agenda + feature selection) to review, and the canonical bytes to sign (hex) |
 | `Signed{ sig }` | member → founder | the member's signature over the table (its ratification) |
 | `Genesis{ sealed, welcome }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations, **agenda**) and the **MLS `Welcome`** |
 

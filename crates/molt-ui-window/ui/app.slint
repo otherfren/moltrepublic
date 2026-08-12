@@ -1002,6 +1002,7 @@ export component AppWindow inherits Window {
         || root.org-name-modal-open
         || root.org-retention-modal-open
         || root.org-relays-modal-open
+        || root.org-features-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
         || root.relay-clearnet-modal-open
@@ -1173,6 +1174,13 @@ export component AppWindow inherits Window {
     in property <[int]> cw-log-tone;
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
+    // the charter step's feature selection (charter_features.md): chat is
+    // core and not a property; wallet defaults on, the rest off. Read by
+    // the Rust create-propose handler, reset when a ritual starts.
+    in-out property <bool> cw-feat-memory: false;
+    in-out property <bool> cw-feat-quests: false;
+    in-out property <bool> cw-feat-vault: false;
+    in-out property <bool> cw-feat-wallet: true;
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -1203,6 +1211,12 @@ export component AppWindow inherits Window {
     in property <bool> jw-awaiting-ratify;
     in property <string> jw-proposed-name;
     in property <string> jw-proposed-agenda;
+    // the proposed feature selection at the ratification step (a pre-v5
+    // founder's proposal renders the legacy baseline: memory only)
+    in property <bool> jw-feat-memory;
+    in property <bool> jw-feat-quests;
+    in property <bool> jw-feat-vault;
+    in property <bool> jw-feat-wallet;
     // the join sealed a workspace (join.sealed_id) — entry now waits on the
     // wizard's phrase-backup step and its join-finish()
     in property <bool> jw-sealed;
@@ -1401,6 +1415,18 @@ export component AppWindow inherits Window {
     callback cw-toggle-relay(int);
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
+    // the charter's EFFECTIVE feature selection (StatusView.features) and
+    // the enable-modal's draft; an already-enabled feature is locked in the
+    // modal - enable-only, the engine refuses removals either way
+    in property <bool> org-feat-memory;
+    in property <bool> org-feat-quests;
+    in property <bool> org-feat-vault;
+    in property <bool> org-feat-wallet;
+    property <bool> org-features-modal-open: false;
+    property <bool> of-memory-draft;
+    property <bool> of-quests-draft;
+    property <bool> of-vault-draft;
+    property <bool> of-wallet-draft;
     property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -1726,6 +1752,8 @@ export component AppWindow inherits Window {
             root.org-retention-modal-open = false;
         } else if (root.org-relays-modal-open) {
             root.org-relays-modal-open = false;
+        } else if (root.org-features-modal-open) {
+            root.org-features-modal-open = false;
         } else if (root.decrypt-modal-open) {
             root.decrypt-modal-open = false;
         } else if (root.relay-clearnet-modal-open) {
@@ -1774,6 +1802,10 @@ export component AppWindow inherits Window {
         root.cw-seed-check = "";
         root.cw-threshold = 2;
         root.cw-members = 3;
+        root.cw-feat-memory = false;
+        root.cw-feat-quests = false;
+        root.cw-feat-vault = false;
+        root.cw-feat-wallet = true;
     }
 
     init => {
@@ -1935,11 +1967,11 @@ export component AppWindow inherits Window {
                             s: s;
                             selected: s.key == root.nav-expanded;
                             compact: root.nav-collapsed;
-                            // Quests, Vault and Wallet are staged out (greyed,
-                            // click-dead) until their real implementations
-                            // land; Memory stays selectable and opens its
-                            // badged DESIGN-MOCK pane (surfaces.slint)
-                            enabled: s.key != "quests" && s.key != "vault" && s.key != "wallet";
+                            // every row the model delivers is selectable: the
+                            // charter's feature gating hides disabled surfaces
+                            // in Rust (surface_tabs), and an enabled-but-unbuilt
+                            // one opens its badged DESIGN-MOCK pane
+                            enabled: true;
                             chosen => {
                                 root.mv-draft = "";
                                 // clicking "Chat" while an Organization
@@ -2968,6 +3000,29 @@ export component AppWindow inherits Window {
                                 text <=> root.cw-agenda;
                                 placeholder: Strings.cw-charter-agenda-ph;
                             }
+                            // the feature selection, ratified with the
+                            // charter: chat is core (locked on); the rest
+                            // is this republic's choice - enable-only
+                            // forever, so a vote can add but never remove
+                            Text {
+                                text: Strings.cw-features;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                            }
+                            GridLayout {
+                                spacing: 4px;
+                                Row {
+                                    AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
+                                    AppCheck { label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
+                                }
+                                Row {
+                                    AppCheck { label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
+                                    AppCheck { label: Strings.feat-vault; checked <=> root.cw-feat-vault; }
+                                }
+                                Row {
+                                    AppCheck { label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
+                                }
+                            }
                             HorizontalLayout {
                                 spacing: 8px;
                                 Rectangle { horizontal-stretch: 1; }
@@ -3842,6 +3897,22 @@ export component AppWindow inherits Window {
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
+                            }
+                            // the proposed feature selection, exactly as it
+                            // will be signed - read-only, off rows dimmed
+                            GridLayout {
+                                spacing: 4px;
+                                Row {
+                                    AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
+                                    AppCheck { label: Strings.feat-memory; checked: root.jw-feat-memory; enabled: false; }
+                                }
+                                Row {
+                                    AppCheck { label: Strings.feat-quests; checked: root.jw-feat-quests; enabled: false; }
+                                    AppCheck { label: Strings.feat-vault; checked: root.jw-feat-vault; enabled: false; }
+                                }
+                                Row {
+                                    AppCheck { label: Strings.feat-wallet; checked: root.jw-feat-wallet; enabled: false; }
+                                }
                             }
                             Text {
                                 text: Strings.jw-ratify-hint;
@@ -5246,6 +5317,46 @@ export component AppWindow inherits Window {
                                             clicked => {
                                                 root.org-charter-draft = root.active-agenda;
                                                 root.org-charter-modal-open = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                // the charter's feature selection: the same
+                                // checkbox language as the wizard, read-only;
+                                // the pencil proposes an enable (m-of-n vote,
+                                // enable-only - the engine refuses removals)
+                                DetailGroup {
+                                    title: Strings.cw-features;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        GridLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 4px;
+                                            Row {
+                                                AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
+                                                AppCheck { label: Strings.feat-memory; checked: root.org-feat-memory; enabled: false; }
+                                            }
+                                            Row {
+                                                AppCheck { label: Strings.feat-quests; checked: root.org-feat-quests; enabled: false; }
+                                                AppCheck { label: Strings.feat-vault; checked: root.org-feat-vault; enabled: false; }
+                                            }
+                                            Row {
+                                                AppCheck { label: Strings.feat-wallet; checked: root.org-feat-wallet; enabled: false; }
+                                            }
+                                        }
+                                        AppButton {
+                                            width: 26px;
+                                            height: 26px;
+                                            pad: 0px;
+                                            label: "✎";
+                                            tooltip: Strings.org-edit;
+                                            tooltip-left: true;
+                                            clicked => {
+                                                root.of-memory-draft = root.org-feat-memory;
+                                                root.of-quests-draft = root.org-feat-quests;
+                                                root.of-vault-draft = root.org-feat-vault;
+                                                root.of-wallet-draft = root.org-feat-wallet;
+                                                root.org-features-modal-open = true;
                                             }
                                         }
                                     }
@@ -7893,6 +8004,56 @@ export component AppWindow inherits Window {
             height: 300px;
             text <=> root.org-charter-draft;
             placeholder: Strings.cw-charter-agenda-ph;
+        }
+    }
+
+    // =================================================================
+    // Modal: enable charter features — the wizard's checkbox language;
+    // chat and everything already enabled are locked (enable-only, the
+    // engine refuses removals). Confirm proposes the full target set.
+    // =================================================================
+    if root.org-features-modal-open: ConfirmModal {
+        title: Strings.cw-features;
+        body: "";
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
+            || (root.of-quests-draft && !root.org-feat-quests)
+            || (root.of-vault-draft && !root.org-feat-vault)
+            || (root.of-wallet-draft && !root.org-feat-wallet);
+        dismissed => {
+            root.org-features-modal-open = false;
+        }
+        confirmed => {
+            root.org-features-modal-open = false;
+            root.org-propose("set_features",
+                (root.of-memory-draft ? " memory" : "")
+                + (root.of-quests-draft ? " quests" : "")
+                + (root.of-vault-draft ? " vault" : "")
+                + (root.of-wallet-draft ? " wallet" : ""));
+        }
+        VerticalLayout {
+            spacing: 4px;
+            AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
+            AppCheck {
+                label: Strings.feat-memory;
+                checked <=> root.of-memory-draft;
+                enabled: !root.org-feat-memory;
+            }
+            AppCheck {
+                label: Strings.feat-quests;
+                checked <=> root.of-quests-draft;
+                enabled: !root.org-feat-quests;
+            }
+            AppCheck {
+                label: Strings.feat-vault;
+                checked <=> root.of-vault-draft;
+                enabled: !root.org-feat-vault;
+            }
+            AppCheck {
+                label: Strings.feat-wallet;
+                checked <=> root.of-wallet-draft;
+                enabled: !root.org-feat-wallet;
+            }
         }
     }
 

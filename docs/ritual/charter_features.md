@@ -1,7 +1,13 @@
 # Charter features — the founder picks the republic's surfaces, the threshold grows them
 
-Status: **PLAN (2026-08-11), discussed with the user before build.** Execution
-order in §6; every step lands red-test-first on master.
+Status: **BUILT (2026-08-12)** — S1..S7 landed on master (S1: roster-v5 +
+checkpoint-v7, conditional; S2: the selection travels the ritual; S3:
+`set_features` governance with union fold; S4: engine gates + legacy
+baseline; S5/S6: wizard checkboxes, ratify card, nav gating, Organization
+list + enable modal, vote diff card; S7: docs). One deviation from §3 D8 as
+planned: the vote card reuses the existing relay-diff rows verbatim
+(feature keys rendered as display labels) instead of renaming the row
+struct — same generalization, no window-API churn.
 
 Read first: `founding_ritual.md` (the deliberation step this extends),
 `docs/chain/persistent_chain.md`, `docs/transport/relay_topology_plan.md`

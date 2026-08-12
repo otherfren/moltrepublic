@@ -2965,6 +2965,7 @@ mod tests {
             retention_days: 7,
             image: image.to_string(),
             relays: String::new(),
+            features: String::new(),
         };
         let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
             surface,
@@ -5164,17 +5165,20 @@ mod tests {
     #[test]
     fn select_view_is_validated_shared_state() {
         rt().block_on(async {
+            // Memory: enabled by the legacy feature baseline, so navigation
+            // reaches the view validation (a disabled surface is refused a
+            // step earlier — pinned in the D7 gate test)
             let w = spawn(GroupConfig::demo(), SessionView::default());
             w.execute(Command::SelectView {
-                surface: Surface::Quests,
-                view: "my-quests".to_string(),
+                surface: Surface::Memory,
+                view: "archive".to_string(),
             })
             .await
             .expect("select");
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
-                    assert_eq!(s.surface, Surface::Quests);
-                    assert_eq!(s.view, "my-quests");
+                    assert_eq!(s.surface, Surface::Memory);
+                    assert_eq!(s.view, "archive");
                 }
                 other => panic!("unexpected: {other:?}"),
             }
@@ -5189,12 +5193,12 @@ mod tests {
             ));
             // a plain surface select falls back to that surface's default view
             w.execute(Command::SelectSurface {
-                surface: Surface::Wallet,
+                surface: Surface::Memory,
             })
             .await
             .expect("select2");
             match w.execute(Command::ReadSession).await.expect("read2") {
-                Reply::Session(s) => assert_eq!(s.view, "balance"),
+                Reply::Session(s) => assert_eq!(s.view, "brain"),
                 other => panic!("unexpected: {other:?}"),
             }
         });

@@ -64,6 +64,7 @@ impl State {
     }
 
     pub(crate) fn cmd_select_surface(&mut self, surface: Surface) -> Result<Reply, MoltError> {
+        self.require_feature(surface)?;
         self.session.surface = surface;
         self.session.view = surface.default_view().to_string();
         self.emit_session(SessionScope::Full);
@@ -75,6 +76,7 @@ impl State {
         surface: Surface,
         view: String,
     ) -> Result<Reply, MoltError> {
+        self.require_feature(surface)?;
         if !surface.views().iter().any(|(k, _)| *k == view) {
             return Err(MoltError::UnknownView(surface, view));
         }

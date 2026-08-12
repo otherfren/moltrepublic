@@ -152,7 +152,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
     a.execute(Command::CreatePropose {
         name: "Transfer Club".to_string(),
         agenda: "move real bytes".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("propose charter");

@@ -353,12 +353,15 @@ export component AppStepper inherits Rectangle {
     }
 }
 
-// Checkbox + label row.
+// Checkbox + label row. A disabled one renders dimmed and ignores clicks
+// (a locked state, e.g. a charter feature that can never be switched off).
 export component AppCheck inherits Rectangle {
     in property <string> label;
     in-out property <bool> checked: false;
+    in property <bool> enabled: true;
     callback toggled(bool);
     height: 28px;
+    opacity: root.enabled ? 1.0 : 0.45;
 
     HorizontalLayout {
         spacing: 10px;
@@ -388,6 +391,7 @@ export component AppCheck inherits Rectangle {
         }
     }
     ta := TouchArea {
+        enabled: root.enabled;
         clicked => {
             root.checked = !root.checked;
             root.toggled(root.checked);

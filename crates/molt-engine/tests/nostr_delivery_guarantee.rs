@@ -153,7 +153,7 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     a.execute(Command::CreatePropose {
         name: "Chess Club".to_string(),
         agenda: "play chess".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("charter");

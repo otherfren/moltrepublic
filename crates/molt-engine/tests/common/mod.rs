@@ -209,7 +209,7 @@ pub async fn found_with_mesh(
     a.execute(Command::CreatePropose {
         name: "Phoenix".to_string(),
         agenda: "keep the mesh alive".to_string(),
-        features: Vec::new(),
+        features: vec!["memory".to_string()],
     })
     .await
     .expect("founder proposes the charter");

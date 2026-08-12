@@ -446,7 +446,7 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static st
 /// the ratified relay pool (roster-v4); v2
 /// covers each member's `nostr_pk` third anchor in BOTH tables; under v1 a
 /// served checkpoint's roster anchor could be swapped without changing the
-/// state hash, so the tamper-evidence roster-v3 gives the genesis vanished
+/// state hash, so the tamper-evidence the signed roster gives the genesis vanished
 /// the moment a republic pruned) —
 /// same length-prefixed framing as [`roster_canonical_bytes`], so the
 /// layouts stay siblings. JSON payloads serialize canonically because

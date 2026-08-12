@@ -1043,6 +1043,22 @@ pub fn run_app(
         let w = wallet.clone();
         let weak = ui.as_weak();
         ui.on_create_propose(move |name, agenda| {
+            // the wizard's checkbox selection; the engine canonicalizes
+            let features = weak
+                .upgrade()
+                .map(|ui| {
+                    [
+                        (ui.get_cw_feat_memory(), "memory"),
+                        (ui.get_cw_feat_quests(), "quests"),
+                        (ui.get_cw_feat_vault(), "vault"),
+                        (ui.get_cw_feat_wallet(), "wallet"),
+                    ]
+                    .into_iter()
+                    .filter(|(on, _)| *on)
+                    .map(|(_, key)| key.to_string())
+                    .collect()
+                })
+                .unwrap_or_default();
             issue(
                 &rt,
                 &w,
@@ -1050,7 +1066,7 @@ pub fn run_app(
                 Command::CreatePropose {
                     name: name.to_string(),
                     agenda: agenda.to_string(),
-                    features: Vec::new(),
+                    features,
                 },
             );
         });
@@ -3025,6 +3041,16 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_sealed(!sv.join.sealed_id.is_empty());
     ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
+    // the proposed feature selection, exactly as it will be signed; a
+    // pre-v5 founder (None) renders the legacy baseline: memory only
+    let jw_feat = |key: &str| match &sv.join.proposed_features {
+        Some(f) => f.iter().any(|k| k == key),
+        None => key == "memory",
+    };
+    ui.set_jw_feat_memory(jw_feat("memory"));
+    ui.set_jw_feat_quests(jw_feat("quests"));
+    ui.set_jw_feat_vault(jw_feat("vault"));
+    ui.set_jw_feat_wallet(jw_feat("wallet"));
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
     ui.set_jw_log_tone(log_tones(&sv.join.run.log));
     ui.set_jw_headline(sv.join.run.headline.clone().into());
@@ -3204,6 +3230,10 @@ struct OrgStats {
     /// shown beside the name and the retention window. Empty on a legacy
     /// queue-shaped republic, which has no relays.
     relays: Vec<String>,
+    /// The charter's EFFECTIVE feature set (engine `StatusView.features`):
+    /// which optional surfaces get a nav row and read as active under
+    /// Organization › charter.
+    features: Vec<String>,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -3637,6 +3667,7 @@ async fn gather_surfaces(
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
                 chain_governed: s.chain_governed,
                 relays: s.relays,
+                features: s.features,
             },
         ),
         _ => return None,
@@ -3751,6 +3782,14 @@ async fn gather_surfaces(
     };
     let mut snaps: Vec<(Surface, SurfaceSnapshot)> = Vec::new();
     for sf in Surface::ALL {
+        // charter feature gating: a disabled optional surface gets NO nav
+        // row (hidden, not greyed) — the engine-side twin refuses selecting
+        // it, so hidden and refused are one verdict
+        if sf.is_charter_feature()
+            && !org_stats.features.iter().any(|f| f == sf.as_str())
+        {
+            continue;
+        }
         let channel = (sf == Surface::Chat).then(|| selected.clone());
         // the displayed chat log follows the selected sub-view: General
         // shows the younger half of the retention window, Archive the
@@ -4262,6 +4301,11 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_chat_retention(b.org_stats.retention_days);
     // the Members table offers "recovery link" only where recovery exists
     ui.set_org_chain_governed(b.org_stats.chain_governed);
+    let feat_on = |key: &str| b.org_stats.features.iter().any(|f| f == key);
+    ui.set_org_feat_memory(feat_on("memory"));
+    ui.set_org_feat_quests(feat_on("quests"));
+    ui.set_org_feat_vault(feat_on("vault"));
+    ui.set_org_feat_wallet(feat_on("wallet"));
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
@@ -4673,10 +4717,21 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             .unwrap_or_default()
             .to_string(),
         charter_op: op == "set_charter",
-        relay_changes: if op == "set_relays" {
-            relay_pool_diff(&p.current, &p.proposed)
-        } else {
-            Vec::new()
+        relay_changes: match op {
+            "set_relays" => relay_pool_diff(&p.current, &p.proposed),
+            // the feature vote reuses the set-diff rows (enable-only: rows
+            // are + or kept); keys render as their display labels — one
+            // vocabulary with the nav and the wizard
+            "set_features" => relay_pool_diff(&p.current, &p.proposed)
+                .into_iter()
+                .map(|(sign, key)| {
+                    let label = Surface::parse(&key)
+                        .map(|sf| surface_name(lang, sf).to_string())
+                        .unwrap_or(key);
+                    (sign, label)
+                })
+                .collect(),
+            _ => Vec::new(),
         },
         votes: p
             .votes
@@ -5482,7 +5537,8 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Organization => "Organisation",
             Surface::Chat => "Chat",
             Surface::Memory => "Shared Memory",
-            Surface::Quests => "Quests",
+            // user-decided 2026-08-11: the board is named for what it shows
+            Surface::Quests => "Kanban",
             Surface::Vault => "Tresor",
             Surface::Wallet => "Wallet",
         }
@@ -5491,7 +5547,7 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Organization => "Organization",
             Surface::Chat => "Chat",
             Surface::Memory => "Shared Memory",
-            Surface::Quests => "Quests",
+            Surface::Quests => "Kanban",
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
         }
@@ -6095,6 +6151,12 @@ lexicon! {
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
     cw_declined_hint: "A member declined the charter - close and found anew.", "Ein Mitglied hat die Satzung abgelehnt - schließen und neu gründen.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
+    cw_features: "Features", "Features";
+    feat_chat: "Chat", "Chat";
+    feat_memory: "Shared Memory", "Shared Memory";
+    feat_quests: "Kanban", "Kanban";
+    feat_vault: "Vault", "Tresor";
+    feat_wallet: "Wallet", "Wallet";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
     jw_ratify_hint: "The founder proposed this name and charter. Confirm to add your signature and join; the workspace opens once every member has ratified.", "Der Gründer hat diesen Namen und diese Satzung vorgeschlagen. Bestätige, um deine Signatur beizusteuern und beizutreten; der Workspace geht auf, sobald jedes Mitglied ratifiziert hat.";
