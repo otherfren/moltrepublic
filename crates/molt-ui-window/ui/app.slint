@@ -3004,23 +3004,51 @@ export component AppWindow inherits Window {
                             // charter: chat is core (locked on); the rest
                             // is this republic's choice - enable-only
                             // forever, so a vote can add but never remove
-                            Text {
-                                text: Strings.cw-features;
-                                color: Theme.faint;
-                                font-size: Theme.fs-cap;
-                            }
-                            GridLayout {
-                                spacing: 4px;
-                                Row {
-                                    AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
-                                    AppCheck { label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
-                                }
-                                Row {
-                                    AppCheck { label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
-                                    AppCheck { label: Strings.feat-vault; checked <=> root.cw-feat-vault; }
-                                }
-                                Row {
-                                    AppCheck { label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
+                            // content-sized, anchored left - the panel must
+                            // not stretch across the step's width
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    background: Theme.panel-2;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        padding-left: 18px;
+                                        padding-right: 22px;
+                                        spacing: 10px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Text {
+                                                text: "🧩";
+                                                font-family: "Twemoji Mozilla";
+                                                font-size: Theme.fs-cap;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: Strings.cw-features;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        GridLayout {
+                                            spacing: 10px;
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
+                                                AppCheck { width: 180px; label: Strings.feat-vault; checked <=> root.cw-feat-vault; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             HorizontalLayout {
@@ -3899,19 +3927,51 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                             // the proposed feature selection, exactly as it
-                            // will be signed - read-only, off rows dimmed
-                            GridLayout {
-                                spacing: 4px;
-                                Row {
-                                    AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
-                                    AppCheck { label: Strings.feat-memory; checked: root.jw-feat-memory; enabled: false; }
-                                }
-                                Row {
-                                    AppCheck { label: Strings.feat-quests; checked: root.jw-feat-quests; enabled: false; }
-                                    AppCheck { label: Strings.feat-vault; checked: root.jw-feat-vault; enabled: false; }
-                                }
-                                Row {
-                                    AppCheck { label: Strings.feat-wallet; checked: root.jw-feat-wallet; enabled: false; }
+                            // will be signed - read-only, off rows dimmed;
+                            // the same panel the founder's wizard shows
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    background: Theme.panel-2;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        padding-left: 18px;
+                                        padding-right: 22px;
+                                        spacing: 10px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Text {
+                                                text: "🧩";
+                                                font-family: "Twemoji Mozilla";
+                                                font-size: Theme.fs-cap;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: Strings.cw-features;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        GridLayout {
+                                            spacing: 10px;
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-memory; checked: root.jw-feat-memory; enabled: false; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-quests; checked: root.jw-feat-quests; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-vault; checked: root.jw-feat-vault; enabled: false; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked: root.jw-feat-wallet; enabled: false; }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Text {
