@@ -3045,6 +3045,15 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 
     // join
     ui.set_jw_step(i32::from(sv.join.run.step));
+    // the engine returned the join session to the idle form (join_finish
+    // after success, or an invalidation by create/recover/open) — re-arm
+    // the optimistic start latch, or the NEXT join in this app run has a
+    // dead button (review 2026-08-12). While a start is in flight the
+    // engine's own re-entry guard still refuses a double, so the worst a
+    // racing pre-start push can do is re-show the toast this latch avoids.
+    if sv.join.run.step == 0 {
+        ui.set_jw_starting(false);
+    }
     ui.set_jw_progress(f32::from(sv.join.run.progress_pct) / 100.0);
     ui.set_jw_outcome(i32::from(sv.join.run.outcome));
     ui.set_jw_republic(sv.join.republic.clone().into());
@@ -3060,10 +3069,10 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
     // the proposed feature selection, exactly as it will be signed; a
-    // pre-v5 founder (None) renders the legacy baseline: memory only
+    // pre-v5 founder (None) renders the legacy baseline
     let jw_feat = |key: &str| match &sv.join.proposed_features {
         Some(f) => f.iter().any(|k| k == key),
-        None => key == "memory",
+        None => molt_core::Surface::LEGACY_FEATURES.contains(&key),
     };
     ui.set_jw_feat_memory(jw_feat("memory"));
     ui.set_jw_feat_quests(jw_feat("quests"));
@@ -4737,16 +4746,19 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         charter_op: op == "set_charter",
         relay_changes: match op {
             "set_relays" => relay_pool_diff(&p.current, &p.proposed),
-            // the feature vote reuses the set-diff rows (enable-only: rows
-            // are + or kept); keys render as their display labels — one
-            // vocabulary with the nav and the wizard
+            // the feature vote reuses the set-diff rows; keys render as
+            // their display labels — one vocabulary with the nav and the
+            // wizard. A "removed" verdict is remapped to KEPT: the union
+            // fold can never remove, and `current` is recomputed live, so a
+            // racing enable would otherwise paint an impossible red minus
+            // on a governance card (review 2026-08-12).
             "set_features" => relay_pool_diff(&p.current, &p.proposed)
                 .into_iter()
                 .map(|(sign, key)| {
                     let label = Surface::parse(&key)
                         .map(|sf| surface_name(lang, sf).to_string())
                         .unwrap_or(key);
-                    (sign, label)
+                    (if sign == RELAY_ROW_REMOVED { RELAY_ROW_KEPT } else { sign }, label)
                 })
                 .collect(),
             _ => Vec::new(),
@@ -6651,6 +6663,51 @@ mod tests {
 
     /// The set_relays vote card shows the CHANGES: every pool member of the
     /// union, marked kept / added / removed, in current-then-added order.
+    /// Review 2026-08-12: a set_features card must never paint a red
+    /// "removed" row - the union fold cannot remove, and `current` is
+    /// recomputed live, so a racing enable would otherwise show an
+    /// impossible removal on a governance card. Keys render as display
+    /// labels (one vocabulary with nav and wizard).
+    #[test]
+    fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
+        let pv = ProposalView {
+            id: ProposalId(7),
+            surface: Surface::Organization,
+            payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            approvals: 1,
+            threshold: 2,
+            state: ProposalState::Proposed,
+            approved_by_me: false,
+            declined_by_me: false,
+            // a racing enable made "vault" effective AFTER this was proposed
+            current: "memory vault".to_string(),
+            proposed: "memory quests".to_string(),
+            votes: Vec::new(),
+            declined_at: 0,
+            declined_by: String::new(),
+        };
+        let row = proposal_row(0, &pv);
+        assert!(
+            row.relay_changes.iter().all(|(sign, _)| *sign != RELAY_ROW_REMOVED),
+            "a feature diff row claimed a removal: {:?}",
+            row.relay_changes
+        );
+        assert!(
+            row.relay_changes
+                .iter()
+                .any(|(sign, label)| *sign == RELAY_ROW_KEPT && label == "Vault"),
+            "the racing enable renders as kept, labelled: {:?}",
+            row.relay_changes
+        );
+        assert!(
+            row.relay_changes
+                .iter()
+                .any(|(sign, label)| *sign == RELAY_ROW_ADDED && label == "Kanban"),
+            "the addition renders with its display label: {:?}",
+            row.relay_changes
+        );
+    }
+
     #[test]
     fn relay_pool_diff_marks_added_removed_kept() {
         let rows = relay_pool_diff("wss://a wss://b", "wss://b wss://c");

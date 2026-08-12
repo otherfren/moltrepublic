@@ -333,14 +333,15 @@ When a member finishes, it has verified — not trusted — that:
    refuses to sign (and later to trust) a roster in which ANY seat's
    `nostr pk` is not a valid x-only key in the one lowercase even-y byte
    form, or is shared between two seats — and because the anchors sit inside
-   the signed `molt-roster-v3` bytes and the `molt-republic-id-v2` preimage,
+   the signed roster bytes (`molt-roster-v5` today; v3 first bound them) and
+   the `molt-republic-id-v2` preimage,
    the *n* attestations transitively pin all of them.
 
 **The honest limit of the third anchor — no proof of possession.** The ritual
 proves that the *ticket holder chose* `nostrpkᵢ` (MAC v2), that the value is a
 real canonical key (ingest validation), that it is exactly what the member
 derived (the member's own self-check), and that everyone signed the same
-anchors (roster v3). It does **not** prove that anyone holds the matching
+anchors (the signed roster bytes). It does **not** prove that anyone holds the matching
 secp256k1 *secret* — the nostr key signs nothing during the ritual, unlike
 Ed25519, whose possession the MLS `KeyPackage` signature proves. A member can
 therefore anchor a key it cannot use (self-harm: its own gift-wrapped
@@ -386,7 +387,7 @@ per-queue wrap; inside MLS ciphertext once MLS lands):
 | `JoinRequest` | member → founder | seat, name, identity pk, nostr pk, **MLS KeyPackage**, ticket MAC (v2), reply-queue handover |
 | `Seal{ name, agenda, features, table }` | founder → member | the proposed charter (name + agenda + feature selection) to review, and the canonical bytes to sign (hex) |
 | `Signed{ sig }` | member → founder | the member's signature over the table (its ratification) |
-| `Genesis{ sealed, welcome }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations, **agenda**) and the **MLS `Welcome`** |
+| `Genesis{ sealed, welcome }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations, **agenda**, **feature selection**) and the **MLS `Welcome`** |
 
 The invite link's transport handover carries `{ server, invite-queue id,
 wrapping key, seat }`; the member's reply-queue handover (inside `JoinRequest`)

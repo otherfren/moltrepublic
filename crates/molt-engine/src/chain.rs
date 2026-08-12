@@ -1040,6 +1040,7 @@ impl State {
                 self.chain = chain;
                 self.chain_head = Some(walk.head.clone());
                 self.chain_walk = Some(walk);
+                self.bump_next_id_past_chain();
                 self.apply_chain_to_state();
             }
             Err(e) => {
@@ -1049,6 +1050,23 @@ impl State {
                 self.chain_walk = None;
                 self.set_checkpoint_blob(None);
             }
+        }
+    }
+
+    /// The mint counter must stay AHEAD of every proposal id the verified
+    /// chain has consumed: `receive_proposed` (and its membership twin)
+    /// refuses an already-consumed id on every peer, so a locally minted
+    /// collision could never seal — a silent liveness hole for any holder
+    /// that adopted its chain without the ephemeral event log to bump
+    /// `next_id` for it (a blob-seeded rejoiner after total loss). Called
+    /// wherever the walk adopts or extends; `max` keeps it monotone.
+    fn bump_next_id_past_chain(&mut self) {
+        if let Some(top) = self
+            .chain_walk
+            .as_ref()
+            .and_then(|w| w.seen.iter().next_back())
+        {
+            self.next_id = self.next_id.max(top.saturating_add(1));
         }
     }
 
@@ -1180,7 +1198,10 @@ impl State {
         let mut set: std::collections::BTreeSet<String> =
             match self.replica.as_ref().and_then(|r| r.features.clone()) {
                 Some(f) => f.into_iter().collect(),
-                None => std::iter::once("memory".to_string()).collect(),
+                None => molt_core::Surface::LEGACY_FEATURES
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
             };
         for v in self.applied_org_entries() {
             if v.get("op").and_then(serde_json::Value::as_str) == Some("set_features") {
@@ -1955,6 +1976,7 @@ impl State {
                 // an append only ADDS to the projection — no whole-chain refold
                 self.project_one(&block);
                 self.chain.push(block);
+                self.bump_next_id_past_chain();
                 true
             }
             Err(e) => {
@@ -6657,6 +6679,146 @@ mod tests {
         assert_eq!(
             walter.status().features,
             vec!["memory".to_string(), "quests".to_string()],
+        );
+    }
+
+    /// D7's approve half (review 2026-08-12): a peer's proposal on a
+    /// disabled surface lands in the pool (ingest is tolerant — the
+    /// enabling block may simply not have applied here yet), but no
+    /// signature leaves this node for it, so it can never reach m honest
+    /// seats. Once the feature is enabled the same approval passes.
+    #[test]
+    fn an_approval_on_a_disabled_surface_is_refused_until_enabled() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // a peer proposal on quests (disabled: legacy baseline is {memory})
+        walter.receive_proposed(
+            9,
+            Surface::Quests,
+            serde_json::json!({ "op": "add_quest", "title": "t" }),
+        );
+        let err = walter
+            .cmd_approve(molt_core::ProposalId(9))
+            .expect_err("no signature may leave for a disabled surface");
+        assert_eq!(format!("{err}"), "quests: not enabled");
+        // the enabling block opens the gate for the SAME proposal
+        let enable = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 1,
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(enable);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter.receive_proposed(
+            9,
+            Surface::Quests,
+            serde_json::json!({ "op": "add_quest", "title": "t" }),
+        );
+        walter
+            .cmd_approve(molt_core::ProposalId(9))
+            .expect("an enabled surface accepts the approval");
+    }
+
+    /// Review 2026-08-12 (mixed versions): an unknown key can become
+    /// effective here via a NEWER build's applied block (wire ingest never
+    /// runs this build's validate). The enable-only gate must not demand a
+    /// key this build cannot name — validate would refuse it — and the
+    /// union fold keeps it regardless, so feature governance keeps working.
+    #[test]
+    fn an_unknown_effective_key_does_not_brick_feature_governance() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let newer = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 1,
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": "memory zzz" }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(newer);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        assert!(
+            walter.effective_features().iter().any(|f| f == "zzz"),
+            "the unknown key is effective (union fold keeps it)"
+        );
+        // this build proposes WITHOUT the key it cannot name — accepted
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            )
+            .expect("an unknown effective key must not brick the gates");
+        // …and the fold still keeps zzz alongside the new enable
+        let (id, surface, payload) = {
+            let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+            (*id, rec.surface, rec.payload.clone())
+        };
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        petra.receive_proposed(id, surface, payload);
+        let walter_sig = walter
+            .pending_sigs
+            .get(&id)
+            .expect("walter's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "walter")
+            .expect("walter signed")
+            .sig
+            .clone();
+        petra.receive_approval(id, "walter", 2, &walter_sig);
+        petra.chain_sign_and_gossip_approval(id);
+        assert_eq!(
+            petra.effective_features(),
+            vec![
+                "memory".to_string(),
+                "quests".to_string(),
+                "zzz".to_string()
+            ],
+            "the union keeps what this build cannot name"
+        );
+    }
+
+    /// The mint counter stays ahead of chain-consumed proposal ids (review
+    /// 2026-08-12): a holder that adopted its chain WITHOUT the ephemeral
+    /// event log (a blob-seeded rejoiner after total loss) would otherwise
+    /// mint an id the chain already decided — every peer's ingest refuses
+    /// that as a stale resend, so the proposal could never seal: a silent
+    /// governance-liveness hole.
+    #[test]
+    fn a_fresh_adopter_never_mints_a_chain_consumed_proposal_id() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let enable = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 1,
+                surface: Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(enable);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter
+            .cmd_propose(
+                Surface::Organization,
+                serde_json::json!({ "op": "set_features", "value": "memory quests vault" }),
+            )
+            .expect("propose");
+        let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+        assert!(*id > 1, "the consumed id 1 must be skipped, got {id}");
+        // and a peer registers it instead of refusing a "stale resend"
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        assert!(
+            petra.receive_proposed(*id, rec.surface, rec.payload.clone()),
+            "the peer registers the freshly minted id"
         );
     }
 

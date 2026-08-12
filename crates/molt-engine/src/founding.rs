@@ -1154,11 +1154,11 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     if s.attestations.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
-    // one set, one byte form (same rule the ratifying member enforces)
+    // one set, one byte form, no key this build cannot render — the same
+    // rule the ratifying member enforces (review 2026-08-12: an unrendered
+    // key silently signed into forever-bytes is the sign-what-you-see hole)
     if let Some(features) = &s.features {
-        if !features.windows(2).all(|w| w[0] < w[1]) {
-            return Err("the sealed feature set is not canonical".to_string());
-        }
+        molt_core::verify_canonical_features(features)?;
     }
     // recompute over the sealed charter too: if the founder put a different
     // name/agenda in the genesis than the members ratified, their signatures
@@ -1318,12 +1318,13 @@ pub(crate) fn verify_seal_proposal(
                 .to_string(),
         );
     }
-    // one set, one byte form: a feature list that is not sorted + deduped
-    // would give the same selection two different signable encodings
+    // one set, one byte form — and NO key this build cannot render: the
+    // ratify card shows exactly the known vocabulary, so a foreign key
+    // would be signed sight-unseen into forever-bytes (review 2026-08-12).
+    // A newer-build founder against an older member fails honestly here,
+    // like the m-of-n mismatch gate.
     if let Some(features) = &proposal.features {
-        if !features.windows(2).all(|w| w[0] < w[1]) {
-            return Err("the proposed feature set is not canonical".to_string());
-        }
+        molt_core::verify_canonical_features(features)?;
     }
     Ok(molt_core::roster_canonical_bytes(
         &proposal.republic_id,
@@ -2881,21 +2882,11 @@ mod ritual_ops {
                     "the agenda is too long (max {AGENDA_MAX} characters)"
                 )));
             }
-            // the feature selection: known optional-surface keys only, then
-            // canonicalized (sort + dedup) — one set, one byte form, so every
-            // member verifies and signs the identical v5 table
-            for key in &features {
-                let known = molt_core::Surface::parse(key)
-                    .is_some_and(molt_core::Surface::is_charter_feature);
-                if !known {
-                    return Err(molt_core::MoltError::Create(format!(
-                        "unknown feature: {key}"
-                    )));
-                }
-            }
-            let mut features = features;
-            features.sort_unstable();
-            features.dedup();
+            // the feature selection: the ONE shared rule — known optional
+            // keys, sorted + deduped, so every member verifies and signs the
+            // identical v5 table
+            let features =
+                molt_core::canonical_features(&features).map_err(molt_core::MoltError::Create)?;
             let Some(ritual) = &mut self.net_ritual else {
                 return Err(molt_core::MoltError::Create(
                     "no founding is in progress".to_string(),
@@ -3726,6 +3717,24 @@ mod tests {
         p.features = Some(vec!["wallet".to_string(), "memory".to_string()]);
         assert!(verify_seal_proposal(&p, "member", &pk, &npk)
             .is_err_and(|e| e.contains("not canonical")));
+    }
+
+    /// Review 2026-08-12 (sign-what-you-see): the ratify card renders
+    /// exactly the known vocabulary, so a key this build cannot render must
+    /// never be signed - the member refuses instead of ratifying it
+    /// sight-unseen into forever-bytes. A core key is diagnosed as what it
+    /// is, not as unknown.
+    #[test]
+    fn verify_seal_proposal_rejects_a_feature_key_this_build_cannot_render() {
+        let mut p = valid_roster();
+        let pk = p.identities[1].identity_pk.clone();
+        let npk = p.identities[1].nostr_pk.clone();
+        p.features = Some(vec!["memory".to_string(), "zzz".to_string()]);
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+            .is_err_and(|e| e.contains("unknown feature: zzz")));
+        p.features = Some(vec!["chat".to_string(), "memory".to_string()]);
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+            .is_err_and(|e| e.contains("chat is always on")));
     }
 
     /// A bare, unactivated seat holding `ticket`.

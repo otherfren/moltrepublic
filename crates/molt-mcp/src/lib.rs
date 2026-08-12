@@ -1350,16 +1350,24 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::CreatePropose {
                 name: str_arg(args, "name")?,
                 agenda: args.get("agenda").and_then(Value::as_str).unwrap_or_default().to_string(),
-                features: args
-                    .get("features")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                // strict, like ids_arg: a wrong-typed selection must error,
+                // not silently found a republic with nothing enabled — the
+                // charter is one-shot (review 2026-08-12). Omitted = none,
+                // as documented in the schema.
+                features: match args.get("features") {
+                    None => Vec::new(),
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .map(|v| {
+                            v.as_str().map(str::to_string).ok_or_else(|| {
+                                "features must be an array of feature-key strings".to_string()
+                            })
+                        })
+                        .collect::<Result<Vec<String>, String>>()?,
+                    Some(_) => {
+                        return Err("features must be an array of feature-key strings".to_string())
+                    }
+                },
             }),
         },
         ToolDef {

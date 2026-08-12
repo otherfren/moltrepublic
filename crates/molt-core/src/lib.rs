@@ -103,6 +103,23 @@ impl Surface {
         !matches!(self, Surface::Organization | Surface::Chat)
     }
 
+    /// The D6 legacy baseline: what a republic founded before roster-v5
+    /// (`features: None`) has enabled — exactly what was usable before the
+    /// gating existed (user-decided 2026-08-11). ONE definition; the engine
+    /// fold and the GUI's pre-v5 rendering both read it.
+    pub const LEGACY_FEATURES: [&'static str; 1] = ["memory"];
+
+    /// Validate one proposed feature key: a core surface gets its own
+    /// diagnosis (it is not "unknown", it is not optional), anything the
+    /// vocabulary does not name is refused.
+    fn check_feature_key(key: &str) -> Result<(), String> {
+        match Surface::parse(key) {
+            Some(sf) if sf.is_charter_feature() => Ok(()),
+            Some(_) => Err(format!("{key} is always on")),
+            None => Err(format!("unknown feature: {key}")),
+        }
+    }
+
     /// The surface's sub-views as `(key, display label)` pairs, in navigation
     /// order. The first entry is the default view. Shared vocabulary: the GUI
     /// nav and the `select_view` command validate against this same list.
@@ -170,6 +187,36 @@ impl Surface {
     pub fn default_view(self) -> &'static str {
         self.views().first().map(|v| v.0).unwrap_or("")
     }
+}
+
+/// Canonicalize a PROPOSED feature selection (`charter_features.md`): every
+/// key must name an optional surface ([`Surface::is_charter_feature`] — a
+/// core key gets its own diagnosis), the result is sorted + deduped. One
+/// set, one byte form — the ONE rule the wizard command and the
+/// `set_features` op share.
+pub fn canonical_features(keys: &[String]) -> Result<Vec<String>, String> {
+    for key in keys {
+        Surface::check_feature_key(key)?;
+    }
+    let mut out = keys.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Verify a RECEIVED feature selection is canonical — known optional keys,
+/// strictly sorted, no duplicates — without re-sorting it: the bytes are
+/// (or become) threshold-signed, so a second encoding of the same set must
+/// be refused, never repaired. Sign-what-you-see closes here too: a member
+/// must not ratify a key its build cannot render.
+pub fn verify_canonical_features(keys: &[String]) -> Result<(), String> {
+    for key in keys {
+        Surface::check_feature_key(key)?;
+    }
+    if !keys.windows(2).all(|w| w[0] < w[1]) {
+        return Err("the feature set is not canonical".to_string());
+    }
+    Ok(())
 }
 
 /// Chat READ slices for `ReadState { view }` — a different axis from the

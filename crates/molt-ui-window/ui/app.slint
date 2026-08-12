@@ -1243,8 +1243,10 @@ export component AppWindow inherits Window {
     property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
     pure function link-armed() -> bool {
         // a run in flight owns the screen: a second start can only be
-        // refused, and a button that can only fail reads as a broken UI
-        return !root.run-active && !root.rv-running
+        // refused, and a button that can only fail reads as a broken UI.
+        // jw-starting covers the click-to-round-trip window run-active
+        // cannot see yet (the engine mirror lags the first click).
+        return !root.run-active && !root.rv-running && !root.jw-starting
             && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2);
     }
     function link-continue() {
@@ -3024,21 +3026,11 @@ export component AppWindow inherits Window {
                                         padding-left: 18px;
                                         padding-right: 22px;
                                         spacing: 10px;
-                                        HorizontalLayout {
-                                            spacing: 6px;
-                                            alignment: start;
-                                            Text {
-                                                text: "🧩";
-                                                font-family: "Twemoji Mozilla";
-                                                font-size: Theme.fs-cap;
-                                                vertical-alignment: center;
-                                            }
-                                            Text {
-                                                text: Strings.cw-features;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                                vertical-alignment: center;
-                                            }
+                                        Text {
+                                            text: Strings.cw-features;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-h2;
+                                            font-weight: 700;
                                         }
                                         GridLayout {
                                             spacing: 10px;
@@ -3949,21 +3941,11 @@ export component AppWindow inherits Window {
                                         padding-left: 18px;
                                         padding-right: 22px;
                                         spacing: 10px;
-                                        HorizontalLayout {
-                                            spacing: 6px;
-                                            alignment: start;
-                                            Text {
-                                                text: "🧩";
-                                                font-family: "Twemoji Mozilla";
-                                                font-size: Theme.fs-cap;
-                                                vertical-alignment: center;
-                                            }
-                                            Text {
-                                                text: Strings.cw-features;
-                                                color: Theme.faint;
-                                                font-size: Theme.fs-cap;
-                                                vertical-alignment: center;
-                                            }
+                                        Text {
+                                            text: Strings.cw-features;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-h2;
+                                            font-weight: 700;
                                         }
                                         GridLayout {
                                             spacing: 10px;
@@ -8093,11 +8075,15 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-features-modal-open = false;
+            // OR-in the LIVE flags: a peer's enable can commit while the
+            // modal is open, and the stale draft would then propose a set
+            // omitting it - refused by the engine for a box the user never
+            // touched (review 2026-08-12)
             root.org-propose("set_features",
-                (root.of-memory-draft ? " memory" : "")
-                + (root.of-quests-draft ? " quests" : "")
-                + (root.of-vault-draft ? " vault" : "")
-                + (root.of-wallet-draft ? " wallet" : ""));
+                (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
+                + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
+                + (root.of-vault-draft || root.org-feat-vault ? " vault" : "")
+                + (root.of-wallet-draft || root.org-feat-wallet ? " wallet" : ""));
         }
         VerticalLayout {
             spacing: 4px;

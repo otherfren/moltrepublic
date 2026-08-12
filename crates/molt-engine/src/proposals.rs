@@ -332,17 +332,14 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
         // known (an applied entry is forever; the enable-only gate sits in
         // cmd_propose, the union fold makes it deterministic)
         "set_features" => {
-            let tokens: Vec<&str> = value.split_whitespace().collect();
+            let tokens: Vec<String> =
+                value.split_whitespace().map(str::to_string).collect();
             if tokens.is_empty() {
                 return Err(MoltError::BadPayload("nothing to enable".into()));
             }
-            for t in tokens {
-                let known = Surface::parse(t).is_some_and(Surface::is_charter_feature);
-                if !known {
-                    return Err(MoltError::BadPayload(format!("unknown feature: {t}")));
-                }
-            }
-            Ok(())
+            molt_core::canonical_features(&tokens)
+                .map(|_| ())
+                .map_err(MoltError::BadPayload)
         }
         // R6: a pool edit — space-separated relay URLs, each one canonical
         // (an applied entry is forever)
@@ -458,12 +455,17 @@ impl State {
             }
         }
         // enable-only (`charter_features.md` D5): the proposed set must keep
-        // every effective feature and add at least one. The gate is local
-        // courtesy — the union fold is what makes the rule deterministic.
+        // every effective feature this build KNOWS and add at least one new
+        // key. The gate is local courtesy — the union fold is what makes the
+        // rule deterministic. Unknown effective keys (a newer build enabled
+        // them) are deliberately exempt from the keep-check: this build can
+        // neither name them (validate refuses) nor lose them (the fold is a
+        // union), and demanding them would brick feature governance on every
+        // older build (review 2026-08-12).
         if surface == Surface::Organization
             && payload.get("op").and_then(Value::as_str) == Some("set_features")
         {
-            let proposed: Vec<&str> = payload
+            let proposed: std::collections::BTreeSet<&str> = payload
                 .get("value")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
@@ -471,11 +473,12 @@ impl State {
                 .collect();
             let current = self.effective_features();
             for f in &current {
-                if !proposed.contains(&f.as_str()) {
+                let known = Surface::parse(f).is_some_and(Surface::is_charter_feature);
+                if known && !proposed.contains(f.as_str()) {
                     return Err(MoltError::BadPayload(format!("{f}: cannot be disabled")));
                 }
             }
-            if proposed.len() == current.len() {
+            if proposed.iter().all(|k| current.iter().any(|c| c == k)) {
                 return Err(MoltError::BadPayload("already enabled".into()));
             }
         }
@@ -543,6 +546,13 @@ impl State {
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
+            // D7's approve half (review 2026-08-12): the propose gate is
+            // local, a peer's proposal on a disabled surface still lands in
+            // the pool — but no signature leaves this node for a surface the
+            // charter has not enabled, so it can never reach m honest seats.
+            // (The nav hides such a surface, so a GUI member could not even
+            // SEE the card it would be co-signing.)
+            self.require_feature(p.surface)?;
             // a standing decline is a cast vote: signing on top of it would
             // let one member hold both stances at once (and a decline does
             // not retract a collected signature — review 2026-08-09).

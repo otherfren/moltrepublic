@@ -1075,6 +1075,13 @@ impl State {
             self.ensure_demo_net();
         }
         self.session.screen = Screen::Main;
+        // the surface selection survives the switch, but the NEW workspace
+        // may not have that feature enabled — falling back to chat beats a
+        // blank main pane with no highlighted nav row (review 2026-08-12)
+        if self.require_feature(self.session.surface).is_err() {
+            self.session.surface = Surface::Chat;
+            self.session.view = Surface::Chat.default_view().to_string();
+        }
         // the honest OFFLINE state (2026-07-19 incident): a workspace whose
         // transport.state carries real-mesh evidence (MLS/creds/links) but
         // whose mesh did NOT resume must never look healthy — net_health

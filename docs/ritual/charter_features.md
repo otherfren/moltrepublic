@@ -30,7 +30,7 @@ Read first: `founding_ritual.md` (the deliberation step this extends),
 - **Features can never be switched off again** — enable-only, monotone.
 - UI with minimal explanation; the design speaks for itself.
 
-## 2. What exists (verified 2026-08-11)
+## 2. What existed BEFORE the build (survey snapshot, 2026-08-11)
 
 | piece | where | state |
 |---|---|---|
@@ -83,9 +83,12 @@ genesis rebuild in `molt-storage`, `sealed_roster_from_genesis/_from_blob`),
 and every recompute harness/byte-pin test (§6 S1).
 
 `verify_seal_proposal` additionally rejects a non-canonical set (unsorted or
-duplicated keys) — one set, one byte encoding. Unknown keys verify (additive
-evolution; the member is shown and signs exactly the raw keys), but the
-founder-side `cmd_create_propose` only accepts the known four.
+duplicated keys) — one set, one byte encoding — **and any key this build
+cannot render** (review 2026-08-12): the ratify card shows exactly the known
+vocabulary, so a foreign key would be signed sight-unseen. A newer-build
+founder against an older member fails honestly at ratification, like the
+m-of-n mismatch gate. (Unknown keys arriving via a newer build's applied
+BLOCK are still kept by the union fold — read-tolerance stays additive.)
 
 ### D3 — The republic id does NOT change
 
@@ -113,9 +116,13 @@ green untouched):
   **full target set**, canonicalized (sort+dedup) in `cmd_propose` like the
   relay tokens.
 - `validate_org_payload` arm: every token one of the known four.
-- Propose-time gates (courtesy, per the `fold_pool_edit` lesson): target set
-  must be a **strict superset** of the effective set — compact refusals
-  (`already enabled` / `<key>: cannot be disabled`).
+- Propose-time gates (courtesy, per the `fold_pool_edit` lesson): the target
+  set must keep every effective feature this build KNOWS and add at least
+  one new key — compact refusals (`already enabled` / `<key>: cannot be
+  disabled`). Unknown effective keys are exempt from the keep-check (review
+  2026-08-12): this build can neither name them (validate refuses) nor lose
+  them (the fold is a union), and demanding them would brick feature
+  governance on every older build in a mixed-version republic.
 - **The deterministic rule is the fold, and the fold is a UNION:**
   `effective = baseline(genesis) ∪ ⋃ applied set_features values`. A block
   that tried to drop a feature folds as pure addition on every holder —
@@ -239,6 +246,23 @@ D8 first half. `AppCheck.enabled`, `cw-feat-*` properties read by the
 D8 second half. Delete the staged-out condition; filter `SurfaceTab` rows on
 `StatusView.features`; charter-section rows + modal; `DiffRow`
 generalization of the relay diff card.
+
+### Known debt (review 2026-08-12, deliberately deferred)
+
+- **UI fan-out**: the four feature keys are hand-enumerated across the
+  slint booleans, three checkbox grids, the reset block, the modal and the
+  MCP schema enum. A model-driven `[FeatureRow]` (the nav/relay-rows shape)
+  would collapse it; do this when the fifth optional surface appears.
+- **Fold walk count**: `org_effective`/`status` fold the (small) applied
+  org log a handful of times per read; a single-pass fold is cheaper if it
+  ever shows up in a profile.
+- **Version-skew diagnosis**: a pre-v5 build meeting a v5 genesis fails
+  with the generic tamper error (it silently drops the unknown field before
+  recomputing) — inherent to any layout bump; nothing in-tree can teach an
+  already-shipped build a better message.
+- **Legacy history visibility**: a pre-v5 republic that (via MCP) had
+  applied entries on quests/vault/wallet shows them again only after the
+  m-of-n enable vote; until then they are reachable read-only over MCP.
 
 ### S7 — docs + stale references
 `founding_ritual.md` (the Seal/Genesis tables + guarantee list gain the
